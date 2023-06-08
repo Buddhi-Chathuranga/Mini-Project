@@ -1,0 +1,318 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: MyWarehouseTaskHandling
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+-- 2019-07-10  CKumlk  SCUXXW4-22809, Modified Get_Pick_Report_Diff_Single_List_Records___ to handle Numeric or value error.
+-- 2019-05-14  SaGelk  SCUXXW4-6345, Created
+-----------------------------------------------------------------------------
+
+layer Core;
+
+PROCEDURE New_Task___ (
+   contract_   IN VARCHAR2,
+   worker_id_  IN VARCHAR2,
+   print_task_ IN NUMBER)
+IS
+   task_id_    NUMBER;
+BEGIN
+	Warehouse_Task_API.Find_And_Start_Task(task_id_, contract_, worker_id_, print_task_);
+END New_Task___;
+
+PROCEDURE Start_Selected___ (
+   task_id_   IN NUMBER,
+   worker_id_ IN VARCHAR2,
+   status_    IN VARCHAR2)
+IS
+   info_ VARCHAR2(200);
+   objid_ VARCHAR2(2000);
+   objversion_ VARCHAR2(2000);
+   attr_ VARCHAR2(32000);
+   
+   CURSOR get_objid_objversion (task_id_ NUMBER) IS
+   SELECT objid, objversion
+   FROM WAREHOUSE_TASK
+   WHERE task_id = task_id_;
+BEGIN
+   IF status_ = 'Released' THEN
+      Warehouse_Task_API.Start_Task(task_id_, worker_id_);
+   ELSE
+      OPEN get_objid_objversion(task_id_);
+      FETCH get_objid_objversion INTO objid_, objversion_;
+      CLOSE get_objid_objversion;
+      
+      Warehouse_Task_API.Restart__(info_, objid_, objversion_, attr_, 'DO');
+   END IF;
+END Start_Selected___;
+
+PROCEDURE Complete___ (
+   contract_  IN VARCHAR2,
+   worker_id_ IN VARCHAR2)
+IS
+BEGIN
+   Warehouse_Task_API.Execute_Started_Task(contract_, worker_id_);
+END Complete___;
+
+@DynamicComponentDependency SHPMNT
+FUNCTION Complete_Warehouse_Worker_Customer___ (
+   selection_ IN VARCHAR2) RETURN Report_Pick_Structure_Rec
+IS
+   pick_list_no_        VARCHAR2(50);
+   contract_            VARCHAR2(5);
+   pick_list_type_      VARCHAR2(20);
+   rec_                 Report_Pick_Structure_Rec;
+   
+   CURSOR get_pick_list_no(contract_ IN VARCHAR2, task_id_ IN VARCHAR2) IS
+   SELECT source_ref1
+   FROM WAREHOUSE_TASK
+   WHERE contract = contract_ AND task_id = to_number(task_id_);
+   
+   CURSOR get_pick_list_type(pick_list_no_ IN VARCHAR2) IS
+   SELECT contract, pick_list_type
+   FROM pick_report_pick_list
+   WHERE pick_list_no = pick_list_no_; 
+   
+BEGIN
+   OPEN get_pick_list_no(Client_SYS.Get_Key_Reference_Value(selection_, 'CONTRACT'), Client_SYS.Get_Key_Reference_Value(selection_, 'TASK_ID'));
+   FETCH get_pick_list_no INTO pick_list_no_;
+   CLOSE get_pick_list_no;
+   
+   OPEN get_pick_list_type(pick_list_no_);
+   FETCH get_pick_list_type INTO contract_, pick_list_type_;
+   CLOSE get_pick_list_type;
+   
+   rec_.contract := contract_;
+   rec_.pick_list_no := pick_list_no_;
+   rec_.pick_list_type := pick_list_type_;
+   
+   rec_.use_shipment_inv := Handle_Ship_Invent_Utility_API.Uses_Shipment_Inventory (rec_.pick_list_no);
+   RETURN rec_;
+END Complete_Warehouse_Worker_Customer___;
+
+@DynamicComponentDependency SHPMNT
+FUNCTION Get_Pick_Report_Diff_Single_List_Records___ (
+   pick_list_no_ IN VARCHAR2,
+   show_details_ IN VARCHAR2) RETURN CLOB
+IS
+   CURSOR populate(pick_list_no_ IN VARCHAR2, show_details_ IN VARCHAR2) IS
+   SELECT *
+   FROM PICK_SHIPMENT_RES_STOCK_UIV
+   where (Pick_List_No = pick_list_no_) 
+   AND((show_details_ = 'ShowAll' AND qty_reserved > 0) OR(show_details_ = 'ShowSingle' AND qty_reserved > 0 AND Handl_Unit_Stock_Snapshot_API.Get_Outermost_Hu_Id(pick_list_no, 'PICK_LIST', handling_unit_id) IS NULL));
+   
+   report_pick_selection_       CLOB; 
+   check_comma_                 BOOLEAN;
+   report_pick_selection_test_  VARCHAR2(32000);
+BEGIN 
+   report_pick_selection_ := '["';
+   check_comma_ := FALSE;
+   FOR rec_ IN populate(pick_list_no_, show_details_) LOOP      
+      IF check_comma_ THEN
+         Dbms_Lob.Append(report_pick_selection_, '","');
+      END IF;      
+      report_pick_selection_test_ := 'SOURCE_REF1=' || rec_.source_ref1 || ',SOURCE_REF2=' || rec_.source_ref2 || ',SOURCE_REF3=' || rec_.source_ref3 || ',SOURCE_REF4=' || rec_.source_ref4 ||
+                                ',SHIPMENT_ID=' || rec_.shipment_id || ',CONTRACT=' || rec_.contract || ',PART_NO=' || rec_.part_no || ',CONFIGURATION_ID=' ||rec_.configuration_id ||
+                                ',LOCATION_NO=' || rec_.location_no || ',LOT_BATCH_NO=' || rec_.lot_batch_no || ',SERIAL_NO=' || rec_.serial_no || ',ENG_CHG_LEVEL=' || rec_.eng_chg_level ||
+                                ',WAIV_DEV_REJ_NO=' || rec_.waiv_dev_rej_no || ',ACTIVITY_SEQ=' || rec_.activity_seq || ',HANDLING_UNIT_ID=' || rec_.handling_unit_id || ',CATCH_QTY_TO_PICK=' || rec_.catch_qty_to_pick ||
+                                ',QTY_PICKED=' || rec_.qty_picked || ',QTY_TO_PICK=' || (NVL(rec_.qty_reserved, 0) - NVL(rec_.qty_picked, 0)) || ',QTY_RESERVED=' || rec_.qty_reserved || ',PART_OWNERSHIP=' || rec_.part_ownership ||
+                                ',OWNER=' || rec_.owner ;
+                                
+      Dbms_Lob.Append(report_pick_selection_, report_pick_selection_test_);
+      check_comma_ := TRUE;  
+   END LOOP;
+      Dbms_Lob.Append(report_pick_selection_, '"]');
+   RETURN report_pick_selection_;
+   
+END Get_Pick_Report_Diff_Single_List_Records___;
+
+@DynamicComponentDependency SHPORD
+PROCEDURE Check_Multiple_Serial_Records___ (
+   shop_order_issue_selection_ IN VARCHAR2)
+IS
+   orders_to_pick_              json_array_t := json_array_t.parse(shop_order_issue_selection_);
+   current_selection_           VARCHAR2(32000);
+   part_no_                     VARCHAR2(25);
+   serial_no_                   VARCHAR2(50);
+   rcpt_issue_serial_track_db_  VARCHAR2(20);
+   count_                       NUMBER := 0;
+BEGIN
+	FOR order_to_pick_ IN 0 .. orders_to_pick_.get_size - 1 LOOP 
+      
+      current_selection_          := orders_to_pick_.get_string(order_to_pick_);
+      part_no_                    := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'PART_NO'),  0);
+      serial_no_                  := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'SERIAL_NO'),  0);
+      rcpt_issue_serial_track_db_ := Part_Catalog_API.Get_Rcpt_Issue_Serial_Track_Db(part_no_);
+      
+      IF rcpt_issue_serial_track_db_ = 'TRUE' AND serial_no_ = '*' THEN
+         count_ := count_ + 1;
+         IF count_ > 1 THEN
+            Error_SYS.Record_General(lu_name_, 'MULTIPLENOSERIALRECS: Only one record can be report picked at once when serial parts are not tracked in the inventory');
+         END IF;
+      END IF;
+      
+   END LOOP;
+END Check_Multiple_Serial_Records___;
+
+@DynamicComponentDependency SHPORD
+FUNCTION Get_My_Shop_Order_Issue_Structure___ (
+   shop_order_issue_selection_ IN VARCHAR2) RETURN Shop_Order_Issue_Structure_Rec
+IS
+   orders_to_pick_              json_array_t := json_array_t.parse(shop_order_issue_selection_);
+   current_selection_           VARCHAR2(32000);
+   rec_                         Shop_Order_Issue_Structure_Rec;
+BEGIN
+   FOR order_to_pick_ IN 0 .. orders_to_pick_.get_size - 1 LOOP 
+      current_selection_               := orders_to_pick_.get_string(order_to_pick_);
+      rec_.part_no                     := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'PART_NO'),  0);
+      rec_.serial_no                   := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'SERIAL_NO'),  0);
+      rec_.rcpt_issue_serial_track_db  := Part_Catalog_API.Get_Rcpt_Issue_Serial_Track_Db(rec_.part_no);
+      
+      IF rec_.rcpt_issue_serial_track_db = 'TRUE' AND rec_.serial_no = '*' THEN
+         rec_.contract                 := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT'),  0);
+         rec_.configuration_id         := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONFIGURATION_ID'),  0);
+         rec_.location_no              := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOCATION_NO'),  0);
+         rec_.lot_batch_no             := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOT_BATCH_NO'),  0);
+         rec_.eng_chg_level            := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'ENG_CHG_LEVEL'),  0);
+         rec_.waiv_dev_rej_no          := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'WAIV_DEV_REJ_NO'),  0);
+         rec_.activity_seq             := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'ACTIVITY_SEQ'),  0);
+         rec_.handling_unit_id         := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'HANDLING_UNIT_ID'),  0);
+         rec_.qty_to_pick              := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'QTY_ASSIGNED'),  0);
+         EXIT;
+      END IF;
+      
+   END LOOP;
+	RETURN rec_;
+END Get_My_Shop_Order_Issue_Structure___;
+
+@DynamicComponentDependency SHPORD
+PROCEDURE Execute_Shop_Order_Pick_List___ (
+   shop_order_issue_selection_ IN VARCHAR2,
+   session_id_                 IN NUMBER)
+IS
+   orders_to_pick_         json_array_t := json_array_t.parse(shop_order_issue_selection_);
+   current_selection_      VARCHAR2(32000);
+   rec_                    Shop_Order_Issue_Structure_Rec;
+   inventory_event_id_     NUMBER;
+   new_qty_assigned_       NUMBER;
+BEGIN
+   inventory_event_id_ := Inventory_Event_Manager_API.Get_Next_Inventory_Event_Id;
+   
+	FOR order_to_pick_ IN 0 .. orders_to_pick_.get_size - 1 LOOP 
+      Inventory_Event_Manager_API.Set_Session_Id(inventory_event_id_);
+      
+      current_selection_ := orders_to_pick_.get_string(order_to_pick_);
+      
+      rec_.part_no                     := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'PART_NO'),  0);
+      rec_.serial_no                   := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'SERIAL_NO'),  0);
+      rec_.rcpt_issue_serial_track_db  := Part_Catalog_API.Get_Rcpt_Issue_Serial_Track_Db(rec_.part_no);
+      rec_.contract                    := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT'),  0);
+      user_allowed_site_api.Is_Authorized (rec_.contract);
+      rec_.configuration_id            := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONFIGURATION_ID'),  0);
+      rec_.location_no                 := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOCATION_NO'),  0);
+      rec_.lot_batch_no                := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOT_BATCH_NO'),  0);
+      rec_.eng_chg_level               := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'ENG_CHG_LEVEL'),  0);
+      rec_.waiv_dev_rej_no             := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'WAIV_DEV_REJ_NO'),  0);
+      rec_.activity_seq                := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'ACTIVITY_SEQ'),  0);
+      rec_.handling_unit_id            := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'HANDLING_UNIT_ID'),  0);
+      rec_.qty_to_pick                 := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'QTY_TO_ISSUE'),  0);
+      rec_.order_no                    := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO'),  0);
+      rec_.release_no                  := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'RELEASE_NO'),  0);
+      rec_.sequence_no                 := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'SEQUENCE_NO'),  0);
+      rec_.line_item_no                := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_ITEM_NO'),  0);
+      rec_.pick_list_no                := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'PICK_LIST_NO'),  0);
+
+      IF (Client_SYS.Get_Key_Reference_Value(current_selection_, 'CATCH_QTY_TO_ISSUE')IS NULL)  THEN
+         rec_.catch_qty_to_issue       := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CATCH_QTY_TO_ISSUE');
+      ELSE
+         rec_.catch_qty_to_issue       := '0';
+      END IF;
+      
+      IF rec_.rcpt_issue_serial_track_db = 'TRUE' AND rec_.serial_no = '*' THEN
+         Shop_Material_Pick_Line_API.Report_Pick_Line(new_qty_assigned_, rec_.order_no, rec_.release_no, rec_.sequence_no, rec_.line_item_no, rec_.contract, rec_.part_no, rec_.location_no, rec_.lot_batch_no, rec_.serial_no, rec_.eng_chg_level, rec_.waiv_dev_rej_no, rec_.pick_list_no, rec_.configuration_id, rec_.activity_seq, rec_.handling_unit_id, rec_.qty_to_pick, rec_.catch_qty_to_issue, session_id_);
+      ELSE
+         Shop_Material_Pick_Line_API.Report_Pick_Line(new_qty_assigned_, rec_.order_no, rec_.release_no, rec_.sequence_no, rec_.line_item_no, rec_.contract, rec_.part_no, rec_.location_no, rec_.lot_batch_no, rec_.serial_no, rec_.eng_chg_level, rec_.waiv_dev_rej_no, rec_.pick_list_no, rec_.configuration_id, rec_.activity_seq, rec_.handling_unit_id, rec_.qty_to_pick, rec_.catch_qty_to_issue, NULL);
+      END IF;
+      
+   END LOOP;
+   
+   Inventory_Event_Manager_API.Finish(inventory_event_id_);
+END Execute_Shop_Order_Pick_List___;
+
+@DynamicComponentDependency SHPORD
+FUNCTION Get_Shop_Order_Issue_From_Parent___ (
+   source_ref1_ IN VARCHAR2,
+   contract_    IN VARCHAR2) RETURN VARCHAR2
+IS
+   CURSOR get_shop_order_pick_list(source_ref1_ VARCHAR2, contract_ VARCHAR2) IS
+   SELECT  PART_NO,
+           SERIAL_NO,
+           CONTRACT,
+           CONFIGURATION_ID,
+           LOCATION_NO,
+           LOT_BATCH_NO,
+           ENG_CHG_LEVEL,
+           WAIV_DEV_REJ_NO,
+           ACTIVITY_SEQ,
+           HANDLING_UNIT_ID,
+           QTY_ASSIGNED,
+           ORDER_NO,
+           RELEASE_NO,
+           SEQUENCE_NO,
+           LINE_ITEM_NO,
+           PICK_LIST_NO,
+           DECODE( QTY_ASSIGNED, 0, TO_NUMBER(null),  QTY_ASSIGNED) AS QTY_TO_ISSUE
+   FROM SHOP_MATERIAL_PICK_LINE
+   WHERE pick_list_no = source_ref1_ AND contract = contract_;
+   
+   shop_order_issue_selection_  VARCHAR2(32000);
+   check_comma_                 BOOLEAN;
+   rcpt_issue_serial_track_db_  VARCHAR2(20);
+   count_                       NUMBER := 0;
+BEGIN
+   shop_order_issue_selection_ := '["';
+   check_comma_ := FALSE;
+   FOR rec_ IN get_shop_order_pick_list(source_ref1_, contract_) LOOP
+      
+      rcpt_issue_serial_track_db_ := Part_Catalog_API.Get_Rcpt_Issue_Serial_Track_Db(rec_.part_no);
+      IF rcpt_issue_serial_track_db_ = 'TRUE' AND rec_.serial_no = '*' THEN
+         count_ := count_ + 1;
+         IF count_ > 1 THEN
+            Error_SYS.Record_General(lu_name_, 'MULTIPLENOSERIALRECS: Only one record can be report picked at once when serial parts are not tracked in the inventory');
+         END IF;
+      END IF;
+      
+      IF check_comma_ THEN
+         shop_order_issue_selection_ := shop_order_issue_selection_ || '","';
+      END IF;
+      
+      shop_order_issue_selection_ := shop_order_issue_selection_ || 
+                                 'PART_NO=' || rec_.part_no || 
+                                 '^SERIAL_NO=' || rec_.serial_no || 
+                                 '^CONTRACT=' || rec_.contract ||
+                                 '^CONFIGURATION_ID=' || rec_.configuration_id ||
+                                 '^LOCATION_NO=' ||rec_.location_no ||
+                                 '^LOT_BATCH_NO=' || rec_.lot_batch_no || 
+                                 '^ENG_CHG_LEVEL=' || rec_.eng_chg_level ||
+                                 '^WAIV_DEV_REJ_NO=' ||rec_.waiv_dev_rej_no ||
+                                 '^ACTIVITY_SEQ=' || rec_.activity_seq || 
+                                 '^HANDLING_UNIT_ID=' || rec_.handling_unit_id ||
+                                 '^QTY_ASSIGNED=' || rec_.qty_assigned ||
+                                 '^ORDER_NO=' || rec_.order_no ||
+                                 '^RELEASE_NO=' || rec_.release_no || 
+                                 '^SEQUENCE_NO=' || rec_.sequence_no || 
+                                 '^LINE_ITEM_NO=' || rec_.line_item_no || 
+                                 '^PICK_LIST_NO=' || rec_.pick_list_no ||
+                                 '^QTY_TO_ISSUE=' || rec_.qty_to_issue ||
+                                 '^CATCH_QTY_TO_ISSUE=' || null || 
+                                 '^';
+      check_comma_ := TRUE;
+      
+   END LOOP;
+   shop_order_issue_selection_ := shop_order_issue_selection_ || '"]';   
+
+   RETURN shop_order_issue_selection_;
+END Get_Shop_Order_Issue_From_Parent___;

@@ -1,0 +1,179 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: AgreementSalesPartDealsHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign    History
+--  ------     ------  ---------------------------------------------------------
+-- 2018-08-01  IzShlk  SCUXXW4-1031, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Catalog_Desc___(
+   base_price_site_ IN VARCHAR2,
+   catalog_no_      IN VARCHAR2 ) RETURN VARCHAR2
+IS  
+BEGIN
+    RETURN Sales_Part_API.Get_Catalog_Desc(base_price_site_, catalog_no_);
+END Catalog_Desc___;
+
+FUNCTION Fetch_Base_Price___(
+   use_price_incl_tax_ IN BOOLEAN,
+   base_price_site_    IN VARCHAR2,
+   catalog_no_         IN VARCHAR2,
+   currency_code_      IN VARCHAR2 ) RETURN NUMBER
+IS
+   price_         NUMBER;
+   out_price_     NUMBER;
+   currency_rate_ NUMBER;
+   customer_no_payer_ VARCHAR2(200) := NULL;
+   sales_price_type_  VARCHAR2(200);
+BEGIN
+   sales_price_type_ := Sales_Price_Type_API.Decode('SALES PRICES');
+   	IF (use_price_incl_tax_) THEN
+			price_ := Sales_Part_Base_Price_API.Get_Base_Price_Incl_Tax(base_price_site_, catalog_no_, sales_price_type_);
+		ELSE
+			price_ := Sales_Part_Base_Price_API.Get_Base_Price(base_price_site_, catalog_no_, sales_price_type_);
+      END IF;
+
+      Customer_Order_Pricing_API.Get_Sales_Price_In_Currency(out_price_, currency_rate_, customer_no_payer_, base_price_site_, currency_code_, price_);
+      RETURN out_price_;
+END Fetch_Base_Price___;
+   
+FUNCTION Tax_Info___(
+   base_price_site_ IN VARCHAR2,
+   catalog_no_      IN VARCHAR2 ) RETURN Tax_Info_Structure_Rec
+IS
+   tax_struct_rec_ Tax_Info_Structure_Rec;
+BEGIN
+   tax_struct_rec_.tax_code := Sales_Part_API.Get_Tax_Code(base_price_site_, catalog_no_);
+   tax_struct_rec_.taxable  := (Sales_Part_API.Get_Taxable_Db(base_price_site_, catalog_no_)= 'TRUE');
+   RETURN tax_struct_rec_;
+END Tax_Info___;
+
+FUNCTION Validate_Offsets___(
+   use_price_incl_tax_  IN BOOLEAN,
+   base_price_incl_tax_ IN NUMBER,
+   base_price_          IN NUMBER,
+   amount_offset_       IN NUMBER,
+   percentage_offset_   IN NUMBER,
+   rounding_            IN NUMBER ) RETURN Deal_Price_Structure_Rec
+IS
+   sales_price_   NUMBER := 0;
+   round_         NUMBER := 0;
+   deal_price_rec_ Deal_Price_Structure_Rec;
+BEGIN
+   IF use_price_incl_tax_ THEN
+      sales_price_ := base_price_incl_tax_ + amount_offset_ + (base_price_incl_tax_ * percentage_offset_/100);
+   ELSE
+      sales_price_ := base_price_ + amount_offset_ + (base_price_ * percentage_offset_/100);
+   END IF;
+
+   IF sales_price_ < 0 THEN
+      deal_price_rec_.invalid_flag := 'INVALID';
+   ELSE
+      IF rounding_ IS NOT NULL AND rounding_ < 0 THEN
+         round_ := ROUND(-rounding_, 0);
+         sales_price_ := sales_price_ * POWER(10, -round_); 
+         sales_price_ := ROUND(sales_price_, 0) * POWER(10, round_);
+         deal_price_rec_.deal_price := ROUND(sales_price_, 0);
+      ELSE 
+         IF MOD(sales_price_, 1) = 0 THEN
+            deal_price_rec_.deal_price := ROUND(sales_price_, 0);
+         ELSE
+            IF rounding_ IS NOT NULL THEN
+               deal_price_rec_.deal_price := ROUND(sales_price_, rounding_);
+            ELSE
+               -- TODO : Use IFS currency to round using user perfile
+               deal_price_rec_.deal_price := sales_price_;
+            END IF;
+         END IF;
+      END IF;
+   END IF;
+   
+   RETURN deal_price_rec_;  
+END Validate_Offsets___;
+
+FUNCTION Calculate_Prices___(
+   use_price_incl_tax_  IN BOOLEAN,
+   direction_           IN VARCHAR2,
+   base_price_incl_tax_ IN NUMBER,
+   base_price_          IN NUMBER,
+   deal_price_incl_tax_ IN NUMBER,
+   deal_price_          IN NUMBER,
+   taxable_             IN BOOLEAN,
+   tax_code_            IN VARCHAR2,
+   rounding_            IN NUMBER,
+   amount_offset_       IN NUMBER,
+   percentage_offset_   IN NUMBER,
+   base_price_site_     IN VARCHAR2,
+   catalog_no_          IN VARCHAR2 ) RETURN Calculate_Price_Structure_Rec
+IS
+   base_price_temp_ NUMBER;
+   deal_price_temp_ NUMBER;
+   base_price_incl_tax_temp_ NUMBER;
+   deal_price_incl_tax_temp_ NUMBER;
+   calculate_price_  BOOLEAN := TRUE;
+   tax_calc_base_    VARCHAR2(100);
+   offset_direction_ VARCHAR2(100);
+   calculate_price_rec_ Calculate_Price_Structure_Rec;
+   -- TODO: Fetch the ifs curr rounding from profile
+   ifs_curr_rounding_ NUMBER := 16;
+BEGIN
+   IF use_price_incl_tax_ THEN
+      tax_calc_base_ := 'GROSS_BASE';
+      IF ((base_price_incl_tax_ IS NULL AND deal_price_incl_tax_ IS NULL) OR taxable_ = FALSE OR tax_code_ IS NULL) THEN
+         calculate_price_rec_.base_price := base_price_incl_tax_;
+         calculate_price_rec_.deal_price := deal_price_incl_tax_;
+         calculate_price_ := FALSE;       
+         calculate_price_rec_.base_price_incl_tax := base_price_incl_tax_;
+         calculate_price_rec_.deal_price_incl_tax := deal_price_incl_tax_;
+      END IF;
+   ELSE
+      tax_calc_base_ := 'NET_BASE';
+      IF ((base_price_ IS NULL AND deal_price_ IS NULL) OR taxable_ = FALSE OR tax_code_ IS NULL) THEN
+         calculate_price_rec_.base_price_incl_tax := base_price_;
+         calculate_price_rec_.deal_price_incl_tax := deal_price_;
+         calculate_price_ := FALSE;
+         calculate_price_rec_.base_price := base_price_;
+         calculate_price_rec_.deal_price := deal_price_;
+      END IF;
+   END IF;
+   
+   IF calculate_price_ THEN
+      offset_direction_ := direction_;
+      base_price_temp_ := base_price_;
+      deal_price_temp_ := deal_price_;
+      base_price_incl_tax_temp_ := base_price_incl_tax_;
+      deal_price_incl_tax_temp_ := deal_price_incl_tax_;
+      
+      -- If the rounding value is specified, DealPrice/DealPriceInclTax calculated at ValidateOffsets should remain.
+      IF rounding_ IS NOT NULL AND rounding_ != 0 AND offset_direction_ != 'NO_CALC' THEN
+         offset_direction_ := 'NO_CALC';
+      END IF;
+      
+      Sales_Part_Base_Price_API.Calculate_Part_Prices(base_price_temp_,
+                                                      base_price_incl_tax_temp_,
+                                                      deal_price_temp_,
+                                                      deal_price_incl_tax_temp_,
+                                                      percentage_offset_,
+                                                      amount_offset_,
+                                                      base_price_site_,
+                                                      catalog_no_,
+                                                      tax_calc_base_,
+                                                      offset_direction_,
+                                                      rounding_,
+                                                      ifs_curr_rounding_);
+                                                      
+      calculate_price_rec_.base_price := base_price_temp_;
+      calculate_price_rec_.base_price_incl_tax := base_price_incl_tax_temp_;
+      calculate_price_rec_.deal_price := deal_price_temp_; 
+      calculate_price_rec_.deal_price_incl_tax := deal_price_incl_tax_temp_;
+   END IF;
+   
+   RETURN calculate_price_rec_;
+END Calculate_Prices___;
+

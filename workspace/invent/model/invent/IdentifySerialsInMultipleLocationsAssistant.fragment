@@ -1,0 +1,424 @@
+-------------------------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  --------------------------------------------------------------------------------
+-- 2019-07-10  JaThlk  SCUXXW4-23055, Removed multiple calls for better performance.
+-- 2019-04-10  JaThlk  SCUXXW4-18434, Moved the where clause for SerialNo to projection file from plsvc file.
+-- 2018-12-08  JaThlk  SCUXXW4-5516, Renamed TempPartTrackingForMultiLocSerialsVirtual as TempPartTrackMultiLocSerialsVirtual to prevent exceeding characters limit in usages.
+-- 2018-11-29  JaThlk  SCUXXW4-5516, Implemented Barcode ID command button.
+-- 2018-11-22  ChFolk  SCUXXW4-5516, Renamed GetCatchUom as GetCatchUomForMultiLocSerials, CreateLines as CreateLinesForMultiLocSerials, CatchUnitInfoStructure as CatchUnitInfoForMultiLocSerialsStructure
+-- 2018-11-22          TemporaryPartTrackingSerialsVirtual as TempPartTrackingForMultiLocSerialsVirtual, SerialsList as MultiLocSerialsList and SerialsArray as MultiLocSerialsArray to distinguish methods names in IdentifySerialsInLocationAssistant and IdentifySerialsInMultipleLocationsAssistant.
+-- 2018-09-27  JaThlk  SCUXXW4-5516, Made the fields noneditable in IdentifySerialsInMultipleLocVirtual and removed cancel command.
+-- 2018-09-13  JaThlk  SCUXXW4-5516, Changed the Ref1 type to Text.
+-- 2018-08-28  JaThlk  SCUXXW4-5516, Renamed the field labels and group names. Minimized server calls by using a common structure.
+-- 2018-08-10  JaThlk  SCUXXW4-5516, Created the fragment to identify serials.
+-------------------------------------------------------------------------------------------------------
+
+fragment IdentifySerialsInMultipleLocationsAssistant;
+component INVENT;
+layer Core;
+description "Assistant to identify serial numbers in multiple locations whenever the need arises.";
+include fragment TemporaryPartTrackingSerialSelector;
+include fragment SequenceGeneratorAssistant;
+include fragment IdentifySerialsByBarcodeDynamicAssistant;
+//warningsenabled = CreateSerialSequence;
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+
+
+-------------------------------- ASSISTANTS ---------------------------------
+
+assistant IdentifySerialsInMultipleLocAssistant using IdentifySerialsInMultipleLocVirtualSet {
+   label = "Identify Serials";
+   input(RefType, Ref1, Ref2, Ref3, Ref4, Ref5, Contract, PartNo, QtyToIdentify);
+   output(SessionId);
+   init command {
+
+      execute {
+         call GetInfoForMultiLocSerials(Contract, PartNo, RefType) into InitialInfoMultiLocSerialsStructure;
+         set PartDescription = InitialInfoMultiLocSerialsStructure.PartDescription;
+         set CatchUoM = InitialInfoMultiLocSerialsStructure.CatchUom;
+         set CatchUnitEnabled = InitialInfoMultiLocSerialsStructure.CatchUnitEnabled;
+         set RefType = InitialInfoMultiLocSerialsStructure.RefType;
+         set SessionId = InitialInfoMultiLocSerialsStructure.SessionId;
+      }
+
+   }
+   steps {
+      step {
+         group SourceGroup;
+         group PartInformationGroup;
+         group IdentifySerialsInMultipleLocGroup;
+         list MultiLocSerialsList(MultiLocSerialsArray);
+      }
+      final step {
+
+      }
+      cancelled step {
+
+      }
+   }
+   finish command {
+      enabled = [QtyToIdentify = computed.SerialsIdentified];
+
+      execute {
+         exit OK;
+      }
+   }
+   restart command {
+      visible = [false];
+   }
+}
+
+--------------------------------- COMMANDS ----------------------------------
+command GenerateSeqInMultiLocCommand for TempPartTrackMultiLocSerialsVirtual {
+   label = "Sequence";
+   mode = Global;
+   variable SerialListStr {
+      type = LongText;
+   }
+   variable ReserveSerialVar {
+      type = Number;
+   }
+   enabled = [QtyToIdentify > computed.SerialsIdentified];
+   execute {
+      set ReserveSerialVar = "#{(QtyToIdentify - computed.SerialsIdentified)}";
+      assistant SequenceGeneratorAssistant(ReserveSerialVar) into(SerialListStr) {
+         when OK {
+            call CreateLinesForMultiLocSerials(Objkey, SerialListStr, SessionId, Contract, PartNo, LotBatchNo);
+         }
+      }
+   }
+
+}
+
+command IdentifySerialsByBarcodeInMultiLocCommand for TempPartTrackMultiLocSerialsVirtual {
+   label = "Barcode ID";
+   mode = Global;
+   variable SerialNoStr {
+      type = Text;
+   }
+   variable SessionIdStr {
+      type = Text;
+   }
+   variable SessionIdVar {
+      type = Number;
+   }
+   variable ParentSessionIdStr {
+      type = Text;
+   }
+   variable LotBatchNoVar {
+      type = Text;
+   }
+   enabled = [QtyToIdentify > computed.SerialsIdentified];
+
+   execute {
+      call GetBarcodeInfoForMultiLoc(SessionId) into BarcodeInfoForMultiLocStructure;
+      set SessionIdStr = BarcodeInfoForMultiLocStructure.SessionIdStr;
+      set SessionIdVar = BarcodeInfoForMultiLocStructure.SessionId;
+      set ParentSessionIdStr = BarcodeInfoForMultiLocStructure.ParentSessionIdStr;
+
+      assistant IdentifySerialsByBarcodeAssistant(null, PartNo, null, null, null, null, null, SessionIdVar, SessionIdStr, ParentSessionIdStr) into(SessionIdVar) {
+
+         when CANCEL {
+            call InsertLinesForMultiLocSerials(Objkey, SessionIdVar, SessionId, Contract, PartNo);
+            exit;
+         }
+
+      }
+   }
+}
+
+---------------------------------- GROUPS -----------------------------------
+
+group SourceGroup for IdentifySerialsInMultipleLocVirtual {
+   label = "Source";
+
+   field Ref1 {
+      size = Small;
+      label = "Order Ref 1";
+   }
+   field Ref2 {
+      size = Small;
+      label = "Order Ref 2";
+   }
+   field Ref3 {
+      size = Small;
+      label = "Order Ref 3";
+   }
+   field Ref4 {
+      size = Small;
+      label = "Order Ref 4";
+   }
+   field Ref5 {
+      size = Small;
+      label = "Order Ref 5";
+   }
+   field RefType {
+      size = Small;
+      label = "Source Ref Type";
+   }
+   field SessionId {
+      visible = [false];
+   }
+   field Contract {
+      visible = [false];
+   }
+   field LotBatchNo {
+      visible = [false];
+   }
+}
+
+group PartInformationGroup for IdentifySerialsInMultipleLocVirtual {
+   label = "Part Information";
+   field PartNo {
+      size = Small;
+      label = "Part No";
+   }
+   field PartDescription {
+      size = Small;
+      label = "Part Description";
+   }
+   field CatchUoM {
+      size = Small;
+      label = "Catch UoM";
+   }
+}
+
+group IdentifySerialsInMultipleLocGroup for IdentifySerialsInMultipleLocVirtual {
+   label = "Quantities";
+   field QtyToIdentify {
+      label = "No of Serials to Identify";
+   }
+   computedfield SerialsIdentified {
+      label = "No of Serials Identified";
+      value = "#{MultiLocSerialsArray.count(SessionId)}";
+      type = Number;
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+
+list MultiLocSerialsList for TempPartTrackMultiLocSerialsVirtual {
+   label = "";
+   editmode = SingleCellEdit;
+   crudactions {
+      new {
+         enabled = [component.MultiLocSerialsList.RowCount < parent.QtyToIdentify];
+      }
+   }
+
+   lov SerialNoRef with ReferenceTemporaryPartTrackingSerialSelector using GetSerialNumbers(SerialNo, Contract, PartNo, SessionId, LotBatchNo) {
+      size = Small;
+   }
+   field CatchQty {
+      editable = [parent.CatchUnitEnabled = "TRUE"];
+   }
+   command GenerateSeqInMultiLocCommand;
+   command IdentifySerialsByBarcodeInMultiLocCommand;
+}
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+
+
+----------------------------- MAIN ENTRY POINTS -----------------------------
+
+entityset IdentifySerialsInMultipleLocVirtualSet for IdentifySerialsInMultipleLocVirtual;
+
+---------------------------------- ACTIONS ----------------------------------
+
+action CreateLinesForMultiLocSerials {
+   initialcheck none;
+   parameter ParentObjkey Text;
+   parameter SerialList LongText;
+   parameter SessionId Number;
+   parameter Contract Text;
+   parameter PartNo Text;
+   parameter LotBatchNo Text;
+   ludependencies = TempPartTrackMultiLocSerialsVirtual, IdentifySerialsInMultipleLocVirtual;
+   supportwarnings = [true];
+}
+action InsertLinesForMultiLocSerials {
+   initialcheck none;
+   parameter ParentObjkey Text;
+   parameter SessionIdVar Number;
+   parameter SessionId Number;
+   parameter Contract Text;
+   parameter PartNo Text;
+   ludependencies = TempPartTrackMultiLocSerialsVirtual, IdentifySerialsInMultipleLocVirtual;
+}
+
+--------------------------------- FUNCTIONS ---------------------------------
+
+function GetInfoForMultiLocSerials Structure(InitialInfoMultiLocSerialsStructure) {
+   parameter Contract Text;
+   parameter PartNo Text;
+   parameter RefType Text;
+}
+function GetPartDescription Text {
+   parameter Contract Text;
+   parameter PartNo Text;
+}
+function GetCatchUomForMultiLocSerials Structure(CatchUnitInfoForMultiLocSerialsStructure) {
+   parameter Contract Text;
+   parameter PartNo Text;
+}
+function GetBarcodeInfoForMultiLoc Structure(BarcodeInfoForMultiLocStructure) {
+   parameter ParentSessionId Number;
+}
+function GetSerialNumbers List < Entity(TemporaryPartTrackingSerial) > {
+   parameter SerialNo Text;
+   parameter Contract Text;
+   parameter PartNo Text;
+   parameter SessionId Number;
+   parameter LotBatchNo Text;
+   ludependencies = TempPartTrackMultiLocSerialsVirtual;
+   where = "PART_NO = :PartNo AND CONTRACT = :Contract AND LOT_BATCH_NO IN (:LotBatchNo) AND SERIAL_NO NOT IN (SELECT t.SERIAL_NO FROM TEMPORARY_PART_TRACKING t WHERE t.SESSION_ID = :SessionId) AND Inventory_Part_In_Stock_API.Check_Individual_Exist(PART_NO, SERIAL_NO) = 0";
+}
+
+-------------------------------- STRUCTURES ---------------------------------
+
+structure InitialInfoMultiLocSerialsStructure {
+   attribute PartDescription Text;
+   attribute CatchUom Text;
+   attribute CatchUnitEnabled Text;
+   attribute RefType Text;
+   attribute SessionId Number;
+}
+
+structure CatchUnitInfoForMultiLocSerialsStructure {
+   attribute CatchUom Text;
+   attribute CatchUnitEnabled Text;
+}
+
+structure PartInfoForMultiLocStructure {
+   attribute PartDescription Text;
+   attribute CatchUom Text;
+   attribute CatchUnitEnabled Text;
+}
+
+structure BarcodeInfoForMultiLocStructure {
+   attribute SessionId Number;
+   attribute SessionIdStr Text;
+   attribute ParentSessionIdStr Text;
+}
+--------------------------------- VIRTUALS ----------------------------------
+
+virtual IdentifySerialsInMultipleLocVirtual {
+
+   attribute Ref1 Text {
+      label = "Ref 1";
+      editable = [false];
+   }
+   attribute Ref2 Text {
+      label = "Ref 2";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute Ref3 Text {
+      label = "Ref 3";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute Ref4 Text {
+      label = "Ref 4";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute Ref5 Text {
+      label = "Ref 5";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute RefType Text {
+      label = "Type";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute PartNo Text {
+      label = "Part No";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute PartDescription Text {
+      label = "Part Description";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute CatchUoM Text {
+      label = "Catch UoM";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute QtyToIdentify Number {
+      label = "No of Serials to Identify";
+      editable = [false];
+   }
+   attribute SerialsIdentified Number {
+      label = "No of Serials Identified";
+   }
+   attribute Contract Text;
+   attribute CatchUnitEnabled Text;
+   attribute SessionId Number;
+   attribute LotBatchNo Text {
+      fetch = "Inv_Part_Stock_Reservation_API.Get_Lot_Batch_Numbers(REF1,REF2,REF3,REF4,REF_TYPE,PART_NO)";
+   }
+   reference PartDescriptionRef(Contract, PartNo) to InventoryPart(Contract, PartNo) {
+      label = "Part Description";
+   }
+   array MultiLocSerialsArray(Contract, PartNo, SessionId, LotBatchNo) to TempPartTrackMultiLocSerialsVirtual(Contract, PartNo, SessionId, LotBatchNo);
+}
+
+virtual TempPartTrackMultiLocSerialsVirtual {
+   crud = Create, Read, Update, Delete;
+
+   attribute SessionId Number {
+      fetch = "SESSION_ID";
+      label = "Session ID";
+      required = [true];
+      editable = [ETag = null];
+   }
+   attribute SerialNo Text {
+      fetch = "SERIAL_NO";
+      label = "Serial No";
+      maxlength = 50;
+      required = [true];
+      editable = [ETag = null];
+      format = uppercase;
+   }
+   attribute CatchQty Number {
+      fetch = "CATCH_QTY";
+      label = "Catch Qty";
+   }
+   attribute Contract Text {
+      fetch = "CONTRACT";
+      label = "Contract";
+      maxlength = 5;
+      editable = [ETag = null];
+      insertable = [true];
+      format = uppercase;
+   }
+   attribute PartNo Text {
+      fetch = "PART_NO";
+      label = "Part No";
+      maxlength = 25;
+      editable = [ETag = null];
+      insertable = [true];
+      format = uppercase;
+   }
+   attribute LotBatchNo Text {
+      fetch = "NULL";
+   }
+   attribute SerialNoAttr Text;
+   attribute Generated Boolean;
+
+   reference SerialNoRef(SerialNo) to TemporaryPartTrackingSerial(SerialNo) {
+      label = "Serial No";
+   }
+}
+
+
+
+
+
+
+

@@ -1,0 +1,185 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: ManagePreliminaryReadingHandling
+--  Component:    EQUIP
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date        Sign    History
+--  ----------  ------  ---------------------------------------------------------
+--  2018-10-15  TAJALK  SAUXXW4-1242 - Created
+--  2018-10-18  TAJALK  SAUXXW4-1264 - Added methods
+--  2018-10-18  TAJALK  SAUXXW4-1265 - Optimized
+--  2018-10-19  TAJALK  SAUXXW4-1266 - Added methods
+--  2018-10-22  TAJALK  SAUXXW4-1267 - Added methods
+--  2018-10-24  TAJALK  SAUXXW4-1268 - Added methods
+--  2018-11-07  TAJALK  SAUXXW4-10917 - Fixed reported issues
+-----------------------------------------------------------------------------
+
+layer Core;
+
+-- Step 1
+FUNCTION Fetch_Object_Values___ (
+   site_           IN VARCHAR2,
+   object_id_      IN VARCHAR2,
+   parameter_code_ IN VARCHAR2,
+   test_print_seq_ IN NUMBER,
+   seq_val_        IN NUMBER,
+   read_date_      IN DATE) RETURN Obj_Def_Structure_Rec
+IS 
+   rec_ Obj_Def_Structure_Rec;
+   
+   CURSOR get_equipment_object_meas_info IS
+     SELECT test_sequence_id, measurement_note
+     FROM equipment_object_meas t
+     WHERE t.values_seq = seq_val_;
+BEGIN
+   rec_.object_description    := Equipment_Object_API.Get_Mch_Name(site_, object_id_);
+   rec_.parameter_description := Measurement_Parameter_API.Get_Description(parameter_code_);
+   rec_.unit                  := Equipment_Object_Param_API.Get_Unit(test_print_seq_, parameter_code_);
+   rec_.current_reading       := Equipment_Object_Meas_API.Get_Recorded_Value(seq_val_);
+   rec_.prev_read             := Equipment_Object_Meas_API.Get_Prev_Rec_Val_By_Date(read_date_, test_print_seq_, parameter_code_);
+   rec_.flip_value            := Equipment_Object_Param_API.Get_Meter_Flip_Value(test_print_seq_, parameter_code_);
+   rec_.has_flip_value        := Equipment_Object_Param_API.Has_Flip_Value(test_print_seq_, parameter_code_);
+   rec_.has_next_rec_read     := Equipment_Object_Meas_API.Next_Recorded_Read_Exist(test_print_seq_, parameter_code_, read_date_);
+   rec_.last_recorded_value   := Equipment_Object_Meas_API.Get_Latest_Recorded_Value(test_print_seq_, parameter_code_);
+   
+   OPEN  get_equipment_object_meas_info;
+   FETCH get_equipment_object_meas_info INTO rec_.test_sequence_id, rec_.measurement_note;
+   CLOSE get_equipment_object_meas_info;
+   
+   rec_.total_value       := Equipment_Object_Meas_API.Get_Prev_Total_Val_By_Date(read_date_, test_print_seq_, parameter_code_);
+   rec_.prev_date         := Equipment_Object_Meas_API.Get_Prev_Rec_Date_By_Date(read_date_, test_print_seq_, parameter_code_);
+   rec_.meter_id_old      := Equipment_Object_Meas_API.Get_Meter_Id(seq_val_);
+   rec_.meter_id_required := Meter_Id_Required_API.Encode(Measurement_Parameter_API.Get_Meter_Id_Required(parameter_code_));
+   rec_.average_date      := Equipment_Object_Meas_API.Get_Average_Date(rec_.prev_date, read_date_);
+   
+   RETURN rec_;
+END Fetch_Object_Values___;
+
+--- Step 2/3
+FUNCTION Update_Flip_Value___(
+   key_ IN Meter_Read_Adjust_Wiz_Virtual_Key) RETURN NUMBER
+IS 
+   rec_  Meter_Read_Adjust_Wiz_Virtual_Rec;
+   tot_value_ NUMBER; 
+BEGIN
+   rec_ := Get_Record___(key_);
+   Equipment_Object_Param_API.Update_Flip_Value(rec_.test_print_seq, rec_.parameter_code, rec_.meter_flip_value);
+   tot_value_ := Equipment_Object_Meas_API.Suggest_Total_Value_After_Flip(rec_.parameter_code, rec_.test_print_seq, rec_.current_reading, rec_.read_date);
+   RETURN tot_value_;
+END Update_Flip_Value___;
+
+FUNCTION Get_Proposed_Total___(
+   key_ IN Meter_Read_Adjust_Wiz_Virtual_Key) RETURN NUMBER
+IS 
+   rec_  Meter_Read_Adjust_Wiz_Virtual_Rec;
+   total_value_         NUMBER;
+   suggested_value_     NUMBER;
+   prev_recorded_value_ NUMBER;   
+BEGIN
+   rec_ := Get_Record___(key_);
+   prev_recorded_value_ := Equipment_Object_Meas_API.Get_Prev_Rec_Val_By_Date(rec_.read_date, rec_.test_print_seq, rec_.parameter_code);                     
+   total_value_         := Equipment_Object_Meas_API.Get_Prev_Total_Val_By_Date(rec_.read_date, rec_.test_print_seq, rec_.parameter_code);    
+   suggested_value_      := ((rec_.meter_flip_value - prev_recorded_value_) + rec_.current_reading) + total_value_;      
+   RETURN suggested_value_;      
+END Get_Proposed_Total___;
+
+
+
+-- Step 4
+PROCEDURE Correct_Readings___ (
+    key_ IN Meter_Read_Adjust_Wiz_Virtual_Key)
+IS 
+   rec_  Meter_Read_Adjust_Wiz_Virtual_Rec;
+BEGIN
+   rec_ := Get_Record___(key_);
+   
+   IF(rec_.correct_read_unknown) THEN
+      rec_.correct_read_unknown_num := 1;     
+   ELSE
+      rec_.correct_read_unknown_num := 0;
+   END IF;
+   
+   Equipment_Object_Meas_API.Handle_Incorrect_Readings(rec_.seq_val, rec_.site, rec_.object_id, rec_.test_point_id, rec_.test_sequence_id, rec_.parameter_code, rec_.valid_value, rec_.measurement_note, rec_.read_date,
+                                                      rec_.valid_registered_date, rec_.correct_read_unknown_num, rec_.test_print_seq);
+END Correct_Readings___;
+
+-- Step 5
+PROCEDURE Handle_Meter_Flips___ (
+    key_ IN Meter_Read_Adjust_Wiz_Virtual_Key)
+IS 
+   rec_  Meter_Read_Adjust_Wiz_Virtual_Rec;
+BEGIN
+   rec_ := Get_Record___(key_);
+   Equipment_Object_Param_API.Update_Flip_Value(rec_.test_print_seq, rec_.parameter_code, rec_.meter_flip_value);   
+   Equipment_Object_Meas_API.Handle_Meter_Flips(rec_.seq_val, rec_.site, rec_.object_id, rec_.test_point_id, rec_.test_sequence_id, rec_.parameter_code, rec_.current_reading, rec_.read_date,
+                                                        rec_.test_print_seq);
+END Handle_Meter_Flips___;
+
+-- Step 6
+PROCEDURE Change_Meter___ (
+    key_ IN Meter_Read_Adjust_Wiz_Virtual_Key)
+IS 
+   rec_  Meter_Read_Adjust_Wiz_Virtual_Rec;
+   meter_change_allowed_ BOOLEAN := FALSE;
+   measurement_type_     VARCHAR2(30);
+   meter_change_before_  DATE;
+   total_value_          NUMBER;
+   resource_seq_         equipment_object_meas_tab.resource_seq%TYPE;
+BEGIN
+   rec_ := Get_Record___(key_);
+   
+   IF(rec_.start_read_unknown) THEN
+      rec_.start_read_unknown_num := 1;  
+      rec_.start_value := 0;
+   ELSE
+      rec_.start_read_unknown_num := 0;
+   END IF;
+   
+   IF(rec_.change_date_unknown) THEN
+      rec_.change_date_unknown_num := 1;   
+      rec_.meter_change_date := rec_.average_date;
+   ELSE
+      rec_.change_date_unknown_num := 0;
+   END IF;
+   
+   IF(rec_.end_reading_unknown) THEN
+      rec_.end_reading_unknown_num := 1;    
+      rec_.end_value := rec_.end_value_ext;
+   ELSE
+      rec_.end_reading_unknown_num := 0;
+   END IF;
+   
+   -- Checking meter change is allowed
+   IF (rec_.selected_read >= rec_.start_value) THEN
+     IF ((rec_.prev_date < rec_.meter_change_date) AND (rec_.meter_change_date < rec_.read_date)) THEN
+        IF ((rec_.meter_id_required = 'M') AND (rec_.meter_id_new IS NOT NULL)) OR (rec_.meter_id_required = 'NU') OR (rec_.meter_id_required = 'OP') THEN
+            IF (rec_.selected_read <= rec_.meter_roll_over_value) OR rec_.meter_roll_over_value IS NULL THEN 
+               IF (rec_.prev_read <= rec_.end_value) THEN
+                  meter_change_before_ := rec_.meter_change_date - 1/(24*60*60);
+                  Equipment_Object_Meas_API.Calc_Accumulated_Value(total_value_, measurement_type_, rec_.site, rec_.object_id, rec_.parameter_code,
+                                                                   rec_.test_point_id, rec_.end_value, meter_change_before_, rec_.test_print_seq);
+                  IF (measurement_type_ = 'RecordedReading') THEN
+                     meter_change_allowed_ := TRUE;                     
+                  END IF;                                
+               END IF;
+            END IF;
+         END IF;
+      END IF;
+   END IF;
+    
+   IF NOT meter_change_allowed_ THEN
+       Error_SYS.Appl_General(lu_name_, 'METERCHGNOTVALID: Validation failed when changing the meter, please check the entered values');
+   END IF;
+    
+   resource_seq_ := Equipment_Object_Meas_API.Get_Resource_Seq(rec_.seq_val);
+   
+   Equipment_Object_Meas_API.Handle_Meter_Change(rec_.seq_val, rec_.site, rec_.object_id, rec_.test_point_id, rec_.test_sequence_id, rec_.parameter_code, 
+                                                 rec_.start_value, rec_.meter_change_date, rec_.read_date, rec_.meter_id_new, rec_.meter_roll_over_value, rec_.measurement_note,
+                                                 rec_.end_value, rec_.start_read_unknown_num, rec_.change_date_unknown_num, rec_.end_reading_unknown_num, rec_.test_print_seq,
+                                                 resource_seq_); 
+END Change_Meter___;
+
+
+

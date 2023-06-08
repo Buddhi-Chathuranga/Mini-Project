@@ -1,0 +1,736 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: Intrastat
+--
+--  File:         IntrastatFR.rdf
+--
+--  Date    Sign    History
+--  ------  ----    ----------------------------------------------------------
+--  211212  ErFelk  Bug 161488(SC21R2-6707), Modified report by making country_of_origin visible to both import and export.
+--  210127  SBalLK  Bug 157792(SCZ-13284), Changed add custom field call by adding report view as parameter to include/not include
+--  210127          custom field according to the report definition.
+---  201008  OsAllk  SC2020R1-10267, Replaced Transaction_SYS.Logical_Unit_Is_Installed with Logical_Unit_Is_Active 
+--                  to check component ACTIVE/INACTIVE instead of installability.
+--  170921  ApWilk  Bug 137682, Changed the values of statistical_procedure_ when there are different combinations of both 
+--  170921          statistical_procedure_ and intrastat_direction_.
+--  120913  NipKlk  Bug 102537, Used the Intrastat_Direction_API.Encode() method to get the db values from client value.
+--  120821  RuLiLk  Enabled Custom Fields for report 'Intrastat Report France'
+--  120410  AyAmlk  Bug 100608, Increased the column length of delivery_terms to 5 in view INTRASTAT_FR_REP.
+--  110811  GayDLK  Bug 95717, Added code to assign statistical procedure values for the statistical procedures 
+--  110811          'DECREASE' and 'TRIANGULAR' in Report_Overview().   
+--  110323  PraWlk  Bug 95757, Modified Report_Overview() by adding delivery terms DAT and DAP.
+--  110309  Bmekse  DF-917 Replaced calls to Company_Invoice_Info_API.Get_Vat_No with 
+--                  Tax_Liability_Countries_API.Get_Tax_Id_Number.
+--  090925  PraWlk  Bug 85992, Removed the spaces of customs_stat_no and modified the length to 8.
+--  090601  SaWjlk  Bug 83173, Removed the prog text duplications.
+--  080317  HoInlk  Bug 72069, Added missing "ifs_assert_safe" annotations.
+--  060908  IsWilk  Removed the qrp entries.
+--  060510  DaZase  Bug 57442 Report Designer handling and Layout added.
+--  060124  MarSlk  Bug 55277, Introduced variable rounded_statistical_value_, 
+--  060124          rounded_net_weight_sum_ and assigned the rounded value of 
+--  060124           statistical_value, net_weight_sum.The variable has  
+--  060124          been used where appropiate. The ROUND function has been 
+--  060124          removed in the STAT_VALUES_SUM, NET_WEIGHT_SUM.
+--  060109  MarSlk  Bug 55277, Introduced variable rounded_invoice_value_ and 
+--  060109          assigned the rounded value of invoice_value.The variable has  
+--  060109          been used where appropiate. The ROUND function has been 
+--  060109          removed in the INV_VAL_SUM.
+--  051216  SuJalk  Changed VIEW_RPV to TABLE in COMMENT ON TABLE.
+--  050921  NiDalk  Removed unused variables.
+--  050107  DiVelk  Bug 48877, Converted value of 'intrastat_direction_' to uppercase.
+--  041101  GaJalk  Bug 47300, Deleted the cursor get_delivery_address inside Report_Overview.
+--  041025  GaJalk  Bug 47300, Deleted an error message inside procedure Report_Overview.
+--  040924  RoJalk  Bug 47126, Modified the cursor get_delivery_address and changed
+--  040924          ca.country to ca.country_db. 
+--  040610  NaWilk  Bug 44975, Modified FROM clause in view INTRASTAT_FR_REP.
+--  040301  GeKalk  Replaced substrb with substr for UNICODE modifications.
+------------------- EDGE Package Group 3 Unicode Changes --------------------
+--  040203  NaWalk  Rewrote the DBMS_SQL to Native dynamic SQL for Unicode modification.  
+--  040202  NaWalk  Removed the fourth variable of DBMS_SQL inside the loop,for Unicode modification.
+--  031016  PrJalk  Bug fix 106237, Added procedure Init.
+--  030903  GaSolk  Performed CR Merge 2(CR Only).
+--  030827  SeKalk  Code Review
+--  030826  ThGulk  Replaced  Company_Address_Tab with COMPANY_ADDRESS_PUB
+--  030326  SeKalk  Replaced Site_Delivery_Address_Tab and Site_Delivery_Address_API with Company_Address_Tab and Company_Address_API
+--  ******************************CR Merge**************************************
+--  020312  DaZa    Bug fix 28308, added ABS on intrastat_alt_qty so we dont get "-x * -y results" when we multiply with the regular qty.
+--  020217  IsAn    A4/Letter conversion.
+--  220301  MKOR    Several error messages added and decode of delivery terms added to cursor
+--                  Added UNDEFINE for used parameters
+--  010319  GEKALK  Created.
+-----------------------------------------------------------------------------
+
+define MODULE             = INVENT
+define LU                 = Intrastat
+define PKG                = INTRASTAT_FR_RPI
+
+define TABLE              = INVENT_INFO_SERVICES_RPT
+define VIEW               = INTRASTAT_FR_REP
+DEFINE VIEW_RPV           = INVENT_INFO_SERVICES_RPV
+define METHOD             = Report_Overview
+
+define COMPANY_NAME             = S1
+define COMPANY_VAT_NO           = S2
+define COMPANY_BRANSCH_NO       = S3
+define AGENT_NAME               = S4
+define AGENT_VAT_NO             = S5
+define AGENT_BRANCH_NO          = S6 
+define REPORTING_PERIOD         = S7
+define CREATION_DATE            = S8
+define CURRENCY_CODE            = S9
+define REPOTING_TYPE            = S10
+define REPORT_TITLE             = S11
+define LINE_NO                  = N1 
+define COUNTRY_OF_DEST          = S12
+define COUNTRY_OF_ORIGIN        = S13
+define REGION_OF_ORIGIN         = S14
+define STAT_PROCEDURE           = S15
+define NAT_TRANS_CODE           = S16
+define MODE_OF_TRANSPORT        = S17
+define COMMODITY_CODE           = S18
+define DELIVERY_TERMS           = S19
+define COUNTRY_DEST_TITLE       = S20
+define REGION_TITLE             = S21
+define OPPONENT_TAX_ID          = S22
+define INTRASTAT_DIRECTION_FLAG = S23
+define NET_WEIGHT               = N2
+define ALT_VALUE                = N3
+define INVOICE_VALUE            = N4
+define STATISTICAL_VALUE        = N5
+define NO_OF_LINES              = N6 
+define NET_WEIGHT_SUM           = N7
+define INV_VAL_SUM              = N8
+define STAT_VALUES_SUM          = N9
+
+
+-----------------------------------------------------------------------------
+-- PACKAGE SPECIFICATION:
+-----------------------------------------------------------------------------
+
+PROMPT Creating &PKG specification
+
+CREATE OR REPLACE PACKAGE &PKG AS
+
+module_ CONSTANT VARCHAR2(6) := '&MODULE';
+lu_name_ CONSTANT VARCHAR2(25) := '&LU';
+
+PROCEDURE &METHOD (
+   report_attr_    IN VARCHAR2,
+   parameter_attr_ IN VARCHAR2 );
+
+PROCEDURE Init;
+
+END &PKG;
+/
+SHOW ERROR
+
+-----------------------------------------------------------------------------
+-- REPORTS
+-----------------------------------------------------------------------------
+
+PROMPT Creating report view &VIEW
+
+CREATE OR REPLACE VIEW &VIEW AS
+SELECT H.RESULT_KEY                        RESULT_KEY,
+       H.ROW_NO                            ROW_NO,
+       H.&COMPANY_NAME       			       COMPANY_NAME,
+       H.&COMPANY_VAT_NO     			       COMPANY_VAT_NO,
+       H.&COMPANY_BRANSCH_NO               COMPANY_BRANSCH_NO,
+       H.&AGENT_NAME       			       AGENT_NAME,
+       H.&AGENT_VAT_NO     			       AGENT_VAT_NO,
+       H.&AGENT_BRANCH_NO       			    AGENT_BRANCH_NO,
+       H.&REPORTING_PERIOD         			 REPORTING_PERIOD,
+       H.&CREATION_DATE            			 CREATION_DATE,
+       H.&CURRENCY_CODE            			 CURRENCY_CODE,
+       H.&REPOTING_TYPE            			 REPOTING_TYPE,
+       H.&REPORT_TITLE             			 REPORT_TITLE,
+       H.&COUNTRY_DEST_TITLE       		    COUNTRY_DEST_TITLE,
+       H.&REGION_TITLE						    REGION_TITLE,
+       H.&NO_OF_LINES 						    NO_OF_LINES,
+	    H.&STAT_VALUES_SUM    				    STAT_VALUES_SUM,
+	    H.&INV_VAL_SUM        				    INV_VAL_SUM,
+       H.&NET_WEIGHT_SUM                   NET_WEIGHT_SUM,
+       H.&INTRASTAT_DIRECTION_FLAG         INTRASTAT_DIRECTION_FLAG,
+       D.&LINE_NO             				 LINE_NO,
+       D.&COUNTRY_OF_DEST    				    COUNTRY_OF_DEST,
+	    D.&COUNTRY_OF_ORIGIN    				 COUNTRY_OF_ORIGIN,
+       D.&REGION_OF_ORIGIN   				    REGION_OF_ORIGIN,
+       D.&STAT_PROCEDURE     				    STAT_PROCEDURE,
+       D.&NAT_TRANS_CODE     				    NAT_TRANS_CODE,
+       D.&MODE_OF_TRANSPORT  				    MODE_OF_TRANSPORT,
+       D.&COMMODITY_CODE     				    COMMODITY_CODE,
+       D.&DELIVERY_TERMS     				    DELIVERY_TERMS,
+       D.&NET_WEIGHT         				    NET_WEIGHT,
+       D.&ALT_VALUE           				 ALT_VALUE,
+       D.&INVOICE_VALUE      				    INVOICE_VALUE,
+       D.&STATISTICAL_VALUE  				    STATISTICAL_VALUE,
+       NULL                                INTRASTAT_ID,
+       NULL                                INTRASTAT_DIRECTION,
+       D.&OPPONENT_TAX_ID                  OPPONENT_TAX_ID
+FROM  &VIEW_RPV H, &VIEW_RPV D
+WHERE D.RESULT_KEY = H.RESULT_KEY 
+AND   D.PARENT_ROW_NO = H.ROW_NO
+WITH  read only;   
+      
+COMMENT ON TABLE &VIEW IS
+   'MODULE=&MODULE^LU=&LU^PROMPT=&LU^';
+
+COMMENT ON COLUMN &VIEW..result_key IS
+   'FLAGS=M----^DATATYPE=NUMBER^';
+COMMENT ON COLUMN &VIEW..row_no IS
+   'FLAGS=M----^DATATYPE=NUMBER^';  
+COMMENT ON COLUMN &VIEW..COMPANY_NAME IS
+   'FLAGS=A----^DATATYPE=STRING(35)^TITLE=Company Name :^ITEM_NAME=iCompanyName^';  
+COMMENT ON COLUMN &VIEW..COMPANY_VAT_NO IS
+   'FLAGS=A----^DATATYPE=STRING(35)^TITLE=Company Tax Number :^ITEM_NAME=iCompanyVatNo^';   
+COMMENT ON COLUMN &VIEW..COMPANY_BRANSCH_NO IS
+   'FLAGS=A----^DATATYPE=STRING(10)^TITLE=Company Branch Number :^ITEM_NAME=iCompanyBranschNumber^'; 
+COMMENT ON COLUMN &VIEW..AGENT_NAME IS
+   'FLAGS=A----^DATATYPE=STRING(35)^TITLE=Representative Name :^ITEM_NAME=iAgentName^';  
+COMMENT ON COLUMN &VIEW..AGENT_VAT_NO IS
+   'FLAGS=A----^DATATYPE=STRING(35)^TITLE=Representative Tax number :^ITEM_NAME=iAgentVatNo^';   
+COMMENT ON COLUMN &VIEW..AGENT_BRANCH_NO IS
+   'FLAGS=A----^DATATYPE=STRING(10)^TITLE=Representative Branch number :^ITEM_NAME=iAgentBranchNo^';  
+COMMENT ON COLUMN &VIEW..REPORTING_PERIOD IS
+   'FLAGS=A----^DATATYPE=STRING(4)^TITLE=Reporting period :^ITEM_NAME=iReportingPeriod^';
+COMMENT ON COLUMN &VIEW..CREATION_DATE IS
+   'FLAGS=A----^DATATYPE=STRING(8)^TITLE=Creation date :^ITEM_NAME=iCreationDate^';
+COMMENT ON COLUMN &VIEW..CURRENCY_CODE IS
+   'FLAGS=A----^DATATYPE=STRING(3)^TITLE=Reporting Currency code :^ITEM_NAME=iCurrencyCode^'; 
+COMMENT ON COLUMN &VIEW..REPORT_TITLE IS
+   'FLAGS=A----^DATATYPE=STRING(50)^TITLE=Report title^ITEM_NAME=iReportTitle^';   
+COMMENT ON COLUMN &VIEW..COUNTRY_DEST_TITLE IS
+   'FLAGS=A----^DATATYPE=STRING(50)^TITLE=Country of Destination title^ITEM_NAME=iCountryDestTitle^';  
+COMMENT ON COLUMN &VIEW..REGION_TITLE IS
+   'FLAGS=A----^DATATYPE=STRING(50)^TITLE=Region of Origin title^ITEM_NAME=iRegionTitle^';
+COMMENT ON COLUMN &VIEW..NO_OF_LINES IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Number of Lines :^ITEM_NAME=iNoOfLines^';  
+COMMENT ON COLUMN &VIEW..STAT_VALUES_SUM IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Total Statistical Value :^ITEM_NAME=iStatisticalValueSum^';
+COMMENT ON COLUMN &VIEW..INV_VAL_SUM IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Total Invoiced Value :^ITEM_NAME=iInvValSum^';
+COMMENT ON COLUMN &VIEW..NET_WEIGHT_SUM IS
+'FLAGS=A----^DATATYPE=NUMBER^TITLE=Total Net Weight :^ITEM_NAME=iNetWeightSum^';
+COMMENT ON COLUMN &VIEW..INTRASTAT_DIRECTION_FLAG IS
+   'FLAGS=A----^DATATYPE=STRING(20)^TITLE=Intrastat Direction Flag ^ITEM_NAME=iIntrastatDirectionFlag^';
+COMMENT ON COLUMN &VIEW..COUNTRY_OF_DEST IS
+   'FLAGS=A----^DATATYPE=STRING(3)^TITLE=Country of dest^ITEM_NAME=iCountryOfDest^';          
+COMMENT ON COLUMN &VIEW..COUNTRY_OF_ORIGIN IS
+   'FLAGS=A----^DATATYPE=STRING(3)^TITLE=Country of Origin^ITEM_NAME=iCountryOfOrigint^';          
+COMMENT ON COLUMN &VIEW..REGION_OF_ORIGIN IS
+   'FLAGS=A----^DATATYPE=STRING(35)^TITLE=Region of Origin^ITEM_NAME=iRegionOfOrigin^';  
+COMMENT ON COLUMN &VIEW..STAT_PROCEDURE IS
+   'FLAGS=A----^DATATYPE=STRING(10)^TITLE=Statistical Procedure^ITEM_NAME=iStatProcedure^';
+COMMENT ON COLUMN &VIEW..NAT_TRANS_CODE IS
+   'FLAGS=A----^DATATYPE=STRING(3)^TITLE=Nature of Transaction Code^ITEM_NAME=iNatTransCode^';
+COMMENT ON COLUMN &VIEW..MODE_OF_TRANSPORT IS
+   'FLAGS=A----^DATATYPE=STRING(1)^TITLE=Mode of Transport^ITEM_NAME=iModeOfTransport^';
+COMMENT ON COLUMN &VIEW..COMMODITY_CODE IS
+   'FLAGS=A----^DATATYPE=STRING(8)^TITLE=Commodity Code^ITEM_NAME=iCommodityCode^';
+COMMENT ON COLUMN &VIEW..DELIVERY_TERMS IS
+   'FLAGS=A----^DATATYPE=STRING(5)^TITLE=Delivery Terms^ITEM_NAME=iDeliveryTerms^';
+COMMENT ON COLUMN &VIEW..LINE_NO IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Line No^ITEM_NAME=iLineNo^';
+COMMENT ON COLUMN &VIEW..NET_WEIGHT IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Net weight^ITEM_NAME=iNetWeight^';
+COMMENT ON COLUMN &VIEW..ALT_VALUE IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Alternative Qty^ITEM_NAME=iAltValue^';
+COMMENT ON COLUMN &VIEW..STATISTICAL_VALUE IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Statistical Value^ITEM_NAME=iStatisticalValue^';
+COMMENT ON COLUMN &VIEW..INVOICE_VALUE IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Invoiced Value^ITEM_NAME=iInvoiceValue^';
+COMMENT ON COLUMN &VIEW..INTRASTAT_ID IS
+   'FLAGS=A----^DATATYPE=NUMBER^REF=Intrastat^QUERY=Intrastat ID:^QFLAGS=MCS--^STATUS=Enter Intrastat ID^';
+COMMENT ON COLUMN &VIEW..INTRASTAT_DIRECTION IS
+'FLAGS=A----^DATATYPE=STRING(20)^REF=IntrastatDirection^QUERY=Intrastat Direction:^QFLAGS=MCS--^STATUS=Enter Intrastat Direction^';
+COMMENT ON COLUMN &VIEW..OPPONENT_TAX_ID IS
+   'FLAGS=A----^DATATYPE=STRING(50)^TITLE=Vat No^ITEM_NAME=iOpponentTaxId^';
+
+
+BEGIN 
+   Report_SYS.Define_Report_('&VIEW','&MODULE','&LU','Intrastat Report France','&TABLE','&PKG..&METHOD',0,NULL,NULL,NULL,'PLSQL1.2','TRUE','Supply Chain','Intrastat'); 
+   -- Addition for Custom Fields ------
+   Report_Lu_Definition_API.Clear_Custom_Fields_For_Report('&VIEW');
+   Report_Lu_Definition_API.Enable_Custom_Fields_for_Lu('&VIEW','Intrastat','INTRASTAT_FR_REP');
+   Report_SYS.Refresh_('&VIEW');
+END;
+/
+
+-----------------------------------------------------------------------------
+-- PACKAGE IMPLEMENTATION
+-----------------------------------------------------------------------------
+
+PROMPT Creating &PKG implementation
+
+CREATE OR REPLACE PACKAGE BODY &PKG AS
+
+PROCEDURE &METHOD (
+   report_attr_    IN VARCHAR2,
+   parameter_attr_ IN VARCHAR2 )
+IS
+  
+   file_line_no_              NUMBER := 0;
+   result_key_                NUMBER;
+   row_no_                    NUMBER := 1;
+   parent_row_no_             NUMBER := 0;
+   intrastat_id_              NUMBER;
+   rep_curr_rate_             NUMBER;   
+   statistical_values_sum_    NUMBER := 0;
+   invoiced_values_sum_       NUMBER := 0;
+   net_weight_sum_            NUMBER := 0;	 
+
+   vat_no_                    VARCHAR2(50);
+   stmt_                      VARCHAR2(2000);
+   intrastat_direction_       VARCHAR2(20);
+   report_title_              VARCHAR2(50);
+   country_code_              VARCHAR2(2);   
+   report_period_             VARCHAR2(4);
+   creation_date_str_         VARCHAR2(8);
+   company_vat_no_            VARCHAR2(35);
+   company_name_              VARCHAR2(35);
+   repr_vat_no_               VARCHAR2(35);
+   repr_name_                 VARCHAR2(35);
+   notc_dummy_                VARCHAR2(2);  
+   country_destination_title_ VARCHAR2(50); 
+   region_title_              VARCHAR2(50);
+   region_origin_             VARCHAR2(35); 
+   statistical_procedure_     VARCHAR2(2); 
+   delivery_terms_            INTRASTAT_LINE_TAB.delivery_terms%TYPE;
+   rounded_invoice_value_     NUMBER := 0;     
+   rounded_statistical_value_ NUMBER := 0;
+   rounded_net_weight_sum_    NUMBER := 0;
+
+   do_xml_                    BOOLEAN := Report_SYS.Should_Generate_Xml('&VIEW');
+   do_rs_                     BOOLEAN := Report_SYS.Should_Generate_Result_Set('&VIEW');
+   xml_                       CLOB;
+   package_name_              VARCHAR2(100) := 'INTRASTAT_FR_REP';    
+
+   CURSOR get_notc IS
+      SELECT distinct notc
+      FROM   intrastat_line_tab
+      WHERE  intrastat_id = intrastat_id_;
+   
+   CURSOR get_country_notc (notc_ VARCHAR2) IS
+      SELECT country_notc
+      FROM   country_notc_tab
+      WHERE  notc = notc_
+      AND    country_code = 'FR';
+
+   CURSOR get_head IS
+      SELECT company,
+             representative,
+             repr_tax_no,  
+             end_date,
+             creation_date,
+             rep_curr_code,
+             bransch_no,
+             bransch_no_repr,
+             company_contact,
+             rep_curr_rate,
+             country_code,
+             rowkey             
+      FROM   intrastat_tab
+      WHERE  intrastat_id = intrastat_id_;
+
+   CURSOR get_lines IS
+      SELECT il.intrastat_direction,
+             SUBSTR(REPLACE(il.customs_stat_no,' '),1,8)    customs_stat_no,
+             cn.country_notc,
+             il.statistical_procedure,
+             il.opposite_country,
+             il.contract,
+			    il.mode_of_transport,
+             il.delivery_terms,
+             il.region_of_origin,
+             il.opponent_tax_id,
+			    il.country_of_origin, 
+			    SUM(il.quantity * NVL(il.net_unit_weight,0))                                          net_weight_sum,
+             SUM(NVL(ABS(il.intrastat_alt_qty),0) * il.quantity)                                   intrastat_alt_qty_sum,                  
+			    SUM(il.quantity * NVL(il.invoiced_unit_price, il.order_unit_price)) * rep_curr_rate_  invoice_value,
+             SUM((NVL(il.invoiced_unit_price, NVL(il.order_unit_price,0)) + 
+                  NVL(il.unit_add_cost_amount_inv, NVL(il.unit_add_cost_amount,0)) +
+                  NVL(il.unit_charge_amount_inv,0) + 
+                  NVL(il.unit_charge_amount,0)) * il.quantity) * rep_curr_rate_                    statistical_value                   
+      FROM   intrastat_line_tab il, country_notc_tab cn
+      WHERE  il.intrastat_id = intrastat_id_
+      AND    il.intrastat_direction = intrastat_direction_
+      AND    il.rowstate != 'Cancelled'        
+      AND    il.notc = cn.notc      
+      AND    cn.country_code = country_code_      
+      GROUP BY  il.intrastat_direction,
+                SUBSTR(REPLACE(il.customs_stat_no,' '),1,8),
+                cn.country_notc,
+                il.statistical_procedure,
+                il.opposite_country,
+                il.contract,
+			       il.mode_of_transport,
+                il.delivery_terms,
+                il.region_of_origin,
+                il.opponent_tax_id,
+			       il.country_of_origin;
+
+BEGIN
+
+   General_SYS.Init_Method(lu_name_, '&PKG', '&METHOD');
+
+   result_key_          := to_number(Client_SYS.Get_Item_Value('RESULT_KEY', report_attr_));
+   intrastat_id_        := to_number(Client_SYS.Get_Item_Value('INTRASTAT_ID', parameter_attr_));
+   intrastat_direction_ := Intrastat_Direction_API.Encode(Client_SYS.Get_Item_Value('INTRASTAT_DIRECTION', parameter_attr_));
+   
+   -- check that country notc have valid values
+   FOR notc_rec_ IN get_notc LOOP
+      OPEN get_country_notc(notc_rec_.notc);
+      FETCH get_country_notc INTO notc_dummy_;
+      IF (get_country_notc%NOTFOUND) THEN    
+         CLOSE get_country_notc;
+         Error_SYS.Record_General(lu_name_, 'NOCOUNTRYNOTC: This country is missing an entry for NOTC :P1 in table COUNTRY_NOTC_TAB. Contact your system administrator.', notc_rec_.notc);   
+      END IF;        
+      CLOSE get_country_notc;  
+   END LOOP;
+
+   IF (intrastat_direction_ = 'EXPORT') THEN
+      report_title_              := Language_SYS.Translate_Constant(lu_name_, 'REPEXPORTFR: Intrastat Export Report');
+      country_destination_title_ := Language_SYS.Translate_Constant(lu_name_, 'EXPORTCD: Country of Destination');      
+	   region_title_				   := Language_SYS.Translate_Constant(lu_name_, 'EXPORTRT: Region of Dispatch');      
+	   --reporting_type_            := 'Arrival';
+   ELSE
+      report_title_              := Language_SYS.Translate_Constant(lu_name_, 'REPIMPORTFR: Intrastat Import Report');
+      country_destination_title_ := Language_SYS.Translate_Constant(lu_name_, 'IMPORTCD: Country of Dispatch');      
+	   region_title_				   := Language_SYS.Translate_Constant(lu_name_, 'IMPORTRT: Region of Destination');      
+	   --reporting_type_            := 'Dispatch';
+   END IF;
+
+   IF (do_xml_) THEN
+      Xml_Record_Writer_SYS.Create_Report_Header(xml_,'&VIEW',package_name_);
+   END IF;
+
+   FOR headrec_ IN get_head LOOP     
+      
+      IF (Transaction_SYS.Logical_Unit_Is_Active('TaxLiabilityCountries')) THEN
+         stmt_ := 'BEGIN :vat_no := Tax_Liability_Countries_API.Get_Tax_Id_Number_Db(:company, :country, TRUNC(:creation_date)); END;';
+         
+         -- ifs_assert_safe bmekse 20110309
+         EXECUTE IMMEDIATE stmt_ 
+            USING OUT vat_no_,
+                  IN  headrec_.company,
+                  IN  headrec_.country_code,
+                  IN  headrec_.creation_date;
+      END IF;
+  
+      report_period_     := to_char(headrec_.end_date, 'YYMM');         
+      creation_date_str_ := to_char(headrec_.creation_date, 'YYYYMMDD');
+      rep_curr_rate_     := headrec_.rep_curr_rate;
+      country_code_      := headrec_.country_code;          
+      company_vat_no_    := SUBSTR(vat_no_, 1, 35); 
+      company_name_      := SUBSTR(Company_API.Get_Name(headrec_.company), 1, 35); 	  
+	   repr_vat_no_       := SUBSTR(headrec_.repr_tax_no, 1, 31) ;
+      repr_name_         := SUBSTR(Person_Info_API.Get_Name(headrec_.representative), 1, 35);           
+
+      IF (do_xml_) THEN
+         Xml_Record_Writer_SYS.Add_Element(xml_,'REGION_TITLE', region_title_);
+         Xml_Record_Writer_SYS.Add_Element(xml_,'COUNTRY_DEST_TITLE', country_destination_title_);
+         Xml_Record_Writer_SYS.Add_Element(xml_,'REPORT_TITLE', report_title_);
+         --Xml_Record_Writer_SYS.Add_Element(xml_,'REPOTING_TYPE', put_your_value_here);
+         Xml_Record_Writer_SYS.Add_Element(xml_,'CURRENCY_CODE', headrec_.rep_curr_code);
+         Xml_Record_Writer_SYS.Add_Element(xml_,'CREATION_DATE', creation_date_str_);
+         Xml_Record_Writer_SYS.Add_Element(xml_,'REPORTING_PERIOD', report_period_);
+         Xml_Record_Writer_SYS.Add_Element(xml_,'AGENT_BRANCH_NO', headrec_.bransch_no_repr);
+         Xml_Record_Writer_SYS.Add_Element(xml_,'AGENT_VAT_NO', repr_vat_no_);
+         Xml_Record_Writer_SYS.Add_Element(xml_,'AGENT_NAME', repr_name_);
+         Xml_Record_Writer_SYS.Add_Element(xml_,'COMPANY_BRANSCH_NO', headrec_.bransch_no);
+         Xml_Record_Writer_SYS.Add_Element(xml_,'COMPANY_VAT_NO', company_vat_no_);
+         Xml_Record_Writer_SYS.Add_Element(xml_,'COMPANY_NAME', company_name_);
+         Xml_Record_Writer_SYS.Add_Custom_Fields(xml_,'Intrastat',headrec_.rowkey, '&VIEW');
+         Xml_Record_Writer_SYS.Add_Element(xml_,'INTRASTAT_DIRECTION_FLAG', intrastat_direction_);
+         Xml_Record_Writer_SYS.Start_Element(xml_, 'INTRASTAT_FR_LINES');
+      END IF;
+      
+      IF (do_rs_) THEN
+         -- Insert Head details
+         INSERT INTO &TABLE
+            (result_key,
+             row_no,
+             parent_row_no, 
+             &COMPANY_NAME,
+             &COMPANY_VAT_NO,
+             &COMPANY_BRANSCH_NO, 
+             &AGENT_NAME,
+             &AGENT_VAT_NO,
+             &AGENT_BRANCH_NO,          
+             &REPORTING_PERIOD,
+             &CREATION_DATE,
+             &CURRENCY_CODE,
+             --&REPOTING_TYPE,
+             &REPORT_TITLE,
+             &COUNTRY_DEST_TITLE,
+             &REGION_TITLE,
+             &INTRASTAT_DIRECTION_FLAG)
+         VALUES
+            (result_key_,
+             row_no_,
+             parent_row_no_, 
+             company_name_,
+             company_vat_no_,
+             headrec_.bransch_no, 
+             repr_name_,
+             repr_vat_no_,
+             headrec_.bransch_no_repr,          
+             report_period_,
+             creation_date_str_,
+             headrec_.rep_curr_code,
+             --reporting_type_,
+             report_title_,
+             country_destination_title_,
+             region_title_,
+             intrastat_direction_);   
+         parent_row_no_ := row_no_;   
+         row_no_        := row_no_ + 1;
+      END IF;
+
+      -- Data Records
+      FOR linerec_ IN get_lines LOOP       
+
+         file_line_no_  := file_line_no_ + 1;
+         --com_code_desc_ := Customs_Statistics_Number_API.Get_Description(linerec_.customs_stat_no);
+
+         IF (intrastat_direction_ = 'IMPORT') THEN
+            IF (linerec_.statistical_procedure = 'DELIVERY' ) THEN
+                statistical_procedure_ := '11';
+            ELSIF (linerec_.statistical_procedure = 'BEFORE SUBCONTRACTING' ) THEN
+                statistical_procedure_ := '19';
+   		   ELSIF (linerec_.statistical_procedure = 'AFTER SUBCONTRACTING' ) THEN
+                statistical_procedure_ := '19';
+            END IF;
+         ELSE
+            IF (linerec_.statistical_procedure = 'DECREASE' ) THEN
+               statistical_procedure_ := '25';
+            ELSIF (linerec_.statistical_procedure = 'TRIANGULAR' ) THEN
+               statistical_procedure_ := '31';
+            ELSIF (linerec_.statistical_procedure = 'INCREASE') THEN
+               statistical_procedure_ := '26';
+            ELSIF (linerec_.statistical_procedure = 'DELIVERY') THEN
+               statistical_procedure_ := '21';
+            ELSE
+               statistical_procedure_ := '29';
+            END IF;
+         END IF;
+
+         IF ((linerec_.contract IS NULL)) THEN
+            Error_SYS.Record_General(lu_name_, 'CONTRACTNULL: At least one row has no value in column Site.');
+         END IF;
+         IF (intrastat_direction_ = 'EXPORT') THEN
+            region_origin_  := linerec_.region_of_origin;
+            
+            IF (linerec_.country_of_origin IS NULL) THEN
+               Error_SYS.Record_General(lu_name_, 'NOCOUNTRYORIGINFR: The country of origin must be specified for intrastat reporting.');   
+            END IF;
+            IF (linerec_.opponent_tax_id IS NULL) THEN             
+               Error_SYS.Record_General(lu_name_, 'NOOPPONENTTAXIDFR: Opponent Tax ID is missing for some lines.');
+            END IF;
+         ELSE 
+            region_origin_ := Company_Address_API.Get_State(Site_API.Get_Company(linerec_.contract), Site_API.Get_Delivery_Address(linerec_.contract));
+         END IF;
+         
+         IF (linerec_.delivery_terms IN ('CFR','CIF','CIP','CPT','DAF','DDU','DDP','DEQ','DES','EXW','FAS','FCA','FOB','DAT','DAP','XXX'))  THEN
+            delivery_terms_ := linerec_.delivery_terms;
+         ELSIF (linerec_.delivery_terms IS NULL) THEN
+            Error_SYS.Record_General(lu_name_, 'NODELIVTERM: At least one row has no value in column Delivery Terms.', linerec_.delivery_terms);
+		   ELSE
+            Error_SYS.Record_General(lu_name_, 'INVALDELIVTERM: Delivery term :P1 is invalid.', linerec_.delivery_terms);
+         END IF;
+
+         rounded_invoice_value_ := ROUND(linerec_.invoice_value);
+         rounded_statistical_value_ := ROUND(linerec_.statistical_value);
+         rounded_net_weight_sum_ := ROUND(linerec_.net_weight_sum);
+         
+         IF (do_xml_) THEN
+            Xml_Record_Writer_SYS.Start_Element(xml_, 'INTRASTAT_FR_LINE');
+            Xml_Record_Writer_SYS.Add_Element(xml_,'LINE_NO', file_line_no_);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'ALT_VALUE', ROUND(linerec_.intrastat_alt_qty_sum));
+            Xml_Record_Writer_SYS.Add_Element(xml_,'COMMODITY_CODE', linerec_.customs_stat_no);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'COUNTRY_OF_DEST', linerec_.opposite_country);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'COUNTRY_OF_ORIGIN', linerec_.country_of_origin);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'DELIVERY_TERMS', linerec_.delivery_terms);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'INVOICE_VALUE', rounded_invoice_value_);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'MODE_OF_TRANSPORT', linerec_.mode_of_transport);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'NAT_TRANS_CODE', linerec_.country_notc);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'NET_WEIGHT', rounded_net_weight_sum_);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'REGION_OF_ORIGIN', region_origin_);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'STAT_PROCEDURE', statistical_procedure_);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'STATISTICAL_VALUE', rounded_statistical_value_);
+            IF (intrastat_direction_ = 'EXPORT') THEN
+               Xml_Record_Writer_SYS.Add_Element(xml_,'OPPONENT_TAX_ID', linerec_.opponent_tax_id);
+            END IF;
+            Xml_Record_Writer_SYS.End_Element(xml_, 'INTRASTAT_FR_LINE');
+         END IF;
+
+         IF (do_rs_) THEN
+            -- insert detail rows
+            INSERT INTO &TABLE
+               (result_key, row_no, parent_row_no, &LINE_NO, 
+                &COUNTRY_OF_DEST,
+                &COUNTRY_OF_ORIGIN,
+   			    &REGION_OF_ORIGIN,
+   			    &STAT_PROCEDURE,
+   			    &NAT_TRANS_CODE,
+                &MODE_OF_TRANSPORT,
+                &COMMODITY_CODE,
+   			    &DELIVERY_TERMS,
+   			    &NET_WEIGHT,
+                &ALT_VALUE, 
+   			    &INVOICE_VALUE,
+                &STATISTICAL_VALUE,
+                &OPPONENT_TAX_ID)
+            
+            VALUES
+               (result_key_, row_no_, parent_row_no_, file_line_no_, 
+                linerec_.opposite_country,
+                linerec_.country_of_origin,
+   			    region_origin_,
+   			    statistical_procedure_,
+   			    linerec_.country_notc,
+                linerec_.mode_of_transport,
+                linerec_.customs_stat_no,
+   			    linerec_.delivery_terms,
+   			    rounded_net_weight_sum_,
+                ROUND(linerec_.intrastat_alt_qty_sum),
+                rounded_invoice_value_, 
+                rounded_statistical_value_,
+                linerec_.opponent_tax_id);
+            
+            row_no_ := row_no_ + 1;
+         END IF;
+        
+         -- sums
+         statistical_values_sum_ := statistical_values_sum_ + rounded_statistical_value_;
+		   invoiced_values_sum_    := invoiced_values_sum_ + rounded_invoice_value_;
+		   net_weight_sum_         := net_weight_sum_ + rounded_net_weight_sum_;
+
+      END LOOP;
+
+
+      IF (do_rs_) THEN
+         IF (row_no_ = 2) THEN -- no details      
+            -- insert blank row
+            INSERT INTO &TABLE
+               (result_key, row_no, parent_row_no, &LINE_NO, 
+                &COUNTRY_OF_DEST,
+                &COUNTRY_OF_ORIGIN,
+   		   	 &REGION_OF_ORIGIN,
+   			    &STAT_PROCEDURE,
+   			    &NAT_TRANS_CODE,
+                &MODE_OF_TRANSPORT,
+                &COMMODITY_CODE,
+   			    &DELIVERY_TERMS,
+   			    &NET_WEIGHT,
+                &ALT_VALUE, 
+   			    &INVOICE_VALUE,
+                &STATISTICAL_VALUE )
+            VALUES
+               (result_key_, row_no_, parent_row_no_, NULL, 
+                NULL,
+   			    NULL,
+   			    NULL,
+   			    NULL,
+                NULL,
+                NULL,
+   			    NULL,
+   			    NULL,
+                0,
+                0,
+                0, 
+                0);
+         END IF;
+         
+         -- update the head with no_of_lines and sums
+         UPDATE &TABLE
+         SET    &NO_OF_LINES     = file_line_no_,
+                &STAT_VALUES_SUM = statistical_values_sum_,
+   			    &INV_VAL_SUM     = invoiced_values_sum_,
+   			    &NET_WEIGHT_SUM  = net_weight_sum_
+         WHERE  result_key = result_key_
+         AND    row_no     = parent_row_no_;
+      END IF;   
+      
+   END LOOP;  
+
+   IF (do_xml_) THEN
+      Xml_Record_Writer_SYS.End_Element(xml_, 'INTRASTAT_FR_LINES');
+      Xml_Record_Writer_SYS.Add_Element(xml_,'NO_OF_LINES', file_line_no_);
+      Xml_Record_Writer_SYS.Add_Element(xml_,'NET_WEIGHT_SUM', net_weight_sum_);
+      Xml_Record_Writer_SYS.Add_Element(xml_,'INV_VAL_SUM', invoiced_values_sum_);
+      Xml_Record_Writer_SYS.Add_Element(xml_,'STAT_VALUES_SUM', statistical_values_sum_);
+      Xml_Record_Writer_SYS.End_Element(xml_,'&VIEW');
+      Report_SYS.Finish_Xml_Report('&VIEW',result_key_,xml_);
+   END IF;
+
+
+END &METHOD;
+
+-----------------------------------------------------------------------------
+-------------------- FOUNDATION1 METHODS ------------------------------------
+-----------------------------------------------------------------------------
+-- Init
+--   Dummy procedure that can be called at database startup to ensure that
+--   this package is loaded into memory for performance reasons only.
+-----------------------------------------------------------------------------
+
+PROCEDURE Init
+IS
+BEGIN
+   NULL;
+END Init;
+
+
+END &PKG;
+/
+SHOW ERROR
+
+-----------------------------------------------------------------------------
+-- END
+-----------------------------------------------------------------------------
+
+UNDEFINE MODULE
+UNDEFINE LU
+UNDEFINE PKG
+UNDEFINE TABLE
+UNDEFINE VIEW
+UNDEFINE METHOD
+
+UNDEFINE COMPANY_NAME       
+UNDEFINE COMPANY_VAT_NO     
+UNDEFINE COMPANY_BRANSCH_NO    
+UNDEFINE AGENT_NAME          
+UNDEFINE AGENT_VAT_NO             
+UNDEFINE AGENT_BRANCH_NO         
+UNDEFINE CURRENCY_CODE      
+UNDEFINE REPORTING_PERIOD   
+UNDEFINE CREATION_DATE     
+UNDEFINE NO_OF_LINES       
+UNDEFINE REPOTING_TYPE       
+UNDEFINE REPORT_TITLE      
+UNDEFINE STAT_VALUES_SUM  
+UNDEFINE COUNTRY_DEST_TITLE
+
+UNDEFINE LINE_NO          
+UNDEFINE COUNTRY_OF_DEST   
+UNDEFINE NAT_TRANS_CODE              
+UNDEFINE MODE_OF_TRANSPORT 
+UNDEFINE COMMODITY_CODE    
+UNDEFINE NET_WEIGHT        
+UNDEFINE ALT_VALUE          
+UNDEFINE STATISTICAL_VALUE 
+UNDEFINE REGION_TITLE      
+									  
+UNDEFINE REGION_OF_ORIGIN  
+UNDEFINE STAT_PROCEDURE    
+UNDEFINE DELIVERY_TERMS    
+UNDEFINE COUNTRY_OF_ORIGIN  
+
+UNDEFINE INVOICE_VALUE      
+UNDEFINE INV_VAL_SUM       
+UNDEFINE NET_WEIGHT_SUM
+UNDEFINE VIEW_RPV
+
+UNDEFINE INTRASTAT_DIRECTION_FLAG
+UNDEFINE OPPONENT_TAX_ID

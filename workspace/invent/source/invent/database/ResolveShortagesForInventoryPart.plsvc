@@ -1,0 +1,252 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: ResolveShortagesForInventoryPart
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  201015  BudKlk  Bug 155905(SC2020R1-10616), Increaseed the size of the variables Line_No and Rel_No.
+--  190411  JaThlk  SCUXXW4-18463, Moved the where clause to projection.
+--  190402  JaThlk  SCUXXW4-17955, Approved overtaking CRUD_Update___.
+--  190109  JaThlk  SCUXXW4-6457, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+
+PROCEDURE Key_Fetch_On_Create___ (
+   objid_ IN VARCHAR2, 
+   old_attr_ IN VARCHAR2, 
+   attr_ IN VARCHAR2, 
+   key_ IN OUT Shortage_Demand_Key)
+IS
+   part_no_       VARCHAR2(25);
+   contract_      VARCHAR2(5);
+   order_no_      VARCHAR2(12);
+   line_no_       VARCHAR2(6);
+   rel_no_        VARCHAR2(6);
+   line_item_no_  NUMBER;
+   activity_seq_  NUMBER;
+   owning_vendor_no_  VARCHAR2(100);
+   owning_customer_no_   VARCHAR2(100);
+   condition_code_   VARCHAR2(10);
+   
+BEGIN
+
+   part_no_              := Client_SYS.Get_Item_Value('PART_NO', old_attr_);
+   contract_             := Client_SYS.Get_Item_Value('CONTRACT', old_attr_);
+   order_no_             := Client_SYS.Get_Item_Value('ORDER_NO', old_attr_);
+   line_no_              := Client_SYS.Get_Item_Value('LINE_NO', old_attr_); 
+   rel_no_               := Client_SYS.Get_Item_Value('REL_NO', old_attr_); 
+   line_item_no_         := Client_SYS.Get_Item_Value('LINE_ITEM_NO', old_attr_); 
+   activity_seq_         := Client_SYS.Get_Item_Value('ACTIVITY_SEQ', old_attr_);
+   owning_customer_no_   := Client_SYS.Get_Item_Value('OWNINGCUSTOMERNO', old_attr_);
+   owning_vendor_no_     := Client_SYS.Get_Item_Value('OWNINGVENDORNO', old_attr_);
+   condition_code_       := Client_SYS.Get_Item_Value('CONDITION_CODE', old_attr_);
+   
+   SELECT part_no, contract, order_no, line_no, rel_no, line_item_no
+   INTO key_
+   FROM shortage_demand_uiv
+   WHERE objid = objid_
+   AND part_no = part_no_
+   AND contract = contract_
+   AND order_no = order_no_
+   AND line_no = line_no_
+   AND rel_no = rel_no_
+   AND line_item_no = line_item_no_;
+  
+END Key_Fetch_On_Create___;
+
+
+PROCEDURE Clear_Inventory_Part_Shortages___ (
+   order_no_     IN VARCHAR2,
+   line_no_      IN VARCHAR2,
+   rel_no_       IN VARCHAR2,
+   line_item_no_ IN NUMBER,
+   order_type_   IN VARCHAR2,
+   order_class_  IN VARCHAR2 ) 
+IS
+   
+BEGIN
+   Shortage_Demand_API.Clear_Shortage__(order_no_, line_no_, rel_no_, line_item_no_, order_type_, order_class_);
+END Clear_Inventory_Part_Shortages___;
+
+
+PROCEDURE Reserve_Quantity___ (
+   key_            IN   Shortage_Demand_Key,
+   qty_to_reserve_ IN   NUMBER,
+   info$_          OUT  VARCHAR2 ) 
+IS
+   info_                VARCHAR2(2000);
+   validate_info_       VARCHAR2(2000);
+   qty_short_           NUMBER;
+   order_class_         VARCHAR2(20);
+   order_type_          VARCHAR2(200);
+   
+  CURSOR get_updated_line IS
+   SELECT order_type, order_class, qty_short 
+   FROM shortage_demand_uiv
+   WHERE part_no = key_.part_no
+   AND contract = key_.contract
+   AND order_no = key_.order_no
+   AND line_no = key_.line_no
+   AND rel_no = key_.rel_no
+   AND line_item_no = key_.line_item_no;
+BEGIN
+   
+   OPEN get_updated_line;
+   FETCH get_updated_line INTO order_type_, order_class_, qty_short_;  
+   CLOSE get_updated_line;
+   
+   IF qty_to_reserve_ > qty_short_ THEN
+      Error_SYS.Record_General('INVPARTSHORTAGEDEMAND', 'GREATERQTYTORESERVE: The Qty To Reserve cannot be greater than the Qty Short.');
+   END IF;
+  
+   Shortage_Demand_API.Check_BackOrder(validate_info_, key_.order_no, order_type_, qty_short_, qty_to_reserve_);
+   Shortage_Demand_API.Reserve_Shortage_Part(info_, order_type_, key_.order_no, key_.line_no, key_.rel_no, key_.line_item_no, order_class_, qty_to_reserve_);
+   info$_ := validate_info_ || info_;
+
+END Reserve_Quantity___;
+
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Shortage_Part_Info_Virtual_Rec )
+IS
+key_list_                VARCHAR2(32000);   
+line_rec_                Shortage_Part_Lines_Virtual_Rec;   
+current_selection_       VARCHAR2(32000);
+qty_to_distribute_temp_  NUMBER;
+
+CURSOR get_shortage_demand_line IS
+   SELECT qty_short, order_type, order_class, due_date, qty_required, qty_reserved, qty_issued, status_desc 
+   FROM shortage_demand_uiv
+   WHERE part_no = rec_.part_no
+   AND contract = rec_.contract
+   AND order_no = line_rec_.order_no
+   AND line_no = line_rec_.line_no
+   AND rel_no = line_rec_.rel_no
+   AND line_item_no = line_rec_.line_item_no;
+BEGIN
+   super(rec_);  
+   key_list_:=  CONCAT(rec_.selection, ';');
+   qty_to_distribute_temp_ := rec_.qty_to_distribute;
+   
+   WHILE (INSTR(key_list_, ';') > 0) LOOP
+      
+      current_selection_        := substr(key_list_, 0, INSTR(key_list_, ';'));
+      line_rec_.objkey          := sys_guid();
+      line_rec_.parent_objkey   := rec_.objkey;
+      line_rec_.order_no        := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');
+      line_rec_.line_no         := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_NO');
+      line_rec_.rel_no          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'REL_NO');
+      line_rec_.line_item_no    := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_ITEM_NO');
+      line_rec_.qty_to_reserve  := 0;
+      
+      OPEN get_shortage_demand_line;
+      FETCH get_shortage_demand_line INTO line_rec_.qty_short, line_rec_.order_type, line_rec_.order_class, line_rec_.due_date, line_rec_.qty_required, line_rec_.qty_reserved, line_rec_.qty_issued, line_rec_.status_desc;  
+      CLOSE get_shortage_demand_line;
+      IF qty_to_distribute_temp_ > 0  THEN
+         IF line_rec_.qty_short <= qty_to_distribute_temp_ THEN
+            line_rec_.qty_to_reserve := line_rec_.qty_short;
+            qty_to_distribute_temp_  := qty_to_distribute_temp_ - line_rec_.qty_short;
+         ELSE
+            line_rec_.qty_to_reserve := qty_to_distribute_temp_;
+            qty_to_distribute_temp_  := 0;
+         END IF;
+      END IF;
+
+      key_list_ := SUBSTR(key_list_, (INSTR(key_list_, ';') + 1));
+      CRUD_Create___(line_rec_);
+   END LOOP;
+END CRUD_Create___;
+
+
+PROCEDURE Resolve_Shortage_Demand___ (
+   parent_objkey_ IN VARCHAR2, 
+   info$_ OUT VARCHAR2 ) 
+IS
+   parent_key_       Shortage_Part_Info_Virtual_Key;
+   child_key_        Shortage_Part_Lines_Virtual_Key; 
+   child_rec_        Shortage_Part_Lines_Virtual_Rec;
+   info_             VARCHAR2(2000);
+   validate_info_    VARCHAR2(2000);
+BEGIN
+   parent_key_.objkey := parent_objkey_;
+   FOR line_rec_ IN Get_Shortage_Part_Lines_Array___(parent_key_) LOOP
+      child_key_.objkey := line_rec_.objkey;
+      child_rec_ := Get_Record___(child_key_);
+      IF child_rec_.qty_to_reserve > 0 THEN
+         IF child_rec_.qty_to_reserve > child_rec_.qty_short THEN
+            Error_SYS.Record_General('INVPARTSHORTAGEDEMAND', 'GREATERQTYTORESERVE: The Qty To Reserve cannot be greater than the Qty Short.');
+         END IF;
+         -- Security
+         Shortage_Demand_Uiv_Initial_Check___(child_rec_.order_no, child_rec_.line_no, child_rec_.rel_no, child_rec_.line_item_no, child_rec_.order_type, child_rec_.order_class);
+         Shortage_Demand_API.Check_BackOrder(validate_info_, child_rec_.order_no, child_rec_.order_type, child_rec_.qty_short, child_rec_.qty_to_reserve);
+         Shortage_Demand_API.Reserve_Shortage_Part(info_, child_rec_.order_type, child_rec_.order_no, child_rec_.line_no, child_rec_.rel_no, child_rec_.line_item_no, child_rec_.order_class, child_rec_.qty_to_reserve);
+      END IF;
+      info$_ := validate_info_ || info_;     
+   END LOOP;
+END Resolve_Shortage_Demand___;
+
+
+
+@Overtake Base (approved: 2019-04-02, jathlk)
+PROCEDURE CRUD_Update___ (
+   etag_ IN OUT VARCHAR2,
+   key_  IN OUT Shortage_Demand_Key,
+   attr_ IN OUT VARCHAR2,
+   info_    OUT VARCHAR2,
+   action_ IN VARCHAR2 )
+IS
+
+BEGIN
+   NULL;
+END CRUD_Update___;
+
+
+FUNCTION Shortage_Demand_Uiv_Initial_Check___ (
+   order_no_     IN VARCHAR2,
+   line_no_      IN VARCHAR2,
+   rel_no_       IN VARCHAR2,
+   line_item_no_ IN NUMBER,
+   order_type_   IN VARCHAR2,
+   order_class_  IN VARCHAR2 ) RETURN BOOLEAN
+IS
+   found_ BOOLEAN := FALSE;
+   dummy_ NUMBER;
+   
+   CURSOR check_record IS
+      SELECT 1
+      FROM  SHORTAGE_DEMAND_UIV
+      WHERE order_no = order_no_
+      AND line_no = line_no_
+      AND rel_no = rel_no_
+      AND line_item_no = line_item_no_
+      AND order_type = order_type_
+      AND (order_class = order_class_ OR order_class_ IS NULL);
+BEGIN
+   OPEN check_record;
+   FETCH check_record INTO dummy_;
+   IF check_record%FOUND THEN 
+      found_ := TRUE;
+   END IF ;
+   CLOSE check_record;
+   RETURN found_;   
+END Shortage_Demand_Uiv_Initial_Check___;
+
+PROCEDURE Shortage_Demand_Uiv_Initial_Check___ (
+   order_no_     IN VARCHAR2,
+   line_no_      IN VARCHAR2,
+   rel_no_       IN VARCHAR2,
+   line_item_no_ IN NUMBER,
+   order_type_   IN VARCHAR2,
+   order_class_  IN VARCHAR2 )
+IS
+BEGIN
+   IF (NOT (Shortage_Demand_Uiv_Initial_Check___(order_no_, line_no_, rel_no_, line_item_no_, order_type_, order_class_))) THEN
+      Error_SYS.Appl_Failure(lu_name_, err_source_ => 'Shortage_Demand_Uiv_Initial_Check___(order_no_, line_no_, rel_no_, line_item_no_, order_type_, order_class_)');
+   END IF;
+END Shortage_Demand_Uiv_Initial_Check___;

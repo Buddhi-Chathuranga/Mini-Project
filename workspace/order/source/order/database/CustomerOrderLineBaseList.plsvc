@@ -1,0 +1,660 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     CustomerOrderLineBaseList
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date        Sign    History
+--  ----------  ------  -----------------------------------------------------
+--  2022-01-20  KaPblk  SCZ-17404, Modified Set_Values_On_Duplicate___ to Set NULL to CUST_WARRANTY_ID.
+--  2021-06-07  KETKLK  PJ21R2-749, Replaced Project Delivery supply code 'PRD' with Project Deliverables supply code 'PJD' as Project Delivery functionality will be removed.
+--  2021-02-03  MaRalk  SC2020R1-12088, Modified Set_Values_On_Duplicate___ in order to solve some issues related to Capability Check  
+--  2021-02-03          and Configurations in the duplicate functionality.
+--  2020-12-01  MalLlk  SCZ-12759(Bug 156756), Added Get_Project_State___.
+--  2020-10-09  MaEelk  SC2020R1-10435, Changed the parameter supply_code_db_ as supply_code_ in Is_Run_Capability_Check_Enabled___
+--  2020-09-23  DhAplk  SC2020R1-9895, Corrected the naming errors of Navigate_Url___.
+--  2020-07-16  PamPlk  Bug 152585(SCZ-9275), Added Is_Valid_Price_List___.
+--  2020-03-16  MaRalk  SCXTEND-2206, Added method Set_Values_On_Duplicate___ in order to support duplicate functionality.   
+--  2019-08-19  ChFolk  SCUXXW4-23490, Added new method Start_Update_Fin_Job___.
+--  2019-07-02  JeLise  SCUXXW4-8717, Rewritten the replication functionality and moved Check_Acquisition_Mode___, Fetch_Po_Info___ 
+--  2019-07-02          and Check_Replicate_Attribute___ to SalesOrderLineCommonValidationCommands.
+--  2019-06-20  fgusse  SCUXXW4-22660, Corrected order of variables in Tax_Liability_Filter___
+--  2019-05-13  fgusse  SCUXXW4-19178, Changed taxable in Tax_Code_Filter___ to Boolean
+--  2019-04-24  JeLise  SCUXXW4-781, Added code in Replicate___ to handle the replication for DOP.
+--  2019-04-15  JeLise  SCUXXW4-17002, Added method Unpeg_And_Cancel_Order_Line___ to handle the replication for Unpeg.
+--  2019-03-27  LaThlk  SCUXXW4-15489, Implemented the function Validate_Project_Customer___.
+--  2019-03-11  JeLise  SCUXXW4-781, Added methods Replicate___,  Check_Acquisition_Mode___, Fetch_Po_Info___, Check_Replicate_Attribute___ and 
+--  2019-03-11          Create_Change_Request___ to handle the replication functionality.
+--  2019-03-11  RasDlk  SCUXXW4-17215, Added Dependency Annotation for the relevant fields.
+--  2019-01-29  Akhalk  SCUXXW4-8740,  Added Dialog "dlgRmaCustomerOrderLine" to CustomerOrderLine.
+--  2019-01-29  Akhalk  SCUXXW4-15482, Added Command "Handle Return Material Authorization" to CustomerOrderLine.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+-- Replication start
+TYPE Purchase_Order_No_Rec IS RECORD (
+   po_order_no  VARCHAR2(12),
+   order_no     VARCHAR2(12),
+   line_no      VARCHAR2(4),
+   rel_no       VARCHAR2(4),
+   line_item_no NUMBER );
+TYPE purchase_order_no_tab IS TABLE OF Purchase_Order_No_Rec INDEX BY BINARY_INTEGER;
+@ApproveGlobalVariable
+purchase_order_no_tab_ purchase_order_no_tab;
+-- Replication end
+
+
+FUNCTION Create_Pq_For_Source___ (
+   selection_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   records_                 json_array_t := json_array_t.parse(selection_);
+   current_selection_       VARCHAR2(32000);
+   price_query_list_        VARCHAR2(32000);
+   source_attr_             VARCHAR2(32000);
+   price_query_id_          NUMBER;
+   order_no_                VARCHAR2(12);
+   line_no_                 VARCHAR2(4);
+   rel_no_                  VARCHAR2(4);
+   line_item_no_            NUMBER;
+BEGIN
+   FOR i_ IN 0 .. records_.get_size - 1 LOOP      
+      current_selection_ := records_.get_string(i_);
+      order_no_          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');
+      line_no_           := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_NO');
+      rel_no_            := Client_SYS.Get_Key_Reference_Value(current_selection_, 'REL_NO');
+      line_item_no_      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_ITEM_NO');
+      Customer_Order_Line_Initial_Check___(order_no_, line_no_, rel_no_, line_item_no_);
+
+      Client_SYS.Add_To_Attr('SOURCE', 'CUSTOMER_ORDER_LINE', source_attr_);
+      Client_SYS.Add_To_Attr('SOURCE_REF1', order_no_,      source_attr_);
+      Client_SYS.Add_To_Attr('SOURCE_REF2', line_no_,       source_attr_);
+      Client_SYS.Add_To_Attr('SOURCE_REF3', rel_no_,        source_attr_);
+      Client_SYS.Add_To_Attr('SOURCE_REF4', line_item_no_,  source_attr_);
+      
+      Price_Query_API.Create_Pq_For_Source(price_query_id_, source_attr_);
+      
+      price_query_list_ := price_query_list_ || '(PriceQueryId eq ' || price_query_id_ || ' ) or ';
+   END LOOP;
+   
+   RETURN SUBSTR(price_query_list_, 0, LENGTH(price_query_list_)-4);
+END Create_Pq_For_Source___;
+
+
+FUNCTION Calc_Com_From_Cust_Ord_Line___ (
+   order_no_              IN VARCHAR2,
+   line_no_               IN VARCHAR2,
+   rel_no_                IN VARCHAR2,
+   line_item_no_          IN NUMBER, 
+   overwrite_manual_data_ IN NUMBER ) RETURN VARCHAR2
+IS
+   info_ VARCHAR2(2000);
+BEGIN
+   Commission_Calculation_API.Calc_Com_From_Cust_Ord_Line(info_, order_no_, line_no_, rel_no_, line_item_no_, overwrite_manual_data_);
+   RETURN info_;
+END Calc_Com_From_Cust_Ord_Line___;
+
+@DynamicComponentDependency SHPORD
+FUNCTION Get_Shop_Order___ (
+   order_no_     IN VARCHAR2,
+   line_no_      IN VARCHAR2,
+   rel_no_       IN VARCHAR2,
+   line_item_no_ IN NUMBER) RETURN Shop_Order_Structure_Rec
+IS
+   rec_ Shop_Order_Structure_Rec;
+BEGIN
+   Customer_Order_Shop_Order_API.Get_Shop_Order(rec_.shop_order_no, rec_.release_no, rec_.sequence_no, order_no_, line_no_, rel_no_, line_item_no_);
+   RETURN rec_ ;
+END Get_Shop_Order___;
+
+
+@DynamicComponentDependency PURCH
+FUNCTION Get_Connected_Purch_Info___ (
+   order_no_     IN VARCHAR2,
+   line_no_      IN VARCHAR2,
+   rel_no_       IN VARCHAR2,
+   line_item_no_ IN NUMBER) RETURN Connected_Purch_Object_Structure_Rec
+IS
+   rec_            Connected_Purch_Object_Structure_Rec;
+   purchase_type_  VARCHAR2(200);
+BEGIN
+	Customer_Order_Pur_Order_API.Get_Purord_For_Custord(rec_.purch_object_id, rec_.release_no, rec_.sequence_no, purchase_type_, order_no_, line_no_, rel_no_, line_item_no_);
+   rec_.purchase_type_db := Purchase_Type_API.Encode(purchase_type_);
+   RETURN rec_ ;
+END Get_Connected_Purch_Info___;
+
+
+--------- Functions for Validatons
+--FUNCTION Get_Next_Rel_No___ (
+--	order_no_ IN VARCHAR2,
+--	line_no_ IN VARCHAR2,
+--	line_item_no_ IN NUMBER,
+--	contract_ IN VARCHAR2) RETURN VARCHAR2
+--IS
+--BEGIN
+--	RETURN Customer_Order_Line_API.Get_Next_Rel_No(order_no_, line_no_, line_item_no_, contract_);
+--END Get_Next_Rel_No___;
+--
+--PROCEDURE Exist_Line_No___ (
+--	order_no_ IN VARCHAR2,
+--	line_no_ IN VARCHAR2,
+--	rel_no_ IN VARCHAR2,
+--	line_item_no_ IN NUMBER)
+--IS
+--BEGIN
+--	Customer_Order_Line_API.Exist_Line_No(quotation_no_, line_no_, rel_no_, line_item_no_);
+--END Exist_Line_No___;
+--
+--FUNCTION Exist_Line_No___ (
+--	quotation_no_ IN VARCHAR2,
+--	line_no_ IN VARCHAR2,
+--	rel_no_ IN VARCHAR2,
+--	line_item_no_ IN NUMBER) RETURN VARCHAR2
+--IS
+--BEGIN
+--	Order_Quotation_Line_API.Exist_Line_No(quotation_no_, line_no_, rel_no_, line_item_no_);
+--   RETURN NULL;
+--END Exist_Line_No___;
+
+
+--FUNCTION Fetch_Delivery_Country___ (
+--   order_no_                    IN VARCHAR2,
+--   default_addr_flag_           IN VARCHAR2,
+--   addr_flag_                   IN VARCHAR2,
+--   ship_addr_no_                IN VARCHAR2,
+--   line_delivery_country_code_  IN VARCHAR2,
+--   deliver_to_cust_no_          IN VARCHAR2,
+--   new_line_                    IN BOOLEAN) RETURN VARCHAR2
+--IS 
+--   delivery_country_code_  VARCHAR2(5);  
+--BEGIN
+--   IF (default_addr_flag_ = 'Y') THEN
+--      delivery_country_code_ := Customer_Order_Address_API.Get_Country_Code(order_no_);
+--   ELSE
+--      IF (addr_flag_ = 'Y') THEN
+--         IF (new_line_) THEN
+--            delivery_country_code_ := Customer_Order_Address_API.Get_Country_Code(order_no_);
+--         ELSE
+--            delivery_country_code_ := line_delivery_country_code_;
+--         END IF;
+--      ELSE 
+--         delivery_country_code_ := Cust_Ord_Customer_Address_API.Get_Country_Code(deliver_to_cust_no_, ship_addr_no_);
+--      END IF;
+--   END IF;
+--   
+--   RETURN delivery_country_code_;
+--END Fetch_Delivery_Country___;
+
+
+-- Replication start
+PROCEDURE Replicate___ (
+   attr_         IN OUT VARCHAR2,
+   order_no_     IN     VARCHAR2,
+   line_no_      IN     VARCHAR2,
+   rel_no_       IN     VARCHAR2,
+   line_item_no_ IN     NUMBER ) 
+IS
+   rec_                       Customer_Order_Line_API.Public_Rec;
+   pegged_comp_exist_         VARCHAR2(5);
+   create_poco_auto_          VARCHAR2(5) := 'FALSE';
+   po_order_no_               VARCHAR2(12) := '';
+   purchase_type_db_          VARCHAR2(1) := '';
+   default_addr_flag_         VARCHAR2(1);
+   changed_attrib_not_in_pol_ VARCHAR2(5);
+   allow_send_chg_            VARCHAR2(5);
+   supply_code_check_         VARCHAR2(5) := 'FALSE';
+   change_request_            VARCHAR2(5) := 'FALSE';
+   replicate_changes_         VARCHAR2(5) := 'TRUE';
+   i_                         NUMBER;
+   found_                     BOOLEAN := FALSE;
+   dop_new_qty_demand_        VARCHAR2(32000);
+   no_of_dop_conns_           NUMBER;
+   no_of_dop_conns_pkg_       NUMBER;
+   msg_                       VARCHAR2(32000);
+BEGIN
+   rec_ := Customer_Order_Line_API.Get(order_no_, 
+                                       line_no_, 
+                                       rel_no_, 
+                                       line_item_no_);   
+                                       
+   default_addr_flag_         := Client_SYS.Get_Item_Value('DEFAULT_ADDR_FLAG_DB', attr_);
+   allow_send_chg_            := Client_SYS.Get_Item_Value('SEND_CHANGE_REQUEST', attr_);
+   change_request_            := Client_SYS.Get_Item_Value('CHANGE_REQUEST', attr_);
+   changed_attrib_not_in_pol_ := Client_SYS.Get_Item_Value('CHANGED_ATTRIB_NOT_IN_POL', attr_);
+   supply_code_check_         := Client_SYS.Get_Item_Value('SUPPLY_CODE_CHECK', attr_);
+   
+   pegged_comp_exist_ := Customer_Order_Line_API.Check_Pegged_Component_Exist(rec_.order_no, 
+                                                                              rec_.line_no, 
+                                                                              rec_.rel_no, 
+                                                                              rec_.line_item_no);
+                                                                                 
+   IF ((rec_.supply_code = 'IPD') OR (rec_.supply_code = 'PD') OR (rec_.supply_code = 'IPT') OR (rec_.supply_code = 'PT') OR
+       ((rec_.supply_code = 'PKG') AND (pegged_comp_exist_ = 'TRUE'))) THEN 
+      Fetch_Po_Info___(create_poco_auto_,
+                       po_order_no_,
+                       purchase_type_db_,
+                       rec_.order_no, 
+                       rec_.line_no, 
+                       rec_.rel_no, 
+                       rec_.line_item_no);
+      supply_code_check_ := 'TRUE';
+   END IF;
+   
+   IF (changed_attrib_not_in_pol_ IS NOT NULL) THEN
+      IF (NVL(default_addr_flag_, rec_.default_addr_flag) = 'Y') THEN
+         IF ((allow_send_chg_ = 'FALSE') AND (supply_code_check_ = 'TRUE')) THEN
+            change_request_ := 'FALSE';
+            Client_SYS.Add_Info(lu_name_, 'ORDCHGNOTSENT: A change request will not be sent automatically to some of the supplier(s) for pegged purchase order(s).');
+         END IF;
+      END IF;   
+
+      IF ((po_order_no_ IS NOT NULL) AND (change_request_ = 'TRUE')) THEN
+         IF (purchase_order_no_tab_.COUNT > 0) THEN
+            FOR j_ IN purchase_order_no_tab_.FIRST .. purchase_order_no_tab_.LAST LOOP
+               IF (purchase_order_no_tab_(j_).po_order_no = po_order_no_) THEN
+                  found_ := TRUE;
+                  EXIT;
+               END IF;         
+            END LOOP;
+         END IF;
+
+         IF (NOT found_) THEN
+            i_ := purchase_order_no_tab_.COUNT + 1;
+            purchase_order_no_tab_(i_).po_order_no := po_order_no_;
+         END IF;
+      END IF;
+
+      IF ((rec_.supply_code = 'DOP') OR (rec_.supply_code = 'PKG')) THEN
+         dop_new_qty_demand_ := Client_SYS.Get_Item_Value('DOP_NEW_QTY_DEMAND', attr_);
+         $IF Component_Dop_SYS.INSTALLED $THEN
+            no_of_dop_conns_     := Dop_Demand_Cust_Ord_API.Get_No_Of_All_Dop_Headers(rec_.order_no, 
+                                                                                      rec_.line_no, 
+                                                                                      rec_.rel_no, 
+                                                                                      rec_.line_item_no);
+            no_of_dop_conns_pkg_ := Dop_Demand_Cust_Ord_API.Get_No_Of_All_Dop_Headers(rec_.order_no, 
+                                                                                      rec_.line_no, 
+                                                                                      rec_.rel_no, 
+                                                                                      rec_.line_item_no,
+                                                                                      'TRUE');
+            IF (((no_of_dop_conns_ > 0) OR ((rec_.supply_code = 'PKG') AND (no_of_dop_conns_pkg_ > 0))) AND (dop_new_qty_demand_ IS NULL)) THEN 
+               Message_SYS.Add_Attribute(msg_, 'FROM_CO_LINE_CLIENT', 'TRUE');
+               Client_SYS.Add_To_Attr('DOP_NEW_QTY_DEMAND', msg_, attr_);
+            END IF;
+         $ELSE
+            NULL;
+         $END
+      END IF;
+      
+      -- set change_reguest to false, since the change request is created in Create_Change_Request___ to keep all updates in one change request
+      IF (rec_.supply_code != 'PKG') THEN
+         Client_SYS.Set_Item_Value('CHANGE_REQUEST', 'FALSE', attr_); 
+      END IF;
+      Client_SYS.Add_To_Attr('UPDATE_PEGGED_ORDERS', 'FALSE', attr_);
+   END IF;
+END Replicate___;
+
+
+PROCEDURE Create_Change_Request___ (
+   init_ IN BOOLEAN ) 
+IS
+   previous_po_order_no_ VARCHAR2(12) := 'NULL';
+BEGIN
+   IF (init_) THEN
+      purchase_order_no_tab_.DELETE;
+   ELSE
+      IF (purchase_order_no_tab_.COUNT > 0) THEN
+         FOR i_ IN purchase_order_no_tab_.FIRST..purchase_order_no_tab_.LAST LOOP
+            IF (purchase_order_no_tab_.COUNT = 1) THEN
+               $IF Component_Purch_SYS.INSTALLED $THEN
+                  Purchase_Order_Initial_Check___(purchase_order_no_tab_(i_).po_order_no);
+                  Purchase_Order_Transfer_API.Send_Order_Change(purchase_order_no_tab_(i_).po_order_no);
+               $ELSE
+                  NULL;
+               $END
+            ELSIF (purchase_order_no_tab_(i_).po_order_no != previous_po_order_no_) THEN
+               $IF Component_Purch_SYS.INSTALLED $THEN
+                  Purchase_Order_Initial_Check___(purchase_order_no_tab_(i_).po_order_no);
+                  Purchase_Order_Transfer_API.Send_Order_Change(purchase_order_no_tab_(i_).po_order_no);
+                  previous_po_order_no_ := purchase_order_no_tab_(i_).po_order_no;
+               $ELSE
+                  NULL;
+               $END
+            END IF;
+         END LOOP;
+      END IF;
+   END IF;
+END Create_Change_Request___;
+-- Replication end
+
+
+FUNCTION Validate_Project_Customer___ (
+   activity_seq_ IN NUMBER,
+   customer_no_  IN VARCHAR2,
+   demand_code_  IN VARCHAR2) RETURN BOOLEAN
+IS
+BEGIN
+	RETURN Customer_Order_Line_API.Valid_Project_Customer__(activity_seq_, customer_no_, demand_code_) = 'TRUE';   
+END Validate_Project_Customer___;
+
+
+-- This function is used just to refresh customer order lines in client using ludependencies when needed
+PROCEDURE Refresh_Order_Lines___
+IS   
+BEGIN
+   NULL;
+END Refresh_Order_Lines___;
+
+
+
+
+--FUNCTION Check_Enable_For_Manual_Reservations_Command___ (
+--	supply_code_ IN VARCHAR2,
+--	header_state_ IN VARCHAR2) RETURN BOOLEAN
+--IS
+--   
+--BEGIN
+--   trace_sys.message('**************************supply_code_'||supply_code_);
+--   trace_sys.message('**************************header_state_'||header_state_);
+--
+--   IF supply_code_ IN ('ND','SEO') THEN
+--      RETURN FALSE;
+--   END IF;
+--   
+--   IF supply_code_ IN ('PD','IPD')  THEN
+--      RETURN FALSE;
+--   END IF;   
+--      
+--   IF supply_code_ IN ('PT','IPT') AND  header_state_ = 'Planned' THEN
+--      RETURN FALSE;
+--   END IF;   
+--   
+--   RETURN TRUE;       
+--END Check_Enable_For_Manual_Reservations_Command___;
+
+FUNCTION Navigate_Url___ (
+	configuration_id_ IN VARCHAR2,
+	supply_code_      IN VARCHAR2,
+	rental_db_        IN VARCHAR2,
+	part_ownership_   IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   navigateurl_ VARCHAR2(1000);
+BEGIN
+   IF configuration_id_ = '*' THEN
+      navigateurl_ := 'Contract eq $[Contract] and PartNo eq $[PartNo] and AvailableQty gt 0 and LocationType eq IfsApp.InventoryPartInStockHandling.InventoryLocationType''Picking''';
+   ELSE
+      navigateurl_ := 'Contract eq $[Contract] and PartNo eq $[PartNo] and ConfigurationId eq $[ConfigurationId] and AvailableQty gt 0 and LocationType eq IfsApp.InventoryPartInStockHandling.InventoryLocationType''Picking''';
+   END IF;
+   IF supply_code_ = 'ProjectInventory' OR supply_code_ = 'ProjectDeliverables' THEN
+      navigateurl_ := navigateurl_ || ' and ProjectId eq $[ProjectId]';
+   ELSE
+      navigateurl_ := navigateurl_ || ' and ProjectId eq null';
+   END IF;
+   IF rental_db_ = 'FALSE'  THEN
+      IF part_ownership_ = 'CompanyOwned'  THEN
+         navigateurl_ := navigateurl_ || ' and (PartOwnership eq IfsApp.InventoryPartInStockHandling.PartOwnership''CompanyOwned'')';
+      END IF;
+      IF part_ownership_ = 'Consignment'  THEN
+         navigateurl_ := navigateurl_ || ' and (PartOwnership eq IfsApp.InventoryPartInStockHandling.PartOwnership''Consignment'')';
+      END IF;
+      IF part_ownership_ = 'CustomerOwned'  THEN
+         navigateurl_ := navigateurl_ || ' and (PartOwnership eq IfsApp.InventoryPartInStockHandling.PartOwnership''CustomerOwned'')';
+      END IF;
+      IF part_ownership_ = 'SupplierLoaned'  THEN
+         navigateurl_ := navigateurl_ || ' and (PartOwnership eq IfsApp.InventoryPartInStockHandling.PartOwnership''SupplierLoaned'')';
+      END IF;
+      IF part_ownership_ = 'SupplierOwned'  THEN
+         navigateurl_ := navigateurl_ || ' and (PartOwnership eq IfsApp.InventoryPartInStockHandling.PartOwnership''SupplierOwned'')';
+      END IF;
+      IF part_ownership_ = 'CompanyRentalAsset'  THEN
+         navigateurl_ := navigateurl_ || ' and (PartOwnership eq IfsApp.InventoryPartInStockHandling.PartOwnership''CompanyRentalAsset'')';
+      END IF;
+   ELSE
+      IF part_ownership_ = 'CompanyRentalAsset'  THEN
+         navigateurl_ := navigateurl_ || ' and (PartOwnership eq IfsApp.InventoryPartInStockHandling.PartOwnership''CompanyRentalAsset'' or PartOwnership eq IfsApp.InventoryPartInStockHandling.PartOwnership''SupplierRented'')';
+      END IF;
+      IF part_ownership_ = 'SupplierRented'  THEN
+         navigateurl_ := navigateurl_ || ' and (PartOwnership eq IfsApp.InventoryPartInStockHandling.PartOwnership''SupplierRented'')';
+      END IF;
+   END IF;
+   RETURN navigateurl_;
+END Navigate_Url___;
+
+@DynamicComponentDependency WO
+FUNCTION Check_Service_Request_Not_Created_For_Line___(
+   order_no_     IN VARCHAR2,
+   line_no_      IN VARCHAR2,
+   rel_no_       IN VARCHAR2,
+   line_item_no_ IN NUMBER )  RETURN BOOLEAN
+IS   
+BEGIN
+   RETURN NOT Active_Work_Order_Util_API.Ser_Request_Exist_For_Cust_Ord(order_no_, line_no_, rel_no_, line_item_no_);
+END Check_Service_Request_Not_Created_For_Line___;
+
+FUNCTION Create_Corr_Inter_Site_Pr_Enable___ (
+   order_no_    IN VARCHAR2,
+   line_no_     IN VARCHAR2,
+   rel_no_      IN VARCHAR2,
+   line_item_no_ IN NUMBER) RETURN BOOLEAN
+IS
+BEGIN
+   RETURN (Intersite_Profit_Manager_API.Is_Corrective_Allowed(order_no_, line_no_, rel_no_, line_item_no_) = 1);
+END Create_Corr_Inter_Site_Pr_Enable___;
+
+
+FUNCTION Sup_Service_Obj_Shpord_Info_Enable___ (
+   order_no_        IN VARCHAR2,
+   line_no_         IN VARCHAR2,
+   rel_no_          IN VARCHAR2,
+   line_item_no_    IN NUMBER,
+   supply_code_     IN VARCHAR2) RETURN BOOLEAN
+IS
+BEGIN
+   RETURN (supply_code_ = 'SO' and Customer_Order_Shop_Order_API.Connected_Orders_Found(order_no_, line_no_, rel_no_, line_item_no_) = 'TRUE');
+END Sup_Service_Obj_Shpord_Info_Enable___;
+
+
+FUNCTION Sup_Service_Obj_Purch_Info_Enable___ (
+   order_no_        IN VARCHAR2,
+   line_no_         IN VARCHAR2,
+   rel_no_          IN VARCHAR2,
+   line_item_no_    IN NUMBER) RETURN BOOLEAN
+IS
+BEGIN
+   RETURN Customer_Order_Pur_Order_API.Connected_Orders_Found(order_no_, line_no_, rel_no_, line_item_no_) = 1;
+END Sup_Service_Obj_Purch_Info_Enable___;
+
+
+
+
+FUNCTION Cancel_Order_Line_Enable___ (
+   order_no_    IN VARCHAR2,
+   line_no_     IN VARCHAR2,
+   rel_no_      IN VARCHAR2,
+   line_item_no_ IN NUMBER) RETURN BOOLEAN
+IS
+   objstate_ customer_order_line_tab.rowstate%TYPE;
+BEGIN
+   objstate_ := Customer_Order_Line_API.get_objstate(order_no_, line_no_, rel_no_, line_item_no_);
+   RETURN (objstate_ = 'Released' or(objstate_ = 'Reserved' 
+         and Customer_Order_Reservation_API.Pick_List_Exist(order_no_, line_no_, rel_no_, line_item_no_) = 0));
+END Cancel_Order_Line_Enable___;
+
+
+FUNCTION Supply_Site_Reservations_Enable___ (
+   order_no_        IN VARCHAR2,
+   line_no_         IN VARCHAR2,
+   rel_no_          IN VARCHAR2,
+   line_item_no_    IN NUMBER) RETURN BOOLEAN
+IS
+BEGIN
+    RETURN Reserve_Customer_Order_API.Is_Supply_Chain_Reservation(order_no_, line_no_, rel_no_, line_item_no_, NULL, NULL) = 1;
+END Supply_Site_Reservations_Enable___;
+
+
+FUNCTION Is_Run_Capability_Check_Enabled___ (
+	supply_site_       IN VARCHAR2,
+   part_no_           IN VARCHAR2,
+   catalog_no_        IN VARCHAR2,
+   objstate_          IN VARCHAR2,
+   parent_objstate_   IN VARCHAR2,
+   part_ownership_db_ IN VARCHAR2,
+   activity_no_       IN VARCHAR2,
+   configurable_      IN BOOLEAN,
+   configuration_id_  IN VARCHAR2,
+   qty_assigned_      IN NUMBER,
+   demand_code_       IN VARCHAR2,
+   qty_reserved_      IN NUMBER,
+   supply_code_       IN VARCHAR2) RETURN BOOLEAN
+IS
+   sourcing_option_            VARCHAR2(50) := Sales_Part_API.Get_Sourcing_Option_Db(supply_site_, part_no_);
+   is_check_ok_on_supply_site_ BOOLEAN := Sales_Part_API.Check_Exist(supply_site_, part_no_) = 1 AND ((sourcing_option_ IN ('DOPORDER', 'INVENTORYORDER') AND Sales_Part_API.Get_Part_No(supply_site_, part_no_) IS NOT NULL) OR (sourcing_option_ = 'SHOPORDER' AND Inventory_Part_API.Get_Type_Code_Db(supply_site_, part_no_) IN ('1', '2')));
+BEGIN
+   RETURN catalog_no_ IS NOT NULL AND objstate_ = 'Released' AND parent_objstate_ = 'Planned' AND part_ownership_db_ = Part_Ownership_API.DB_COMPANY_OWNED AND activity_no_ IS NULL AND 
+         ((configurable_ AND configuration_id_ IS NOT NULL AND configuration_id_ != '*') OR (supply_code_ = 'DOP' AND part_no_ IS NOT NULL AND qty_assigned_ = 0) OR 
+         (supply_code_ = 'IO' AND part_no_ IS NOT NULL AND qty_assigned_ = 0 AND demand_code_ != 'PI') OR (supply_code_ = 'SO' AND qty_assigned_ = 0) OR 
+         (supply_code_ = 'IPT' AND qty_reserved_ = 0 AND is_check_ok_on_supply_site_) OR
+         (supply_code_ = 'IPD' AND qty_reserved_ = 0 AND is_check_ok_on_supply_site_ AND demand_code_ != 'PI'));
+END Is_Run_Capability_Check_Enabled___;
+
+@DynamicComponentDependency GENLED
+PROCEDURE Start_Update_Fin_Job___ (
+   company_     IN VARCHAR2,
+   project_id_  IN VARCHAR2 )
+IS
+   exec_plan_   VARCHAR2(10) := 'ONLINE';
+BEGIN
+   Financial_Job_Info_API.Start_Update_Fin_Job_Info__(exec_plan_, company_, project_id_);
+END Start_Update_Fin_Job___;
+
+
+PROCEDURE Set_Values_On_Duplicate___ (
+   attr_ IN OUT VARCHAR2)
+IS
+   supply_type_               customer_order_line_tab.supply_code%TYPE;
+   vendor_no_                 customer_order_line_tab.vendor_no%TYPE;  
+   supply_site_               customer_order_line_tab.supply_site%TYPE;  
+   delivery_type_             customer_order_line_tab.delivery_type%TYPE; 
+   supply_code_               customer_order_line_tab.supply_code%TYPE; 
+   dummy_text_                VARCHAR2(2000) := NULL;  
+   dummy_number_              NUMBER := NULL;
+   dummy_date_                DATE := NULL;
+BEGIN  
+   supply_type_ := Client_SYS.Get_Item_Value('SUPPLY_CODE_DB', attr_);  
+   delivery_type_ := Client_SYS.Get_Item_Value('DELIVERY_TYPE', attr_); 
+   -- Store supply code to be able to reset it after sales part validation
+   supply_code_ := Client_SYS.Get_Item_Value('SUPPLY_CODE_DB', attr_);
+   IF (Client_SYS.Get_Item_Value('VENDOR_NO', attr_) IS NOT NULL) THEN
+      vendor_no_ := Client_SYS.Get_Item_Value('VENDOR_NO', attr_);      
+   END IF;  
+   IF (Client_SYS.Get_Item_Value('SUPPLY_SITE', attr_) IS NOT NULL) THEN
+      supply_site_ := Client_SYS.Get_Item_Value('SUPPLY_SITE', attr_);
+   END IF;  
+   Client_SYS.Set_Item_Value('LINE_NO', dummy_text_, attr_);
+   Client_SYS.Set_Item_Value('REL_NO', dummy_text_, attr_);  
+   Client_SYS.Set_Item_Value('CATALOG_TYPE_DB', dummy_text_, attr_);
+   Client_SYS.Set_Item_Value('PART_NO', dummy_text_, attr_);
+   Client_SYS.Set_Item_Value('CURRENCY_RATE', dummy_number_, attr_);
+   Client_SYS.Set_Item_Value('NOTE_ID', dummy_number_, attr_);
+   Client_SYS.Set_Item_Value('PRE_ACCOUNTING_ID', dummy_number_, attr_);
+   Client_SYS.Set_Item_Value('NOTE_TEXT', dummy_text_, attr_);
+   Client_SYS.Set_Item_Value('QTY_ASSIGNED', 0, attr_);
+   Client_SYS.Set_Item_Value('REVISED_QTY_DUE', 0, attr_);   
+   Client_SYS.Set_Item_Value('QTY_INVOICED', 0, attr_);
+   Client_SYS.Set_Item_Value('QTY_SHIPPED', 0, attr_);
+   Client_SYS.Set_Item_Value('QTY_ON_ORDER', 0, attr_);
+   Client_SYS.Set_Item_Value('QTY_RETURNED', 0, attr_);
+   Client_SYS.Set_Item_Value('QTY_TO_SHIP', 0, attr_);
+   Client_SYS.Set_Item_Value('OPEN_SHIPMENT_QTY', 0, attr_);   
+   Client_SYS.Set_Item_Value('QTY_PICKED', 0, attr_);
+   Client_SYS.Set_Item_Value('QTY_SHIPPED', 0, attr_);
+   Client_SYS.Set_Item_Value('QTY_SHIPDIFF', 0, attr_);   
+   Client_SYS.Set_Item_Value('QTY_CONFIRMEDDIFF', 0, attr_);  
+   Client_SYS.Set_Item_Value('CONV_FACTOR', 0, attr_);
+   Client_SYS.Set_Item_Value('INVERTED_CONV_FACTOR', 1, attr_);
+   Client_SYS.Set_Item_Value('COST', 0, attr_);
+   Client_SYS.Set_Item_Value('LINE_ITEM_NO', 0, attr_); 
+   Client_SYS.Set_Item_Value('ORDER_DISCOUNT', 0, attr_);
+   Client_SYS.Set_Item_Value('CONFIGURATION_ID', '*', attr_);
+   Client_SYS.Set_Item_Value('CONFIGURED_LINE_PRICE_ID', dummy_number_, attr_);  
+   Client_SYS.Set_Item_Value('ADDR_FLAG_DB', 'N', attr_);
+   Client_SYS.Set_Item_Value('EVALUATE_DEFAULT_INFO', 'TRUE', attr_);  
+   Client_SYS.Set_Item_Value('DUPLICATE_LINE', 'TRUE', attr_);
+   Client_SYS.Set_Item_Value('DEMAND_CODE_DB', dummy_text_, attr_);  
+   Client_SYS.Set_Item_Value('DEMAND_ORDER_REF1', dummy_text_, attr_);  
+   Client_SYS.Set_Item_Value('DEMAND_ORDER_REF2', dummy_text_, attr_);  
+   Client_SYS.Set_Item_Value('DEMAND_ORDER_REF3', dummy_text_, attr_);  
+   Client_SYS.Set_Item_Value('DEMAND_ORDER_REF4', dummy_number_, attr_);  
+   Client_SYS.Set_Item_Value('REAL_SHIP_DATE', dummy_date_, attr_);
+   Client_SYS.Set_Item_Value('FIRST_ACTUAL_SHIP_DATE', dummy_date_, attr_);   
+   Client_SYS.Set_Item_Value('PROJECT_ID', dummy_text_, attr_); 
+   Client_SYS.Set_Item_Value('ACTIVITY_SEQ', dummy_text_, attr_); 
+   Client_SYS.Set_Item_Value('DELIVERY_SEQUENCE', dummy_number_, attr_);    
+   Client_SYS.Set_Item_Value('CALC_CHAR_PRICE', dummy_number_, attr_);
+   Client_SYS.Set_Item_Value('CHAR_PRICE', dummy_number_, attr_);   
+   Client_SYS.Set_Item_Value('CTP_PLANNED_DB', Gen_Yes_No_API.DB_NO, attr_);
+   Client_SYS.Set_Item_Value('CUST_WARRANTY_ID', dummy_number_, attr_);
+   
+   -- Trigger Catalog No and Buy Qty Due validations.
+   Val_Cat_N_Buy_Q_Due_For_Dup___(attr_); 
+   
+   -- Overriding Delivery Type value from the original value, otherwise the value get overridden inside Val_Cat_N_Buy_Q_Due_For_Dup___.
+   Client_SYS.Set_Item_Value('DELIVERY_TYPE', delivery_type_, attr_); 
+  
+   -- Trigger Input Qty Validations
+--   IF (Client_SYS.Get_Item_Value('INPUT_QTY', attr_) IS NOT NULL) THEN 
+--      Validate_Input_Qty_For_Dup___(attr_);       
+--   END IF;   
+   
+   -- Trigger Wanted Delivery Date Validations
+   
+   -- Trigger Target Date Validations
+   
+   -- Trigger Planned Delivery Date Validations
+   
+   -- Trigger Sale Unit Price Validations
+   Val_Sale_Unit_Price_For_Dup___(attr_); 
+   
+   -- Trigger Base Sale Unit Price Validations
+   Val_Base_Sale_Un_P_For_Dup___(attr_); 
+   
+   -- Trigger Discount Validations
+   Validate_Discount_For_Dup___(attr_); 
+   
+   -- Reset old value to supply code 
+   IF (supply_code_ != 'SEO') THEN
+      IF (supply_code_ NOT IN ('PI', 'PJD', 'PRJ')) THEN
+         Client_SYS.Set_Item_Value('SUPPLY_CODE_DB', supply_code_, attr_);
+      END IF; 
+      Client_SYS.Set_Item_Value('VENDOR_NO', vendor_no_, attr_);
+      Client_SYS.Set_Item_Value('SUPPLY_SITE', supply_site_, attr_);
+   END IF;
+  
+   -- Trigger Supply Code Validations
+   Validate_Sup_Code_For_Dup___(attr_); 
+END Set_Values_On_Duplicate___;    
+
+FUNCTION Is_Valid_Price_List___ (
+   price_list_no_    IN VARCHAR2,
+   contract_         IN VARCHAR2,
+   catalog_no_       IN VARCHAR2,
+   customer_no_      IN VARCHAR2,
+   currency_code_    IN VARCHAR2,
+   effectivity_date_ IN DATE,
+   sales_price_type_ IN VARCHAR2,
+   buy_qty_due_      IN NUMBER,
+   min_duration_     IN NUMBER) RETURN VARCHAR2
+IS
+   valid_price_list_    VARCHAR2(5); 
+BEGIN
+   valid_price_list_ := Sales_Price_List_API.Is_Valid_Price_List(price_list_no_, contract_, catalog_no_, customer_no_, currency_code_, effectivity_date_, sales_price_type_, buy_qty_due_, min_duration_);
+   RETURN valid_price_list_;
+END Is_Valid_Price_List___;
+
+@DynamicComponentDependency PROJ
+FUNCTION Get_Project_State___ (
+   project_id_    IN VARCHAR2) RETURN VARCHAR2
+IS
+BEGIN   
+   RETURN Project_API.Get_Objstate(project_id_);
+END Get_Project_State___;

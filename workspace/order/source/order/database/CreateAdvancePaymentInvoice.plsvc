@@ -1,0 +1,1017 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: CreateAdvancePaymentInvoice
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+-- Date        Sign    History
+-- ----------  ------  ---------------------------------------------------------
+-- 2021-11-22  NiDalk  Bug 161670(SCZ-16714), Modified Check_Order_Tax_Combination___ to consider delivery type as well.
+-- 2021-07-01  ApWilk  SC2020R1-13070, Added the procedure Update_Invoice_Text___().
+-- 2021-04-30  Skanlk  Bug 158631(SCZ-14565), Added new method Get_Tax_Percentage___ to retrieve tax percentage to enable the done button in the Create Advance Invoice window.
+-- 2020-10-22  RaVdlk  SC2020R1-10512, Reverted the earlier correction and added the method Create_And_Print_Invoice method
+--                     and removed the invoice printing logic from Create_Invoice method
+-- 2020-10-13  RaVdlk  SC2020R1-10512, Added the parameter print_invoice_ to Populate_Table_And_Update_Amounts method
+-- 2020-04-17  KiSalk  Bug 152994, In Get_Tax_Lines___, Used header_rec_.order_total_net multiplied, tax_base_amount by the percentage to set "TAX_BASE_CURR_AMOUNT" to cater for multiple CO lines.
+-- 2019-12-17  KiSalk  Bug 151344(FIZ-4808), In Get_Tax_Lines___, multiplied tax_base_amount by the percentage to set "TAX_BASE_CURR_AMOUNT" to have correct value in source_tax_item_tab.
+-- 2019-10-28  KiSalk  Bug 150676(SCZ-7544), M0dified Unpack_Tax_Lines_Message___ to restrict using total tax amount if more than one tax code is found in message_, whether they are the same or different.
+-- 2019-08-17  MalLlk  SCUXXW4-22978, Supporting to move fragment CreateAdvancePaymentInvoiceAssistant to a seperate projection 
+-- 2019-08-17          and renamed the projection ManageAdvancePaymentInvoiceAssistant to CreateAdvancePaymentInvoice.
+-- 2018-09-05  JeLise  SCUXXW4-8302, Created for the convertion of dlgCreateAdvancePaymentInvoice.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Fetch_Defaults___ (
+   order_no_ IN VARCHAR2 ) RETURN Default_Structure_Rec
+IS
+   rec_       Default_Structure_Rec;
+   order_rec_ Customer_Order_API.Public_Rec;
+BEGIN
+   order_rec_                    := Customer_Order_API.Get(order_no_);
+   rec_.customer_no              := order_rec_.customer_no;
+   rec_.customer_name            := Cust_Ord_Customer_API.Get_Name(rec_.customer_no);
+   rec_.invoicing_customer       := NVL(order_rec_.customer_no_pay, rec_.customer_no);
+   rec_.invoice_customer_name    := Cust_Ord_Customer_API.Get_Name(rec_.invoicing_customer);
+   rec_.wanted_delivery_date     := order_rec_.wanted_delivery_date;
+   rec_.currency_code            := order_rec_.currency_code;
+   rec_.company                  := Site_API.Get_Company(order_rec_.contract);
+   rec_.currency_rounding        := Currency_Code_API.Get_Currency_Rounding(rec_.company, rec_.currency_code);
+   rec_.site_date                := Site_API.Get_Site_Date(order_rec_.contract);
+   rec_.pay_term_id              := order_rec_.pay_term_id;
+   rec_.pay_term_description     := Payment_Term_API.Get_Description(rec_.company, order_rec_.pay_term_id);
+   rec_.pay_term_base_date       := order_rec_.pay_term_base_date;
+   IF ((rec_.pay_term_base_date IS NULL) OR (rec_.pay_term_base_date < rec_.site_date)) THEN
+      rec_.pay_term_base_date := rec_.site_date;
+   END IF;
+   IF (rec_.pay_term_id IS NOT NULL) THEN
+      rec_.due_date := Get_Due_Date___(rec_.company, rec_.customer_no, rec_.pay_term_id, rec_.pay_term_base_date, null);
+   END IF;
+   rec_.contract                 := order_rec_.contract;
+   rec_.base_for_adv_invoice_db  := Company_Order_Info_API.Get_Base_For_Adv_Invoice_Db(rec_.company);
+   rec_.base_for_adv_invoice     := Company_Order_Info_API.Get_Base_For_Adv_Invoice(rec_.company);
+   rec_.def_tax_code             := Identity_Invoice_Info_API.Get_Def_Vat_Code(rec_.company, order_rec_.customer_no, Customer_Info_API.Get_Party_Type(order_rec_.customer_no));
+   rec_.order_invoiced_gross     := Customer_Order_Inv_Head_API.Get_Co_Gross_Total(rec_.company, order_rec_.order_no);
+   rec_.ship_addr_no             := order_rec_.ship_addr_no;
+   rec_.supply_country_db        := order_rec_.supply_country;
+   rec_.order_total_net          := Customer_Order_API.Get_Total_Sale_Price__(order_rec_.order_no);
+   rec_.order_total_gross        := Customer_Order_API.Get_Ord_Gross_Amount(order_rec_.order_no);
+   rec_.total_sales_charge       := Customer_Order_API.Get_Total_Sale_Charge__(order_rec_.order_no);
+   rec_.total_sales_charge_gross := Customer_Order_API.Get_Total_Sale_Charge_Gross__(order_rec_.order_no);
+   rec_.order_sales_charge_tax   := Customer_Order_API.Get_Tot_Charge_Sale_Tax_Amt(order_rec_.order_no);
+   rec_.tax_liability_type_db    := Customer_Order_API.Get_Tax_Liability_Type_Db(order_rec_.order_no);
+   rec_.total_advance_net        := Customer_Order_Inv_Head_API.Get_Ad_Net_Without_Invoice_Fee(rec_.company, order_rec_.order_no);
+   rec_.total_advance_gross      := Customer_Order_Inv_Head_API.Get_Ad_Gro_Without_Invoice_Fee(rec_.company, order_rec_.order_no);
+   rec_.invoiced_net_amount      := Customer_Order_Inv_Head_API.Get_Co_Inv_Net_Total(rec_.company, order_rec_.order_no);
+   rec_.invoiced_gross_amount    := Customer_Order_Inv_Head_API.Get_Co_Inv_Gross_Total(rec_.company, order_rec_.order_no);
+   Fetch_Order_Amounts___(rec_.order_amount,
+                          rec_.order_total_gross_charge,
+                          rec_.order_total_net_charge,
+                          rec_.base_for_adv_invoice_db,
+                          rec_.order_total_gross,
+                          rec_.order_total_net,
+                          rec_.total_sales_charge_gross,
+                          rec_.total_sales_charge,
+                          rec_.order_sales_charge_tax);
+   Calculate_Max_Allowed_Values___(rec_.max_allowed_amt_adv_inv,
+                                   rec_.max_amt_adv_inv_percentage,
+                                   rec_.base_for_adv_invoice_db,
+                                   rec_.order_amount,
+                                   rec_.invoiced_net_amount,
+                                   rec_.invoiced_gross_amount);
+   rec_.invoice_text             := Invoice_Customer_Order_API.Get_Prepayment_Text__(order_rec_.order_no);
+
+   IF (rec_.tax_liability_type_db != 'EXM' AND Company_Order_Info_API.Get_Apply_Tax_Db(rec_.company) = 'TRUE') THEN
+      rec_.apply_tax := TRUE;
+   ELSE
+      rec_.apply_tax := FALSE;
+   END IF;
+
+   rec_.base_for_adv_invoice_gross := Check_Gross_Base_Inv___(rec_.base_for_adv_invoice_db);
+
+   Check_Advance_Amount___(rec_.order_total_net,
+                           rec_.total_sales_charge,
+                           rec_.base_for_adv_invoice_db);
+   RETURN rec_;
+END Fetch_Defaults___;
+
+
+FUNCTION Get_Due_Date___ (
+   company_            IN VARCHAR2,
+   customer_no_        IN VARCHAR2, 
+   pay_term_id_        IN VARCHAR2,
+   pay_term_base_date_ IN DATE,
+   objkey_             IN VARCHAR2 ) RETURN DATE 
+IS
+   party_type_     VARCHAR2(20);
+   due_date_       DATE;
+   parent_rec_     Create_Advance_Payment_Invoice_Virtual_Rec;
+   parent_key_     Create_Advance_Payment_Invoice_Virtual_Key;
+   old_parent_rec_ Create_Advance_Payment_Invoice_Virtual_Rec;
+BEGIN
+   party_type_ := Customer_Info_API.Get_Party_Type(customer_no_);
+   Invoice_API.Get_Unblocked_Due_Date(due_date_,
+                                      company_,
+                                      customer_no_,
+                                      party_type_,
+                                      pay_term_id_,
+                                      pay_term_base_date_);
+                                      
+   IF (objkey_ IS NOT NULL) THEN
+      parent_key_.objkey             := objkey_;
+      parent_rec_                    := Get_Record___(parent_key_);
+      old_parent_rec_                := parent_rec_;
+      parent_rec_.pay_term_id        := pay_term_id_;
+      parent_rec_.pay_term_base_date := pay_term_base_date_;
+      parent_rec_.due_date           := due_date_;
+      CRUD_Update___(old_parent_rec_, parent_rec_);
+   END IF;                                      
+   
+   RETURN due_date_;
+END Get_Due_Date___;
+
+
+PROCEDURE Fetch_Order_Amounts___ (
+   order_amount_             OUT NUMBER,
+   order_total_gross_charge_ OUT NUMBER,
+   order_total_net_charge_   OUT NUMBER,
+   base_for_adv_invoice_db_  IN  VARCHAR2,
+   order_total_gross_        IN  NUMBER,
+   order_total_net_          IN  NUMBER,
+   total_sales_charge_gross_ IN  NUMBER,
+   total_sales_charge_       IN  NUMBER,
+   order_sales_charge_tax_   IN  NUMBER )
+IS
+BEGIN
+   IF (Check_Gross_Base_Inv___(base_for_adv_invoice_db_)) THEN
+      order_total_gross_charge_ := order_total_gross_ + total_sales_charge_gross_;
+      order_total_net_charge_   := order_total_net_ + total_sales_charge_;
+   ELSE
+		order_total_net_charge_   := order_total_net_ + total_sales_charge_;
+		order_total_gross_charge_ := order_total_gross_ + total_sales_charge_ + order_sales_charge_tax_;
+   END IF;
+   
+   IF (base_for_adv_invoice_db_ = 'NET AMOUNT') THEN
+		order_amount_ := order_total_net_;
+   ELSIF (base_for_adv_invoice_db_ = 'NET AMOUNT WITH CHARGES') THEN 
+		order_amount_ := order_total_net_charge_;
+   ELSIF (base_for_adv_invoice_db_ = 'GROSS AMOUNT') THEN 
+		order_amount_ := order_total_gross_;
+   ELSIF (base_for_adv_invoice_db_ = 'GROSS AMOUNT WITH CHARGES') THEN 
+		order_amount_ := order_total_gross_charge_;
+   END IF;
+END Fetch_Order_Amounts___;
+
+
+FUNCTION Check_Gross_Base_Inv___(
+   base_for_adv_invoice_db_ IN VARCHAR2 ) RETURN BOOLEAN
+IS
+BEGIN
+   IF ((base_for_adv_invoice_db_ = 'GROSS AMOUNT WITH CHARGES') OR (base_for_adv_invoice_db_ = 'GROSS AMOUNT')) THEN
+      RETURN TRUE;
+   END IF;
+   RETURN FALSE;
+END Check_Gross_Base_Inv___;
+
+
+PROCEDURE Calculate_Max_Allowed_Values___ (
+   max_allowed_amt_adv_inv_    OUT NUMBER,
+   max_amt_adv_inv_percentage_ OUT NUMBER,
+   base_for_adv_invoice_db_    IN  VARCHAR2,
+   order_amount_               IN  NUMBER,
+   invoiced_net_amount_        IN  NUMBER,
+   invoiced_gross_amount_      IN  NUMBER )
+IS
+BEGIN
+   IF ((base_for_adv_invoice_db_= 'NET AMOUNT') OR (base_for_adv_invoice_db_= 'NET AMOUNT WITH CHARGES')) THEN
+      max_allowed_amt_adv_inv_ := order_amount_ - invoiced_net_amount_;
+   ELSE
+      max_allowed_amt_adv_inv_ := order_amount_ - invoiced_gross_amount_;
+   END IF;
+   
+   IF (max_allowed_amt_adv_inv_ > 0 AND order_amount_ > 0) THEN
+      max_amt_adv_inv_percentage_ := (max_allowed_amt_adv_inv_/order_amount_) * 100;
+   ELSE
+      max_amt_adv_inv_percentage_ := 0;
+   END IF;
+END Calculate_Max_Allowed_Values___;
+
+
+FUNCTION Calc_Adv_Invoice_Percentage___ (
+   base_for_adv_invoice_db_ IN VARCHAR2,
+   order_amount_            IN NUMBER,
+   advance_invoice_amount_  IN NUMBER,
+   order_total_net_         IN NUMBER,
+   order_total_net_charge_  IN NUMBER ) RETURN NUMBER 
+IS
+   invoice_net_percentage_ NUMBER := 0;
+BEGIN
+   IF (advance_invoice_amount_ > 0 AND order_amount_ > 0) THEN
+      IF ((base_for_adv_invoice_db_= 'NET AMOUNT') OR (base_for_adv_invoice_db_= 'GROSS AMOUNT')) THEN
+         invoice_net_percentage_ := (advance_invoice_amount_/order_total_net_) * 100;
+      ELSIF ((base_for_adv_invoice_db_= 'NET AMOUNT WITH CHARGES') OR (base_for_adv_invoice_db_= 'GROSS AMOUNT WITH CHARGES')) THEN
+         invoice_net_percentage_ := (advance_invoice_amount_/order_total_net_charge_) * 100;
+      END IF;
+   END IF;
+   
+   RETURN invoice_net_percentage_;
+END Calc_Adv_Invoice_Percentage___;
+
+
+FUNCTION Calc_Adv_Inv_Gross_Percentage___ (
+   base_for_adv_invoice_db_      IN VARCHAR2,
+   order_amount_                 IN NUMBER,
+   advance_invoice_gross_amount_ IN NUMBER,
+   order_total_gross_            IN NUMBER,
+   order_total_gross_charge_     IN NUMBER ) RETURN NUMBER 
+IS
+   invoice_gross_percentage_ NUMBER := 0;
+BEGIN
+   IF (advance_invoice_gross_amount_ > 0 AND order_amount_ > 0) THEN
+      IF ((base_for_adv_invoice_db_= 'NET AMOUNT') OR (base_for_adv_invoice_db_= 'GROSS AMOUNT')) THEN
+         invoice_gross_percentage_ := (advance_invoice_gross_amount_/order_total_gross_) * 100;
+      ELSIF ((base_for_adv_invoice_db_= 'NET AMOUNT WITH CHARGES') OR (base_for_adv_invoice_db_= 'GROSS AMOUNT WITH CHARGES')) THEN
+         invoice_gross_percentage_ := (advance_invoice_gross_amount_/order_total_gross_charge_) * 100;
+      END IF;
+   END IF;
+   
+   RETURN invoice_gross_percentage_;
+END Calc_Adv_Inv_Gross_Percentage___;
+
+
+FUNCTION Calculate_Invoice_Amount___ (
+   invoice_net_percentage_ IN NUMBER,
+   order_amount_           IN NUMBER,
+   currency_rounding_      IN NUMBER ) RETURN NUMBER 
+IS
+   advance_invoice_amount_ NUMBER := 0;
+BEGIN
+   IF (invoice_net_percentage_ > 0 AND invoice_net_percentage_ <= 100) THEN
+      advance_invoice_amount_ := ROUND(order_amount_ * (invoice_net_percentage_ / 100), currency_rounding_);
+   END IF;
+   
+   RETURN advance_invoice_amount_;
+END Calculate_Invoice_Amount___;
+
+
+FUNCTION Calculate_Invoice_Gross_Amount___ (
+   invoice_gross_percentage_ IN NUMBER,
+   order_amount_             IN NUMBER,
+   currency_rounding_        IN NUMBER ) RETURN NUMBER 
+IS
+   advance_invoice_gross_amount_ NUMBER := 0;
+BEGIN
+   IF (invoice_gross_percentage_ > 0 AND invoice_gross_percentage_ <= 100) THEN
+      advance_invoice_gross_amount_ := ROUND(order_amount_ * (invoice_gross_percentage_ / 100), currency_rounding_);
+   END IF;
+   
+   RETURN advance_invoice_gross_amount_;
+END Calculate_Invoice_Gross_Amount___;
+
+
+FUNCTION Get_Total_Invoice_Amount___ (
+   base_for_adv_invoice_db_      IN VARCHAR2,
+   advance_invoice_amount_       IN NUMBER,
+   invoiced_net_amount_          IN NUMBER,
+   advance_invoice_gross_amount_ IN NUMBER,
+   invoiced_gross_amount_        IN NUMBER ) RETURN NUMBER  
+IS
+   total_invoice_amount_ NUMBER;
+BEGIN
+   IF ((base_for_adv_invoice_db_= 'NET AMOUNT') OR (base_for_adv_invoice_db_= 'NET AMOUNT WITH CHARGES')) THEN
+      total_invoice_amount_ := advance_invoice_amount_ + invoiced_net_amount_;
+   ELSE
+      total_invoice_amount_ := advance_invoice_gross_amount_ + invoiced_gross_amount_;
+   END IF;
+   
+   RETURN total_invoice_amount_;
+END Get_Total_Invoice_Amount___;
+
+
+PROCEDURE Control_Create_Invoice___ (
+   base_for_adv_invoice_db_      IN  VARCHAR2,
+   advance_invoice_gross_amount_ IN  NUMBER,
+   total_advance_gross_          IN  NUMBER,
+   advance_invoice_amount_       IN  NUMBER,
+   invoiced_gross_amount_        IN  NUMBER,
+   order_amount_                 IN  NUMBER,
+   order_no_                     IN  VARCHAR2,
+   info$_                        OUT VARCHAR2 ) 
+IS
+   total_invoice_amount_     NUMBER;
+   total_invoice_max_amount_ NUMBER;
+   info_                     VARCHAR2(32000);
+BEGIN
+   IF ((base_for_adv_invoice_db_ = 'GROSS AMOUNT') OR (base_for_adv_invoice_db_ = 'GROSS AMOUNT WITH CHARGES')) THEN 
+      total_invoice_amount_ := advance_invoice_gross_amount_ + total_advance_gross_;
+      IF (order_amount_ < total_invoice_amount_) THEN 
+         Error_SYS.Record_General(lu_name_, 'TOTALORDERAMOUNT: Total Advance invoice amount cannot be greater than total Order amount');
+      END IF;
+      
+      total_invoice_max_amount_ := advance_invoice_amount_ + invoiced_gross_amount_;
+      IF (order_amount_ < total_invoice_max_amount_) THEN 
+         Error_SYS.Record_General(lu_name_, 'REMAININGORDERAMOUNT: Total Advance invoice amount cannot be greater than the remaining Order amount');
+      END IF;
+      Invoice_Customer_Order_API.Check_Adv_Credit_Inv_Create__(info_, order_no_, advance_invoice_gross_amount_);
+   ELSE 
+      Invoice_Customer_Order_API.Check_Adv_Credit_Inv_Create__(info_, order_no_, advance_invoice_amount_);
+   END IF;
+   info$_ := info_;
+END Control_Create_Invoice___;
+
+
+FUNCTION Get_Line_Level_Tax_Rounding___ (
+   customer_no_  IN VARCHAR2,
+   ship_addr_no_ IN VARCHAR2,
+   company_      IN VARCHAR2 ) RETURN VARCHAR2 
+IS
+   tax_rounding_level_      VARCHAR2(20);
+   line_level_tax_rounding_ VARCHAR2(5);
+BEGIN
+   tax_rounding_level_ := Customer_Tax_Info_API.Get_Tax_Rounding_Level_Db(customer_no_,
+                                                                          ship_addr_no_,
+                                                                          company_);
+   IF (tax_rounding_level_ IS NULL OR tax_rounding_level_= Tax_Rounding_Level_API.DB_SPECIFIED_ON_COMPANY) THEN
+      tax_rounding_level_ := Company_Tax_Control_Invoic_API.Get_Tax_Rounding_Level_Db(company_);
+   END IF;
+   IF (tax_rounding_level_ = Tax_Rounding_Level_API.DB_LINE_LEVEL) THEN
+      line_level_tax_rounding_ := 'TRUE';
+   ELSE
+      line_level_tax_rounding_ := 'FALSE';
+   END IF;
+   
+   RETURN line_level_tax_rounding_;
+END Get_Line_Level_Tax_Rounding___;
+
+
+@Override
+PROCEDURE CRUD_Create___ (
+   rec_ IN Create_Advance_Payment_Invoice_Virtual_Rec )
+IS
+   tax_info_msg_         VARCHAR2(32000);
+   price_type_           VARCHAR2(10);
+   with_charges_         VARCHAR2(5);
+   pay_tax_              VARCHAR2(5);
+   same_tax_combination_ VARCHAR2(5);
+   structure_with_gross_ BOOLEAN;
+   delivery_type_        delivery_type_tab.deliv_type_id%TYPE;
+BEGIN
+   super(rec_);
+   IF ((rec_.base_for_adv_invoice_db = 'GROSS AMOUNT WITH CHARGES') OR (rec_.base_for_adv_invoice_db = 'NET AMOUNT WITH CHARGES')) THEN
+      with_charges_ := 'TRUE';
+   ELSE
+      with_charges_ := 'FALSE';
+   END IF;
+   Check_Order_Tax_Combination___(same_tax_combination_,
+                                  structure_with_gross_,
+                                  delivery_type_,
+                                  rec_.base_for_adv_invoice_db,
+                                  rec_.company, 
+                                  rec_.order_no,
+                                  with_charges_,
+                                  rec_.tax_liability_type_db);
+                                  
+   IF (same_tax_combination_ = 'TRUE' AND NOT structure_with_gross_) THEN
+      IF (rec_.apply_tax) THEN 
+         pay_tax_ := 'TRUE';
+      ELSE
+         pay_tax_ := 'FALSE';
+      END IF;
+      IF (Check_Gross_Base_Inv___(rec_.base_for_adv_invoice_db)) THEN
+         price_type_ := 'GROSS_BASE';
+      ELSE
+         price_type_ := 'NET_BASE';
+      END IF;
+      tax_info_msg_ := Tax_Handling_Order_Util_API.Populate_Initial_Adv_Inv_Tax(rec_.advance_invoice_gross_amount,
+                                                                                rec_.advance_invoice_amount,
+                                                                                price_type_,
+                                                                                rec_.order_no,
+                                                                                rec_.company,
+                                                                                rec_.site_date,
+                                                                                pay_tax_, 
+                                                                                with_charges_,
+                                                                                rec_.customer_no,
+                                                                                rec_.currency_code,
+                                                                                rec_.currency_rounding,
+                                                                                rec_.ship_addr_no,
+                                                                                rec_.supply_country_db,
+                                                                                delivery_type_);
+      IF (tax_info_msg_ IS NOT NULL) THEN
+         Unpack_Tax_Lines_Message___(tax_info_msg_,
+                                     rec_);
+      END IF;
+   END IF;
+END CRUD_Create___;
+
+
+PROCEDURE Check_Order_Tax_Combination___ (
+   same_tax_combination_    IN OUT VARCHAR2,
+   structure_with_gross_    IN OUT BOOLEAN,
+   delivery_type_           OUT    VARCHAR2,
+   base_for_adv_invoice_db_ IN     VARCHAR2,
+   company_                 IN     VARCHAR2, 
+   order_no_                IN     VARCHAR2,
+   with_charges_            IN     VARCHAR2,
+   tax_liability_type_db_   IN     VARCHAR2)
+IS
+   tax_structure_id_    VARCHAR2(20);
+   same_delivery_type_  VARCHAR2(5);
+BEGIN
+   IF (tax_liability_type_db_ = 'EXM') THEN 
+      Customer_Order_API.Check_Delivery_Type(same_delivery_type_, delivery_type_, order_no_, with_charges_);
+      
+      IF ( same_delivery_type_ = 'FALSE') THEN 
+         same_tax_combination_ := 'FALSE';
+         IF (with_charges_ = 'FALSE') THEN
+            Client_SYS.Add_Info(lu_name_, 'DIFF_DEL_TYYPE_LINE: There are different delivery types on different CO lines. Please enter tax information manually.');
+         ELSE 
+            Client_SYS.Add_Info(lu_name_, 'DIFF_DEL_TYYPE_LINECHG: There are different delivery types on different CO lines and charge lines. Please enter tax information manually.');
+         END IF;
+      END IF;
+   END IF;
+
+   IF (tax_liability_type_db_ != 'EXM' OR same_delivery_type_ = 'TRUE') THEN 
+      Customer_Order_Inv_Item_API.Check_Order_Tax_Combination__(same_tax_combination_,
+                                                                tax_structure_id_,
+                                                                company_,
+                                                                order_no_,
+                                                                with_charges_);
+      IF (same_tax_combination_ = 'FALSE') THEN 
+         IF (with_charges_ = 'FALSE') THEN 
+            Client_SYS.Add_Info(lu_name_, 'DIFF_TAX: There are different taxes on different CO lines. Please enter tax information manually.');
+         ELSE 
+            Client_SYS.Add_Info(lu_name_, 'DIFF_TAX_CHARGE: There are different taxes on different CO lines and charge lines. Please enter tax information manually.');
+         END IF;
+      ELSE 
+         IF (Check_Gross_Base_Inv___(base_for_adv_invoice_db_) AND (tax_structure_id_ IS NOT NULL)) THEN 
+            structure_with_gross_ := TRUE;
+            Client_SYS.Add_Info(lu_name_, 'GROSS_AMOUNT: When gross amount is base for advance invoice then it is not possible to use tax calculation structure. Please enter tax information manually.');
+         ELSE 
+            structure_with_gross_ := FALSE;
+         END IF;
+      END IF;
+   END IF;
+END Check_Order_Tax_Combination___;
+
+
+PROCEDURE Update_Advance_Invoiced_Amounts___ (
+   invoice_net_percentage_       OUT    NUMBER,
+   invoice_gross_percentage_     OUT    NUMBER,
+   total_invoice_amount_         OUT    NUMBER,
+   advance_invoice_amount_       IN OUT NUMBER,
+   advance_invoice_gross_amount_ IN OUT NUMBER,
+   parent_key_                   IN     Create_Advance_Payment_Invoice_Virtual_Key,
+   apply_tax_                    IN     BOOLEAN,
+   base_for_adv_invoice_db_      IN     VARCHAR2,
+   order_amount_                 IN     NUMBER,
+   order_total_net_              IN     NUMBER,
+   order_total_net_charge_       IN     NUMBER,
+   order_total_gross_            IN     NUMBER,
+   order_total_gross_charge_     IN     NUMBER,
+   invoiced_net_amount_          IN     NUMBER,
+   invoiced_gross_amount_        IN     NUMBER )
+IS
+   total_tax_amount_ NUMBER;
+BEGIN
+   IF (apply_tax_) THEN
+      total_tax_amount_ := Calculate_Total_Tax_Amount___(parent_key_);
+      IF (Check_Gross_Base_Inv___(base_for_adv_invoice_db_)) THEN 
+         IF (advance_invoice_gross_amount_ >= total_tax_amount_) THEN 
+            advance_invoice_amount_ := advance_invoice_gross_amount_ - total_tax_amount_;
+         ELSE 
+            advance_invoice_amount_ := 0;
+         END IF;
+      ELSE 
+         advance_invoice_gross_amount_ := advance_invoice_amount_ + total_tax_amount_;
+      END IF;
+      invoice_net_percentage_   := Calc_Adv_Invoice_Percentage___(base_for_adv_invoice_db_, 
+                                                                  order_amount_, 
+                                                                  advance_invoice_amount_, 
+                                                                  order_total_net_, 
+                                                                  order_total_net_charge_);
+      invoice_gross_percentage_ := Calc_Adv_Inv_Gross_Percentage___(base_for_adv_invoice_db_, 
+                                                                    order_amount_, 
+                                                                    advance_invoice_gross_amount_, 
+                                                                    order_total_gross_, 
+                                                                    order_total_gross_charge_);
+   ELSE 
+      IF (Check_Gross_Base_Inv___(base_for_adv_invoice_db_)) THEN 
+         advance_invoice_amount_ := advance_invoice_gross_amount_;
+      ELSE 
+         advance_invoice_gross_amount_ := advance_invoice_amount_;
+      END IF;
+      invoice_net_percentage_    := Calc_Adv_Invoice_Percentage___(base_for_adv_invoice_db_, 
+                                                                   order_amount_, 
+                                                                   advance_invoice_amount_, 
+                                                                   order_total_net_, 
+                                                                   order_total_net_charge_);
+      invoice_gross_percentage_  := Calc_Adv_Inv_Gross_Percentage___(base_for_adv_invoice_db_, 
+                                                                     order_amount_, 
+                                                                     advance_invoice_gross_amount_, 
+                                                                     order_total_gross_, 
+                                                                     order_total_gross_charge_);
+   END IF;
+   total_invoice_amount_ := Get_Total_Invoice_Amount___(base_for_adv_invoice_db_, 
+                                                        advance_invoice_amount_, 
+                                                        invoiced_net_amount_, 
+                                                        advance_invoice_gross_amount_, 
+                                                        invoiced_gross_amount_);
+END Update_Advance_Invoiced_Amounts___;
+
+
+FUNCTION Calculate_Total_Tax_Amount___ (
+   parent_key_ IN Create_Advance_Payment_Invoice_Virtual_Key ) RETURN NUMBER 
+IS
+   tax_amount_ NUMBER := 0;
+BEGIN
+   FOR rec_ IN Get_Tax_Lines_Array___(parent_key_) LOOP
+      tax_amount_ := tax_amount_ + rec_.tax_curr_amount;
+   END LOOP;
+
+   RETURN tax_amount_;
+END Calculate_Total_Tax_Amount___;
+
+
+PROCEDURE Unpack_Tax_Lines_Message___ (
+   message_ IN VARCHAR2,
+   rec_     IN Create_Advance_Payment_Invoice_Virtual_Rec )
+IS
+   line_level_tax_rounding_ VARCHAR2(5);
+   count_                   NUMBER;
+   name_arr_                Message_SYS.name_table;
+   value_arr_               Message_SYS.line_table;
+   line_rec_                Tax_Lines_Virtual_Rec;
+   unique_tax_code_         BOOLEAN := FALSE;
+   invoice_total_gross_     BOOLEAN := FALSE;
+   invoice_total_net_       BOOLEAN := FALSE;
+BEGIN
+   Message_SYS.Get_Attributes(message_, count_, name_arr_, value_arr_);
+   IF (Message_SYS.Get_Name(message_) = 'TAX_INFORMATION') THEN 
+      IF ((rec_.same_tax_combination = 'TRUE') AND (NOT rec_.structure_with_gross) AND (rec_.invoice_gross_percentage = 100 OR rec_.invoice_net_percentage = 100)) THEN        
+         FOR n_ IN 1..count_ LOOP
+            IF (name_arr_(n_) = 'TAX_CODE') THEN
+               IF unique_tax_code_ THEN
+                  --If more than one tax code is found in lsTaxLineInfo, whether they are the same or different, Tax Code is not Unique as per the limited correction done by bug 141253
+                  unique_tax_code_ := FALSE;
+                  EXIT;
+               END IF;
+               unique_tax_code_ := TRUE;
+            END IF;
+         END LOOP;
+      END IF;      
+      FOR n_ IN 1..count_ LOOP
+         line_rec_.objkey        := sys_guid();
+         line_rec_.parent_objkey := rec_.objkey;
+         line_rec_.company       := rec_.company;
+         IF (name_arr_(n_) = 'TAX_CODE') THEN 
+            line_rec_.tax_code := value_arr_(n_);
+         END IF;
+         IF (name_arr_(n_) = 'TAX_CALC_STRUCTURE_ID') THEN
+            line_rec_.tax_calc_struct_id := value_arr_(n_);
+         END IF;
+         IF (name_arr_(n_) = 'TAX_CALC_STRU_DESC') THEN
+            line_rec_.tax_calc_struct_description := value_arr_(n_);
+         END IF;
+         IF (name_arr_(n_) = 'TAX_CALC_STRUCTURE_ITEM_ID') THEN 
+            line_rec_.tax_calc_structure_item_id := value_arr_(n_);
+         END IF;
+         IF (name_arr_(n_) = 'TAX_PERCENTAGE') THEN 
+            line_rec_.tax_percentage := Client_SYS.Attr_Value_To_Number(value_arr_(n_));
+         END IF;
+         IF (name_arr_(n_) = 'TAX_CURR_AMOUNT') THEN
+            line_rec_.tax_curr_amount := Client_SYS.Attr_Value_To_Number(value_arr_(n_));
+            IF (unique_tax_code_ ) THEN
+               IF (Check_Gross_Base_Inv___(rec_.base_for_adv_invoice_db)) THEN
+                  IF (rec_.total_advance_gross = 0 AND rec_.invoice_gross_percentage = 100 AND rec_.advance_invoice_gross_amount = rec_.order_total_gross_charge) THEN
+                     invoice_total_gross_ := TRUE;
+                  END IF;
+               ELSE 
+                  IF (rec_.total_advance_net = 0 AND rec_.invoice_net_percentage = 100 AND rec_.advance_invoice_amount = rec_.order_total_net_charge) THEN
+                     invoice_total_net_ := TRUE;
+                  END IF;
+               END IF;
+               line_level_tax_rounding_ := Get_Line_Level_Tax_Rounding___(rec_.customer_no,
+                                                                          rec_.ship_addr_no,
+                                                                          rec_.company);
+               IF (line_level_tax_rounding_ = 'TRUE' AND rec_.total_advance_gross = 0 AND (invoice_total_gross_ OR invoice_total_net_)) THEN
+                  line_rec_.tax_curr_amount := rec_.order_total_gross_charge - rec_.order_total_net_charge;
+               END IF;
+            END IF;
+         END IF;
+         IF (name_arr_(n_) = 'TAX_BASE_CURR_AMOUNT') THEN 
+            line_rec_.tax_base_amount := Client_SYS.Attr_Value_To_Number(value_arr_(n_));
+            CRUD_Create___(line_rec_);
+         END IF;
+      END LOOP;
+   END IF;
+END Unpack_Tax_Lines_Message___;   
+
+
+FUNCTION Get_Tax_Percentage___ (
+   company_    IN VARCHAR2,
+   tax_code_   IN VARCHAR2) RETURN NUMBER
+IS
+BEGIN
+	RETURN Statutory_Fee_API.Get_Percentage(company_, tax_code_);
+END Get_Tax_Percentage___;
+
+
+PROCEDURE Update_Tax_Info___ (
+   objkey_        IN VARCHAR2,
+   parent_objkey_ IN VARCHAR2,
+   company_       IN VARCHAR2,
+   tax_code_      IN VARCHAR2 ) 
+IS
+   line_key_     Tax_Lines_Virtual_Key;
+   line_rec_     Tax_Lines_Virtual_Rec;
+   old_line_rec_ Tax_Lines_Virtual_Rec;
+BEGIN
+   IF (objkey_ IS NOT NULL) THEN
+      line_key_.objkey         := objkey_;
+      line_rec_                := Get_Record___(line_key_);
+      old_line_rec_            := line_rec_;
+      line_rec_.tax_code       := tax_code_;
+      line_rec_.tax_percentage := Statutory_Fee_API.Get_Percentage(company_, tax_code_);
+      CRUD_Update___(old_line_rec_, line_rec_);
+   ELSE
+      line_rec_.objkey         := sys_guid();
+      line_rec_.parent_objkey  := parent_objkey_;
+      line_rec_.company        := company_;
+      line_rec_.tax_code       := tax_code_;
+      line_rec_.tax_percentage := Statutory_Fee_API.Get_Percentage(company_, tax_code_);
+      CRUD_Create___(line_rec_);
+   END IF;
+END Update_Tax_Info___;
+
+
+FUNCTION Get_Tax_Lines___ (
+   parent_key_          IN Create_Advance_Payment_Invoice_Virtual_Key,
+   condider_tax_amount_ IN BOOLEAN ) RETURN VARCHAR2 
+IS
+   tax_line_msg_ VARCHAR2(32000);
+   header_rec_   Create_Advance_Payment_Invoice_Virtual_Rec;
+BEGIN
+   tax_line_msg_ := Message_SYS.Construct('TAX_INFORMATION');
+   IF (Message_SYS.Get_Name(tax_line_msg_) = 'TAX_INFORMATION') THEN
+      FOR tax_rec_ IN Get_Tax_Lines_Array___(parent_key_) LOOP
+         Message_SYS.Add_Attribute(tax_line_msg_, 'TAX_CALC_STRUCTURE_ID', tax_rec_.tax_calc_struct_id);
+         Message_SYS.Add_Attribute(tax_line_msg_, 'TAX_CALC_STRUCTURE_ITEM_ID', tax_rec_.tax_calc_structure_item_id);
+         Message_SYS.Add_Attribute(tax_line_msg_, 'TAX_CODE', tax_rec_.tax_code);
+         Message_SYS.Add_Attribute(tax_line_msg_, 'TAX_PERCENTAGE', tax_rec_.tax_percentage);
+         IF (condider_tax_amount_) THEN 
+            Message_SYS.Add_Attribute(tax_line_msg_, 'TAX_CURR_AMOUNT', tax_rec_.tax_curr_amount);
+         ELSE 
+            Message_SYS.Add_Attribute(tax_line_msg_, 'TAX_CURR_AMOUNT', TO_NUMBER(NULL));
+         END IF;
+         header_rec_ := Get_Record___(parent_key_);
+         Message_SYS.Add_Attribute(tax_line_msg_, 'TAX_BASE_CURR_AMOUNT', ROUND(header_rec_.order_total_net*header_rec_.invoice_net_percentage/100, header_rec_.currency_rounding));
+      END LOOP;
+   END IF; 
+
+   RETURN tax_line_msg_;
+END Get_Tax_Lines___;
+
+
+PROCEDURE Populate_Table_And_Update_Amounts___ (
+   objkey_                       IN  VARCHAR2,
+   tax_edited_                   IN  BOOLEAN,
+   tax_structure_edited_         IN  BOOLEAN,
+   advance_invoice_amount_       IN  NUMBER,
+   invoice_net_percentage_       IN  NUMBER,
+   advance_invoice_gross_amount_ IN  NUMBER,
+   invoice_gross_percentage_     IN  NUMBER,
+   tax_calc_structure_id_        IN  VARCHAR2,
+   apply_tax_                    IN  BOOLEAN,
+   info$_                        OUT VARCHAR2 ) 
+IS
+   parent_rec_     Create_Advance_Payment_Invoice_Virtual_Rec;
+   parent_key_     Create_Advance_Payment_Invoice_Virtual_Key;
+   old_parent_rec_ Create_Advance_Payment_Invoice_Virtual_Rec;
+BEGIN
+   parent_key_.objkey                       := objkey_;
+   parent_rec_                              := Get_Record___(parent_key_);
+   old_parent_rec_                          := parent_rec_;
+   parent_rec_.advance_invoice_amount       := advance_invoice_amount_;
+   parent_rec_.invoice_net_percentage       := invoice_net_percentage_;
+   parent_rec_.advance_invoice_gross_amount := advance_invoice_gross_amount_;
+   parent_rec_.invoice_gross_percentage     := invoice_gross_percentage_;
+   parent_rec_.tax_calc_structure_id        := tax_calc_structure_id_;
+   parent_rec_.apply_tax                    := apply_tax_;
+   parent_rec_.tax_edited                   := tax_edited_;
+   parent_rec_.tax_structure_edited         := tax_structure_edited_;
+   CRUD_Update___(old_parent_rec_, parent_rec_);
+
+   IF (tax_structure_edited_) THEN
+      IF (NVL(old_parent_rec_.tax_calc_structure_id, 'NULL') != parent_rec_.tax_calc_structure_id) THEN
+         Client_SYS.Add_Warning(lu_name_, 'CHANGETAXCALCSTRUCT: This will overwrite existing tax lines.');
+         info$_ := Client_SYS.Get_All_Info;
+      END IF;
+   END IF;
+
+   Populate_Table___(parent_key_, 
+                     tax_edited_, 
+                     tax_structure_edited_);
+   
+   Update_Advance_Invoiced_Amounts___(parent_rec_.invoice_net_percentage,
+                                      parent_rec_.invoice_gross_percentage,
+                                      parent_rec_.total_invoice_amount,
+                                      parent_rec_.advance_invoice_amount,
+                                      parent_rec_.advance_invoice_gross_amount,
+                                      parent_key_,
+                                      parent_rec_.apply_tax,
+                                      parent_rec_.base_for_adv_invoice_db,
+                                      parent_rec_.order_amount,
+                                      parent_rec_.order_total_net,
+                                      parent_rec_.order_total_net_charge,
+                                      parent_rec_.order_total_gross,
+                                      parent_rec_.order_total_gross_charge,
+                                      parent_rec_.invoiced_net_amount,
+                                      parent_rec_.invoiced_gross_amount);
+   CRUD_Update___(old_parent_rec_, parent_rec_);
+END Populate_Table_And_Update_Amounts___;
+
+
+PROCEDURE Populate_Table___ (
+   parent_key_           IN Create_Advance_Payment_Invoice_Virtual_Key, 
+   tax_edited_           IN BOOLEAN, 
+   tax_structure_edited_ IN BOOLEAN )
+IS
+   parent_rec_    Create_Advance_Payment_Invoice_Virtual_Rec;
+   price_type_    VARCHAR2(10);
+   tax_line_msg_  VARCHAR2(32000) := NULL;
+   tax_info_msg_  VARCHAR2(32000);
+   with_charges_  VARCHAR2(5);
+   pay_tax_       VARCHAR2(5);
+   delivery_type_ delivery_type_tab.deliv_type_id%TYPE;
+BEGIN
+   parent_rec_ := Get_Record___(parent_key_);
+   IF (Check_Gross_Base_Inv___(parent_rec_.base_for_adv_invoice_db)) THEN
+      price_type_ := 'GROSS_BASE';
+   ELSE
+      price_type_ := 'NET_BASE';
+   END IF;
+
+   IF (tax_edited_) THEN
+      IF (NOT tax_structure_edited_) THEN
+         tax_line_msg_ := Get_Tax_Lines___(parent_key_, false);
+      END IF;
+      tax_info_msg_ := Tax_Handling_Order_Util_API.Calculate_Adv_Inv_Tax_To_Msg(tax_line_msg_,
+                                                                                parent_rec_.tax_calc_structure_id,
+                                                                                parent_rec_.company,
+                                                                                parent_rec_.advance_invoice_gross_amount, 
+                                                                                parent_rec_.advance_invoice_amount,
+                                                                                price_type_,
+                                                                                parent_rec_.site_date,
+                                                                                'INVOICE',
+                                                                                parent_rec_.customer_no,
+                                                                                parent_rec_.currency_code,
+                                                                                parent_rec_.ship_addr_no,
+                                                                                parent_rec_.currency_rounding);
+      IF (tax_info_msg_ IS NOT NULL) THEN
+         Delete_Tax_Lines___(parent_key_);
+         Unpack_Tax_Lines_Message___(tax_info_msg_,
+                                     parent_rec_);
+      END IF;
+   ELSE
+      IF ((parent_rec_.base_for_adv_invoice_db = 'GROSS AMOUNT WITH CHARGES') OR (parent_rec_.base_for_adv_invoice_db = 'NET AMOUNT WITH CHARGES')) THEN 
+         with_charges_ := 'TRUE';
+      ELSE
+         with_charges_ := 'FALSE';
+      END IF;
+
+      Check_Order_Tax_Combination___(parent_rec_.same_tax_combination,
+                                     parent_rec_.structure_with_gross,
+                                     delivery_type_,
+                                     parent_rec_.base_for_adv_invoice_db,
+                                     parent_rec_.company, 
+                                     parent_rec_.order_no,
+                                     with_charges_,
+                                     parent_rec_.tax_liability_type_db);
+      
+      IF (parent_rec_.same_tax_combination = 'TRUE' AND NOT parent_rec_.structure_with_gross) THEN
+         IF (parent_rec_.apply_tax) THEN 
+            pay_tax_ := 'TRUE';
+         ELSE
+            pay_tax_ := 'FALSE';
+         END IF;
+         tax_info_msg_ := Tax_Handling_Order_Util_API.Populate_Initial_Adv_Inv_Tax(parent_rec_.advance_invoice_gross_amount,
+                                                                                   parent_rec_.advance_invoice_amount,
+                                                                                   price_type_,
+                                                                                   parent_rec_.order_no,
+                                                                                   parent_rec_.company,
+                                                                                   parent_rec_.site_date,
+                                                                                   pay_tax_, 
+                                                                                   with_charges_,
+                                                                                   parent_rec_.customer_no,
+                                                                                   parent_rec_.currency_code,
+                                                                                   parent_rec_.currency_rounding,
+                                                                                   parent_rec_.ship_addr_no,
+                                                                                   parent_rec_.supply_country_db,
+                                                                                   delivery_type_);
+         Delete_Tax_Lines___(parent_key_);
+         Unpack_Tax_Lines_Message___(tax_info_msg_,
+                                     parent_rec_);
+      END IF;
+   END IF;
+END Populate_Table___;
+      
+
+-- Used from the tax lines
+PROCEDURE Update_Tax_And_Amounts___ (
+   objkey_               IN VARCHAR2,
+   tax_edited_           IN BOOLEAN,
+   tax_structure_edited_ IN BOOLEAN )
+IS
+   parent_key_     Create_Advance_Payment_Invoice_Virtual_Key;
+   parent_rec_     Create_Advance_Payment_Invoice_Virtual_Rec;
+   old_parent_rec_ Create_Advance_Payment_Invoice_Virtual_Rec;
+BEGIN
+   parent_key_.objkey               := objkey_;
+   parent_rec_                      := Get_Record___(parent_key_);
+   old_parent_rec_                  := parent_rec_;
+   parent_rec_.tax_edited           := tax_edited_;
+   parent_rec_.tax_structure_edited := tax_structure_edited_;
+   
+   Populate_Table___(parent_key_, 
+                     tax_edited_, 
+                     tax_structure_edited_);
+
+   Update_Advance_Invoiced_Amounts___(parent_rec_.invoice_net_percentage,
+                                      parent_rec_.invoice_gross_percentage,
+                                      parent_rec_.total_invoice_amount,
+                                      parent_rec_.advance_invoice_amount,
+                                      parent_rec_.advance_invoice_gross_amount,
+                                      parent_key_,
+                                      parent_rec_.apply_tax,
+                                      parent_rec_.base_for_adv_invoice_db,
+                                      parent_rec_.order_amount,
+                                      parent_rec_.order_total_net,
+                                      parent_rec_.order_total_net_charge,
+                                      parent_rec_.order_total_gross,
+                                      parent_rec_.order_total_gross_charge,
+                                      parent_rec_.invoiced_net_amount,
+                                      parent_rec_.invoiced_gross_amount);
+   CRUD_Update___(old_parent_rec_, parent_rec_);
+END Update_Tax_And_Amounts___;
+
+
+PROCEDURE Delete_Tax_Lines___ (
+   parent_key_ IN Create_Advance_Payment_Invoice_Virtual_Key )
+IS
+   line_key_ Tax_Lines_Virtual_Key;
+   line_rec_ Tax_Lines_Virtual_Rec;
+BEGIN
+   FOR rec_ IN Get_Tax_Lines_Array___(parent_key_) LOOP
+      line_key_.objkey := rec_.objkey;
+      line_rec_        := Get_Record___(line_key_);
+      CRUD_Delete___(line_rec_);
+   END LOOP;
+END Delete_Tax_Lines___;
+
+PROCEDURE Create_Invoice___ (
+   objkey_        IN VARCHAR2 )
+IS
+   pay_tax_            VARCHAR2(5);
+   tax_line_msg_       VARCHAR2(32000);
+   rec_                Create_Advance_Payment_Invoice_Virtual_Rec;
+   key_                Create_Advance_Payment_Invoice_Virtual_Key;
+   advance_pay_amount_ NUMBER;
+   invoice_id_         VARCHAR2(50);
+BEGIN
+   key_.objkey := objkey_;
+   rec_        := Get_Record___(key_);
+   
+   IF (rec_.apply_tax) THEN 
+      pay_tax_ := 'TRUE';
+   ELSE 
+      pay_tax_ := 'FALSE';
+   END IF;
+   
+   tax_line_msg_ := Get_Tax_Lines___(key_, true);
+
+   IF (Check_Gross_Base_Inv___(rec_.base_for_adv_invoice_db)) THEN
+      advance_pay_amount_ := rec_.advance_invoice_gross_amount;
+   ELSE
+      advance_pay_amount_ := rec_.advance_invoice_amount;
+   END IF;
+
+      Invoice_Customer_Order_API.Create_Advance_Invoice__(invoice_id_,
+                                                          rec_.order_no,
+                                                          advance_pay_amount_,
+                                                          tax_line_msg_,
+                                                          rec_.invoice_text,
+                                                          rec_.pay_term_base_date,
+                                                          rec_.pay_term_id,
+                                                          pay_tax_);
+END Create_Invoice___;
+
+PROCEDURE Create_And_Print_Invoice___ (
+   objkey_        IN VARCHAR2 )
+IS
+   pay_tax_            VARCHAR2(5);
+   tax_line_msg_       VARCHAR2(32000);
+   rec_                Create_Advance_Payment_Invoice_Virtual_Rec;
+   key_                Create_Advance_Payment_Invoice_Virtual_Key;
+   advance_pay_amount_ NUMBER;
+   invoice_id_         VARCHAR2(50);
+BEGIN
+   key_.objkey := objkey_;
+   rec_        := Get_Record___(key_);
+   
+   IF (rec_.apply_tax) THEN 
+      pay_tax_ := 'TRUE';
+   ELSE 
+      pay_tax_ := 'FALSE';
+   END IF;
+   
+   tax_line_msg_ := Get_Tax_Lines___(key_, true);
+
+   IF (Check_Gross_Base_Inv___(rec_.base_for_adv_invoice_db)) THEN
+      advance_pay_amount_ := rec_.advance_invoice_gross_amount;
+   ELSE
+      advance_pay_amount_ := rec_.advance_invoice_amount;
+   END IF;
+
+   Invoice_Customer_Order_API.Create_And_Print_Adv_Invoice__(invoice_id_,
+                                                                rec_.order_no,
+                                                                advance_pay_amount_,
+                                                                tax_line_msg_,
+                                                                rec_.invoice_text,
+                                                                rec_.pay_term_base_date,
+                                                                rec_.pay_term_id,
+                                                                pay_tax_);
+END Create_And_Print_Invoice___;
+
+
+PROCEDURE Check_Advance_Amount___ (
+   order_total_net_         IN NUMBER,
+   total_sales_charge_      IN NUMBER,
+   base_for_adv_invoice_db_ IN VARCHAR2 ) 
+IS
+BEGIN
+   IF (order_total_net_ = 0 AND total_sales_charge_ > 0) THEN 
+      IF (base_for_adv_invoice_db_ = 'NET AMOUNT' OR base_for_adv_invoice_db_ = 'GROSS AMOUNT') THEN 
+         Error_SYS.Record_General(lu_name_, 'NOADVANCEPAYALLOWED: Based on the criteria selected in company general data for distribution, amount available for advance payment is 0');
+      END IF;
+   END IF;
+END Check_Advance_Amount___;
+
+
+PROCEDURE Check_Tax_Combination___ (
+   base_for_adv_invoice_db_ IN  VARCHAR2,
+   company_                 IN  VARCHAR2,
+   order_no_                IN  VARCHAR2,
+   tax_liability_type_db_   IN  VARCHAR2,
+   info$_                   OUT VARCHAR2 )
+IS
+   with_charges_         VARCHAR2(5);
+   same_tax_combination_ VARCHAR2(5);
+   structure_with_gross_ BOOLEAN;
+   delivery_type_        delivery_type_tab.deliv_type_id%TYPE;
+BEGIN
+   IF ((base_for_adv_invoice_db_ = 'GROSS AMOUNT WITH CHARGES') OR (base_for_adv_invoice_db_ = 'NET AMOUNT WITH CHARGES')) THEN
+      with_charges_ := 'TRUE';
+   ELSE
+      with_charges_ := 'FALSE';
+   END IF;
+   Check_Order_Tax_Combination___(same_tax_combination_,
+                                  structure_with_gross_,
+                                  delivery_type_,
+                                  base_for_adv_invoice_db_,
+                                  company_, 
+                                  order_no_,
+                                  with_charges_,
+                                  tax_liability_type_db_);
+   info$_ := Client_SYS.Get_All_Info;
+END Check_Tax_Combination___;
+
+
+FUNCTION Create_Advance_Payment_Invoice_Initial_Check___ (
+	objkey_ IN VARCHAR2) RETURN BOOLEAN
+IS
+   rec_    Create_Advance_Payment_Invoice_Virtual_Rec;
+   key_    Create_Advance_Payment_Invoice_Virtual_Key;
+BEGIN
+   key_.objkey    := objkey_;
+   rec_           := Get_Record___(key_);
+   RETURN User_Allowed_Site_API.Is_Authorized(Customer_Order_API.Get_Contract(rec_.order_no)) = 1;
+END Create_Advance_Payment_Invoice_Initial_Check___;
+
+
+PROCEDURE Update_Invoice_Text___ (
+   objkey_        IN VARCHAR2,
+   invoice_text_  IN VARCHAR2)
+IS
+   parent_rec_     Create_Advance_Payment_Invoice_Virtual_Rec;
+   parent_key_     Create_Advance_Payment_Invoice_Virtual_Key;
+   old_parent_rec_ Create_Advance_Payment_Invoice_Virtual_Rec;
+BEGIN
+   parent_key_.objkey                        := objkey_;
+   parent_rec_                               := Get_Record___(parent_key_);
+   old_parent_rec_                           := parent_rec_;
+   parent_rec_.invoice_text                  := invoice_text_;
+   CRUD_Update___(old_parent_rec_, parent_rec_);
+END Update_Invoice_Text___;
+
+

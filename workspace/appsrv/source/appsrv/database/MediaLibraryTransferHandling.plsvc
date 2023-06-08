@@ -1,0 +1,190 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: MediaTransferHandling
+--  Component:    APPSRV
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  210731  DEEKLK  AM21R2-1725, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Create_Item_Type_String___ (
+   image_ IN BOOLEAN,
+   video_ IN BOOLEAN,
+   audio_ IN BOOLEAN) RETURN VARCHAR2
+IS
+   type_string_   VARCHAR2(20);
+BEGIN
+   IF image_ THEN
+      type_string_ := type_string_ || 'IMAGE;';
+   END IF;
+   IF video_ THEN
+      type_string_ := type_string_ || 'VIDEO;';
+   END IF;
+   IF audio_ THEN
+      type_string_ := type_string_ || 'AUDIO;';
+   END IF;
+   type_string_    := RTRIM(type_string_, ';');
+   
+   RETURN type_string_;
+END Create_Item_Type_String___;
+
+
+PROCEDURE Batch_Transfer_Media___ (
+   key_ IN Transfer_Info_Virtual_Key)
+IS
+   rec_              Transfer_Info_Virtual_Rec;
+   attr_             VARCHAR2(32000);
+   lu_names_         VARCHAR2(4000);
+   description_      VARCHAR2(200);
+   media_item_types_ VARCHAR2(20);
+BEGIN
+	rec_ := Get_Record___(key_);
+   media_item_types_ := Create_Item_Type_String___(rec_.image_selected, rec_.video_selected, rec_.audio_selected);
+   
+   IF rec_.object_types_selected AND rec_.is_any_selected THEN
+      FOR object_rec_ IN Get_Select_Object_Types_Array___(key_) LOOP
+         IF(object_rec_.selected = 1) THEN 
+            IF(lu_names_ IS NULL ) THEN 
+               lu_names_ := object_rec_.lu_name;
+            ELSE 
+               lu_names_ := lu_names_ || ';' || object_rec_.lu_name;
+            END IF;
+         END IF;
+      END LOOP;
+   ELSIF rec_.object_types_selected THEN 
+      Error_SYS.Appl_General(lu_name_, 'ATLSTONE: At least one Object Type should be selected.');
+   END IF;
+   
+   Client_SYS.Add_To_Attr('FROM_REPO',        rec_.from_repo,     attr_);
+   Client_SYS.Add_To_Attr('TO_REPO',          rec_.to_repo,       attr_);
+   Client_SYS.Add_To_Attr('MEDIA_ITEM_TYPES', media_item_types_,  attr_);
+   Client_SYS.Add_To_Attr('LU_NAMES',         lu_names_,          attr_);
+   
+   description_ := Language_SYS.Translate_Constant(lu_name_, 'MEDIA_LIBRARY_BATCH_TRANSFER: Batch Transfer Media Files.');
+   Transaction_SYS.Deferred_Call('Media_Library_Trans_Util_API.Batch_Transfer_Media', attr_, description_);
+END Batch_Transfer_Media___;
+
+
+PROCEDURE Load_Object_Types___ (
+   key_ IN Transfer_Info_Virtual_Key)
+IS
+   CURSOR get_object_types(media_item_type_ VARCHAR2, lu_name_ VARCHAR2, from_rep_ VARCHAR2) IS
+      SELECT count(unique c.item_id) count
+      FROM media_library_tab t, media_library_item_tab p, media_item_tab c 
+      WHERE t.library_id = p.library_id
+      AND c.item_id = p.item_id
+      AND c.media_item_type = media_item_type_
+      AND t.lu_name = lu_name_
+      AND c.repository = from_rep_;
+   
+   rec_              Transfer_Info_Virtual_Rec;
+   new_rec_          Select_Object_Types_Virtual_Rec;
+   
+   item_type_aray_   Utility_SYS.STRING_TABLE;
+   lu_name_array_    Utility_SYS.STRING_TABLE;
+   
+   lu_name_count_    NUMBER;
+   item_type_count_  NUMBER;
+   count_            NUMBER;
+   media_item_types_ VARCHAR2(20);
+BEGIN
+	rec_ := Get_Record___(key_);
+   Clear_Object_Types___(key_);
+   
+   media_item_types_ := Create_Item_Type_String___(rec_.image_selected, rec_.video_selected, rec_.audio_selected);
+   
+   Utility_SYS.Tokenize(rec_.lu_names, ';', lu_name_array_, lu_name_count_);
+   FOR i IN 1..lu_name_count_ LOOP
+      count_ := 0;
+      
+      Utility_SYS.Tokenize(media_item_types_, ';', item_type_aray_, item_type_count_);
+      FOR j IN 1..item_type_count_ LOOP
+         FOR selected_rec_ IN get_object_types(item_type_aray_(j), lu_name_array_(i), rec_.from_repo) LOOP 
+            count_ := count_ + selected_rec_.count;
+         END LOOP;
+      END LOOP; 
+      
+      new_rec_.objkey         := sys_guid();
+      new_rec_.parent_objkey  := key_.objkey;
+      new_rec_.selected       := TRUE;
+      new_rec_.lu_name        := lu_name_array_(i);
+      new_rec_.quantity       := count_;
+      CRUD_Create___(new_rec_);
+   END LOOP;
+   
+   rec_.is_any_selected := TRUE;
+   CRUD_Update___(rec_, rec_);
+END Load_Object_Types___;
+
+
+PROCEDURE Clear_Object_Types___(
+   key_ IN Transfer_Info_Virtual_Key)
+IS 
+   old_rec_  Select_Object_Types_Virtual_Rec;
+BEGIN 
+   FOR rec_ IN Get_Select_Object_Types_Array___(key_) LOOP
+      old_rec_.objkey := rec_.objkey;
+      CRUD_Delete___(old_rec_);
+   END LOOP;
+END Clear_Object_Types___;
+
+@Override
+PROCEDURE CRUD_Update___(
+   old_ IN Select_Object_Types_Virtual_Rec,
+   new_ IN Select_Object_Types_Virtual_Rec )
+IS
+   parent_key_        Transfer_Info_Virtual_Key;
+   parent_rec_        Transfer_Info_Virtual_Rec;
+   is_any_selected_   BOOLEAN;
+BEGIN
+   super(old_, new_);
+   
+   parent_key_.objkey := new_.parent_objkey;
+   IF (new_.selected = TRUE) THEN
+      is_any_selected_ := TRUE;
+   ELSE
+      is_any_selected_ := Is_Any_Selected___(parent_key_);
+   END IF;
+   
+   parent_rec_ := Get_Record___(parent_key_);
+   parent_rec_.is_any_selected := is_any_selected_;
+   CRUD_Update___(parent_rec_, parent_rec_);
+END CRUD_Update___;
+
+
+FUNCTION Is_Any_Selected___ (
+   parent_key_ IN Transfer_Info_Virtual_Key  ) RETURN BOOLEAN
+IS
+BEGIN
+   FOR rec_ IN Get_Select_Object_Types_Array___(parent_key_) LOOP
+      IF rec_.selected = 1 THEN 
+         RETURN TRUE;
+      END IF;
+   END LOOP;
+   
+   RETURN FALSE;
+END Is_Any_Selected___;
+
+
+FUNCTION Get_Media_Item_Count___ (
+   key_ IN Transfer_Info_Virtual_Key) RETURN NUMBER
+IS
+   media_item_types_  VARCHAR2(20);
+   count_             NUMBER := 0;
+   rec_               Transfer_Info_Virtual_Rec;
+BEGIN
+   rec_ := Get_Record___(key_);
+   media_item_types_ := Create_Item_Type_String___(rec_.image_selected, rec_.video_selected, rec_.audio_selected);
+   
+   SELECT count(c.item_id) INTO count_
+   FROM media_item_tab c
+   WHERE INSTR (media_item_types_, c.media_item_type) > 0
+   AND c.repository = rec_.from_repo;
+   
+   RETURN count_;
+END Get_Media_Item_Count___;

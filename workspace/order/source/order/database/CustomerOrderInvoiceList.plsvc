@@ -1,0 +1,627 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     CustomerOrderInvoiceList
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date        Sign    History
+--  ------      ------  -------------------------------------------------------------------------------
+--  2019-08-19  KHVESE  SCUXXW4-23534, Added methods Is_Rate_Correction_Invoice___.
+--  2019-03-21  DaZase  SCUXXW4-16379, moved code to fragment.
+--  2018-11-07  KHVESE  SCUXXW4-1054, SCUXXW4-8720, Implemented methods Get_No_Invoice_Copies___ , Reprint_Modified_Invoice___ and Get_Result_Key___.
+--  2018-08-10  KHVESE  SCUXXW4-12339, Implemented methods Fetch_Cust_Ref___, Get_Unblocked_Due_Date___, Calculate_Due_Date___, Get_Installment_Count___, 
+--  2018-08-10          Get_Consider_Pay_Vac_Period___, Get_Default_Pay_Way___, Get_New_Vac_Due_Date___.
+--  2018-08-10  KHVESE  SCUXXW4-1054, Added method Check_Note_Exist___, Reprint_Original_Result_Key___, Reprint_Org_Duplicate_Result_Key___.
+--  2018-07-05  KHVESE  SCUXXW4-1054, Added methods Print_Work_Copy_Result_Key___, Get_Layout_Id___ and Check_Inv_Date_Period_Close___ and
+--  2018-07-05          and overtake of method CRUD_Update___ and modified method Notes_Dialog_Label___
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Get_Customer_Contact_Name___ (
+  identity_ IN VARCHAR2, 
+  invoice_address_id_ IN VARCHAR2, 
+  your_reference_ IN VARCHAR2) RETURN VARCHAR2
+IS
+BEGIN
+   RETURN Contact_Util_API.Get_Cust_Contact_Name(identity_, invoice_address_id_, your_reference_);
+END Get_Customer_Contact_Name___;
+
+
+FUNCTION Check_Note_Exist___( 
+   company_                IN VARCHAR2, 
+   invoice_id_             IN NUMBER ) RETURN BOOLEAN
+IS
+BEGIN
+	RETURN Fnd_Boolean_API.Is_True_Db(Invoice_Note_API.Check_Note_Exist(company_,invoice_id_));
+END Check_Note_Exist___;
+
+
+FUNCTION Print_Work_Copy_Result_Key___ (
+  selection_      IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   lu_rec_              CUSTOMER_ORDER_INV_HEAD%ROWTYPE;
+   selection_in_        VARCHAR2(32000) := CONCAT(selection_, ';');
+   distribution_list_   VARCHAR2(2000) := Fnd_Session_API.Get_Fnd_User;
+   current_selection_   VARCHAR2(32000);
+   company_             VARCHAR2(20);
+   parameter_attr_      VARCHAR2(2000);
+   report_attr_         VARCHAR2(2000);
+   result_key_list_     VARCHAR2(32000);
+   layout_id_           VARCHAR2(100);
+   print_separate_tax_  VARCHAR2(5);
+   invoice_id_          NUMBER;
+   result_key_          NUMBER;
+   
+   CURSOR getrec IS
+      SELECT *
+        FROM CUSTOMER_ORDER_INV_HEAD 
+       WHERE company = company_
+         AND invoice_id = invoice_id_;   
+BEGIN
+
+   WHILE (INSTR(selection_in_, ';') > 0) LOOP
+      current_selection_ := substr(selection_in_, 0, INSTR(selection_in_, ';'));
+      company_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'COMPANY');
+      invoice_id_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'INVOICE_ID');
+      Customer_Order_Inv_Head_Uiv_Initial_Check___(company_, invoice_id_);
+
+      OPEN getrec;
+      FETCH getrec INTO lu_rec_;
+      CLOSE getrec;
+
+      IF lu_rec_.objstate = 'Preliminary' THEN 
+
+         layout_id_ := Get_Layout_Id___(company_, 
+                                        invoice_id_, 
+                                        lu_rec_.collect,
+                                        Party_Type_API.Decode(lu_rec_.party_type), 
+                                        lu_rec_.invoice_type, 
+                                        lu_rec_.aggregation_no);
+
+         Client_SYS.Clear_Attr(report_attr_);
+         Client_SYS.Add_To_Attr('REPORT_ID', layout_id_, report_attr_);  
+
+         Client_SYS.Clear_Attr(parameter_attr_);
+         Client_SYS.Add_To_Attr('INVOICE_ID', invoice_id_, parameter_attr_);
+         Client_SYS.Add_To_Attr('COMPANY', company_, parameter_attr_);
+         Client_SYS.Add_To_Attr('CONTRACT', lu_rec_.contract, parameter_attr_); 
+         Client_SYS.Add_To_Attr('ORIGINAL', 'FALSE', parameter_attr_);
+         Client_SYS.Add_To_Attr('PRINT_OPTION', '', parameter_attr_);
+         Client_SYS.Add_To_Attr('DUPLICATE', '', parameter_attr_);
+         
+         result_key_ := Report_Format_API.Create_New_Report(report_attr_, parameter_attr_, distribution_list_);
+
+         IF (result_key_ IS NOT NULL) THEN
+            IF (result_key_list_ IS NULL) THEN
+               result_key_list_ := result_key_;
+            ELSE 
+               result_key_list_ := result_key_list_ || ',' || result_key_;      
+            END IF;                       
+         END IF;     
+
+         print_separate_tax_ := INVOICE_API.Print_Separate_Tax_Invoice(company_,invoice_id_);
+         IF print_separate_tax_ = 'TRUE' THEN 
+            Client_SYS.Add_To_Attr('TAX_INVOICE', '1', parameter_attr_); 
+            result_key_ := Report_Format_API.Create_New_Report(report_attr_, parameter_attr_, distribution_list_);
+            IF (result_key_ IS NOT NULL) THEN
+               IF (result_key_list_ IS NULL) THEN
+                  result_key_list_ := result_key_;
+               ELSE 
+                  result_key_list_ := result_key_list_ || ',' || result_key_;      
+               END IF;                       
+            END IF;     
+         END IF;     
+
+      END IF;
+      
+      selection_in_ := substr(selection_in_, INSTR(selection_in_, ';')+1);
+   END LOOP;
+
+   RETURN result_key_list_;
+END Print_Work_Copy_Result_Key___;
+
+
+FUNCTION Reprint_Original_Result_Key___ (
+  selection_      IN VARCHAR2 ) RETURN Report_Result_Struc_Rec
+IS
+   report_result_struc_rec_   Report_Result_Struc_Rec;      
+   lu_rec_                    CUSTOMER_ORDER_INV_HEAD%ROWTYPE;
+   selection_in_              VARCHAR2(32000) := CONCAT(selection_, ';');
+   distribution_list_         VARCHAR2(2000) := Fnd_Session_API.Get_Fnd_User;
+   current_selection_         VARCHAR2(32000);
+   result_key_list_           VARCHAR2(32000);
+   company_                   VARCHAR2(20);
+   invoice_id_                NUMBER;
+   result_key_                NUMBER;
+   info_message_              VARCHAR2(2000);
+   not_allowed_inv_ids_       VARCHAR2(32000);
+   
+   CURSOR getrec IS
+      SELECT *
+        FROM CUSTOMER_ORDER_INV_HEAD 
+       WHERE company = company_
+         AND invoice_id = invoice_id_;   
+BEGIN
+
+   WHILE (INSTR(selection_in_, ';') > 0) LOOP
+      current_selection_ := substr(selection_in_, 0, INSTR(selection_in_, ';'));
+      company_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'COMPANY');
+      invoice_id_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'INVOICE_ID');
+      Customer_Order_Inv_Head_Uiv_Initial_Check___(company_, invoice_id_);
+
+      OPEN getrec;
+      FETCH getrec INTO lu_rec_;
+      CLOSE getrec;
+
+      IF lu_rec_.objstate IS NOT NULL AND lu_rec_.objstate NOT IN ('Preliminary', 'Cancelled') THEN 
+
+         result_key_ := Invoice_API.Get_Original_Result_Key(company_, invoice_id_);
+         -- Do not print if the invoice is originally printed by another user.
+         IF (Invoice_Customer_Order_API.Is_Report_Available(result_key_ ,distribution_list_) = 'TRUE') THEN 
+            IF (result_key_ IS NOT NULL) THEN
+               IF (result_key_list_ IS NULL) THEN
+                  result_key_list_ := result_key_;
+               ELSE 
+                  result_key_list_ := result_key_list_ || ',' || result_key_;      
+               END IF;                       
+            END IF;     
+         ELSE 
+            IF (not_allowed_inv_ids_ IS NULL) THEN
+               not_allowed_inv_ids_ := lu_rec_.invoice_no;
+            ELSE 
+               not_allowed_inv_ids_ := not_allowed_inv_ids_ || ',' || lu_rec_.invoice_no;      
+            END IF;              
+         END IF;
+      END IF;
+      selection_in_ := substr(selection_in_, INSTR(selection_in_, ';')+1);
+   END LOOP;
+   
+   IF not_allowed_inv_ids_ IS NOT NULL THEN 
+      info_message_ := 'Invoice number(s) ' ||  not_allowed_inv_ids_ || ' has not been printed previously or has been printed by another user. You do not have access to these report(s).';
+   END IF;
+
+   report_result_struc_rec_.result_key_list := result_key_list_;
+   report_result_struc_rec_.info_message := info_message_;
+
+   RETURN report_result_struc_rec_;
+END Reprint_Original_Result_Key___;
+
+
+FUNCTION Reprint_Org_Duplicate_Result_Key___ (
+  selection_      IN VARCHAR2 ) RETURN Report_Result_Struc_Rec
+IS
+   report_result_struc_rec_   Report_Result_Struc_Rec;      
+   lu_rec_                    CUSTOMER_ORDER_INV_HEAD%ROWTYPE;
+   selection_in_              VARCHAR2(32000) := CONCAT(selection_, ';');
+   distribution_list_         VARCHAR2(2000) := Fnd_Session_API.Get_Fnd_User;
+   current_selection_         VARCHAR2(32000);
+   parameter_attr_            VARCHAR2(2000);
+   report_attr_               VARCHAR2(2000);
+   result_key_list_           VARCHAR2(32000);
+   layout_id_                 VARCHAR2(100);
+   company_                   VARCHAR2(20);
+   invoice_id_                NUMBER;
+   result_key_                NUMBER;
+   exists_in_archive_         VARCHAR2(5);
+   info_message_              VARCHAR2(2000);
+   not_allowed_inv_ids_       VARCHAR2(32000);
+   
+   CURSOR getrec IS
+      SELECT *
+        FROM CUSTOMER_ORDER_INV_HEAD 
+       WHERE company = company_
+         AND invoice_id = invoice_id_;   
+BEGIN
+   WHILE (INSTR(selection_in_, ';') > 0) LOOP
+      current_selection_ := substr(selection_in_, 0, INSTR(selection_in_, ';'));
+      company_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'COMPANY');
+      invoice_id_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'INVOICE_ID');
+      Customer_Order_Inv_Head_Uiv_Initial_Check___(company_, invoice_id_);
+
+      OPEN getrec;
+      FETCH getrec INTO lu_rec_;
+      CLOSE getrec;
+
+      Invoice_API.Get_Org_Result_Key(result_key_, exists_in_archive_, company_, invoice_id_);
+
+      IF exists_in_archive_ = 'TRUE' THEN 
+         layout_id_ := Get_Layout_Id___(company_, 
+                                        invoice_id_, 
+                                        lu_rec_.collect,
+                                        Party_Type_API.Decode(lu_rec_.party_type), 
+                                        lu_rec_.invoice_type, 
+                                        lu_rec_.aggregation_no);
+
+         Client_SYS.Clear_Attr(report_attr_);
+         Client_SYS.Add_To_Attr('REPORT_ID', layout_id_, report_attr_);  
+
+         IF lu_rec_.objstate IS NOT NULL AND lu_rec_.objstate NOT IN ('Preliminary', 'Cancelled') THEN 
+            Client_SYS.Clear_Attr(parameter_attr_);
+            Client_SYS.Add_To_Attr('INVOICE_ID', invoice_id_, parameter_attr_);
+            Client_SYS.Add_To_Attr('COMPANY', company_, parameter_attr_);
+            Client_SYS.Add_To_Attr('CONTRACT', lu_rec_.contract, parameter_attr_); 
+            Client_SYS.Add_To_Attr('DUPLICATE_ORIGINAL', 'TRUE', parameter_attr_);
+
+            result_key_ := Report_Format_API.Create_New_Report(report_attr_, parameter_attr_, distribution_list_);
+
+            IF (result_key_ IS NOT NULL) THEN
+               IF (result_key_list_ IS NULL) THEN
+                  result_key_list_ := result_key_;
+               ELSE 
+                  result_key_list_ := result_key_list_ || ',' || result_key_;      
+               END IF;                       
+            END IF;     
+         END IF;     
+      ELSE 
+         IF (not_allowed_inv_ids_ IS NULL) THEN
+            not_allowed_inv_ids_ := lu_rec_.invoice_no;
+         ELSE 
+            not_allowed_inv_ids_ := not_allowed_inv_ids_ || ',' || lu_rec_.invoice_no;      
+         END IF;                       
+      END IF;
+      
+      selection_in_ := substr(selection_in_, INSTR(selection_in_, ';')+1);
+   END LOOP;
+   IF not_allowed_inv_ids_ IS NOT NULL THEN 
+      info_message_ := 'Invoice number(s) ' ||  not_allowed_inv_ids_ || ' has not been printed previously or has been removed from the archive.';
+   END IF;
+
+   report_result_struc_rec_.result_key_list := result_key_list_;
+   report_result_struc_rec_.info_message := info_message_;
+
+   RETURN report_result_struc_rec_;
+END Reprint_Org_Duplicate_Result_Key___;
+
+
+FUNCTION Reprint_Modified_Invoice___ (
+   selection_      IN VARCHAR2, 
+   duplicate_      IN BOOLEAN,
+   copy_no_        IN NUMBER,
+   print_option_   IN VARCHAR2 ) RETURN Report_Result_Struc_Rec
+IS
+   report_result_struc_rec_   Report_Result_Struc_Rec;      
+   lu_rec_                    CUST_ORDER_INV_HEAD_UIV_ALL%ROWTYPE;
+   selection_in_              VARCHAR2(32000) := CONCAT(selection_, ';');
+   distribution_list_         VARCHAR2(2000) := Fnd_Session_API.Get_Fnd_User;
+   current_selection_         VARCHAR2(32000);
+   result_key_list_           VARCHAR2(32000);
+   layout_id_                 VARCHAR2(100);
+   company_                   VARCHAR2(20);
+   invoice_id_                NUMBER;
+   info_message_              VARCHAR2(2000);
+   not_allowed_inv_ids_       VARCHAR2(32000);
+   not_order_connected_       VARCHAR2(32000);
+   connected_co_exist_        NUMBER;
+   duplicate_str_             VARCHAR2(5);
+   use_tax_invoice_           VARCHAR2(5);
+   local_copy_no_             NUMBER;
+   max_copy_no_               NUMBER;
+   local_print_option_        VARCHAR2(20) := print_option_;
+   
+   CURSOR getrec IS
+      SELECT *
+        FROM CUST_ORDER_INV_HEAD_UIV_ALL 
+       WHERE company = company_
+         AND invoice_id = invoice_id_;   
+BEGIN
+   IF duplicate_ = True THEN
+      duplicate_str_ := 'TRUE';
+   ELSE
+      duplicate_str_ := 'FALSE';
+   END IF;
+  
+   IF print_option_ = 'ALL' THEN
+      local_print_option_ := 'ORIGINAL'; 
+   END IF;
+
+   WHILE (INSTR(selection_in_, ';') > 0) LOOP
+      current_selection_ := substr(selection_in_, 0, INSTR(selection_in_, ';'));
+      company_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'COMPANY');
+      invoice_id_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'INVOICE_ID');
+      Customer_Order_Inv_Head_Uiv_Initial_Check___(company_, invoice_id_);
+
+      OPEN getrec;
+      FETCH getrec INTO lu_rec_;
+      CLOSE getrec;
+
+      -- If print_option_ is All, the local_copy_no_ parameter needs to be zero for first call to Get_Result_Key___
+      IF (print_option_ != 'All') THEN
+         local_copy_no_ := copy_no_;
+      ELSE 
+         local_copy_no_ := 0;
+         max_copy_no_ := 0;
+      END IF;
+
+      connected_co_exist_ := Customer_Order_Inv_Head_API.Check_Connected_Co_Exist__(company_, invoice_id_, lu_rec_.creators_reference, lu_rec_.invoice_type);     
+      IF connected_co_exist_ = 1 THEN 
+         IF lu_rec_.objstate NOT IN ('Preliminary', 'Cancelled') THEN 
+
+            layout_id_ := Get_Layout_Id___(company_, 
+                                           invoice_id_, 
+                                           lu_rec_.collect,
+                                           Party_Type_API.Decode(lu_rec_.party_type), 
+                                           lu_rec_.invoice_type, 
+                                           lu_rec_.aggregation_no);
+
+            Get_Result_Key___(result_key_list_, invoice_id_, 'FALSE', duplicate_str_, local_copy_no_, local_print_option_, 'FALSE', layout_id_, distribution_list_);
+
+            use_tax_invoice_ := Invoice_API.Print_Separate_Tax_Invoice(company_, invoice_id_);
+            IF use_tax_invoice_ = 'TRUE' THEN
+               Get_Result_Key___(result_key_list_, invoice_id_, use_tax_invoice_, duplicate_str_, 0, local_print_option_, 'FALSE', layout_id_, distribution_list_);
+            END IF;
+
+            IF (print_option_ = 'All') THEN
+               max_copy_no_ := Identity_Invoice_Info_API.Get_No_Invoice_Copies(company_, lu_rec_.identity, Party_Type_API.Decode('CUSTOMER'));
+               local_copy_no_ := 1;
+               WHILE (local_copy_no_ <= max_copy_no_) LOOP 
+                  Get_Result_Key___(result_key_list_, invoice_id_, 'FALSE', duplicate_str_, local_copy_no_, 'Copy', 'FALSE', layout_id_, distribution_list_);
+                  IF (use_tax_invoice_ = 'TRUE') THEN
+                     Get_Result_Key___(result_key_list_, invoice_id_, use_tax_invoice_, duplicate_str_, local_copy_no_, 'Copy', 'FALSE', layout_id_, distribution_list_);
+                  END IF;
+                  local_copy_no_ := local_copy_no_ + 1;
+               END LOOP;
+            END IF;
+
+         ELSE 
+            IF (not_allowed_inv_ids_ IS NULL) THEN
+               not_allowed_inv_ids_ := lu_rec_.invoice_no;
+            ELSE 
+               not_allowed_inv_ids_ := not_allowed_inv_ids_ || ',' || lu_rec_.invoice_no;      
+            END IF;              
+         END IF;
+      ELSE 
+         IF (not_order_connected_ IS NULL) THEN
+            not_order_connected_ := lu_rec_.invoice_no;
+         ELSE 
+            not_order_connected_ := not_order_connected_ || ',' || lu_rec_.invoice_no;      
+         END IF;              
+      END IF;
+      selection_in_ := substr(selection_in_, INSTR(selection_in_, ';')+1);
+   END LOOP;
+   
+   IF (not_order_connected_ IS NOT NULL) AND (not_allowed_inv_ids_ IS NOT NULL) THEN 
+      info_message_ := 'The selected customer invoice(s) ' ||  not_order_connected_ || ' does not have connected customer order(s). Customer Invoice(s) ' ||  not_allowed_inv_ids_ || ' has not been printed previously or has been removed from the archive and will not be printed.';
+   ELSIF not_order_connected_ IS NOT NULL THEN 
+      info_message_ := 'The selected customer invoice(s) ' ||  not_order_connected_ || ' does not have connected customer order(s) and will not be printed.';
+   ELSIF (not_allowed_inv_ids_ IS NOT NULL) THEN 
+      info_message_ := 'The selected customer Invoice(s) ' ||  not_allowed_inv_ids_ || ' has not been printed previously or has been removed from the archive and will not be printed.';
+   END IF;
+
+   report_result_struc_rec_.result_key_list := result_key_list_;
+   report_result_struc_rec_.info_message := info_message_;
+
+   RETURN report_result_struc_rec_;
+END Reprint_Modified_Invoice___;
+
+
+PROCEDURE Get_Result_Key___ (
+   result_key_list_     IN OUT VARCHAR2,
+   invoice_id_          IN NUMBER,
+   use_tax_invoice_     IN VARCHAR2,
+   duplicate_           IN VARCHAR2,
+   copy_no_             IN NUMBER,
+   print_option_        IN VARCHAR2,
+   original_            IN VARCHAR2,
+   report_id_           IN VARCHAR2,
+   distribution_list_   IN VARCHAR2 )
+IS
+   result_key_          NUMBER;
+   report_attr_         VARCHAR2(2000);
+   parameter_attr_      VARCHAR2(32000);
+BEGIN
+   Client_SYS.Clear_Attr(report_attr_);
+   Client_SYS.Add_To_Attr('REPORT_ID', report_id_ , report_attr_); 
+   
+   Client_SYS.Clear_Attr(parameter_attr_); 
+   Client_SYS.Add_To_Attr('INVOICE_ID', invoice_id_, parameter_attr_);
+   Client_SYS.Add_To_Attr('ORIGINAL', original_, parameter_attr_);
+   Client_SYS.Add_To_Attr('PRINT_OPTION', print_option_, parameter_attr_);
+   Client_SYS.Add_To_Attr('DUPLICATE', duplicate_, parameter_attr_);
+   IF (copy_no_ > 0) THEN
+      Client_SYS.Add_To_Attr('INVOICE_COPY_NO', copy_no_, parameter_attr_);
+   END IF;
+   IF use_tax_invoice_ = 'TRUE' THEN
+      Client_SYS.Add_To_Attr('TAX_INVOICE', '1', parameter_attr_);
+   END IF;
+
+   result_key_ := Report_Format_API.Create_New_Report(report_attr_, parameter_attr_, distribution_list_);
+   IF (result_key_ IS NOT NULL) THEN
+      IF (result_key_list_ IS NULL) THEN
+         result_key_list_ := result_key_;
+      ELSE 
+         result_key_list_ := result_key_list_ || ',' || result_key_;      
+      END IF;                       
+   END IF;     
+END Get_Result_Key___;
+
+
+FUNCTION Get_Layout_Id___ (
+   company_                IN VARCHAR2, 
+   invoice_id_             IN NUMBER,
+   collect_                IN VARCHAR2, 
+   party_type_             IN VARCHAR2,
+   invoice_type_           IN VARCHAR2,
+   rebate_settlement_      IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   layout_id_              VARCHAR2(100);
+   prepayment_invoice_     VARCHAR2(5);
+   advance_prepay_invoice_ VARCHAR2(5);
+BEGIN
+    
+   layout_id_ :=  Invoice_Type_API.Get_Layout_Id(company_, 
+                                                 party_type_, 
+                                                 invoice_type_);
+   IF layout_id_ IS NULL THEN 
+      IF (collect_ = 'TRUE') THEN 
+         layout_id_ := 'CUSTOMER_ORDER_COLL_IVC_REP';
+      ELSE 
+         advance_prepay_invoice_ := Invoice_API.Is_Adv_Or_Prepay_Based_Inv(company_, invoice_id_);         
+         IF (advance_prepay_invoice_ = 'TRUE') THEN 
+            prepayment_invoice_ := Invoice_API.Get_Prepay_Based_Inv_Db(company_, invoice_id_);
+            IF prepayment_invoice_ = 'TRUE' THEN 
+               layout_id_ := 'CUST_ORDER_PREPAYM_INVOICE_REP';
+            else
+               layout_id_ := 'CUSTOMER_ORDER_ADV_IVC_REP';
+            END IF;
+         ELSIF rebate_settlement_ IS NOT NULL THEN 
+               layout_id_ := 'REBATE_CREDIT_IVC_REP';
+         ELSE 
+               layout_id_ := 'CUSTOMER_ORDER_IVC_REP';
+         END IF;
+      END IF;
+   END IF;
+
+   RETURN layout_id_;
+END Get_Layout_Id___;
+
+
+FUNCTION Check_Inv_Date_Period_Close___  (
+   company_          IN VARCHAR2, 
+   invoice_id_       IN NUMBER,
+   invoice_date_     IN DATE,
+   objstate_         IN VARCHAR2 ) RETURN Inv_Date_Period_Struc_Rec
+IS
+   inv_date_period_struc_rec_    Inv_Date_Period_Struc_Rec;      
+   user_group_                   VARCHAR2(30);
+   accounting_year_              NUMBER;
+   accounting_period_            NUMBER;
+   old_invoice_date_             DATE;
+BEGIN
+   inv_date_period_struc_rec_.is_period_close := FALSE;      
+   IF (objstate_ = 'Preliminary') THEN 
+      old_invoice_date_ := Customer_Order_Inv_Head_API.Get_Invoice_Date(company_, invoice_id_);
+      user_group_  :=  User_Group_Member_Finance_API.Get_Default_Group(company_, Fnd_Session_API.Get_Fnd_User);
+
+      inv_date_period_struc_rec_.user_group :=  user_group_;
+
+      IF (user_group_ IS NOT NULL AND old_invoice_date_ != invoice_date_) THEN
+         User_Group_Period_API.Get_Year_And_Period(accounting_year_,  accounting_period_, company_, user_group_, invoice_date_);
+         IF (User_Group_Period_API.Check_Exist(company_, accounting_year_, accounting_period_, user_group_)) AND 
+            (User_Group_Period_API.Is_Period_Open(company_, accounting_year_, accounting_period_, user_group_) = 'FALSE') THEN
+               inv_date_period_struc_rec_.is_period_close :=  TRUE;
+         END IF;
+      END IF;
+   END IF;
+   RETURN inv_date_period_struc_rec_;
+END Check_Inv_Date_Period_Close___;
+
+
+FUNCTION Fetch_Cust_Ref___  (
+   identity_            IN VARCHAR2, 
+   invoice_address_id_  IN VARCHAR2 ) RETURN VARCHAR2
+IS
+BEGIN
+   RETURN Cust_Ord_Customer_API.Fetch_Cust_Ref(identity_, invoice_address_id_, 'TRUE');
+END Fetch_Cust_Ref___;
+
+
+FUNCTION Get_Unblocked_Due_Date___  (
+   company_        IN  VARCHAR2,
+   identity_       IN  VARCHAR2,
+   party_type_     IN  VARCHAR2,
+   pay_term_id_    IN  VARCHAR2,  
+   base_date_      IN  DATE ) RETURN DATE
+IS
+   due_date_       DATE;
+BEGIN
+   Invoice_API.Get_Unblocked_Due_Date(due_date_, company_, identity_, party_type_, pay_term_id_, base_date_);
+   RETURN due_date_;
+END Get_Unblocked_Due_Date___;
+
+
+FUNCTION Calculate_Due_Date___  (
+   company_             IN VARCHAR2,
+   pay_term_id_         IN VARCHAR2,
+   pay_term_base_date_  IN DATE ) RETURN DATE
+IS
+BEGIN
+   RETURN Payment_Term_API.Calc_Due_Date(company_, pay_term_id_, pay_term_base_date_);
+END Calculate_Due_Date___;
+
+
+FUNCTION Get_Installment_Count___ (
+   company_       IN VARCHAR2,
+   pay_term_id_   IN VARCHAR2 ) RETURN NUMBER
+IS
+BEGIN
+   RETURN Payment_Term_Details_API.Get_Installment_Count(company_, pay_term_id_);
+END Get_Installment_Count___;
+
+
+FUNCTION Get_Consider_Pay_Vac_Period___ (
+   company_       IN VARCHAR2,
+   pay_term_id_   IN VARCHAR2 ) RETURN VARCHAR2
+IS
+BEGIN
+   RETURN Payment_Term_API.Get_Consider_Pay_Vac_Period(company_, pay_term_id_);
+END Get_Consider_Pay_Vac_Period___;
+
+
+FUNCTION Get_Default_Pay_Way___ (
+   company_        IN  VARCHAR2,
+   identity_       IN  VARCHAR2,
+   party_type_     IN  VARCHAR2 ) RETURN VARCHAR2
+IS
+   default_way_   VARCHAR2(20);
+BEGIN
+   $IF (Component_Payled_SYS.INSTALLED) $THEN
+      default_way_ := Payment_Way_Per_Identity_API.Get_Default_Pay_Way(company_, identity_, party_type_);
+   $END  
+   RETURN default_way_;
+END Get_Default_Pay_Way___;
+
+
+FUNCTION Get_New_Vac_Due_Date___ (
+   company_          IN VARCHAR2,
+   payment_method_   IN VARCHAR2,
+   identity_         IN VARCHAR2,
+   due_date_         IN DATE ) RETURN DATE
+IS
+   
+BEGIN
+   RETURN Payment_Vacation_Period_API.Get_New_Vac_Due_Date(company_, payment_method_, identity_, due_date_);
+END Get_New_Vac_Due_Date___;
+
+FUNCTION Get_No_Invoice_Copies___(
+  selection_      IN VARCHAR2 ) RETURN NUMBER
+IS
+   selection_in_        VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_   VARCHAR2(32000);
+   company_             VARCHAR2(20);
+   identity_            VARCHAR2(100);
+   invoice_id_          NUMBER;
+   copy_no_             NUMBER := 0;
+   index_               NUMBER := 0;
+   max_copy_no_         NUMBER := 0;
+BEGIN
+   WHILE (INSTR(selection_in_, ';') > 0) LOOP
+      index_ := index_ + 1;
+      current_selection_ := substr(selection_in_, 0, INSTR(selection_in_, ';'));
+      company_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'COMPANY');
+      invoice_id_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'INVOICE_ID');
+      
+      identity_ := Customer_Order_Inv_Head_API.Get_Identity(company_, invoice_id_);
+
+      copy_no_ := Identity_Invoice_Info_API.Get_No_Invoice_Copies(company_, identity_, Party_Type_API.Decode('CUSTOMER'));
+      IF index_ = 1 THEN 
+         max_copy_no_ := copy_no_;
+      ELSE 
+         max_copy_no_ := LEAST(max_copy_no_,copy_no_);
+      END IF;
+      
+      selection_in_ := substr(selection_in_, INSTR(selection_in_, ';')+1);
+   END LOOP;
+
+   RETURN max_copy_no_;
+END Get_No_Invoice_Copies___;
+
+
+FUNCTION Is_Rate_Correction_Invoice___ (
+	company_ IN VARCHAR2,
+	invoice_id_ IN NUMBER) RETURN VARCHAR2
+IS
+BEGIN
+	RETURN 'CORRECTION_INV';--Invoice_API.Is_Rate_Correction_Invoice(company_,invoice_id_);
+END Is_Rate_Correction_Invoice___;

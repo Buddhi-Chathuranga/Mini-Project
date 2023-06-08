@@ -1,0 +1,327 @@
+--------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  ---------------------------------------------------------------
+-- 2020-11-09  RavDlk  SC2020R1-11228, Handled 'SmConnection' in Cancel Order Line command
+-- 2020-11-09  RavDlk  SC2020R1-11228, Replaced 'SmConnectionDb' with Enumeration
+-- 2019-08-29  KHVESE  SCUXXW4-16951, Added call to custome crud action ModifyLine.
+-- 2019-01-09  RaVdlk  SCUXXW4-1374, Modified the validations of BuyQtyDue
+-- 2019-01-09  RaVdlk  SCUXXW4-1374, Renamed the buttons Cancel and Reserve and modified the validation command in BuyQtyDue
+-- 2018-10-16  RaVdlk  SCUXXW4-1374, Implemented the Cancel command button
+-- 2018-10-09  RaVdlk  SCUXXW4-1374, Converted from tbwResShort using MTG Version: 1.30
+--------------------------------------------------------------------------------------
+
+client HandleCustomerOrderShortages;
+component ORDER;
+layer Core;
+projection HandleCustomerOrderShortages;
+
+include fragment NonRentalSalesPartLovSelector;
+include fragment CustOrdCust1Selector;
+include fragment CancelReasonDialog;
+include fragment OrderCancelReasonLovSelector;
+
+warningsenabled = CancelOrderLine;
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+navigator {
+   entry HandleCustomerOrderShortagesNavEntry parent OrderNavigator.SalesReservation at index 1500 {
+      label = "Handle Customer Order Shortages";
+      page List;
+   }
+}
+
+-------------------------------- MAIN PAGES ---------------------------------
+page List using CustomerOrderLineSet {
+   label = "Handle Customer Order Shortages";
+   startupmode = search;
+   list CustomerOrderShortageList;
+}
+
+-------------------------------- ASSISTANTS ---------------------------------
+
+--------------------------------- COMMANDS ----------------------------------
+command ReserveLineCommand for CustomerOrderLine {
+   label = "Reserve Line";
+   mode = SelectedRecords;
+   enabled = [true];
+   bulkexecute {
+      call ReserveOrder(Selection) {
+         when SUCCESS {
+            hideselection();
+         }
+         when FAIL {
+            error("${error.Message}");
+            exit;
+         }
+      }
+   }
+}
+command InventoryPartAvailabilityCommand for CustomerOrderLine {
+   label = "Inventory Part Availability Planning";
+   mode = SelectedRecords;
+   enabled = [LineItemNo >= 0];
+   bulkexecute {
+      bulknavigate "page/InventoryPartAvailabilityPlanning/Form?$filter=Contract eq $[Contract] and PartNo eq $[PartNo] and (ConfigurationId eq $[ConfigurationId] or ConfigurationId eq '*') and (ProjectId eq $[ProjectId] or ProjectId eq '*') ";
+   }
+}
+command CancelOrderLineCommand for CustomerOrderLine {
+   label = "Cancel Order Line";
+   mode = SingleRecord;
+   enabled = [(Objstate = "Released") or((Objstate = "Reserved") and(PickListExist = "0"))];
+   variable CancellationReasonVar {
+      type = Text;
+   }
+   execute {
+      if [SmConnection = "Connected"] {
+         inquire("Do you want to Cancel the connected Service Request too? Abort this operation? Press Cancel.") {
+            when YES {
+               // Cancel all connected work orders
+               call CancelWorkOrderForLine() {
+                  when FAIL {
+                     error("${error.Message}");
+                     warning("The connected Work Orders were not cancelled.");
+                  }
+               }
+            }
+            when NO {
+               // Remove all Customer Order references for connected Work Orders
+               call DisconnectWorkOrderFromLine() {
+                  when FAIL {
+                     error("${error.Message}");
+                     warning("Failed to remove order references on connected Work Orders.");
+                  }
+               }
+            }
+            when CANCEL {
+               exit;
+            }
+         }
+      }
+      else {
+         set EntityCodeVar = "CO";
+         dialog CancelReasonDialog(EntityCodeVar) into(CancellationReasonVar) {
+            when OK {
+               call CancelOrderLine(CancellationReasonVar) {
+                  when FAIL {
+                     error("${error.Message}");
+                     warning("The order line was not cancelled");
+                  }
+                  when SUCCESS {
+                     if [DemandCodeDb = "PO"] {
+                        info("This order is connected to a purchase order which will not be updated automatically");
+                     }
+                     if[DemandCodeDb = "WO"] {
+                        info("This order is connected to a work order which will not be updated automatically");
+                     }
+                     refresh;
+                  }
+               }
+            }
+            when CANCEL {
+               exit CANCEL;
+            }
+         }
+      }
+   }
+}
+command PackagePartStructureCommand for CustomerOrderLine {
+   label = "Package Part Structure";
+   mode = SingleRecord;
+   enabled = [LineItemNo = -1];
+   execute {
+      navigate "page/PackageStructure/Form?$filter=OrderNo eq $[OrderNo] and LineNo eq $[LineNo] and RelNo eq $[RelNo] and LineItemNo eq $[LineItemNo]";
+   }
+}
+--------------------------------- SELECTORS ---------------------------------
+
+---------------------------------- GROUPS -----------------------------------
+
+----------------------------------- LISTS -----------------------------------
+
+list CustomerOrderShortageList for CustomerOrderLine {
+   crudactions {
+      update action = ModifyLine;
+   }
+   field OrderNoRef {
+      size = Large;
+      searchable = true;
+   }
+   field LineNo;
+   field RelNo;
+   lov CatalogNoRef with ReferenceNonRentalSalesPartLovSelector {
+      size = Large;
+      description = CatalogDesc;
+      searchable = true;
+   }
+   field SalesPartType {
+      size = Large;
+   }
+   field ConditionCode;
+   field ConditionCodeRef.Description {
+
+      label = "Condition Code Description";
+   }
+   field PartOwnership {
+      size = Large;
+   }
+   field Owner {
+      contactwidget {
+         enabled = [Owner != null];
+         source {
+            Customer = [PartOwnerShipDb = "CUSTOMER OWNED"];
+            Supplier = [PartOwnerShipDb = "SUPPLIER LOANED" or PartOwnerShipDb = "SUPPLIER RENTED"];
+         }
+      }
+   }
+   field OwningCustomerName;
+   field ContractRef;
+   badge Objstate {
+      label = "Status";
+      emphasis Progress1 = [Objstate = "Planned"];
+      emphasis Progress3 = [Objstate = "Released"];
+      emphasis Progress5 = [Objstate = "Reserved"];
+      emphasis Progress7 = [Objstate = "Picked"];
+      emphasis Progress8 = [Objstate = "PartiallyDelivered"];
+      emphasis Progress10 = [Objstate = "Delivered"];
+      emphasis Progress12 = [Objstate = "Invoiced"];
+      emphasis StateBlocked = [Objstate = "Blocked"];
+      emphasis StateCancelled = [Objstate = "Cancelled"];
+
+      style = TextOnly;
+   }
+   field BuyQtyDue {
+      validate command {
+         variable BuyQtyDueVar Number;
+         variable ConvFactorVar Number;
+         variable InvertedConvFactorVar Number;
+         execute {
+            if [not((SupplyCodeDb = "IO") or(SupplyCodeDb = "NO")or(SupplyCodeDb = "PKG") or(SupplyCodeDb = "PS"))] {
+               warning("Acquisition from another order - which will not be updated automatically.");
+            }
+            set BuyQtyDueVar = BuyQtyDue;
+            set ConvFactorVar = ConvFactor;
+            set InvertedConvFactorVar = InvertedConvFactor;
+            set RevisedQtyDue = "#{(BuyQtyDueVar * ConvFactorVar) / InvertedConvFactor}";
+         }
+      }
+   }
+   field SalesUnitMeasRef;
+   field RevisedQtyDue;
+   field InventoryPartRef.UnitMeas {
+
+      label = "Inventory UoM";
+   }
+   field QtyAssigned;
+   field QtyShipped;
+   field AvailableQty;
+   field PlannedDueDate {
+      validate command {
+         execute {
+            call ValidatePlannedDueDate(PlannedDeliveryDate, PlannedDueDate, WantedDeliveryDate, Contract, SupplyCodeDb, CustomerNo, VendorNo,
+            PartNo, PurchasePartNo, ShipAddrNo, ShipViaCode, RouteId, DeliveryLeadtime, PickingLeadtime, ExtTransportCalendarId, SupplierShipViaTransit)into DateItem;
+
+            set PlannedDeliveryDate = DateItem.PlannedDeliveryDate;
+            set PlannedDueDate = DateItem.PlannedDueDate;
+         }
+      }
+   }
+   field PlannedDeliveryDate {
+      validate command {
+         execute {
+            call ValidatePlannedDeliveryDate(PlannedDeliveryDate, PlannedDueDate, WantedDeliveryDate, DateEntered, OrderNo, CustomerNo, ShipAddrNo,
+            VendorNo, ShipViaCode, DeliveryLeadtime, PickingLeadtime, ExtTransportCalendarId, SupplierShipViaTransit, RouteId, SupplyCodeDb, Contract,
+            PartNo, PurchasePartNo, ConfigurationId, PartOwnership)into DateItem;
+
+            set PlannedDeliveryDate = DateItem.PlannedDeliveryDate;
+            set PlannedDueDate = DateItem.PlannedDueDate;
+         }
+      }
+   }
+   lov CustomerNoRef with ReferenceCustOrdCust1Selector {
+      contactwidget {
+         enabled = [CustomerNoRef.CustomerNo != null];
+         source = Customer;
+      }
+      description = CustomerName;
+   }
+
+   field AuthorizeCodeRef {
+      contactwidget {
+         enabled = [AuthorizeCodeRef.AuthorizeCode != null];
+         source = Person;
+      }
+   }
+   field SalesmanCodeRef {
+      contactwidget {
+         enabled = [SalesmanCodeRef.SalesmanCode != null];
+         source = Person;
+      }
+   }
+   field DescriptionOfReservationProblem {
+      searchable = false;
+      size = Large;
+   }
+   field Priority;
+   field BackorderOption {
+      size = Large;
+   }
+
+   fieldranking OrderNoRef, LineNo, RelNo, CatalogNoRef, BuyQtyDue, PlannedDueDate, PlannedDeliveryDate;
+
+   commandgroup CommandGroupCmdGroup {
+
+      command ReserveLineCommand;
+      command InventoryPartAvailabilityCommand;
+   }
+
+   commandgroup CommandGroup2CmdGroup {
+
+      command CancelOrderLineCommand;
+      command PackagePartStructureCommand;
+   }
+}
+
+@Override
+list CustomerOrderLovList for CustomerOrder {
+   label = "";
+   static AuthorizeCode {
+      label = "Coordinator";
+   }
+   static BillAddrNo {
+      label = "Doc Address";
+   }
+   static VendorNo {
+      label = "Deliver-from Supplier";
+   }
+}
+
+@Override
+selector ReferenceCustomerOrderSelector for CustomerOrder {
+   label = "";
+   static AuthorizeCode {
+      label = "Coordinator";
+   }
+   static BillAddrNo {
+      label = "Doc Address";
+   }
+   static VendorNo {
+      label = "Deliver-from Customer";
+   }
+}
+----------------------------------- CARDS -----------------------------------
+
+---------------------------------- DIALOGS ----------------------------------
+
+---------------------------------- CHARTS -----------------------------------
+
+--------------------------------- CALENDARS ---------------------------------
+
+---------------------------------- SHEETS -----------------------------------
+
+----------------------------- STATE INDICATORS ------------------------------
+
+----------------------------------- TREES -----------------------------------
+
+---------------------------------- PLUGINS ----------------------------------
+
+------------------------------- IMAGE VIEWERS -------------------------------

@@ -1,0 +1,450 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: RegisterDirectReturnsToSupplierHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign       History
+--  ------     ------    ---------------------------------------------------------
+-- 2020-07-03  MaRalk     Bug 154330 (SCZ-10357), Modified Register_Direct_Return___ to send serial no in the message 
+-- 2020-07-03             for the server logic Return_Material_Line_API.Register_Direct_Return.   
+-- 2019-08-23  RaVdlk     SCUXXW4-23907, Moved code from RegisterDirectReturnsToSupplier.fragment
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Fetch_Rma_Line_Information___(
+   rma_no_      IN NUMBER,
+   rma_line_no_ IN NUMBER ) RETURN Rma_Line_Details_Struct_Rec
+IS
+   rma_line_details_rec_      Rma_Line_Details_Struct_Rec;
+   return_material_line_rec_  Return_Material_Line_API.Public_Rec;
+   
+   CURSOR get_row_count_ IS 
+    
+   SELECT COUNT(transaction_id)
+   FROM DIRECT_DELIVERY_RETURNS
+   WHERE RMA_NO = rma_no_
+   AND RMA_LINE_NO =  rma_line_no_ 
+   AND ((DELIVERED_INV_QTY - RETURNED_INV_QTY) > 0 
+   OR (DELIVERED_SALES_QTY - RETURNED_SALES_QTY) > 0);
+
+BEGIN
+   
+   OPEN get_row_count_;
+   FETCH get_row_count_ INTO rma_line_details_rec_.rec_count;
+   CLOSE get_row_count_;
+   
+   return_material_line_rec_                       := Return_Material_Line_API.Get(rma_no_, rma_line_no_);   
+   rma_line_details_rec_.contract                  := return_material_line_rec_.contract;
+   rma_line_details_rec_.state                     := return_material_line_rec_.rowstate;
+   rma_line_details_rec_.customer_reason           := return_material_line_rec_.return_reason_code;
+   rma_line_details_rec_.return_to_vendor_no       := Return_Material_API.Get_Return_To_Vendor_No(rma_no_);
+   rma_line_details_rec_.supplier_return_reason    := return_material_line_rec_.supplier_return_reason;
+   rma_line_details_rec_.catalog_no                := return_material_line_rec_.catalog_no;
+   rma_line_details_rec_.configuration_id          := return_material_line_rec_.configuration_id;
+   rma_line_details_rec_.condition_code            := Return_Material_Line_API.Get_Condition_Code(rma_no_,rma_line_no_ );
+   rma_line_details_rec_.qty_to_return             := return_material_line_rec_.qty_to_return;
+   rma_line_details_rec_.qty_received_inv_uom      := return_material_line_rec_.qty_received_inv_uom;
+   rma_line_details_rec_.qty_received              := return_material_line_rec_.qty_received;
+   rma_line_details_rec_.qty_to_return_inv_uom     := return_material_line_rec_.qty_to_return_inv_uom;
+   rma_line_details_rec_.credit_invoice_no         := return_material_line_rec_.credit_invoice_no;
+   rma_line_details_rec_.return_uom                := Return_Material_Line_API.Get_Sales_Unit_Meas(rma_no_, rma_line_no_);
+   rma_line_details_rec_.total_received_qty        := NVL(return_material_line_rec_.qty_received, 0);
+   rma_line_details_rec_.conv_factor               := return_material_line_rec_.conv_factor;
+   rma_line_details_rec_.inverted_conv_factor      := return_material_line_rec_.inverted_conv_factor;
+   rma_line_details_rec_.remaining_return_qty      := return_material_line_rec_.qty_to_return - NVL(return_material_line_rec_.qty_received, 0);
+   rma_line_details_rec_.remaining_return_qty_inv  := return_material_line_rec_.qty_to_return_inv_uom - NVL(return_material_line_rec_.qty_received_inv_uom, 0);
+   rma_line_details_rec_.total_received_qty        := NVL(return_material_line_rec_.qty_received, 0);
+   rma_line_details_rec_.total_received_qty_inv    := NVL(return_material_line_rec_.qty_received_inv_uom, 0);
+   rma_line_details_rec_.part_no                   := return_material_line_rec_.part_no;
+   rma_line_details_rec_.latest_return_date        := Return_Material_API.Get_Latest_Return_Date(rma_no_);
+   rma_line_details_rec_.receipt_date              := Site_API.Get_Site_Date(return_material_line_rec_.contract);
+   
+   IF rma_line_details_rec_.total_received_qty = 0 THEN
+      rma_line_details_rec_.new_qty_received    := return_material_line_rec_.qty_to_return - NVL(return_material_line_rec_.qty_received,0);
+      rma_line_details_rec_.newly_received_inv  :=  return_material_line_rec_.qty_to_return_inv_uom - NVL(return_material_line_rec_.qty_received_inv_uom,0);
+   ELSE
+      rma_line_details_rec_.new_qty_received   := 0;
+      rma_line_details_rec_.newly_received_inv := 0;
+   END IF;   
+   
+  RETURN  rma_line_details_rec_;
+   
+END Fetch_Rma_Line_Information___;
+
+@Override
+PROCEDURE CRUD_Update___(
+   old_ IN Direct_Returns_To_Suppliers_Virtual_Rec,
+   new_ IN Direct_Returns_To_Suppliers_Virtual_Rec,
+   update_from_header_ IN BOOLEAN DEFAULT FALSE)
+IS
+   parent_rec_  Direct_Returns_To_Suppliers_Virtual_Rec;
+   parent_key_  Direct_Returns_To_Suppliers_Virtual_Key;
+   
+   new_rec_     Direct_Delivery_Returns_Virtual_Rec;
+   old_rec_     Direct_Delivery_Returns_Virtual_Rec;
+   child_key_   Direct_Delivery_Returns_Virtual_Key;
+   
+   old_include_all_ VARCHAR2(5); 
+   new_include_all_ VARCHAR2(5);
+   qty_to_return_struct_rec_      Qty_To_Return_Struct_Rec;
+   
+BEGIN
+   
+   IF old_.include_all THEN
+      old_include_all_ := 'TRUE';
+   ELSE
+      old_include_all_ := 'FALSE';
+   END IF;   
+      
+   IF new_.include_all THEN
+      new_include_all_ := 'TRUE';
+   ELSE
+      new_include_all_ := 'FALSE';  
+   END IF; 
+
+   IF (NOT update_from_header_) THEN
+      
+      parent_key_.objkey := new_.objkey;
+      parent_rec_   := Get_Record___(parent_key_);  
+      
+      FOR direct_delivery_return_rec_ IN Get_Return_To_Supplier_Array___(parent_key_) LOOP  
+         child_key_.objkey := direct_delivery_return_rec_.objkey;
+         old_rec_          := Get_Record___(child_key_);
+         new_rec_          := old_rec_;         
+         IF parent_rec_.rec_count =1 THEN
+            new_rec_.sales_qty_to_return := new_.new_qty_received;   
+            new_rec_.inv_qty_to_return := new_.newly_received_inv;
+         END IF; 
+         IF Validate_SYS.Is_Different(old_include_all_, new_include_all_) THEN 
+            IF new_.include_all THEN
+               new_rec_.include_in_return := TRUE;
+               qty_to_return_struct_rec_ := Set_Qty_To_Return___( parent_key_.objkey,  
+                                                                  new_rec_.part_no,
+                                                                  new_rec_.delivered_sales_qty,
+                                                                  new_rec_.returned_sales_qty,
+                                                                  new_rec_.delivered_inv_qty,
+                                                                  new_rec_.returned_inv_qty); 
+            new_rec_.sales_qty_to_return := qty_to_return_struct_rec_.sales_qty_to_return;
+            new_rec_.inv_qty_to_return   := qty_to_return_struct_rec_.inv_qty_to_return;
+            ELSE
+               new_rec_.include_in_return:= FALSE;
+               new_rec_.sales_qty_to_return := 0;
+               new_rec_.inv_qty_to_return   := 0;
+            END IF;
+         END IF;   
+         CRUD_Update___(old_rec_, new_rec_);
+      END LOOP; 
+   END IF;   
+   super(old_, new_);
+   
+END CRUD_Update___;
+
+PROCEDURE Update_The_Header___ (
+    parent_obj_key_ IN VARCHAR2) 
+IS
+   key_       Direct_Returns_To_Suppliers_Virtual_Key;
+   rec_       Direct_Returns_To_Suppliers_Virtual_Rec;
+   new_rec_   Direct_Returns_To_Suppliers_Virtual_Rec;
+   update_from_header_      BOOLEAN := TRUE;
+BEGIN
+   key_.Objkey := parent_obj_key_;
+   rec_ := Get_Record___(key_);
+   new_rec_ := rec_;
+   new_rec_.include_all := FALSE;
+   CRUD_Update___(rec_, new_rec_,update_from_header_);
+END Update_The_Header___;
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Direct_Returns_To_Suppliers_Virtual_Rec)
+IS
+   line_ Direct_Delivery_Returns_Virtual_Rec;
+   parent_key_  Direct_Returns_To_Suppliers_Virtual_Key;
+   
+   CURSOR get_direct_delivery_returns_ IS
+      
+      SELECT  transaction_id, part_no, alt_source_ref4, date_created, delivered_inv_qty, returned_inv_qty, delivered_sales_qty,
+      returned_sales_qty, lot_batch_no, serial_no, condition_code
+      FROM DIRECT_DELIVERY_RETURNS
+      WHERE RMA_NO = rec_.rma_no
+      AND RMA_LINE_NO =  rec_.rma_line_no 
+      AND ((DELIVERED_INV_QTY - RETURNED_INV_QTY) > 0 
+      OR (DELIVERED_SALES_QTY - RETURNED_SALES_QTY) > 0);
+      
+BEGIN
+   super(rec_);
+   parent_key_.objkey := rec_.objkey;
+   FOR direct_delivery_returns_rec_ IN get_direct_delivery_returns_ LOOP
+      line_.objkey                 := sys_guid();
+      line_.parent_objkey          := rec_.objkey;
+      line_.transaction_id         := direct_delivery_returns_rec_.transaction_id;
+      line_.part_no                := direct_delivery_returns_rec_.part_no;
+      line_.alt_source_ref4        := direct_delivery_returns_rec_.alt_source_ref4;
+      line_.date_created           := direct_delivery_returns_rec_.date_created;
+      line_.delivered_inv_qty      := direct_delivery_returns_rec_.delivered_inv_qty;
+      line_.returned_inv_qty       := direct_delivery_returns_rec_.returned_inv_qty;
+      line_.delivered_sales_qty    := direct_delivery_returns_rec_.delivered_sales_qty;
+      line_.returned_sales_qty     := direct_delivery_returns_rec_.returned_sales_qty;
+      line_.lot_batch_no           := direct_delivery_returns_rec_.lot_batch_no;
+      line_.serial_no              := direct_delivery_returns_rec_.serial_no;
+      line_.condition_code         := direct_delivery_returns_rec_.condition_code;
+      line_.include_in_return      := FALSE;
+      line_.qty_changed            := TRUE;
+      CRUD_Create___(line_);
+   END LOOP;
+   
+END CRUD_Create___;
+
+FUNCTION Set_Qty_To_Return___ (
+   parent_key_           IN VARCHAR2,
+   part_no_              IN VARCHAR2,
+   delivered_sales_qty_  IN NUMBER,
+   returned_sales_qty_   IN NUMBER,
+   delivered_inv_qty_    IN NUMBER,
+   returned_inv_qty_     IN NUMBER)RETURN Qty_To_Return_Struct_Rec
+   
+IS    
+   qty_to_return_struct_rec_  Qty_To_Return_Struct_Rec;
+   parent_rec_                Direct_Returns_To_Suppliers_Virtual_Rec;
+   key_                       Direct_Returns_To_Suppliers_Virtual_Key;
+BEGIN   
+   key_.Objkey := parent_key_;
+   parent_rec_   := Get_Record___(key_);  
+   
+   IF parent_rec_.rec_count > 1 THEN
+      qty_to_return_struct_rec_.sales_qty_to_return := delivered_sales_qty_ - returned_sales_qty_;
+      IF part_no_ IS NOT NULL THEN
+         qty_to_return_struct_rec_.inv_qty_to_return := delivered_inv_qty_ - returned_inv_qty_;
+      END IF;
+   ELSE  
+      IF  parent_rec_.total_received_qty = 0 THEN  
+         qty_to_return_struct_rec_.sales_qty_to_return := parent_rec_.remaining_return_qty;
+         qty_to_return_struct_rec_.inv_qty_to_return   := parent_rec_.remaining_return_qty_inv;
+      ELSE
+         qty_to_return_struct_rec_.sales_qty_to_return := parent_rec_.new_qty_received;
+         qty_to_return_struct_rec_.inv_qty_to_return   :=  parent_rec_.newly_received_inv;
+      END IF;   
+   END IF;
+   RETURN qty_to_return_struct_rec_;
+END Set_Qty_To_Return___;
+
+
+FUNCTION Validate_Qty_To_Return___ (
+ parent_objkey_ IN  VARCHAR2)RETURN Totals_Struct_Rec
+   
+IS    
+   part_no_             VARCHAR2 (40);
+   totals_struct_rec_   Totals_Struct_Rec;
+   parent_rec_          Direct_Returns_To_Suppliers_Virtual_Rec;
+   parent_key_          Direct_Returns_To_Suppliers_Virtual_Key;   
+   child_rec_           Direct_Delivery_Returns_Virtual_Rec;
+   child_key_           Direct_Delivery_Returns_Virtual_Key;   
+
+BEGIN  
+   parent_key_.objkey := parent_objkey_;
+   parent_rec_   := Get_Record___(parent_key_);    
+   parent_rec_.total_inv_qty_to_return := 0;
+   FOR direct_delivery_return_rec_ IN Get_Return_To_Supplier_Array___(parent_key_) LOOP  
+      child_key_.objkey := direct_delivery_return_rec_.objkey;
+      child_rec_          := Get_Record___(child_key_);
+
+      IF child_rec_.part_no IS NOT NULL THEN  
+         IF parent_rec_.newly_received_inv  > 0 THEN
+            IF child_rec_.include_in_return THEN
+               parent_rec_.total_inv_qty_to_return := parent_rec_.total_inv_qty_to_return + child_rec_.inv_qty_to_return;
+            END IF;
+            IF ((child_rec_.delivered_inv_qty - child_rec_.returned_inv_qty) < child_rec_.inv_qty_to_return) THEN
+               Error_SYS.Record_General(lu_name_, 'QTYEXCEEDED: The return quantity cannot exceed the delivered quantity per receipt');
+            END IF;
+         END IF;
+      ELSE
+         IF parent_rec_.new_qty_received > 0 THEN
+            IF child_rec_.include_in_return THEN
+               parent_rec_.total_non_inv_qty_to_return := parent_rec_.total_non_inv_qty_to_return + child_rec_.sales_qty_to_return;
+         END IF;
+            IF ((child_rec_.delivered_sales_qty - child_rec_.returned_sales_qty) < child_rec_.sales_qty_to_return) THEN
+               Error_SYS.Record_General(lu_name_, 'QTYEXCEEDED: The return quantity cannot exceed the delivered quantity per receipt');
+            END IF;
+         END IF;       
+      END IF;
+
+   END LOOP;      
+   
+   part_no_  := Return_Material_Line_API.Get_Part_No(parent_rec_.rma_no, parent_rec_.rma_line_no);  
+   
+   IF child_rec_.part_no IS NOT NULL THEN
+      IF parent_rec_.newly_received_inv != parent_rec_.total_inv_qty_to_return  THEN
+         Error_SYS.Record_General(lu_name_, 'SUMNOTEQUAL: The sum of the quantity to return should be equal to the newly received quantity');
+      END IF;
+   ELSE
+      IF parent_rec_.new_qty_received !=  parent_rec_.total_non_inv_qty_to_return THEN
+         Error_SYS.Record_General(lu_name_, 'SUMNOTEQUAL: The sum of the quantity to return should be equal to the newly received quantity');
+      END IF;
+   END IF;   
+   
+   totals_struct_rec_.total_inv_qty_to_return := parent_rec_.total_inv_qty_to_return;
+   totals_struct_rec_.total_non_inv_qty_to_return := parent_rec_.total_non_inv_qty_to_return;
+   RETURN totals_struct_rec_;
+
+END Validate_Qty_To_Return___;
+
+PROCEDURE Register_Direct_Return___ (
+  parent_objkey_ IN VARCHAR2) 
+IS
+   parent_rec_  Direct_Returns_To_Suppliers_Virtual_Rec;
+   parent_key_  Direct_Returns_To_Suppliers_Virtual_Key;
+
+   child_rec_   Direct_Delivery_Returns_Virtual_Rec;
+   child_key_   Direct_Delivery_Returns_Virtual_Key;
+   
+   msg_                        CLOB;
+   record_ready_to_send_       BOOLEAN ;
+   total_inv_qty_to_return_    NUMBER;
+   total_sales_qty_to_return_  NUMBER;
+   demand_site_transaction_    VARCHAR2 (10);
+   
+BEGIN
+   parent_key_.objkey := parent_objkey_;
+   parent_rec_        := Get_Record___(parent_key_);
+
+   FOR direct_delivery_return_rec_ IN Get_Return_To_Supplier_Array___(parent_key_) LOOP  
+      child_key_.objkey   := direct_delivery_return_rec_.objkey;
+      child_rec_          := Get_Record___(child_key_);                  
+      IF child_rec_.include_in_return THEN
+         Message_SYS.Add_Attribute(msg_,'TRANSACTION_ID', child_rec_.transaction_id);
+         IF (child_rec_.serial_no != '*') THEN
+            Message_SYS.Add_Attribute(msg_,'SERIAL_NO', child_rec_.serial_no);
+         END IF;          
+         Message_SYS.Add_Attribute(msg_,'SALES_QTY_RETURNED', child_rec_.sales_qty_to_return);
+         Message_SYS.Add_Attribute(msg_,'INV_QTY_RETURNED', child_rec_.inv_qty_to_return);
+
+         IF child_rec_.sales_qty_to_return = 0 AND child_rec_.inv_qty_to_return = 0 THEN
+            record_ready_to_send_ := FALSE;
+         ELSE
+            record_ready_to_send_ := TRUE;
+         END IF;     
+      END IF;
+      
+      IF child_rec_.part_no IS NULL THEN
+         demand_site_transaction_ := 'OERET-NI';
+      ELSE
+         demand_site_transaction_ := 'RETPODIRSH';
+      END IF;
+   END LOOP;
+   IF record_ready_to_send_ THEN      
+      Return_Material_Line_Initial_Check___(parent_rec_.rma_no, parent_rec_.rma_line_no);
+
+      total_inv_qty_to_return_   := parent_rec_.newly_received_inv;
+      total_sales_qty_to_return_ := parent_rec_.new_qty_received;
+      Return_Material_Line_API.Register_Direct_Return_Clob(parent_rec_.rma_no,
+                                                      parent_rec_.rma_line_no,                                                                               
+                                                      total_inv_qty_to_return_,
+                                                      total_sales_qty_to_return_,
+                                                      demand_site_transaction_,
+                                                      msg_);
+   END IF;
+   
+END Register_Direct_Return___;   
+
+
+PROCEDURE  Reset_Row_Selection___ (
+  parent_key_                 IN VARCHAR2,
+  total_received_qty_         IN NUMBER,
+  total_received_qty_inv_     IN NUMBER,
+  new_qty_received_           IN NUMBER,
+  newly_received_inv_         IN NUMBER,
+  remaining_return_qty_       IN NUMBER,
+  remaining_return_qty_inv_   IN NUMBER)
+IS
+
+   old_parent_rec_         Direct_Returns_To_Suppliers_Virtual_Rec;
+   new_parent_rec_         Direct_Returns_To_Suppliers_Virtual_Rec;
+   key_                    Direct_Returns_To_Suppliers_Virtual_Key;
+   old_child_rec_          Direct_Delivery_Returns_Virtual_Rec;
+   new_child_rec_          Direct_Delivery_Returns_Virtual_Rec;
+   child_key_              Direct_Delivery_Returns_Virtual_Key;
+   get_totals_struct_rec_  Totals_Struct_Rec;
+   
+BEGIN
+
+   key_.Objkey := parent_key_;
+   old_parent_rec_   := Get_Record___(key_);   
+
+   new_parent_rec_   := old_parent_rec_;
+   get_totals_struct_rec_ := Validate_Qty_To_Return___ (parent_key_);
+   new_parent_rec_.total_inv_qty_to_return      := get_totals_struct_rec_.total_inv_qty_to_return;
+   new_parent_rec_.total_non_inv_qty_to_return  := get_totals_struct_rec_.total_non_inv_qty_to_return;
+
+
+   new_parent_rec_.total_received_qty       := total_received_qty_ + new_qty_received_;
+   new_parent_rec_.total_received_qty_inv   := total_received_qty_inv_ + newly_received_inv_;
+   new_parent_rec_.remaining_return_qty     := remaining_return_qty_  - new_qty_received_;
+   new_parent_rec_.remaining_return_qty_inv := remaining_return_qty_inv_ - newly_received_inv_;           
+   new_parent_rec_.new_qty_received         := 0;
+   new_parent_rec_.newly_received_inv       := 0;
+   
+
+   FOR direct_delivery_return_rec_ IN Get_Return_To_Supplier_Array___(key_) LOOP  
+      child_key_.objkey       := direct_delivery_return_rec_.objkey;
+      old_child_rec_          := Get_Record___(child_key_);
+      new_child_rec_          := old_child_rec_; 
+      
+      IF old_child_rec_.include_in_return THEN
+         new_child_rec_.returned_inv_qty     := old_child_rec_.returned_inv_qty + old_child_rec_.inv_qty_to_return;
+         new_child_rec_.returned_sales_qty   := old_child_rec_.returned_sales_qty + old_child_rec_.sales_qty_to_return;
+         new_child_rec_.inv_qty_to_return    := NULL;
+         new_child_rec_.sales_qty_to_return  := NULL ;
+         new_child_rec_.include_in_return    := FALSE;
+      END IF;
+      CRUD_Update___(old_child_rec_, new_child_rec_);
+   END LOOP;
+   CRUD_Update___(old_parent_rec_, new_parent_rec_);
+   
+END Reset_Row_Selection___;
+   
+FUNCTION Set_Newly_Received_Inv___ (
+   new_qty_received_      IN NUMBER,
+   conv_factor_           IN NUMBER,
+   inverted_conv_factor_  IN NUMBER)RETURN NUMBER   
+IS    
+  calculated_val_ NUMBER;
+BEGIN   
+   calculated_val_:= new_qty_received_ * conv_factor_ / inverted_conv_factor_;
+   RETURN calculated_val_;
+END Set_Newly_Received_Inv___;
+
+FUNCTION Set_New_Qty_Received___ (
+   newly_received_inv_    IN NUMBER,
+   conv_factor_           IN NUMBER,
+   inverted_conv_factor_  IN NUMBER)RETURN NUMBER   
+IS    
+  value_ NUMBER;
+BEGIN   
+   value_:= newly_received_inv_  / conv_factor_ * inverted_conv_factor_;
+   RETURN value_;
+END Set_New_Qty_Received___;
+
+FUNCTION Calculate_Sales_Qty_To_Rtn___ (
+   inv_qty_to_return_             IN NUMBER,
+   parent_inverted_conv_factor_   IN NUMBER,
+   parent_conv_factor_            IN NUMBER)RETURN NUMBER
+IS    
+  value_ NUMBER;
+BEGIN   
+   value_:= (inv_qty_to_return_ * parent_inverted_conv_factor_) / parent_conv_factor_;
+   RETURN value_;
+END Calculate_Sales_Qty_To_Rtn___;
+
+FUNCTION Calculate_Inv_Qty_To_Rtn___ (
+   sales_qty_to_return_           IN NUMBER,
+   parent_inverted_conv_factor_   IN NUMBER,
+   parent_conv_factor_            IN NUMBER)RETURN NUMBER
+IS    
+  value_ NUMBER;
+BEGIN   
+   value_:= (sales_qty_to_return_ * parent_inverted_conv_factor_) / parent_conv_factor_;
+   RETURN value_;
+END Calculate_Inv_Qty_To_Rtn___;

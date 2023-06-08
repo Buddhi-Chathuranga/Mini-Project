@@ -1,0 +1,206 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     ApproveForCredit
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign    History
+--  ------     ------  ---------------------------------------------------------
+-- 2019-02-01  MaEelk  SCUXXW4-9372, Made it work from RMA Header.
+-- 2018-12-05  RaVdlk  SCUXXW4-8140, Created a new message when debit invoice cerdited amount is equal to 0.
+-- 2018-12-03  RaVdlk  SCUXXW4-8130, Created
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Get_Debit_Inv_Credited_Amount___(
+   company_          IN VARCHAR2,
+   debit_series_id_  IN VARCHAR2,
+   debit_inv_no_     IN VARCHAR2) RETURN NUMBER
+IS
+   debit_inv_cr_amount_ NUMBER;
+BEGIN
+   
+   debit_inv_cr_amount_ := Invoice_Customer_Order_API.Get_Cred_Amt_Per_Db_Ivc__(company_,debit_inv_no_ ,debit_series_id_);
+   RETURN debit_inv_cr_amount_;
+
+END Get_Debit_Inv_Credited_Amount___;
+
+PROCEDURE Check_Approve_For_Credit___ (
+   objkey_        IN VARCHAR2,  
+   selection_     IN VARCHAR2, 
+   header_rma_no_ IN NUMBER) 
+IS
+   selection_in_         VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_    VARCHAR2(32000);
+   rma_no_               NUMBER;
+   rma_line_no_          NUMBER;
+   rec_                  Return_Material_Line_API.Public_Rec;
+   debit_inv_cr_amount_  NUMBER;
+   
+   CURSOR get_lines (rma_no_ NUMBER) IS
+      SELECT rma_line_no, order_no, line_no, rel_no, line_item_no
+      FROM   RETURN_MATERIAL_LINE_TAB
+      WHERE  rma_no = rma_no_
+      AND    credit_invoice_no IS NULL
+      AND    credit_approver_id IS NULL
+      AND    rowstate NOT IN ('Denied', 'Planned', 'Cancelled')
+      AND    rental = Fnd_Boolean_API.DB_FALSE;
+BEGIN
+   IF (header_rma_no_ IS NOT NULL) THEN
+      FOR line_rec_ IN get_lines(header_rma_no_) LOOP
+         IF (Invoice_Customer_Order_API.Get_Credited_Amt_Per_Ord_Line(line_rec_.order_no, line_rec_.line_no, line_rec_.rel_no, line_rec_.line_item_no) != 0) THEN
+            rec_                  := Return_Material_Line_API.Get(header_rma_no_,line_rec_.rma_line_no);
+            debit_inv_cr_amount_  := Get_Debit_Inv_Credited_Amount___(rec_.company, rec_.debit_invoice_series_id,rec_.debit_invoice_no);
+            IF debit_inv_cr_amount_ != 0 THEN
+               Check_Create_Warning___(header_rma_no_, line_rec_.rma_line_no, debit_inv_cr_amount_,objkey_,TRUE);
+            ELSE
+               Check_Create_Warning___(header_rma_no_, line_rec_.rma_line_no, debit_inv_cr_amount_,objkey_,FALSE);
+            END IF;
+         END IF;
+      END LOOP;         
+   ELSE
+      WHILE (INSTR(selection_in_, ';') > 0) LOOP
+         current_selection_    := substr(selection_in_, 0, INSTR(selection_in_, ';'));
+         rma_no_               := Client_SYS.Get_Key_Reference_Value(current_selection_, 'RMA_NO');
+         rma_line_no_          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'RMA_LINE_NO');
+         rec_                  := Return_Material_Line_API.Get(rma_no_,rma_line_no_);
+         debit_inv_cr_amount_  := Get_Debit_Inv_Credited_Amount___(rec_.company, rec_.debit_invoice_series_id,rec_.debit_invoice_no);
+
+         IF debit_inv_cr_amount_ != 0 THEN
+            Check_Create_Warning___(rma_no_,rma_line_no_, debit_inv_cr_amount_,objkey_,TRUE);
+         ELSE
+            Check_Create_Warning___(rma_no_,rma_line_no_, debit_inv_cr_amount_,objkey_,FALSE);
+         END IF;
+         selection_in_          := substr(selection_in_, INSTR(selection_in_, ';')+1);  
+
+      END LOOP;
+   END IF; 
+END Check_Approve_For_Credit___;
+
+PROCEDURE Check_Create_Warning___ ( 
+   rma_no_               IN NUMBER,
+   rma_line_no_          IN NUMBER,
+   debit_inv_cr_amount_  IN NUMBER,
+   parent_objkey_        IN VARCHAR2,
+   credited_             IN BOOLEAN) 
+IS
+   get_rec_              Return_Material_Line_API.Public_Rec;
+   old_rec_              Approve_For_Credit_Virtual_Rec;
+   new_rec_              Approve_For_Credit_Virtual_Rec;
+   key_                  Approve_For_Credit_Virtual_Key;
+   credited_line_amt_    NUMBER; 
+      
+BEGIN
+   get_rec_           := Return_Material_Line_API.Get(rma_no_,rma_line_no_);
+   credited_line_amt_ := INVOICE_CUSTOMER_ORDER_API.Get_Credited_Amt_Per_Ord_Line( get_rec_.order_no,get_rec_.line_no,get_rec_.rel_no,get_rec_.line_item_no);
+   Create_Warning___(rma_no_,
+                     rma_line_no_,
+                     get_rec_.order_no, 
+                     get_rec_.line_no, 
+                     get_rec_.rel_no,
+                     credited_line_amt_,
+                     get_rec_.debit_invoice_series_id,
+                     get_rec_.debit_invoice_no,
+                     debit_inv_cr_amount_,
+                     parent_objkey_,
+                     credited_);
+  
+   key_.objkey := parent_objkey_;
+   old_rec_ := Get_Record___(key_);
+   new_rec_ := old_rec_;
+   crud_update___(old_rec_, new_rec_);
+
+END Check_Create_Warning___;
+
+
+PROCEDURE Create_Warning___ (
+   rma_no_               IN NUMBER,
+   rma_line_no_          IN NUMBER,
+   order_no_             IN VARCHAR2,
+   line_no_              IN VARCHAR2,
+   rel_no_               IN VARCHAR2,
+   credited_amount_      IN NUMBER,
+   debit_series_id_      IN VARCHAR2,
+   debit_inv_no_         IN VARCHAR2, 
+   debit_inv_cr_amount_  IN NUMBER,
+   parent_objkey_        IN VARCHAR2,
+   credited_             IN BOOLEAN) 
+IS
+   value_     VARCHAR2 (2000);
+   new_rec_   Approve_For_Credit_Warning_Virtual_Rec;
+BEGIN
+   IF credited_ THEN
+      value_ := 'RMA line no. '|| rma_line_no_ ||'(order no. ' || order_no_ || ', line no. ' || line_no_||', release no. ' ||rel_no_||', total credit amount '|| credited_amount_||') was credited so far. Credit invoice(s) for invoice '
+      ||debit_series_id_||debit_inv_no_|| ' already exists with credit amount ' ||debit_inv_cr_amount_ || ' Do you want to approve? ';
+   ELSE
+      value_ := 'RMA line no. '|| rma_line_no_ ||'(order no. ' || order_no_ || ', line no. ' || line_no_||', release no. ' ||rel_no_||', total credit amount '|| credited_amount_||') was credited/corrected so far.' || ' Do you want to approve? ';
+   END IF;
+   new_rec_.rma_no        := rma_no_;  
+   new_rec_.rma_line_no   := rma_line_no_;
+   new_rec_.Warning       := value_;
+   new_rec_.Answer        := FALSE;
+   new_rec_.objkey        := sys_guid();
+   new_rec_.parent_objkey := parent_objkey_;
+      
+   CRUD_Create___(new_rec_); 
+     
+END Create_Warning___;
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Approve_For_Credit_Virtual_Rec )
+IS
+BEGIN
+   super(rec_);
+   Check_Approve_For_Credit___(rec_.objkey, rec_.Selection, rec_.rma_no);
+END CRUD_Create___;
+
+PROCEDURE Answer_All___ (
+   parent_objkey_ IN VARCHAR2,
+   answer_        IN NUMBER) 
+IS
+BEGIN
+   UPDATE ${PROJECTION}_Approve_For_Credit_Warning_Virtual_VRT
+      SET answer = answer_
+   WHERE parent_objkey = parent_objkey_;
+   
+END Answer_All___; 
+
+PROCEDURE Approve_For_Credit___ (
+   key_   IN  Approve_For_Credit_Virtual_Key,
+   info$_ OUT VARCHAR2) 
+IS
+   error_msg_         VARCHAR2(2000):= '';
+   approver_          VARCHAR2(200);
+   session_user_      VARCHAR2(200);
+   
+BEGIN
+   
+   session_user_ := Fnd_Session_API.Get_Fnd_User;
+   approver_     := Person_Info_API.Get_Id_For_User(session_user_);
+   
+   IF (approver_ IS NULL) THEN
+      Error_SYS.Record_General(lu_name_, 'NOPERCOORD: Logon user :P1 is not connected to an application person id.', session_user_);
+   ELSE
+      IF (Order_Coordinator_API.Check_Exist(approver_)= 'FALSE') THEN
+         Error_SYS.Record_General(lu_name_, 'APPROVER_NOT_REG: You need to be registered as a coordinator in order to approve the return material authorization.');
+      END IF;
+   END IF;
+   
+   FOR record_ IN Get_Warnings_Array___(key_) LOOP   
+      BEGIN         
+         IF record_.answer = 1 THEN
+            Return_Material_Line_Initial_Check___(record_.rma_no,record_.rma_line_no);
+            Return_Material_Line_API.Approve_For_Credit__(record_.rma_no,record_.rma_line_no);         
+         END IF;         
+      EXCEPTION
+         WHEN OTHERS THEN            
+            error_msg_ := Language_SYS.Translate_Constant(lu_name_,sqlerrm);
+            Client_SYS.Add_Warning(lu_name_, error_msg_); 
+            info$_ := Client_SYS.Get_All_Info;
+      END;      
+   END LOOP;
+
+END Approve_For_Credit___;

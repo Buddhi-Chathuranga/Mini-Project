@@ -1,0 +1,226 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     SplitReservationAssistant
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  190410  JaThlk  SCUXXW4-18465, Moved the where clause for SerialNo to projection file from plsvc file.
+--  181001  JaThlk  SCUXXW4-5836, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Temporary_Part_Tracking_Virtual_Rec )
+IS
+   identification_context_  VARCHAR2(25) := '';
+BEGIN   
+   super(rec_);  
+   IF (NOT (rec_.generated)) OR (rec_.generated IS NULL) THEN
+      Temporary_Part_Tracking_API.New(rec_.session_id, rec_.serial_no, rec_.catch_qty, rec_.contract, rec_.part_no, identification_context_); 
+   END IF;   
+END CRUD_Create___;  
+
+
+@Override
+PROCEDURE CRUD_Update___(
+   old_ IN Temporary_Part_Tracking_Virtual_Rec,
+   new_ IN Temporary_Part_Tracking_Virtual_Rec )
+IS
+   
+BEGIN
+   Temporary_Part_Tracking_API.Modify_Catch_Qty(new_.session_id, new_.serial_no, new_.catch_qty);
+   super(old_, new_);
+
+END CRUD_Update___;
+
+
+@Override
+PROCEDURE CRUD_Delete___(   
+   rec_ IN Temporary_Part_Tracking_Virtual_Rec )
+IS
+
+BEGIN
+   Temporary_Part_Tracking_API.Remove(rec_.session_id, rec_.serial_no);  
+   super(rec_);
+       
+END CRUD_Delete___;
+
+
+FUNCTION Get_Initial_Values___ (
+   contract_         IN VARCHAR2,
+   part_no_          IN VARCHAR2,
+   config_id_        IN VARCHAR2,
+   location_no_      IN VARCHAR2,
+   lot_batch_no_     IN VARCHAR2,
+   eng_chg_level_    IN VARCHAR2,
+   waiv_dev_rej_no_  IN VARCHAR2,
+   activity_seq_     IN NUMBER,
+   handling_unit_id_ IN NUMBER,
+   qty_reserved_     IN NUMBER) RETURN Catch_Unit_Info_Structure_Rec
+IS
+   rec_                 Catch_Unit_Info_Structure_Rec;
+   catch_uom_           VARCHAR2(32);
+   catch_unit_enabled_  VARCHAR2(5);
+   qty_onhand_          NUMBER;
+   catch_qty_reserved_  NUMBER;
+BEGIN
+   IF Part_Catalog_API.Get_Catch_Unit_Enabled_Db(part_no_) = 'TRUE' THEN
+      catch_unit_enabled_ := 'TRUE';
+      catch_uom_ := Inventory_Part_API.Get_Catch_Unit_Meas(contract_, part_no_);
+      qty_onhand_ := Inventory_Part_In_Stock_API.Get_Qty_Onhand(contract_, part_no_, config_id_, location_no_, lot_batch_no_, '*', eng_chg_level_, waiv_dev_rej_no_, activity_seq_, handling_unit_id_);
+      IF qty_onhand_ = qty_reserved_ THEN
+         catch_qty_reserved_ := Inventory_Part_In_Stock_API.Get_Sum_Catch_Qty_Onhand(contract_, part_no_, config_id_, location_no_, lot_batch_no_, '*', eng_chg_level_, waiv_dev_rej_no_, activity_seq_, handling_unit_id_);
+      END IF;
+   ELSE
+      catch_unit_enabled_ := 'FALSE';
+   END IF;
+   
+   rec_.catch_uom := catch_uom_;
+   rec_.catch_unit_enabled := catch_unit_enabled_;
+   rec_.catch_qty_reserved := catch_qty_reserved_;
+   RETURN rec_;
+            
+END Get_Initial_Values___;
+
+PROCEDURE Remove_Session___ (
+   session_id_ IN NUMBER ) 
+IS
+   
+BEGIN
+   Temporary_Part_Tracking_API.Remove_Session(session_id_);
+END Remove_Session___;
+
+
+PROCEDURE Split_Stock_Record___ (
+   session_id_       IN NUMBER,
+   ref_type_db_      IN VARCHAR2,
+   ref1_             IN VARCHAR2,
+   ref2_             IN VARCHAR2,
+   ref3_             IN VARCHAR2,
+   ref4_             IN VARCHAR2,
+   ref5_             IN VARCHAR2,
+   ref6_             IN VARCHAR2,
+   contract_         IN VARCHAR2,
+   part_no_          IN VARCHAR2,
+   config_id_        IN VARCHAR2,
+   location_no_      IN VARCHAR2,
+   lot_batch_no_     IN VARCHAR2,
+   eng_chg_level_    IN VARCHAR2,
+   waiv_dev_rej_no_  IN VARCHAR2,
+   activity_seq_     IN NUMBER,
+   handling_unit_id_ IN NUMBER ) 
+IS
+ 
+BEGIN
+   Temporary_Part_Tracking_API.Split_Reservation(  session_id_,
+                                                   ref_type_db_,
+                                                   ref1_,
+                                                   ref2_,
+                                                   ref3_,
+                                                   ref4_,
+                                                   ref5_,
+                                                   ref6_,
+                                                   contract_,
+                                                   part_no_,
+                                                   config_id_,
+                                                   location_no_,
+                                                   lot_batch_no_,
+                                                   eng_chg_level_,
+                                                   waiv_dev_rej_no_,
+                                                   activity_seq_,
+                                                   handling_unit_id_ );
+  
+END Split_Stock_Record___;
+
+
+PROCEDURE Create_Lines___ (
+   parent_objkey_ IN  VARCHAR2,
+   serial_list_   IN  CLOB,
+   session_id_    IN  NUMBER,
+   contract_      IN  VARCHAR2,
+   part_no_       IN  VARCHAR2,
+   info$_         OUT VARCHAR2 ) 
+IS
+   serial_no_list_   CLOB := CONCAT(serial_list_, Client_SYS.record_separator_);
+   line_rec_         Temporary_Part_Tracking_Virtual_Rec;
+   serial_no_        VARCHAR2(50);
+   serial_no_attr_   VARCHAR2(32000);
+   catch_qty_        NUMBER;
+BEGIN  
+   WHILE (INSTR(serial_no_list_, Client_SYS.record_separator_) > 0) LOOP
+         serial_no_ := substr(serial_no_list_, 0, INSTR(serial_no_list_, Client_SYS.record_separator_) - 1);
+         line_rec_.objkey                    := sys_guid();
+         line_rec_.parent_objkey             := parent_objkey_;
+         line_rec_.serial_no                 := serial_no_;
+         line_rec_.session_id                := session_id_;
+         line_rec_.contract                  := contract_;
+         line_rec_.part_no                   := part_no_;
+         line_rec_.generated                 := true;
+         
+         IF serial_no_attr_ IS NULL THEN
+            serial_no_attr_ := serial_no_;
+         ELSE
+            serial_no_attr_ := serial_no_attr_ || Client_SYS.record_separator_ || serial_no_;
+         END IF;
+         CRUD_Create___(line_rec_);
+         serial_no_list_ := SUBSTR(serial_no_list_, (INSTR(serial_no_list_, Client_SYS.record_separator_) + 1)); 
+   END LOOP; 
+   info$_ := Temporary_Part_Tracking_API.New_Clob(serial_no_attr_, session_id_, catch_qty_, contract_, part_no_); 
+END Create_Lines___;
+
+
+
+PROCEDURE Insert_Lines___ (
+   parent_objkey_      IN VARCHAR2,
+   session_id_var_     IN NUMBER,
+   session_id_         IN NUMBER,
+   contract_           IN VARCHAR2,
+   part_no_            IN VARCHAR2 ) 
+IS
+  rec_  Temporary_Part_Tracking_Virtual_Rec;
+  CURSOR Get_Serial_Numbers IS
+  SELECT *
+  FROM temporary_part_tracking_tab
+  WHERE session_id = session_id_var_;
+BEGIN
+   FOR linerec_ IN Get_Serial_Numbers LOOP
+      rec_.objkey                    := sys_guid();
+      rec_.parent_objkey             := parent_objkey_;
+      rec_.serial_no                 := linerec_.serial_no;
+      rec_.session_id                := session_id_;
+      rec_.contract                  := contract_;
+      rec_.part_no                   := part_no_;
+      rec_.generated                 := true;
+      CRUD_Create___(rec_);
+   END LOOP;
+END Insert_Lines___;
+
+
+FUNCTION Get_Barcode_Info___ (
+   parent_session_id_  IN NUMBER,
+   activity_seq_       IN NUMBER) RETURN Barcode_Info_Structure_Rec
+IS
+   rec_               Barcode_Info_Structure_Rec;
+   session_id_temp_   NUMBER;
+BEGIN
+   session_id_temp_           := Get_Session_Id___;
+   rec_.session_id            := session_id_temp_;
+   rec_.session_id_str        := TO_CHAR(session_id_temp_);
+   rec_.parent_session_id_str := TO_CHAR(parent_session_id_);
+   rec_.activity_seq_str      := TO_CHAR(activity_seq_);
+   RETURN rec_;
+END Get_Barcode_Info___;
+
+
+FUNCTION Get_Session_Id___ RETURN NUMBER
+IS
+   session_id_ NUMBER;
+BEGIN
+   session_id_ := Temporary_Part_Tracking_API.Get_Next_Session_Id;
+   RETURN session_id_;
+END Get_Session_Id___;

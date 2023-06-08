@@ -1,0 +1,157 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     PackHuInStockAccordingToPackingInstructionAssistant
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date        Sign    History
+--  ---------   ------  ---------------------------------------------------------
+--  2018-10-10  ChFolk  SCUXXW4-5631, Renamed PackHandlingUnitsInStockAccordingToPackingInstructionAssistant as PackHuInStockAccordingToPackingInstructionAssistant.
+--  2018-10-09  ChFolk  SCUXXW4-5631, renamed PackHandlingUnitsAccordingToPackingInstructionAssistant as PackHandlingUnitsInStockAccordingToPackingInstructionAssistant. 
+--  2018-09-27  ChFolk  SCUXXW4-5631, Created. Overrided methods CRUD_Create___ and CRUD_Update___ of parent to update applied column.
+--  2018-09-27          Added methods Get_Packing_Instruction_Ids___ and Pack_Handling_Units___.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Pack_Hu_Acc_To_Pack_Ins_Virtual_Rec )
+IS
+   line_rec_       Handling_Units_To_Pack_Virtual_Rec;
+   newrec_         Pack_Hu_Acc_To_Pack_Ins_Virtual_Rec;
+   
+   CURSOR get_hu_details IS
+      SELECT contract, handling_unit_id, handling_unit_type_id, location_no
+      FROM    HANDLING_UNIT_TAB
+      WHERE  handling_unit_id IN ( SELECT REGEXP_SUBSTR(rec_.selected_handling_units,'[^,]+', 1, LEVEL) 
+                                   FROM dual
+                                   CONNECT BY REGEXP_SUBSTR(rec_.selected_handling_units, '[^,]+', 1, LEVEL) IS NOT NULL);
+BEGIN
+   newrec_ := rec_;
+   newrec_.lines_ready_to_pack := Fnd_Boolean_API.DB_FALSE;
+   super(newrec_);
+   FOR hu_rec_ IN get_hu_details LOOP
+      line_rec_.objkey        := sys_guid();
+      line_rec_.parent_objkey := rec_.objkey;
+      line_rec_.applied       := false;
+      line_rec_.contract              := hu_rec_.contract;
+      line_rec_.handling_unit_id      := hu_rec_.handling_unit_id;
+      line_rec_.handling_unit_type_id := hu_rec_.handling_unit_type_id;
+      line_rec_.location_no           := hu_rec_.location_no;
+      line_rec_.packing_instruction_id := rec_.packing_instruction_id;
+      line_rec_.handling_unit_category_id  := Handling_Unit_Type_API.Get_Handling_Unit_Category_Id(line_rec_.handling_unit_type_id);
+      IF (Accessory_On_Handling_Unit_API.Handling_Unit_Connected_Exist(line_rec_.handling_unit_id) = Fnd_Boolean_API.DB_TRUE) THEN
+         line_rec_.accessory_exist := true;
+      ELSE
+         line_rec_.accessory_exist := false;
+      END IF;          
+      CRUD_Create___(line_rec_);
+   END LOOP;
+ 
+END CRUD_Create___;
+
+@Override
+PROCEDURE CRUD_Update___(
+   old_ IN Pack_Hu_Acc_To_Pack_Ins_Virtual_Rec,
+   new_ IN Pack_Hu_Acc_To_Pack_Ins_Virtual_Rec )
+IS 
+   parent_key_              Pack_Hu_Acc_To_Pack_Ins_Virtual_Key;
+   key_                     Handling_Units_To_Pack_Virtual_Key;
+   old_child_rec_           Handling_Units_To_Pack_Virtual_Rec;
+   new_child_rec_           Handling_Units_To_Pack_Virtual_Rec;
+   set_lines_ready_to_pick_ BOOLEAN := FALSE;
+   new_rec_                 Pack_Hu_Acc_To_Pack_Ins_Virtual_Rec;
+BEGIN   
+   parent_key_.objkey := old_.objkey;
+   new_rec_ := new_;  
+   IF (NVL(old_.packing_instruction_id, ' ') != NVL(new_.packing_instruction_id, ' ')) THEN      
+      FOR details_rec_ IN Get_Handling_Units_To_Pack_Array___(parent_key_) LOOP
+         key_.objkey := details_rec_.objkey;
+         old_child_rec_ := Get_Record___(key_);
+         new_child_rec_ := old_child_rec_;
+         new_child_rec_.packing_instruction_id := new_.packing_instruction_id;        
+         IF (Packing_Instruction_Node_API.Hu_Type_Exist_As_Leaf_Node(new_.packing_instruction_id, old_child_rec_.handling_unit_type_id) = Fnd_Boolean_API.DB_TRUE) THEN
+            new_child_rec_.applied := TRUE;
+            set_lines_ready_to_pick_ := TRUE;           
+         ELSE
+            new_child_rec_.applied := FALSE;
+         END IF;
+
+         CRUD_Update___(old_child_rec_, new_child_rec_);
+      END LOOP;
+   END IF;
+   IF (set_lines_ready_to_pick_) THEN
+      new_rec_.lines_ready_to_pack := Fnd_Boolean_API.DB_TRUE;
+   END IF;
+   super(old_, new_rec_);
+END CRUD_Update___;
+
+FUNCTION Get_Packing_Instruction_Ids_Hu___(
+   parent_objkey_ IN VARCHAR2 ) RETURN Objid_Arr
+IS
+   parent_key_                 Pack_Hu_Acc_To_Pack_Ins_Virtual_Key;
+   child_rec_                  Handling_Units_To_Pack_Virtual_Rec;
+   child_key_                  Handling_Units_To_Pack_Virtual_Key;
+   handling_unit_types_array_  VARCHAR2(2000);
+   base_collection_            Objid_Arr := Objid_Arr();
+     
+   CURSOR get_objids IS
+      SELECT  objid
+      FROM PACKING_INSTRUCTION_WITH_ROOT
+      WHERE packing_instruction_id IN (SELECT pin1.packing_instruction_id
+                                       FROM  PACKING_INSTRUCTION_NODE pin1
+                                       WHERE pin1.packing_instruction_id = packing_instruction_id
+                                       AND   pin1.handling_unit_type_id IN ( SELECT REGEXP_SUBSTR(handling_unit_types_array_,'[^,]+', 1, LEVEL) 
+                                                                             FROM dual
+                                                                             CONNECT BY REGEXP_SUBSTR(handling_unit_types_array_, '[^,]+', 1, LEVEL) IS NOT NULL)
+                                       AND   NOT EXISTS (SELECT 1
+                                                         FROM  PACKING_INSTRUCTION_NODE pin2
+                                                         WHERE pin2.packing_instruction_id = pin1.packing_instruction_id
+                                                         AND   pin2.parent_node_id = pin1.node_id));
+BEGIN
+   parent_key_.objkey := parent_objkey_;   
+   FOR details_rec_ IN Get_Handling_Units_To_Pack_Array___(parent_key_) LOOP
+      child_key_.objkey := details_rec_.objkey;
+      child_rec_ := Get_Record___(child_key_);
+      IF (handling_unit_types_array_ IS NULL) THEN
+         handling_unit_types_array_ := child_rec_.handling_unit_type_id;         
+      ELSE
+         handling_unit_types_array_ := handling_unit_types_array_ || ',' ||child_rec_.handling_unit_type_id;
+      END IF;      
+   END LOOP;  
+   OPEN get_objids;
+   FETCH get_objids BULK COLLECT INTO base_collection_;
+   CLOSE get_objids;
+
+   RETURN base_collection_;
+END Get_Packing_Instruction_Ids_Hu___;
+
+PROCEDURE Pack_Handling_Units___ (
+   parent_objkey_       IN VARCHAR2,
+   shipment_id_         IN NUMBER )
+IS
+   parent_key_           Pack_Hu_Acc_To_Pack_Ins_Virtual_Key; 
+   child_key_            Handling_Units_To_Pack_Virtual_Key;
+   current_child_rec_    Handling_Units_To_Pack_Virtual_Rec; 
+   msg_clob_             CLOB;
+ 
+BEGIN  
+   parent_key_.objkey := parent_objkey_;   
+   FOR child_rec_ IN Get_Handling_Units_To_Pack_Array___(parent_key_) LOOP
+      child_key_.objkey := child_rec_.objkey;
+      current_child_rec_ := Get_Record___(child_key_);
+      IF (current_child_rec_.applied) THEN 
+         -- Security
+         Handling_Unit_Extended_Initial_Check___(current_child_rec_.handling_unit_id);
+         Message_SYS.Add_Attribute(msg_clob_, 'HANDLING_UNIT_ID', current_child_rec_.handling_unit_id);
+         Message_SYS.Add_Attribute(msg_clob_, 'HANDLING_UNIT_TYPE_ID', current_child_rec_.handling_unit_type_id);
+         Message_SYS.Add_Attribute(msg_clob_, 'PACKING_INSTRUCTION_ID', current_child_rec_.packing_instruction_id);
+      END IF;   
+   END LOOP; 
+   IF (msg_clob_ IS NOT NULL) THEN
+      Handl_Unit_Auto_Pack_Util_API.Auto_Pack_Hu_In_Parent__(msg_clob_, shipment_id_);      
+   END IF;
+   
+END Pack_Handling_Units___;

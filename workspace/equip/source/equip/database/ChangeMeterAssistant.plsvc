@@ -1,0 +1,130 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     ChangeMeterAssistant
+--  Component:    EQUIP
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date        Sign    History
+--  ------      ------  ---------------------------------------------------------
+--  2018-10-19  AMNALK  SAUXXW4-1232, Created using MTG Version: 1.31. EE Source: dlgChangeMeter
+--  2021-01-05  SHAGLK  AM2020R1-7255, Modified Change_Meter___
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Get_Init_Values___(
+	contract_ IN VARCHAR2,
+	mch_code_ IN VARCHAR2,
+	parameter_code_ IN VARCHAR2,
+	test_pnt_seq_ IN NUMBER,
+   test_point_id_ IN VARCHAR2 ) RETURN Assistant_Init_Structure_Rec
+IS
+   return_rec_ Assistant_Init_Structure_Rec;
+BEGIN
+   return_rec_.meter_id_required := Meter_Id_Required_API.Encode(Measurement_Parameter_API.Get_Meter_Id_Required(parameter_code_));
+   return_rec_.change_date := Maintenance_Site_Utility_API.Get_Site_Date(contract_);
+   return_rec_.readings_exists := Equipment_Object_Meas_API.Is_Readings_Exists(test_pnt_seq_,parameter_code_);
+   return_rec_.meter_id_old := Equipment_Object_Meas_API.Get_Prev_Meter_Id_By_Date(return_rec_.change_date, test_pnt_seq_,parameter_code_);
+   return_rec_.parameter_type := Measurement_Parameter_API.Get_Measurement_Param_Type_Db(parameter_code_);
+   return_rec_.latest_measurement_type := Equipment_Object_Meas_API.Get_Latest_Meas_Type(contract_,mch_code_,test_point_id_,parameter_code_);
+   RETURN return_rec_;
+END Get_Init_Values___;
+
+PROCEDURE Change_Meter___ (
+   contract_         IN VARCHAR2,
+   mch_code_         IN VARCHAR2,
+   test_point_id_    IN VARCHAR2,
+   parameter_code_   IN VARCHAR2,
+   start_value_      IN NUMBER,
+   change_date_      IN DATE,
+   meter_id_new_     IN VARCHAR2,
+   meter_flip_value_ IN NUMBER,
+   meas_note_        IN VARCHAR2,
+   end_value_        IN NUMBER,
+   test_point_seq_   IN NUMBER,
+   tool_eq_seq_      IN NUMBER,
+   meter_id_old_     IN VARCHAR2) 
+IS
+   set_or_change_meter_ VARCHAR2(5) := 'MC';
+   parameter_type_      VARCHAR2(5);
+   prev_read_date_      DATE;
+   readings_exists_     NUMBER;
+   meter_required_      VARCHAR2(100);
+   prev_read_value_     NUMBER;
+   measured_value_      NUMBER;
+   measurement_type_    VARCHAR2(20);
+   latest_measurement_type_ VARCHAR2(20); 
+BEGIN
+   parameter_type_ := Measurement_Parameter_API.Get_Measurement_Param_Type_Db(parameter_code_);
+   prev_read_date_ := Equipment_Object_Meas_API.Get_Prev_Rec_Date_By_Date(Maintenance_Site_Utility_API.Get_Site_Date(contract_ ), test_point_seq_,  parameter_code_);
+   readings_exists_ := Equipment_Object_Meas_API.Is_Readings_Exists(test_point_seq_, parameter_code_);   
+   latest_measurement_type_ := Equipment_Object_Meas_API.Get_Latest_Meas_Type(contract_,mch_code_,test_point_id_,parameter_code_);
+   meter_required_ := Meter_Id_Required_API.Encode(Measurement_Parameter_API.Get_Meter_Id_Required(parameter_code_));
+   
+   IF (meter_required_ = 'M') THEN
+      IF meter_id_new_ IS NULL  THEN
+         Error_SYS.Appl_General('ChangeMeter', 'METERREQUIRED: Meter ID is required for parameter :P1',parameter_code_  );         
+      END IF;
+   ELSE
+      IF (meter_id_new_ IS NULL AND meter_id_old_ IS NULL AND meter_required_ != 'OP') THEN
+         Error_SYS.Appl_General('ChangeMeter', 'METERREQUIRED2: A Meter ID is required' );            
+      END IF;
+   END IF;
+   IF (meter_id_old_ IS NOT NULL) THEN  
+      IF (meter_id_new_ = meter_id_old_) THEN
+         Error_SYS.Appl_General('ChangeMeter', 'METERHASNOTCHANGE: New Meter ID cannot be same as old Meter ID.');         
+      END IF;
+      IF (end_value_ IS NULL AND parameter_type_ = 'A')  THEN
+         Error_SYS.Appl_General('ChangeMeter', 'METERENDVALUENULL: Old Meter end value cannot be NULL.');           
+      END IF;
+      prev_read_value_ := Equipment_Object_Meas_API.Get_Latest_Recorded_Value(test_point_seq_, parameter_code_);      
+      IF (parameter_type_ = 'A' AND prev_read_value_ IS NOT NULL ) THEN
+         IF (end_value_ < prev_read_value_ ) THEN
+            Error_SYS.Appl_General('ChangeMeter', 'WRONGENDVALUE: For accumulated parameters, old meter end value must be larger than last recorded reading.');           
+         END IF;
+      END IF;
+   ELSE
+      set_or_change_meter_ := 'MS';
+   END IF;
+   
+   IF (readings_exists_ = 1) THEN
+      IF prev_read_date_ > change_date_ THEN
+         Error_SYS.Appl_General('ChangeMeter', 'WRONGCHANGEDATE: Meter Setup/Change date must be later than Registration date of the last recorded reading.');            
+      END IF;
+   END IF;
+   latest_measurement_type_ := Equipment_Object_Meas_API.Get_Latest_Meas_Type(contract_,mch_code_,test_point_id_,parameter_code_);
+   IF latest_measurement_type_ = 'PreliminaryReading'  THEN
+      Error_SYS.Appl_General('ChangeMeter', 'PROCESSPRELIMINARY: Meter change is not allowed. Process Priliminary Redords first' );
+   END IF;
+   
+   Equipment_Object_Meas_API.Calc_Accumulated_Value(measured_value_, measurement_type_, contract_, mch_code_, parameter_code_, test_point_id_, end_value_, change_date_ - 1/(24*60*60), test_point_seq_);
+   
+   IF (meter_flip_value_ IS NOT NULL AND start_value_ >= meter_flip_value_ ) THEN
+      Error_SYS.Appl_General('ChangeMeter', 'WRONGSTARTVALUE: Start value cannot be larger than meter roll-over value.');                                    
+   END IF;
+
+   
+       Equipment_Object_Meas_API.Handle_Meter_Change(NULL,
+                                                   contract_,
+                                                   mch_code_,
+                                                   test_point_id_,
+                                                   NULL,
+                                                   parameter_code_,
+                                                   start_value_,
+                                                   change_date_,
+                                                   change_date_,
+                                                   meter_id_new_,
+                                                   meter_flip_value_,
+                                                   meas_note_,
+                                                   end_value_,
+                                                   0,
+                                                   0,
+                                                   0,
+                                                   test_point_seq_,
+                                                   tool_eq_seq_,
+                                                   set_or_change_meter_);
+                                              
+                                                 
+END Change_Meter___;
+

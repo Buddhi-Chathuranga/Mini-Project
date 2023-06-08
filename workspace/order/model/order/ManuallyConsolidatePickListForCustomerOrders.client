@@ -1,0 +1,605 @@
+-------------------------------------------------------------------------------------------------
+-- Date        Sign     History
+-- ----------  ------   -------------------------------------------------------------------------
+-- 2021-02-01  DhAplk   SC2020R1-11784, Replaced complex project views using Get methods if reference is read only.
+-- 2018-12-25  SBalLK   SCUXXW4-9240, Converted from frmManualConsolPickList using MTG Version: 1.34.
+-------------------------------------------------------------------------------------------------
+client ManuallyConsolidatePickListForCustomerOrders;
+component ORDER;
+layer Core;
+//projection ManuallyConsolidatePickListForCustomerOrders;
+
+include fragment UserAllowedSiteLovSelector;
+include fragment WarehouseWorkerGroupLovSelector;
+include fragment WarehouseWorkerLov1Selector;
+include fragment CreatePickListLovSelector;
+include fragment CustOrdCust1Selector;
+include fragment WarehouseLovSelector;
+include fragment WarehouseBayLovSelector;
+include fragment WarehouseBayRowLovSelector;
+include fragment WarehouseBayTierLovSelector;
+include fragment SalesPartLov2Selector;
+include fragment OrderCoordinatorLovSelector;
+
+include fragment DocumentText;
+
+-------------------------------- MAIN PAGES ---------------------------------
+
+------------------------------ SEARCH CONTEXT -------------------------------
+searchcontext StorageZoneSearchContext for StorageZonesSearchContextStructure {
+   label = "";
+   field StorageZoneIdRef;
+}
+
+--------------------------------- COMMANDS ----------------------------------
+
+
+----------------------------- VISUAL COMPONENTS -----------------------------
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+navigator {
+   entry ManualConsolidatedPickListforCustomerOrdersNavEntry parent OrderNavigator.SalesReservation at index 1300 {
+      label = "Manual Consolidated Pick List for Customer Orders";
+      page Form home ManualConsolPickList;
+   }
+}
+
+-------------------------------- MAIN PAGES ---------------------------------
+page Form using ManualConsolPickListSet {
+   label = "Manual Consolidated Pick List for Customer Orders";
+   startupmode = search;
+   stateindicator ManualConsolPickListStateIndicator;
+   selector ManualConsolPickListSelector;
+   group ManualConsolPickListGroup;
+
+   tabs {
+      tab {
+         label = "Connected Order Lines";
+         list ConnectedCustomerOrderLineList(ConnectedLineArray);
+      }
+      tab {
+         label = "Available Order Lines";
+         visible = [Objstate != "Created"];
+
+         list AvailableCustomerOrderLineList using GetAvailableCustomerOrderLines(PreliminaryPickListNo, StorageZoneSearchContext.StorageZoneId) {
+            searchcontext StorageZoneSearchContext {
+               defaults = GetStorageZoneSearchContextDefaults(PreliminaryPickListNo);
+            }
+         }
+      }
+   }
+
+   commandgroup CommandGroupCmdGroup {
+      label = "Actions";
+      command CreatePickListCommand;
+      command PrintPickListCommand;
+      command ReportPickingCommand;
+      command ReportPickingOfCustomerOrderCommand;
+   }
+
+   commandgroup DocumentTextCmdGroup {
+      label = "Document Text";
+      command DocumentTextCommand;
+   }
+}
+
+-------------------------------- ASSISTANTS ---------------------------------
+
+--------------------------------- COMMANDS ----------------------------------
+command ConnectAllAvailableOrderLinesCommand for ManualConsolPickList {
+   label = "Connect All Available Order Lines";
+   variable FullSelectionVar Text;
+   mode = Global;
+   enabled = [component.AvailableCustomerOrderLineList.RowCount > 0];
+   bulkexecute {
+      stringify(AvailableCustomerOrderLineList, "PRELIMINARY_PICK_LIST_NO=${HeaderPreliminaryPickListNo}^ACTIVITY_SEQ=${ActivitySeq}^CONFIGURATION_ID=${ConfigurationId}^CONTRACT=${Contract}^ENG_CHG_LEVEL=${EngChgLevel}^WAIV_DEV_REJ_NO=${WaivDevRejNo}^HANDLING_UNIT_ID=${HandlingUnitId}^LINE_ITEM_NO=${LineItemNo}^LINE_NO=${LineNo}^LOCATION_NO=${LocationNo}^LOT_BATCH_NO=${LotBatchNo}^ORDER_NO=${OrderNo}^PART_NO=${PartNo}^PICK_LIST_NO=${PickListNo}^REL_NO=${RelNo}^SERIAL_NO=${SerialNo}^SHIPMENT_ID=${ShipmentId}^", JSON) into FullSelectionVar;
+      call ConnectAllOrderLines(FullSelectionVar);
+   }
+}
+
+command CreatePickListCommand for ManualConsolPickList {
+   label = "Create Pick List";
+   enabled = [PreliminaryPickListNo != null and Objstate = "Preliminary" and ConnectedLineExists = true];
+   execute {
+      confirm("Create pick list for customer order(s)") {
+         when OK {
+            call StartCreateConsolidatedPickList(Contract);
+            // Toast message for background job(18-06-29 Functional meeting).
+            success("This action will run as a background job.");
+         }
+      }
+   }
+}
+command PrintPickListCommand for ManualConsolPickList {
+   label = "Print Pick List";
+   enabled = [PreliminaryPickListNo != null and Objstate = "Created" and PickListPrintedDb = false];
+   execute {
+      call StartPrintPickList();
+      // Toast message for background job(18-06-29 Functional meeting).
+      success("This action will run as a background job.");
+   }
+}
+command DocumentTextCommand for ManualConsolPickList {
+   label = "Document Text";
+   enabled = [true];
+   variable LabelVar {
+      type = Text;
+   }
+   execute {
+      set LabelVar = " for Manual Consolidated Pick List for Customer Orders - ${PreliminaryPickListNo}" {
+         translatable = true;
+      }
+      assistant DocumentText(NoteId, LabelVar) {
+         when NO {
+            exit CANCEL;
+         }
+      }
+   }
+}
+command ReportPickingCommand for ManualConsolPickList {
+   label = "Report Picking";
+   enabled = [PreliminaryPickListNo != null and Objstate = "Created" and AllLinesReported = false];
+   variable PickListNoListVar Text;
+   execute {
+      call CreatePickListNoListForNavigation(PreliminaryPickListNo) into PickListNoListVar;
+      navigate "page/ReportPickingOfPickLists/List?$filter=${PickListNoListVar}";
+   }
+}
+command ReportPickingOfCustomerOrderCommand for ManualConsolPickList {
+   label = "Report Picking of Customer Order Lines";
+   enabled = [PreliminaryPickListNo != null and Objstate = "Created" and AllLinesReported = false];
+   variable PickListNoListVar Text;
+   execute {
+      call CreatePickListNoListForNavigation(PreliminaryPickListNo) into PickListNoListVar;
+      navigate "page/ReportPickingOfPickListLines/Form?$filter=${PickListNoListVar}";
+   }
+}
+
+-- Connected Customer Order Line Tab Commands.
+command DisconnectOrderLineCommand for ConnectedCustomerOrderReservation {
+   label = "Disconnect";
+   enabled = [parent.Objstate != "Created"];
+   mode = SelectedRecords;
+   bulkexecute {
+      bulkcall DisconnectOrderLine() {
+         continueonerror = [true];
+      }
+   }
+}
+
+-- Available Customer Order Line Tab Commands.
+command ConnectOrderLineCommand for AvailableCustomerOrderReservation {
+   label = "Connect";
+   enabled = [HeaderObjstate != "Created" and HeaderPreliminaryPickListNo != null];
+   mode = SelectedRecords;
+   bulkexecute {
+      bulkcall ConnectAvailableOrderLine(OrderNo, LineNo, RelNo, LineItemNo, Contract, PartNo, LocationNo, LotBatchNo, SerialNo, EngChgLevel,
+      WaivDevRejNo, ActivitySeq, HandlingUnitId, ConfigurationId, PickListNo, ShipmentId, HeaderPreliminaryPickListNo) {
+         continueonerror = [true];
+      }
+   }
+}
+
+--------------------------------- SELECTORS ---------------------------------
+@Override
+selector ManualConsolPickListSelector for ManualConsolPickList {
+   label = "${PreliminaryPickListNo} - ${Contract} - ${Objstate}";
+   static PreliminaryPickListNo;
+   static Contract;
+   badge Objstate {
+      style = TextOnly;
+      emphasis Progress2 = [Objstate = "Preliminary"];
+      emphasis Progress12 = [Objstate = "Created"];
+   }
+}
+
+---------------------------------- GROUPS -----------------------------------
+group ManualConsolPickListGroup for ManualConsolPickList {
+   label = "";
+   field PreliminaryPickListNo {
+
+      size = Small;
+   }
+   lov ContractRef with ReferenceUserAllowedSiteLovSelector {
+      size = Small;
+      description = ContractRef.ContractDesc;
+
+   }
+   lov WorkerGroupRef with ReferenceWarehouseWorkerGroupLovSelector {
+      editable = [Objstate != "Created"];
+      size = Small;
+      description = WorkerGroupDescription;
+      validate command {
+         execute {
+            set WorkerId = "";
+         }
+      }
+   }
+   lov WorkerIdRef with ReferenceWarehouseWorkerLov1Selector {
+      contactwidget {
+         enabled = [WorkerId];
+         source = Person;
+      }
+      editable = [Objstate != "Created"];
+      size = Small;
+      validate command {
+         execute {
+            set WorkerGroup = WorkerIdRef.WorkerGroup;
+         }
+      }
+   }
+   field DocumentTextDb {
+      size = Small;
+   }
+   field PickListPrintedDb {
+      size = Small;
+   }
+   field NoteText {
+      size = Medium;
+      multiline = true;
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+list ConnectedCustomerOrderLineList for ConnectedCustomerOrderReservation {
+   label = "";
+   field OrderNo {
+      size = Small;
+   }
+   field LineNo {
+      size = Small;
+   }
+   field RelNo {
+      size = Small;
+   }
+   field LineItemNo {
+      columnvisible = [false];
+   }
+   lov PartNoRef with ReferenceSalesPartLov2Selector {
+      description = InventoryPartRef.Description;
+   }
+   field PackageComponentDb {
+      size = Small;
+   }
+   field CustomerOrderLineRef.Objstate {
+      size = Small;
+      label = "Status";
+   }
+   field PickListNo {
+      size = Small;
+   }
+   field TaskId {
+      size = Small;
+   }
+   field ConfigurationId {
+      size = Small;
+   }
+   field InventoryPartRef.UnitMeas {
+      size = Small;
+      label = "UoM";
+   }
+   field QtyPicked;
+   field QtyAssigned;
+   field LocationNo {
+      size = Small;
+   }
+   field HandlingUnitIdRef;
+   lov HandlingUnitTypeRef with ReferenceHandlingUnitTypeSelector {
+      description = HandlingUnitTypeRef.Description;
+   }
+   field HandlingUnitIdRef.Sscc {
+      size = Small;
+      label = "SSCC";
+   }
+   field HandlingUnitIdRef.AltHandlingUnitLabelId {
+      size = Small;
+      label = "Alt Handling Unit Label ID";
+   }
+   field WarehouseId {
+      size = Small;
+   }
+   field BayId {
+      size = Small;
+   }
+   field RowId {
+      size = Small;
+   }
+   field TierId {
+      size = Small;
+   }
+   field BinId {
+      size = Small;
+   }
+   field LotBatchNo {
+      size = Small;
+   }
+   field SerialNo {
+      size = Small;
+   }
+   lov ConditionCodeRef with ReferenceConditionCodeSelector {
+      description = ConditionCodeRef.Description;
+   }
+   field CustomerOrderLineRef.PartOwnership {
+      size = Small;
+      label = "Ownership";
+   }
+   field OwnerName {
+      size = Small;
+   }
+   field OwningCustomerName {
+      size = Small;
+   }
+   field EngChgLevel {
+      size = Small;
+   }
+   field CustomerOrderLineRef.PlannedDeliveryDate {
+      label = "Planned Delivery Date/Time";
+   }
+   lov CustomerNoRef with ReferenceCustOrdCust1Selector {
+      contactwidget {
+         enabled = [true];
+         source = Customer;
+      }
+      description = CustomerNoRef.Name;
+   }
+   lov AuthorizeCodeRef with ReferenceOrderCoordinatorLovSelector {
+      contactwidget {
+         enabled = [true];
+         source = Person;
+      }
+      description = AuthorizeCodeRef.Name;
+   }
+   field CustomerOrderLineRef.WantedDeliveryDate {
+      label = "Wanted Delivery Date/Time";
+   }
+   field PlannedShipDate;
+   field PlannedDueDate;
+   lov RouteIdRef with ReferenceDeliveryRouteSelector {
+      description = RouteIdRef.Description;
+   }
+   field Priority;
+   @DynamicComponentDependency PROJ
+   lov ProjectRef with ReferenceProjectSelector {
+      description = ProjectName;
+   }
+   field ActivitySeq;
+   @DynamicComponentDependency PROJ
+   field SubProjectId {
+      size = Small;
+   }
+   @DynamicComponentDependency PROJ
+   field SubProjectDescription {
+      size = Small;
+   }
+   @DynamicComponentDependency PROJ
+   field ActivityNo {
+      size = Small;
+   }
+   @DynamicComponentDependency PROJ
+   field ActivityDescription {
+      size = Small;
+   }
+   lov TopParentHandlingUnitTypeRef with ReferenceHandlingUnitTypeSelector {
+      description = TopParentHandlingUnitTypeRef.Description;
+   }
+   field TopParentSSCC {
+      size = Small;
+   }
+   field TopParentAltHandlingUnitLabelId {
+      size = Small;
+   }
+
+   command DisconnectOrderLineCommand;
+}
+list AvailableCustomerOrderLineList for AvailableCustomerOrderReservation {
+   label = "";
+   field Contract {
+      columnvisible = [false];
+      searchable = false;
+   }
+   field OrderNoRef {
+      size = Small;
+   }
+   field LineNo {
+      size = Small;
+   }
+   field RelNo {
+      size = Small;
+   }
+   lov PartNoRef with ReferenceSalesPartLov2Selector {
+      description = InventoryPartRef.Description;
+   }
+   field PackageComponentDb {
+      size = Small;
+   }
+   field CustomerOrderLineRef.Objstate {
+      size = Small;
+      label = "Status";
+   }
+   field PickListNo {
+      size = Small;
+   }
+   field ConfigurationId {
+      size = Small;
+   }
+   field InventoryPartRef.UnitMeas {
+      size = Small;
+      label = "UoM";
+   }
+   field QtyPicked;
+   field QtyAssigned;
+   field LocationNo {
+      size = Small;
+   }
+   field HandlingUnitIdRef;
+   field HandlingUnitIdRef.HandlingUnitTypeId {
+      size = Small;
+      label = "Handling Unit Type ID";
+   }
+   field HandlingUnitTypeDescription;
+   field HandlingUnitIdRef.Sscc {
+      size = Small;
+      label = "SSCC";
+   }
+   field HandlingUnitIdRef.AltHandlingUnitLabelId {
+      size = Small;
+      label = "Alt Handling Unit Label ID";
+   }
+   field WarehouseId {
+      size = Small;
+   }
+   field BayId {
+      size = Small;
+   }
+   field RowId {
+      size = Small;
+   }
+   field TierId {
+      size = Small;
+   }
+   field BinId {
+      size = Small;
+   }
+   field LotBatchNo {
+      size = Small;
+   }
+   field SerialNo {
+      size = Small;
+   }
+   lov ConditionCodeRef with ReferenceConditionCodeSelector {
+      description = ConditionCodeRef.Description;
+   }
+   field CustomerOrderLineRef.PartOwnership {
+      size = Small;
+      label = "Ownership";
+   }
+   field OwnerName {
+      size = Small;
+   }
+   field OwningCustomerName {
+      size = Small;
+   }
+   field EngChgLevel {
+      size = Small;
+   }
+   field CustomerOrderLineRef.PlannedDeliveryDate {
+      label = "Planned Delivery Date/Time";
+   }
+   lov OrderCustomerNoRef with ReferenceCustOrdCust1Selector {
+      contactwidget {
+         enabled = [true];
+         source = Customer;
+      }
+      description = OrderCustomerNoRef.Name;
+   }
+   lov AuthorizeCodeRef with ReferenceOrderCoordinatorLovSelector {
+      contactwidget {
+         enabled = [true];
+         source = Person;
+      }
+      description = AuthorizeCodeRef.Name;
+   }
+   field CustomerOrderLineRef.WantedDeliveryDate {
+      label = "Wanted Delivery Date/Time";
+   }
+   field PlannedShipDate;
+   field PlannedDueDate;
+   lov RouteIdRef with ReferenceDeliveryRouteSelector {
+      description = RouteIdRef.Description;
+   }
+   field Priority;
+   field ProjectId {
+      size = Small;
+   }
+   @DynamicComponentDependency PROJ
+   field ProjectName {
+      size = Small;
+   }
+   @DynamicComponentDependency PROJ
+   field SubProjectId {
+      size = Small;
+   }
+   @DynamicComponentDependency PROJ
+   field SubProjectDescription {
+      size = Small;
+   }
+   @DynamicComponentDependency PROJ
+   field ActivityNo {
+      size = Small;
+   }
+   @DynamicComponentDependency PROJ
+   field ActivityDescription {
+      size = Small;
+   }
+   field ActivitySeq;
+   field TopParentHandlingUnitTypeID {
+      size = Small;
+   }
+   field TopParentHandlingUnitTypeDesc {
+      size = Small;
+   }
+   field TopParentSSCC {
+      size = Small;
+   }
+   field TopParentAltHandlingUnitLabelId {
+      size = Small;
+   }
+
+   field CustomerNoRef {
+      size = Small;
+      searchable = true;
+      columnvisible = [false];
+   }
+   field ShipViaCodeRef {
+      size = Small;
+      searchable = true;
+      columnvisible = [false];
+   }
+   field ForwardAgentIdRef {
+      size = Small;
+      searchable = true;
+      columnvisible = [false];
+   }
+   field LocationGroupRef {
+      size = Small;
+      searchable = true;
+      columnvisible = [false];
+   }
+
+
+   commandgroup ConnectCommandGroup {
+      command ConnectAllAvailableOrderLinesCommand;
+      command ConnectOrderLineCommand;
+   }
+}
+
+----------------------------------- CARDS -----------------------------------
+
+---------------------------------- DIALOGS ----------------------------------
+
+---------------------------------- CHARTS -----------------------------------
+
+--------------------------------- CALENDARS ---------------------------------
+
+---------------------------------- SHEETS -----------------------------------
+
+----------------------------- STATE INDICATORS ------------------------------
+@Override
+stateindicator ManualConsolPickListStateIndicator for ManualConsolPickList {
+   state "Preliminary" {
+      completed = 10%;
+      emphasis Progress2 = [Objstate = "Preliminary"];
+   }
+   state "Created" {
+      completed = 100%;
+      emphasis Progress12 = [Objstate = "Created"];
+   }
+}
+
+----------------------------------- TREES -----------------------------------
+
+---------------------------------- PLUGINS ----------------------------------
+
+------------------------------- IMAGE VIEWERS -------------------------------
+
+--------------------------------- CHECKLIST ---------------------------------

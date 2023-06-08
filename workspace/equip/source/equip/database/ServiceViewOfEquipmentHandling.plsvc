@@ -1,0 +1,516 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: ServiceViewOfEquipmentHandling
+--  Component:    EQUIP
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign    History
+-- ----------  ------  ---------------------------------------------------------
+-- 2021-06-30 KrRaLK AM21R2-1682, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+----
+
+FUNCTION Get_Default_Values_For_Page_Filter___ RETURN Nav_Page_Filter_Structure_Rec
+IS
+   page_filter_values_ Nav_Page_Filter_Structure_Rec;
+BEGIN
+	page_filter_values_.mch_code              := NULL;
+   page_filter_values_.contract              := NULL;
+   page_filter_values_.structure_in_tree     := 'F';
+   page_filter_values_.equipment_object_seq  := NULL;
+   
+   RETURN page_filter_values_;
+END Get_Default_Values_For_Page_Filter___;
+
+FUNCTION Get_Navigation_Url___(
+   equipment_object_seq_ IN NUMBER,
+   navigating_form_      IN VARCHAR2,
+   type_of_obj_          IN VARCHAR2) RETURN CLOB
+IS
+   first_iter_       NUMBER;
+   navigation_url_   VARCHAR2(32000);
+   page_             VARCHAR2(200);
+   mch_code_         equipment_object_tab.mch_code%TYPE := Equipment_Object_API.Get_Mch_Code(equipment_object_seq_);
+   contract_         equipment_object_tab.contract%TYPE := Equipment_Object_API.Get_Contract(equipment_object_seq_);
+   inv_url_          EXCEPTION;
+   
+   $IF Component_Pcmsci_SYS.INSTALLED AND Component_Srvcon_SYS.INSTALLED $THEN
+   CURSOR get_sc IS
+      SELECT contr_line.contract_id contract_id
+      FROM   psc_contr_product contr_line
+      WHERE  contr_line.contract_id IN (SELECT contract_id
+                                        FROM   sc_service_contract)
+      AND    (connection_type_db = 'REQUEST')
+      AND    (EXISTS (SELECT 1
+                      FROM   psc_srv_line_objects obj_lines
+                      WHERE  obj_lines.contract_id = contr_line.contract_id
+                      AND    obj_lines.line_no = contr_line.line_no
+                      AND    obj_lines.equipment_object_seq = equipment_object_seq_));
+
+   CURSOR get_all_sc IS
+      SELECT contr_line.contract_id contract_id
+      FROM   psc_contr_product contr_line
+      WHERE  contr_line.contract_id IN (SELECT contract_id
+                                        FROM   sc_service_contract)
+      AND    (connection_type_db = 'REQUEST')
+      AND    (EXISTS (SELECT 1
+                      FROM   psc_srv_line_objects obj_lines
+                      WHERE  obj_lines.contract_id = contr_line.contract_id
+                      AND    obj_lines.line_no = contr_line.line_no
+                      AND    (obj_lines.equipment_object_seq) IN (SELECT equipment_object_seq
+                                                                              FROM   equipment_object
+                                                                              START  WITH equipment_object_seq = equipment_object_seq_
+                                                                              CONNECT BY PRIOR equipment_object_seq = functional_object_seq)));
+   $END
+
+   $IF Component_Recsrv_SYS.INSTALLED $THEN
+   CURSOR get_program IS
+      SELECT rec_ser.rec_program_id       rec_program_id,
+             rec_ser.rec_program_revision rec_program_revision
+      FROM   recurring_service_program_tab rec_ser,
+             equipment_object_tab          equ_obj
+      WHERE  (rec_ser.obj_conn_lu_name = 'EquipmentObject' AND equ_obj.equipment_object_seq = equipment_object_seq_ AND equ_obj.rowkey = rec_ser.obj_conn_rowkey)
+      OR     (EXISTS (SELECT 1
+                      FROM   rec_program_scope_schedule rec_sch,
+                             recurring_service_scope    rec_scp
+                      WHERE  rec_ser.rec_program_id = rec_sch.rec_program_id
+                      AND    rec_ser.rec_program_revision = rec_sch.rec_program_revision
+                      AND    rec_ser.rec_program_id = rec_scp.rec_program_id
+                      AND    rec_ser.rec_program_revision = rec_scp.rec_program_revision
+                      AND    rec_sch.rec_scope_id = rec_scp.rec_scope_id
+                      AND    rec_scp.obj_conn_lu_name_db = 'EquipmentObject'
+                      AND    equ_obj.equipment_object_seq = equipment_object_seq_
+                      AND    rec_scp.obj_conn_rowkey = equ_obj.rowkey))
+      ORDER  BY rec_program_id,
+                rec_program_revision;
+
+   CURSOR get_all_program IS
+      SELECT rec_ser.rec_program_id       rec_program_id,
+             rec_ser.rec_program_revision rec_program_revision
+      FROM   recurring_service_program_tab rec_ser
+      WHERE  (rec_ser.obj_conn_lu_name = 'EquipmentObject' AND rec_ser.obj_conn_rowkey IN (SELECT rowkey
+                                                                                           FROM   equipment_object_tab
+                                                                                           START  WITH equipment_object_seq = equipment_object_seq_
+                                                                                           CONNECT BY PRIOR equipment_object_seq = functional_object_seq))
+      OR     (EXISTS (SELECT 1
+                      FROM   rec_program_scope_schedule rec_sch,
+                             recurring_service_scope    rec_scp
+                      WHERE  rec_ser.rec_program_id = rec_sch.rec_program_id
+                      AND    rec_ser.rec_program_revision = rec_sch.rec_program_revision
+                      AND    rec_ser.rec_program_id = rec_scp.rec_program_id
+                      AND    rec_ser.rec_program_revision = rec_scp.rec_program_revision
+                      AND    rec_sch.rec_scope_id = rec_scp.rec_scope_id
+                      AND    rec_scp.obj_conn_lu_name_db = 'EquipmentObject'
+                      AND    ((rec_scp.obj_conn_rowkey) IN (SELECT rowkey
+                                                            FROM   equipment_object_tab
+                                                            START  WITH equipment_object_seq = equipment_object_seq_
+                                                            CONNECT BY PRIOR equipment_object_seq = functional_object_seq))))
+      ORDER  BY rec_program_id,
+                rec_program_revision;
+   $END
+
+   $IF Component_Reqmgt_SYS.INSTALLED AND Component_Recsrv_SYS.INSTALLED $THEN
+   CURSOR get_req IS
+      SELECT req.req_id req_id
+      FROM   srv_request req
+      WHERE  req.objstate NOT IN ('Closed', 'Completed', 'Cancelled')
+      AND    (req.req_id IN (SELECT srv_req.req_id
+                             FROM   srv_request_scope_all srv_req
+                             WHERE  srv_req.req_id = req.req_id
+                             AND    req.source_db = 'MANUAL'
+                             AND    srv_req.actual_obj_conn_lu_name_db = 'EquipmentObject'
+                             AND    srv_req.actual_object_site = contract_
+                             AND    srv_req.actual_object_id = mch_code_) OR req.req_id IN (SELECT srv_req.req_id
+                                                                                              FROM   srv_request_scope_all      srv_req,
+                                                                                                     recurring_service_scope    rec_scp,
+                                                                                                     rec_program_scope_schedule rec_sch,
+                                                                                                     equipment_object_tab       equ_obj
+                                                                                              WHERE  srv_req.req_id = req.req_id
+                                                                                              AND    req.source_db = 'RECURRING_SERVICE'
+                                                                                              AND    rec_scp.obj_conn_lu_name_db = 'EquipmentObject'
+                                                                                              AND    rec_sch.rec_program_id = rec_scp.rec_program_id
+                                                                                              AND    rec_sch.rec_program_revision = rec_scp.rec_program_revision
+                                                                                              AND    rec_sch.rec_scope_id = rec_scp.rec_scope_id
+                                                                                              AND    rec_sch.srv_request_scope_id = srv_req.srv_request_scope_id
+                                                                                              AND    equ_obj.equipment_object_seq = equipment_object_seq_
+                                                                                              AND    rec_scp.obj_conn_rowkey = equ_obj.rowkey));
+
+   CURSOR get_all_req IS
+      SELECT req.req_id req_id
+      FROM   srv_request req
+      WHERE  req.objstate NOT IN ('Closed', 'Completed', 'Cancelled')
+      AND    (req.req_id IN (SELECT srv_req.req_id
+                             FROM   srv_request_scope_all srv_req
+                             WHERE  srv_req.req_id = req.req_id
+                             AND    req.source_db = 'MANUAL'
+                             AND    srv_req.actual_obj_conn_lu_name_db = 'EquipmentObject'
+                             AND    (srv_req.actual_object_id, srv_req.actual_object_site) IN (SELECT mch_code,
+                                                                                                      contract
+                                                                                               FROM   equipment_object
+                                                                                               START  WITH equipment_object_seq = equipment_object_seq_
+                                                                                               CONNECT BY PRIOR equipment_object_seq = functional_object_seq)) OR req.req_id IN (SELECT srv_req.req_id
+                                                                                                                                                              FROM   srv_request_scope_all      srv_req,
+                                                                                                                                                                     recurring_service_scope    rec_scp,
+                                                                                                                                                                     rec_program_scope_schedule rec_sch
+                                                                                                                                                              WHERE  srv_req.req_id = req.req_id
+                                                                                                                                                              AND    req.source_db = 'RECURRING_SERVICE'
+                                                                                                                                                              AND    rec_scp.obj_conn_lu_name_db = 'EquipmentObject'
+                                                                                                                                                              AND    rec_sch.rec_program_id = rec_scp.rec_program_id
+                                                                                                                                                              AND    rec_sch.rec_program_revision = rec_scp.rec_program_revision
+                                                                                                                                                              AND    rec_sch.rec_scope_id = rec_scp.rec_scope_id
+                                                                                                                                                              AND    rec_sch.srv_request_scope_id = srv_req.srv_request_scope_id
+                                                                                                                                                              AND    ((rec_scp.obj_conn_rowkey) IN (SELECT rowkey
+                                                                                                                                                                                                    FROM   equipment_object_tab
+                                                                                                                                                                                                    START  WITH equipment_object_seq = equipment_object_seq_
+                                                                                                                                                                                                    CONNECT BY PRIOR equipment_object_seq = functional_object_seq))));
+   $END
+
+   $IF Component_Reqmgt_SYS.INSTALLED AND Component_Wo_SYS.INSTALLED $THEN
+   CURSOR get_active_task IS
+      SELECT task_scope.task_seq task_seq
+      FROM   srv_request_scope_all srv_req,
+             task_request_scope    task_scope,
+             jt_task_tab           task_rec
+      WHERE  srv_req.actual_obj_conn_lu_name_db = 'EquipmentObject'
+      AND    srv_req.actual_object_site = contract_
+      AND    srv_req.actual_object_id = mch_code_
+      AND    srv_req.srv_request_scope_id = task_scope.srv_request_scope_id
+      AND    task_rec.task_seq = task_scope.task_seq
+      AND    task_rec.rowstate NOT IN ('FINISHED', 'CANCELLED', 'WORKDONE');
+
+   CURSOR get_all_active_task IS
+      SELECT task_scope.task_seq task_seq
+      FROM   srv_request_scope_all srv_req,
+             task_request_scope    task_scope,
+             jt_task_tab           task_rec
+      WHERE  srv_req.actual_obj_conn_lu_name_db = 'EquipmentObject'
+      AND    srv_req.srv_request_scope_id = task_scope.srv_request_scope_id
+      AND    task_rec.task_seq = task_scope.task_seq
+      AND    task_rec.rowstate NOT IN ('FINISHED', 'CANCELLED', 'WORKDONE')
+      AND    (srv_req.actual_object_id, srv_req.actual_object_site) IN (SELECT mch_code,
+                                                                               contract
+                                                                        FROM   equipment_object
+                                                                        START  WITH equipment_object_seq = equipment_object_seq_
+                                                                        CONNECT BY PRIOR equipment_object_seq = functional_object_seq);
+   $END
+
+   $IF Component_Reqmgt_SYS.INSTALLED AND Component_Recsrv_SYS.INSTALLED $THEN
+   CURSOR get_fin_req IS
+      SELECT req.req_id req_id
+      FROM   srv_request req
+      WHERE  req.objstate IN ('Closed', 'Completed')
+      AND    (req.req_id IN (SELECT srv_req.req_id
+                             FROM   srv_request_scope_all srv_req
+                             WHERE  srv_req.req_id = req.req_id
+                             AND    req.source_db = 'MANUAL'
+                             AND    srv_req.actual_obj_conn_lu_name_db = 'EquipmentObject'
+                             AND    srv_req.actual_object_site = contract_
+                             AND    srv_req.actual_object_id = mch_code_) OR req.req_id IN (SELECT srv_req.req_id
+                                                                                              FROM   srv_request_scope_all      srv_req,
+                                                                                                     recurring_service_scope    rec_scp,
+                                                                                                     rec_program_scope_schedule rec_sch,
+                                                                                                     equipment_object_tab       equ_obj
+                                                                                              WHERE  srv_req.req_id = req.req_id
+                                                                                              AND    req.source_db = 'RECURRING_SERVICE'
+                                                                                              AND    rec_scp.obj_conn_lu_name_db = 'EquipmentObject'
+                                                                                              AND    rec_sch.rec_program_id = rec_scp.rec_program_id
+                                                                                              AND    rec_sch.rec_program_revision = rec_scp.rec_program_revision
+                                                                                              AND    rec_sch.rec_scope_id = rec_scp.rec_scope_id
+                                                                                              AND    rec_sch.srv_request_scope_id = srv_req.srv_request_scope_id
+                                                                                              AND    equ_obj.equipment_object_seq = equipment_object_seq_
+                                                                                              AND    rec_scp.obj_conn_rowkey = equ_obj.rowkey));
+
+   CURSOR get_all_fin_req IS
+      SELECT req.req_id req_id
+      FROM   srv_request req
+      WHERE  req.objstate IN ('Closed', 'Completed')
+      AND    (req.req_id IN (SELECT srv_req.req_id
+                             FROM   srv_request_scope_all srv_req
+                             WHERE  srv_req.req_id = req.req_id
+                             AND    req.source_db = 'MANUAL'
+                             AND    srv_req.actual_obj_conn_lu_name_db = 'EquipmentObject'
+                             AND    (srv_req.actual_object_id, srv_req.actual_object_site) IN (SELECT mch_code,
+                                                                                                      contract
+                                                                                               FROM   equipment_object
+                                                                                               START  WITH equipment_object_seq = equipment_object_seq_
+                                                                                               CONNECT BY PRIOR equipment_object_seq = functional_object_seq)) OR req.req_id IN (SELECT srv_req.req_id
+                                                                                                                                                              FROM   srv_request_scope_all      srv_req,
+                                                                                                                                                                     recurring_service_scope    rec_scp,
+                                                                                                                                                                     rec_program_scope_schedule rec_sch
+                                                                                                                                                              WHERE  srv_req.req_id = req.req_id
+                                                                                                                                                              AND    req.source_db = 'RECURRING_SERVICE'
+                                                                                                                                                              AND    rec_scp.obj_conn_lu_name_db = 'EquipmentObject'
+                                                                                                                                                              AND    rec_sch.rec_program_id = rec_scp.rec_program_id
+                                                                                                                                                              AND    rec_sch.rec_program_revision = rec_scp.rec_program_revision
+                                                                                                                                                              AND    rec_sch.rec_scope_id = rec_scp.rec_scope_id
+                                                                                                                                                              AND    rec_sch.srv_request_scope_id = srv_req.srv_request_scope_id
+                                                                                                                                                              AND    ((rec_scp.obj_conn_rowkey) IN (SELECT rowkey
+                                                                                                                                                                                                    FROM   equipment_object_tab
+                                                                                                                                                                                                    START  WITH equipment_object_seq = equipment_object_seq_
+                                                                                                                                                                                                    CONNECT BY PRIOR equipment_object_seq = functional_object_seq))));
+   $END
+
+   $IF Component_Reqmgt_SYS.INSTALLED AND Component_Wo_SYS.INSTALLED $THEN
+   CURSOR get_fin_task IS
+      SELECT task_scope.task_seq task_seq
+      FROM   srv_request_scope_all srv_req,
+             task_request_scope    task_scope,
+             jt_task_tab           task_rec
+      WHERE  srv_req.actual_obj_conn_lu_name_db = 'EquipmentObject'
+      AND    srv_req.actual_object_site = contract_
+      AND    srv_req.actual_object_id = mch_code_
+      AND    srv_req.srv_request_scope_id = task_scope.srv_request_scope_id
+      AND    task_rec.task_seq = task_scope.task_seq
+      AND    task_rec.rowstate IN ('FINISHED', 'WORKDONE');
+
+   CURSOR get_all_fin_task IS
+      SELECT task_scope.task_seq task_seq
+      FROM   srv_request_scope_all srv_req,
+             task_request_scope    task_scope,
+             jt_task_tab           task_rec
+      WHERE  srv_req.actual_obj_conn_lu_name_db = 'EquipmentObject'
+      AND    srv_req.srv_request_scope_id = task_scope.srv_request_scope_id
+      AND    task_rec.task_seq = task_scope.task_seq
+      AND    task_rec.rowstate IN ('FINISHED', 'WORKDONE')
+      AND    (srv_req.actual_object_id, srv_req.actual_object_site) IN (SELECT mch_code,
+                                                                               contract
+                                                                        FROM   equipment_object
+                                                                        START  WITH equipment_object_seq = equipment_object_seq_
+                                                                        CONNECT BY PRIOR equipment_object_seq = functional_object_seq);
+   $END
+BEGIN
+   first_iter_ := 0;
+   IF navigating_form_ = 'ScContract' THEN
+      $IF Component_Pcmsci_SYS.INSTALLED AND Component_Srvcon_SYS.INSTALLED $THEN
+      IF type_of_obj_ = 'Single' THEN
+         navigation_url_ := 'tree/RequestContract/RequestContractTree?$filter=';
+         page_           := 'Request Contract';
+         FOR rec_ IN get_sc LOOP
+            IF first_iter_ = 0 THEN
+               navigation_url_ := navigation_url_ || ' ContractId eq ''' || rec_.contract_id || '''';
+            ELSE
+               navigation_url_ := navigation_url_ || ' or ContractId eq ''' || rec_.contract_id || '''';
+            END IF; 
+            first_iter_ := 1;
+            IF (LENGTH(navigation_url_) > 30000) THEN
+               RAISE inv_url_;
+            END IF;
+         END LOOP;
+      ELSE
+         navigation_url_ := 'tree/RequestContract/RequestContractTree?$filter=';
+         page_           := 'Request Contract';
+         FOR rec_ IN get_all_sc LOOP
+            IF first_iter_ = 0 THEN
+               navigation_url_ := navigation_url_ || ' ContractId eq ''' || rec_.contract_id || '''';
+            ELSE
+               navigation_url_ := navigation_url_ || ' or ContractId eq ''' || rec_.contract_id || '''';
+            END IF;        
+            first_iter_ := 1;
+            IF (LENGTH(navigation_url_) > 30000) THEN
+               RAISE inv_url_;
+            END IF;
+         END LOOP;
+      END IF;
+      $ELSE
+      navigation_url_ := '';
+      $END
+   ELSIF navigating_form_ = 'ServiceProgram' THEN
+      $IF Component_Recsrv_SYS.INSTALLED $THEN
+      IF type_of_obj_ = 'Single' THEN
+         navigation_url_ := 'page/RecurringServiceProgram/Form?$filter=';
+         page_           := 'Recurring Service Program';
+         FOR rec_ IN get_program LOOP
+            IF first_iter_ = 0 THEN
+               navigation_url_ := navigation_url_ || ' RecProgramId eq ''' || rec_.rec_program_id || '''';
+            ELSE
+               navigation_url_ := navigation_url_ || ' or RecProgramId eq ''' || rec_.rec_program_id || '''';
+            END IF;
+            first_iter_ := 1;
+            IF (LENGTH(navigation_url_) > 30000) THEN
+               RAISE inv_url_;
+            END IF;
+         END LOOP;
+      ELSE
+         navigation_url_ := 'page/RecurringServiceProgram/Form?$filter=';
+         page_           := 'Recurring Service Program';
+         FOR rec_ IN get_all_program LOOP
+            IF first_iter_ = 0 THEN
+               navigation_url_ := navigation_url_ || ' RecProgramId eq ''' || rec_.rec_program_id || '''';
+            ELSE
+               navigation_url_ := navigation_url_ || ' or RecProgramId eq ''' || rec_.rec_program_id || '''';
+            END IF;
+            first_iter_ := 1;
+            IF (LENGTH(navigation_url_) > 30000) THEN
+               RAISE inv_url_;
+            END IF;
+         END LOOP;
+      END IF;
+      $ELSE
+      navigation_url_ := '';
+      $END
+   
+   ELSIF navigating_form_ = 'ActiveSrvRequest' THEN
+      $IF Component_Reqmgt_SYS.INSTALLED AND Component_Recsrv_SYS.INSTALLED $THEN
+      IF type_of_obj_ = 'Single' THEN
+         navigation_url_ := 'page/Request/RequestManagementPage?$filter=';
+         page_           := 'Request';
+         FOR rec_ IN get_req LOOP
+            IF first_iter_ = 0 THEN
+               navigation_url_ := navigation_url_ || ' ReqId eq ''' || rec_.req_id || '''';
+            ELSE
+               navigation_url_ := navigation_url_ || ' or ReqId eq ''' || rec_.req_id || '''';
+            END IF;
+            first_iter_ := 1;
+            IF (LENGTH(navigation_url_) > 30000) THEN
+               RAISE inv_url_;
+            END IF;
+         END LOOP;
+      ELSE
+         navigation_url_ := 'page/Request/RequestManagementPage?$filter=';
+         page_           := 'Request';
+         FOR rec_ IN get_all_req LOOP
+            IF first_iter_ = 0 THEN
+               navigation_url_ := navigation_url_ || ' ReqId eq ''' || rec_.req_id || '''';
+            ELSE
+               navigation_url_ := navigation_url_ || ' or ReqId eq ''' || rec_.req_id || '''';
+            END IF;
+            first_iter_ := 1;
+            IF (LENGTH(navigation_url_) > 30000) THEN
+               RAISE inv_url_;
+            END IF;
+         END LOOP;
+      END IF;
+      $ELSE
+      navigation_url_ := '';
+      $END
+   ELSIF navigating_form_ = 'ActiveWorkTask' THEN
+      $IF Component_Reqmgt_SYS.INSTALLED AND Component_Wo_SYS.INSTALLED $THEN
+      IF type_of_obj_ = 'Single' THEN
+         navigation_url_ := 'page/WorkTaskService/Form?$filter=';
+         page_           := 'Work Task';
+         FOR rec_ IN get_active_task LOOP
+            IF first_iter_ = 0 THEN
+               navigation_url_ := navigation_url_ || ' TaskSeq eq ' || rec_.task_seq;
+            ELSE
+               navigation_url_ := navigation_url_ || ' or TaskSeq eq ' || rec_.task_seq;
+            END IF;
+            first_iter_ := 1;
+            IF (LENGTH(navigation_url_) > 30000) THEN
+               RAISE inv_url_;
+            END IF;
+         END LOOP;
+      ELSE
+         navigation_url_ := 'page/WorkTaskService/Form?$filter=';
+         page_           := 'Work Task';
+         FOR rec_ IN get_all_active_task LOOP
+            IF first_iter_ = 0 THEN
+               navigation_url_ := navigation_url_ || ' TaskSeq eq ' || rec_.task_seq;
+            ELSE
+               navigation_url_ := navigation_url_ || ' or TaskSeq eq ' || rec_.task_seq;
+            END IF;
+            first_iter_ := 1;
+            IF (LENGTH(navigation_url_) > 30000) THEN
+               RAISE inv_url_;
+            END IF;
+         END LOOP;
+      END IF;
+      $ELSE
+      navigation_url_ := '';
+      $END
+   ELSIF navigating_form_ = 'FWorkTask' THEN
+      $IF Component_Reqmgt_SYS.INSTALLED AND Component_Wo_SYS.INSTALLED $THEN
+      IF type_of_obj_ = 'Single' THEN
+         navigation_url_ := 'page/WorkTaskService/Form?$filter=';
+         page_           := 'Work Task';
+         FOR rec_ IN get_fin_task LOOP
+            IF first_iter_ = 0 THEN
+               navigation_url_ := navigation_url_ || ' TaskSeq eq ' || rec_.task_seq;
+            ELSE
+               navigation_url_ := navigation_url_ || ' or TaskSeq eq ' || rec_.task_seq;
+            END IF;
+            first_iter_ := 1;
+            IF (LENGTH(navigation_url_) > 30000) THEN
+               RAISE inv_url_;
+            END IF;
+         END LOOP;
+      ELSE
+         navigation_url_ := 'page/WorkTaskService/Form?$filter=';
+         page_           := 'Work Task';
+         FOR rec_ IN get_all_fin_task LOOP
+            IF first_iter_ = 0 THEN
+               navigation_url_ := navigation_url_ || ' TaskSeq eq ' || rec_.task_seq;
+            ELSE
+               navigation_url_ := navigation_url_ || ' or TaskSeq eq ' || rec_.task_seq;
+            END IF;
+            first_iter_ := 1;
+            IF (LENGTH(navigation_url_) > 30000) THEN
+               RAISE inv_url_;
+            END IF;
+         END LOOP;
+      END IF;
+      $ELSE
+      navigation_url_ := '';
+      $END
+   ELSIF navigating_form_ = 'FSrvRequest' THEN
+      $IF Component_Reqmgt_SYS.INSTALLED AND Component_Recsrv_SYS.INSTALLED $THEN
+      IF type_of_obj_ = 'Single' THEN
+         navigation_url_ := 'page/Request/RequestManagementPage?$filter=';
+         page_           := 'Request';
+         FOR rec_ IN get_fin_req LOOP
+            IF first_iter_ = 0 THEN
+               navigation_url_ := navigation_url_ || ' ReqId eq ''' || rec_.req_id || '''';
+            ELSE
+               navigation_url_ := navigation_url_ || ' or ReqId eq ''' || rec_.req_id || '''';
+            END IF;
+            first_iter_ := 1;
+            IF (LENGTH(navigation_url_) > 30000) THEN
+               RAISE inv_url_;
+            END IF;
+         END LOOP;
+      ELSE
+         navigation_url_ := 'page/Request/RequestManagementPage?$filter=';
+         page_           := 'Request';
+         FOR rec_ IN get_all_fin_req LOOP
+            IF first_iter_ = 0 THEN
+               navigation_url_ := navigation_url_ || ' ReqId eq ''' || rec_.req_id || '''';
+            ELSE
+               navigation_url_ := navigation_url_ || ' or ReqId eq ''' || rec_.req_id || '''';
+            END IF;
+            first_iter_ := 1;
+            IF (LENGTH(navigation_url_) > 30000) THEN
+               RAISE inv_url_;
+            END IF;
+         END LOOP;
+      END IF;
+      $ELSE
+      navigation_url_ := '';
+      $END
+   END IF;
+   RETURN navigation_url_;
+EXCEPTION
+   WHEN inv_url_ THEN
+      IF type_of_obj_ = 'Single' THEN
+         Error_SYS.Appl_General(lu_name_, 'EXCCEDTYPESINGLE: Query exceeds the character limit, try from the :P1 page.', page_);
+      ELSE
+         Error_SYS.Appl_General(lu_name_, 'EXCCEDTYPESTRUCT: Query exceeds the character limit, try from a lower level of the object structure.');
+      END IF;
+END Get_Navigation_Url___;
+
+
+FUNCTION Get_Object_Image___(
+   equipment_object_seq_ IN NUMBER) RETURN BLOB
+IS 
+BEGIN
+   RETURN Media_Library_API.Get_Default_Media(Media_Library_API.Get_Library_Id_From_Ref('EquipmentObject', equipment_object_seq_));
+END Get_Object_Image___;
+
+PROCEDURE Validate_Child_Objects___
+IS
+BEGIN
+	null;
+END Validate_Child_Objects___;
+

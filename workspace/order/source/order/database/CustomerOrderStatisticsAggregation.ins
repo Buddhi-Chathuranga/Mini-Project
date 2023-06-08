@@ -1,0 +1,252 @@
+-------------------------------------------------------------------------------------------- 
+-- Export file for Task ORD_AGG_STAT_UTIL_API.SCHEDULED_AGGREGATION.
+-- 
+--  Date    Sign    History
+--  ------  ------  -----------------------------------------------------------
+--  160119  Kisalk  Bug 126815, Added mandatory column check_executing to INSERT statement of the batch_schedule_tab.
+--  100716  SudJlk  Bug 91834, Modified method Update_Scheduled_Tasks to set the correct
+--  100716	         user on renamed scheduled tasks
+--  091215  MAMALK  Modified the method and number of parameters used for CO Statistics Aggregation and update the existing scheduled tasks.
+----------------------------- 14.0.0 ------------------------------------------
+--  100710  SudJlk  Bug 91834, Added log_user to Upgrade_Background_Job to set the correct
+--  100710	         user on converted scheduled tasks
+--  080313  IFSAPP  Export file for task ORD_AGG_STAT_UTIL_API.SCHEDULED_AGGREGATION.
+-------------------------------------------------------------------------------------------- 
+
+PROMPT Register Batch Schedule Method "ORD_AGG_STAT_UTIL_API.DO_AGGREGATE"
+DECLARE
+   schedule_method_id_ NUMBER          := NULL;
+   seq_no_             NUMBER          := NULL;
+   info_msg_           VARCHAR2(32000) := NULL;
+BEGIN
+-- Construct Main Message
+   info_msg_    := Message_SYS.Construct('');
+   Message_SYS.Add_Attribute(info_msg_, 'METHOD_NAME', 'ORD_AGG_STAT_UTIL_API.DO_AGGREGATE');
+   Message_SYS.Add_Attribute(info_msg_, 'DESCRIPTION', 'Customer Order Statistics Aggregation');
+   Message_SYS.Add_Attribute(info_msg_, 'MODULE', 'ORDER');
+   Message_SYS.Add_Attribute(info_msg_, 'SINGLE_EXECUTION_DB', 'FALSE');
+   Message_SYS.Add_Attribute(info_msg_, 'ARGUMENT_TYPE_DB', 'MESSAGE');
+   Message_SYS.Add_Attribute(info_msg_, 'VALIDATION_METHOD', 'ORD_AGG_STAT_UTIL_API.VALIDATE_PARAMS');
+-- Register Batch Schedule Method
+   Batch_SYS.Register_Batch_Schedule_Method(schedule_method_id_, info_msg_);
+-- Adding parameters   
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'COMPANY_', TO_CHAR(NULL), 'TRUE', NULL);
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'AGG_ID_LIST_',TO_CHAR(NULL), 'TRUE', NULL); 
+END;
+/
+
+
+DECLARE
+   -- Customer Order Statistics Aggregation (Upgraded from background jobs)
+   PROCEDURE Upgrade_Background_Job (
+      method_name_ IN VARCHAR2,
+      schedule_name_  IN VARCHAR2)
+   IS
+      parameters_          VARCHAR2(4000);
+      execution_plan_      VARCHAR2(4000);
+      param_start_         NUMBER;
+      param_stop_          NUMBER;
+      next_execution_date_ DATE;
+      start_date_          DATE := sysdate;
+
+      seq_no_              NUMBER;
+      schedule_id_         NUMBER;
+      ptr_                 NUMBER;      
+      name_                VARCHAR2(30);
+      value_               VARCHAR2(2000);
+
+      CURSOR get_jobs IS
+         SELECT what, interval, log_user 
+         FROM   user_jobs
+         WHERE  UPPER(what) like '%'||method_name_||'%';
+   BEGIN
+      FOR rec IN get_jobs LOOP
+        execution_plan_ := rec.interval;
+        param_start_ := instr(execution_plan_, '(');
+        param_stop_  := instr(execution_plan_, ')');
+        execution_plan_ := substr(execution_plan_, param_start_ + 2, param_stop_ - param_start_- 3);
+
+        Batch_SYS.New_Batch_Schedule(schedule_id_, next_execution_date_, start_date_, NULL, schedule_name_, method_name_, 'TRUE', execution_plan_);
+        -- Update batch schedule with correct user name 
+        UPDATE batch_schedule_tab SET username = rec.log_user WHERE schedule_id = schedule_id_; 
+
+        parameters_ := rec.what;
+        param_start_ := instr(parameters_, '(''');
+        param_stop_  := instr(parameters_, ''')');
+        parameters_  := substr(parameters_, param_start_ + 3, param_stop_ - param_start_- 3);
+        ptr_ := NULL;
+        WHILE (Client_SYS.Get_Next_From_Attr(parameters_, ptr_, name_, value_)) LOOP
+           IF (name_ = 'AGGREGATE_ID') THEN
+              name_ := 'AGG_ID_LIST_';
+           END IF;
+           Batch_SYS.New_Batch_Schedule_Param(seq_no_, schedule_id_, name_, value_);
+        END LOOP;
+      END LOOP;
+   END Upgrade_Background_Job;
+   
+   -- Remove the background jobs
+   PROCEDURE Remove_Server_Process (
+      method_name_ IN VARCHAR2 )
+   IS
+      job_   NUMBER;
+      CURSOR get_job IS
+         SELECT job
+         FROM   user_jobs
+         WHERE  UPPER(what) like '%'||method_name_||'%';
+   BEGIN
+     FOR rec_ IN get_job LOOP
+        dbms_job.remove(rec_.job);
+     END LOOP;
+      
+   EXCEPTION
+      WHEN OTHERS THEN
+         NULL;
+   END Remove_Server_Process;
+
+   -- Update schedule task method name from ORD_AGG_STAT_UTIL_API.SCHEDULED_AGGREGATION to ORD_AGG_STAT_UTIL_API.DO_AGGREGATE
+   PROCEDURE Update_Scheduled_Tasks(
+      old_method_ IN VARCHAR2,
+      new_method_ IN VARCHAR2)
+   IS
+
+      old_method_id_  NUMBER;
+      new_method_id_  NUMBER;
+     
+   BEGIN
+      old_method_id_ := Batch_Schedule_Method_API.Get_Schedule_Method_Id(old_method_);
+      new_method_id_ := Batch_Schedule_Method_API.Get_Schedule_Method_Id(new_method_);
+      
+      UPDATE batch_schedule_tab
+      SET    schedule_method_id = new_method_id_
+      WHERE  schedule_method_id = old_method_id_;     
+      
+      DELETE
+      FROM   batch_schedule_method_par_tab
+      WHERE  schedule_method_id = old_method_id_;
+   
+      DELETE
+      FROM   batch_schedule_method_tab
+      WHERE  schedule_method_id = old_method_id_;          
+   END Update_Scheduled_Tasks;
+
+   -- Introduce company parameter to the scheduled task
+   PROCEDURE Update_Parameters(method_name_ IN VARCHAR2)
+   IS
+      schedule_id_         NUMBER;
+      value_               VARCHAR2(2000);
+      param_               VARCHAR2(2000);
+      name_                VARCHAR2(30);
+      rowversion_          DATE;
+      count_               NUMBER := 2;
+      method_id_           NUMBER;
+
+      CURSOR get_batch_sched IS
+         SELECT *
+         FROM   batch_schedule_tab bs
+         WHERE  bs.schedule_method_id = method_id_ 
+         AND    NOT EXISTS (SELECT 1
+                            FROM  batch_schedule_par_tab bp
+                            WHERE bs.schedule_id = bp.schedule_id
+                            AND   bp.name = 'COMPANY_')
+         AND    EXISTS     (SELECT 1
+                            FROM  batch_schedule_par_tab bp
+                            WHERE bs.schedule_id = bp.schedule_id
+                            AND   bp.name = 'AGG_ID_LIST_'); 
+
+
+      CURSOR get_companies IS
+         SELECT DISTINCT company
+         FROM   site_tab;
+
+      CURSOR get_sched_params(sched_id_ IN NUMBER) IS
+         SELECT value, rowversion
+         FROM   batch_schedule_par_tab
+         WHERE  schedule_id =  sched_id_
+         AND    name = 'AGG_ID_LIST_';
+   BEGIN
+      method_id_ := Batch_Schedule_Method_API.Get_Schedule_Method_Id(method_name_);
+      FOR batch_rec_ IN get_batch_sched LOOP
+         OPEN get_sched_params(batch_rec_.schedule_id);
+         FETCH get_sched_params INTO param_, rowversion_;
+         CLOSE get_sched_params; 
+
+         FOR comp_rec_ IN get_companies LOOP   
+            SELECT schedule_id_seq.NEXTVAL
+            INTO   schedule_id_
+            FROM   dual;
+                         
+            INSERT
+               INTO batch_schedule_tab (
+                  schedule_id,
+                  schedule_name,
+                  active,
+                  execution_plan,
+                  next_execution_date,
+                  modified_date,
+                  username,
+                  schedule_method_id,
+                  start_date,
+                  stop_date,
+                  lang_code,
+                  executions,
+                  installation_id,
+                  external_id,
+                  batch_schedule_type,
+                  check_executing,
+                  rowversion)
+               VALUES (
+                  schedule_id_,
+                  batch_rec_.schedule_name,
+                  batch_rec_.active,
+                  batch_rec_.execution_plan,
+                  batch_rec_.next_execution_date,
+                  batch_rec_.modified_date,
+                  batch_rec_.username,
+                  batch_rec_.schedule_method_id,
+                  batch_rec_.start_date,
+                  batch_rec_.stop_date,
+                  batch_rec_.lang_code,
+                  batch_rec_.executions,
+                  TO_CHAR(schedule_id_),
+                  batch_rec_.external_id,
+                  batch_rec_.batch_schedule_type,
+                  batch_rec_.check_executing,
+                  batch_rec_.rowversion);                         
+         
+            FOR n_ IN 1..count_ LOOP
+                IF (n_ = 1) THEN
+                   name_ := 'COMPANY_';
+                   value_ :=  comp_rec_.company;                
+                ELSE                
+                   name_ := 'AGG_ID_LIST_';
+                   value_ := param_;
+                END IF;
+                          
+                INSERT
+                   INTO batch_schedule_par_tab (
+                      schedule_id,
+                      seq_no,
+                      name,
+                      value,
+                      rowversion)
+                   VALUES (
+                      schedule_id_,
+                      n_,
+                      name_,
+                      value_,
+                      rowversion_); 
+            END LOOP;
+         END LOOP;         
+         Batch_SYS.Remove_Batch_Schedule(batch_rec_.schedule_id);
+      END LOOP;   
+   END Update_Parameters;
+BEGIN   
+   Upgrade_Background_Job('ORD_AGG_STAT_UTIL_API.DO_AGGREGATE', 'Customer Order Statistics Aggregation');
+   Remove_Server_Process('ORD_AGG_STAT_UTIL_API.DO_AGGREGATE');
+   Update_Scheduled_Tasks('ORD_AGG_STAT_UTIL_API.SCHEDULED_AGGREGATION', 'ORD_AGG_STAT_UTIL_API.DO_AGGREGATE');
+   Update_Parameters('ORD_AGG_STAT_UTIL_API.DO_AGGREGATE');
+END;
+/
+
+COMMIT;
+

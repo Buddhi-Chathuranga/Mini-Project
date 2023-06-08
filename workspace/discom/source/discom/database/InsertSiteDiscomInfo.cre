@@ -1,0 +1,197 @@
+-----------------------------------------------------------------------------
+--  File:         InsertSiteDiscomInfo.cre
+--
+--  Purpose:      Due to Redesign of Site LU, Some attributes were moved to DISCOM component,
+--                From this cre file the data belongs to those moved columns will be inserted 
+--                to Site_Discom_Info_Tab.
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  191118  ErRalk  SCSPRING20-959, Renamed purchase_receive_case into receive_case. 
+--  070416  KeFelk  Added use_partca_desc_order,use_partca_desc_purch,create_ord_in_rel_state and use_pre_ship_del_note to INSERT stmt
+--                  in Insert_Row. Those columns were added in 7.5 and without values for them, FRESH instalations give problems.
+--  060517  KeFelk  Enlarge AddressId - Changed variable definitions.
+----------------------------- 13.4.0 ----------------------------------------
+--  051214  KeFelk  Changed the cursor connected to site_tab to a REF CURSOR.
+--  051021  KeFelk  Created.
+-----------------------------------------------------------------------------
+SET SERVEROUTPUT ON
+
+PROMPT Inserting data from SITE_TAB to SITE_DISCOM_INFO_TAB
+DECLARE
+   contract_                   VARCHAR2(5);  
+   purch_comp_method_          VARCHAR2(50); 
+   cust_order_pricing_method_  VARCHAR2(30); 
+   cust_order_discount_method_ VARCHAR2(30); 
+   branch_                     VARCHAR2(20); 
+   disp_cond_customer_order_   VARCHAR2(20); 
+   disp_cond_purchase_order_   VARCHAR2(20); 
+   document_address_id_        COMPANY_ADDRESS_TYPE_TAB.address_id%TYPE;
+   company_                    VARCHAR2(20); 
+   rowversion_                 DATE;
+   stmt_                       VARCHAR2(32000);
+   
+   TYPE RecordType IS REF CURSOR;
+   rec_                  RecordType; 
+   document_address_rec_ RecordType;
+
+   FUNCTION Get_Document_Address (
+      company_ IN VARCHAR2 ) RETURN VARCHAR2
+   IS
+      document_address_id_ COMPANY_ADDRESS_TYPE_TAB.address_id%TYPE;
+
+      CURSOR get_default_address IS
+         SELECT address_id
+         FROM company_address_type_tab
+         WHERE company           = company_
+         AND address_type_code   = 'INVOICE'
+         AND def_address         = 'TRUE';
+
+      CURSOR get_first_address IS
+         SELECT MIN(address_id)
+         FROM company_address_type_tab
+         WHERE company           = company_
+         AND address_type_code   = 'INVOICE';
+   BEGIN
+      OPEN get_default_address;
+      FETCH get_default_address INTO document_address_id_;
+      IF (get_default_address%NOTFOUND) THEN
+         OPEN get_first_address;
+         FETCH get_first_address INTO document_address_id_;
+         IF (get_first_address%NOTFOUND) THEN
+            document_address_id_ := NULL;
+         END IF;
+         CLOSE get_first_address;
+      END IF;
+      CLOSE get_default_address;
+      RETURN document_address_id_;
+   END Get_Document_Address;
+
+   PROCEDURE Insert_Row (
+      contract_                   IN VARCHAR2,
+      purch_comp_method_          IN VARCHAR2,
+      cust_order_pricing_method_  IN VARCHAR2,
+      cust_order_discount_method_ IN VARCHAR2,
+      branch_                     IN VARCHAR2,
+      disp_cond_customer_order_   IN VARCHAR2,
+      disp_cond_purchase_order_   IN VARCHAR2,
+      document_address_id_        IN VARCHAR2,
+      rowversion_                 IN DATE)
+   IS
+   BEGIN
+      INSERT INTO site_discom_info_tab
+         (contract,
+          purch_comp_method,
+          cust_order_pricing_method,
+          cust_order_discount_method,
+          branch,
+          disp_cond_customer_order,
+          disp_cond_purchase_order,
+          document_address_id,
+          use_partca_desc_order,
+          use_partca_desc_purch,
+          create_ord_in_rel_state,
+          use_pre_ship_del_note,
+          fair_share_reservation,
+          shipment_freight_charge,
+          price_effective_date,
+          enforce_use_of_poco,
+          create_base_price_planned,
+          receive_case,
+          rowversion)
+      VALUES
+         (contract_,
+          purch_comp_method_,
+          cust_order_pricing_method_,
+          cust_order_discount_method_,
+          branch_,
+          disp_cond_customer_order_,
+          disp_cond_purchase_order_,
+          document_address_id_,
+          'FALSE',
+          'FALSE',
+          'TRUE',
+          'FALSE',
+          'FALSE',
+          'FALSE',
+          'FALSE',
+          'FALSE',
+          'FALSE',
+          'ARRINV',
+          rowversion_);                                           
+      COMMIT;         
+   EXCEPTION
+      WHEN dup_val_on_index THEN
+         NULL;      
+   END Insert_Row;
+
+BEGIN
+   IF Database_Sys.Column_Exist('site_tab','purch_comp_method') THEN
+      stmt_ := 'SELECT contract, 
+                       purch_comp_method,
+                       cust_order_pricing_method,
+                       cust_order_discount_method,
+                       branch,
+                       disp_cond_customer_order,
+                       disp_cond_purchase_order,
+                       company,
+                       rowversion
+                FROM site_tab';               
+   
+      OPEN rec_ FOR stmt_;
+      LOOP
+         FETCH rec_ INTO contract_, 
+                         purch_comp_method_, 
+                         cust_order_pricing_method_, 
+                         cust_order_discount_method_, 
+                         branch_, 
+                         disp_cond_customer_order_, 
+                         disp_cond_purchase_order_, 
+                         company_, 
+                         rowversion_;
+         EXIT WHEN rec_%NOTFOUND; 
+
+         IF rowversion_ IS NULL THEN
+            rowversion_ := SYSDATE;
+         END IF;
+
+         IF disp_cond_customer_order_ = 'DISPLAY_COND_CODE' THEN
+            disp_cond_customer_order_ := 'TRUE';
+         ELSE
+            disp_cond_customer_order_ := 'FALSE';
+         END IF;
+   
+         IF disp_cond_purchase_order_ = 'DISPLAY_COND_CODE' THEN
+            disp_cond_purchase_order_ := 'TRUE';
+         ELSE
+            disp_cond_purchase_order_ := 'FALSE';
+         END IF;
+
+         IF Database_Sys.Column_Exist('site_tab', 'document_address_id') THEN
+            stmt_ := 'SELECT document_address_id
+                      FROM   site_tab
+                      WHERE  contract = :contract';
+        
+            OPEN  document_address_rec_ FOR stmt_ USING contract_;
+            FETCH document_address_rec_ INTO document_address_id_;
+            CLOSE document_address_rec_;
+         ELSE
+            document_address_id_ := Get_Document_Address(company_);
+         END IF;
+
+         Insert_Row(contract_,
+                    NVL(purch_comp_method_,'CUST ORDER'),
+                    NVL(cust_order_pricing_method_, 'ORDER_DATE'),
+                    NVL(cust_order_discount_method_, 'SINGLE_DISCOUNT'),
+                    branch_,
+                    NVL(disp_cond_customer_order_,'FALSE'),
+                    NVL(disp_cond_purchase_order_,'FALSE'),
+                    document_address_id_,
+                    rowversion_);
+      END LOOP;
+   END IF;
+END;
+/
+
+
+

@@ -1,0 +1,789 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: CreateMaterialReq
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  211129  GrGalk  SC21R2-6100, Changed the varchar limit of temp_serial_no_ to match with serial_no_
+--  190911  YasMlk  SCFALL19-225, Added method Get_Project_Connection_Descriptions___.
+--  180702  LaThlk  Bug 142755, Added the procedure Modify_Mtrl_Req_Lines_Exist_With_Invalid_Qty___() to update the material requisition header property
+--  180702          lines_with_invalid_qty when updating each line.
+--  170531  niedlk  APPUXX-11806, Raised an error at Finish_Create_M_R___ and Finish_Issue_Material___ when the project information is not properly entered.
+--  170512  niedlk  STRSC-7842, Modified Finish_Issue_Material___ to always make the supply code as INVENTORY_ORDER.
+--  170419  Dinklk  APPUXX-11313, Removed unused functions Get_Contract___, Get_Due_Date___, Is_Allowed_Codepart___, Get_Company___,
+--  170419          Get_Codepart_Function_Db___, Get_Code_Name___, Get_Codeno___, Create_M_R_Header___ and Get_Activity_Seq___.
+--  170419  Dinklk  APPUXX-11308, Added a new function Get_Assistant_Init_Info___.
+--  170407  Dinklk  APPUXX-8744, Modified Create_Location_Virtual_Recs to create records for Serial_Tracked_Only_Rece_Issue parts.
+--  170407          Modified Finish_Issue_Material___ and Make_Part_Res_Issue___ to handle Serial_Tracked_Only_Rece_Issue parts.
+--  170307  Dinklk  APPUXX-10099, Modified Finish_Create_M_R___ to ignore project connection for parts with supply option Purchase Order.
+--  170103  Dinklk  APPUXX-9399, Raised an error at CRUD_Update___ (Location_Virtual_Rec) if quantity to issue is greater than available quantity.
+--  170228  Dinklk  APPUXX-9918, Modified Create_Location_Virtual_Recs for PURCH dependancy.
+--  170222  Dinklk  APPUXX-9702, CRUD_Update___ for Issue_Material_Virtual is overriden to refresh data in Location_Virtual.
+--  170221  Dinklk  APPUXX-9117, Move casual user MR code.
+--  170217  Dinklk  APPUXX-9389, Modified Finish_Create_M_R___ and Finish_Issue_Material___ to use FW generated cursors 
+--  170217          Get_Added_Part_Set___ and Get_Location_Set___ respectively.
+--  170208  Dinklk  APPUXX-9228, Modified Add_Modify_Code_Parts___ to ignore project connected code part for MR header.
+--  170127  Dinklk  APPUXX-8707, Improvements needed for issue material assistant after List on assistant is supported.
+--  170124  Dinklk  APPUXX-8622, Implementation of List in Create MR Assistant.
+--  170118  Dinklk  APPUXX-8334, Implementation of List in Issue Material Assistant.
+--  161124  Dinklk  APPUXX-2836, Added a new function Get_Codepart_Function_Db___.
+--  161004  Dinklk  APPUXX-5039, Added a new function Get_Code_Name___.
+--  160908  Dinklk  APPUXX-4348, Added the new function Issue_Material___.
+--  160621  Dinklk  Added this revision
+--  ------  ------  ---------------------------------------------------------
+
+layer Core;
+
+PROCEDURE Create_Location_Virtual_Recs (
+   rec_ IN Issue_Material_Virtual_Rec )
+IS
+   newrec_ Location_Virtual_Rec;
+   CURSOR get_recs IS
+      SELECT contract, part_no, configuration_id, location_no, lot_batch_no, serial_no, eng_chg_level, Waiv_Dev_Rej_No, Activity_Seq, Handling_Unit_Id, 
+             (QTY_ONHAND - QTY_RESERVED) avail_qty, expiration_date 
+        FROM INVENTORY_PART_IN_STOCK
+       WHERE location_type_db IN ('PICKING','F','SHIPMENT','MANUFACTURING') 
+         AND (QTY_ONHAND - QTY_RESERVED) > 0
+         AND PART_OWNERSHIP_DB IN ('COMPANY OWNED','CONSIGNMENT')
+         AND activity_seq = 0 
+         AND EXISTS (SELECT 1 FROM user_allowed_site_pub WHERE inventory_part_in_stock.contract = site)
+         AND contract = rec_.contract 
+         AND part_no = rec_.line_part_no 
+         AND location_no = rec_.location_no
+         AND NOT (Part_Catalog_API.Serial_Trak_Only_Rece_Issue_Db(part_no) = 'TRUE' AND serial_no = '*');
+   
+   CURSOR get_temprecs IS
+      SELECT contract, part_no, configuration_id, lot_batch_no, serial_no, condition_code
+      FROM TEMPORARY_PART_TRACKING_SERIAL
+      WHERE contract = rec_.contract
+        AND part_no = rec_.line_part_no
+        AND LOT_BATCH_NO = '*'
+        AND CONFIGURATION_ID = '*'
+        AND Inventory_Part_In_Stock_API.Check_Individual_Exist(PART_NO, SERIAL_NO) = 0
+        AND PART_OWNERSHIP_DB IN ('COMPANY OWNED','CONSIGNMENT');
+BEGIN
+   FOR i_rec_ IN get_recs LOOP
+      newrec_.parent_objkey := rec_.objkey;
+      newrec_.objkey := sys_guid();
+      newrec_.select_serial := FALSE;
+      newrec_.part_no := rec_.line_part_no;
+      newrec_.Contract := rec_.contract;
+      newrec_.unit_meas := Inventory_Part_API.Get_Unit_Meas(rec_.contract, rec_.line_part_no);
+      $IF Component_Purch_SYS.INSTALLED $THEN
+         newrec_.unit_meas := NVL(newrec_.unit_meas, Purchase_Part_Supplier_API.Get_buy_unit_meas(rec_.contract, rec_.line_part_no, Purchase_Part_Supplier_API.Get_Primary_Supplier_No(rec_.contract, rec_.line_part_no)));
+      $END
+      newrec_.configuration_id := i_rec_.configuration_id;
+      newrec_.Location_No := i_rec_.Location_No;
+      newrec_.lot_batch_no := i_rec_.lot_batch_no;
+      newrec_.serial_no := i_rec_.serial_no;
+      newrec_.eng_chg_level := i_rec_.eng_chg_level;
+      newrec_.Waiv_Dev_Rej_No := i_rec_.Waiv_Dev_Rej_No;
+      newrec_.Activity_Seq := i_rec_.Activity_Seq;
+      newrec_.Handling_Unit_Id := i_rec_.Handling_Unit_Id;
+      newrec_.avail_qty := i_rec_.avail_qty;
+      newrec_.expiration_date := i_rec_.expiration_date;
+      newrec_.condition_code := Condition_Code_Manager_API.Get_Condition_Code(rec_.line_part_no, i_rec_.serial_no, i_rec_.lot_batch_no);
+      newrec_.condition_code_description := Condition_Code_API.Get_Description(newrec_.condition_code);
+      newrec_.catch_uom := Inventory_Part_API.Get_Enabled_Catch_Unit_Meas(rec_.contract, rec_.line_part_no);
+      CRUD_Create___(newrec_);
+   END LOOP;
+   IF Part_Catalog_API.Serial_Tracked_Only_Rece_Issue(rec_.line_part_no) THEN
+      FOR j_rec_ IN get_temprecs LOOP
+         newrec_.parent_objkey := rec_.objkey;
+         newrec_.objkey := sys_guid();
+         newrec_.select_serial := FALSE;
+         newrec_.part_no := rec_.line_part_no;
+         newrec_.Contract := rec_.contract;
+         newrec_.unit_meas := Inventory_Part_API.Get_Unit_Meas(rec_.contract, rec_.line_part_no);
+         newrec_.configuration_id := '*';
+         newrec_.Location_No := rec_.location_no;
+         newrec_.lot_batch_no := '*';
+         newrec_.serial_no := j_rec_.serial_no;
+         newrec_.eng_chg_level := '1';
+         newrec_.Waiv_Dev_Rej_No := '*';
+         newrec_.Activity_Seq := '0';
+         newrec_.Handling_Unit_Id := '0';
+         newrec_.avail_qty := '1';
+--         newrec_.expiration_date := j_rec_.expiration_date;
+         newrec_.condition_code := j_rec_.condition_code;
+         newrec_.condition_code_description := Condition_Code_API.Get_Description(j_rec_.condition_code);
+         newrec_.catch_uom := Inventory_Part_API.Get_Enabled_Catch_Unit_Meas(rec_.contract, rec_.line_part_no);
+         newrec_.to_be_identify_serial := 1;
+         CRUD_Create___(newrec_);
+      END LOOP;
+   END IF;
+END Create_Location_Virtual_Recs;
+
+@Override
+PROCEDURE CRUD_Create___ (
+   rec_ IN OUT Issue_Material_Virtual_Rec )
+IS
+BEGIN
+   super(rec_);
+   Create_Location_Virtual_Recs(rec_);
+END CRUD_Create___;
+
+@Override
+PROCEDURE CRUD_Update___ (
+   old_ IN Issue_Material_Virtual_Rec,
+   new_ IN Issue_Material_Virtual_Rec )
+IS
+   key_           Issue_Material_Virtual_Key;
+   rec_           Location_Virtual_Rec;
+BEGIN
+   super(old_, new_);
+   key_.Objkey := old_.objkey;
+
+   IF (old_.line_part_no != new_.line_part_no) OR (old_.location_no != new_.location_no) OR (old_.contract != new_.contract) THEN
+      FOR detail_rec_ IN Get_Location_Set___(key_) LOOP
+         rec_.objkey := detail_rec_.objkey;
+         CRUD_Delete___(rec_);
+      END LOOP;
+      Create_Location_Virtual_Recs(new_);
+      -- Update the header line_qty_added since a new set of records will be added to Issue_Material_Virtual withough quantities.
+      Modify_Issue_Mtrl_Qty_Added___(key_.Objkey);
+   END IF;
+END CRUD_Update___;
+
+FUNCTION Finish_Create_M_R___ (
+   objkey_               IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   newrec_               material_requisition_tab%ROWTYPE;
+   newlinerec_           material_requis_line_tab%ROWTYPE;
+   key_                  Material_Req_Virtual_Key;
+   material_req_rec_     Material_Req_Virtual_Rec;
+   project_conn_code_part_ VARCHAR2(4);
+   
+   PROCEDURE ResetRecord (
+      linerec_            IN OUT material_requis_line_tab%ROWTYPE)
+   IS
+   BEGIN
+      linerec_.activity_seq := NULL; linerec_.condition_code := NULL; linerec_.contract := NULL;
+      linerec_.date_entered := NULL; linerec_.due_date := NULL; linerec_.external_id := NULL;
+      linerec_.line_item_no := NULL; linerec_.line_no := NULL; linerec_.note_id := NULL;
+      linerec_.note_text := NULL;    linerec_.order_class := NULL; linerec_.order_no := NULL;
+      linerec_.part_no := NULL; linerec_.planned_delivery_date := NULL; linerec_.pre_accounting_id := NULL;
+      linerec_.project_id := NULL; linerec_.qty_assigned := NULL; linerec_.qty_due := NULL;
+      linerec_.qty_on_order := NULL; linerec_.qty_returned := NULL; linerec_.qty_shipdiff := NULL;
+      linerec_.qty_shipped := NULL; linerec_.qty_short := NULL; linerec_.release_no := NULL;
+      linerec_.rowkey := NULL; linerec_.rowversion := NULL; linerec_.status_code := NULL;
+      linerec_.supply_code := NULL; linerec_.unit_meas := NULL;
+   END ResetRecord;
+BEGIN
+   key_.Objkey := objkey_;
+   material_req_rec_ := Get_Record___(key_);
+   User_Allowed_Site_API.Is_Authorized(material_req_rec_.contract);
+   
+   IF ((material_req_rec_.line_program_id IS NOT NULL OR material_req_rec_.line_project_id IS NOT NULL OR material_req_rec_.line_sub_project_id IS NOT NULL) AND material_req_rec_.line_activity_seq IS NULL) THEN
+      Error_SYS.Record_General(lu_name_, 'EXTPROJECT: External Projects must have an Activity Seq value.');
+   END IF;
+   
+   project_conn_code_part_ := Accounting_Code_Parts_API.Get_Codepart_Function_Db(material_req_rec_.company, 'PRACC');
+
+   newrec_.contract := material_req_rec_.contract;
+   newrec_.int_customer_no := material_req_rec_.int_customer_no;
+   newrec_.due_date := material_req_rec_.due_date;
+   newrec_.destination_id := material_req_rec_.destination_id;
+   IF material_req_rec_.internal_destination IS NOT NULL THEN
+     newrec_.internal_destination := material_req_rec_.internal_destination;
+   END IF;
+   
+   Material_Requisition_API.New(newrec_);
+   Add_Modify_Code_Parts___(newrec_.pre_accounting_id, material_req_rec_.code_a, material_req_rec_.code_b, material_req_rec_.code_c, material_req_rec_.code_d, 
+   material_req_rec_.code_e, material_req_rec_.code_f, material_req_rec_.code_g, material_req_rec_.code_h, material_req_rec_.code_i, material_req_rec_.code_j, 
+   material_req_rec_.company, 'M109', material_req_rec_.contract);
+   
+   FOR detail_rec_ IN Get_Added_Part_Set___(key_) LOOP
+      newlinerec_.order_class := newrec_.order_class;
+      newlinerec_.order_no := newrec_.order_no;
+      newlinerec_.contract := material_req_rec_.contract;
+      newlinerec_.part_no := detail_rec_.part_no;
+      newlinerec_.qty_due := detail_rec_.qty_due;
+      newlinerec_.unit_meas := detail_rec_.unit_meas;
+      newlinerec_.due_date := material_req_rec_.due_date;
+      -- according to the functional specification supply code should be always INVENTORY_ORDER
+      newlinerec_.supply_code := Material_Requis_Supply_API.Encode(detail_rec_.supply_code);
+      newlinerec_.condition_code := detail_rec_.condition_code;
+      IF newlinerec_.supply_code <> Material_Requis_Supply_API.DB_PURCHASE_ORDER THEN
+         newlinerec_.activity_seq := material_req_rec_.line_activity_seq;
+      END IF;
+
+      Material_Requis_Line_API.New(newlinerec_);
+      
+      IF newlinerec_.supply_code = Material_Requis_Supply_API.DB_PURCHASE_ORDER THEN
+         IF (project_conn_code_part_ =  'A') THEN
+            material_req_rec_.code_a := NULL;
+         END IF;
+         IF (project_conn_code_part_ =  'B') THEN
+            material_req_rec_.code_b := NULL;
+         END IF;
+         IF (project_conn_code_part_ =  'C') THEN
+            material_req_rec_.code_c := NULL;
+         END IF;
+         IF (project_conn_code_part_ =  'D') THEN
+            material_req_rec_.code_d := NULL;
+         END IF;
+         IF (project_conn_code_part_ =  'E') THEN
+            material_req_rec_.code_e := NULL;
+         END IF;
+         IF (project_conn_code_part_ =  'F') THEN
+            material_req_rec_.code_f := NULL;
+         END IF;
+         IF (project_conn_code_part_ =  'G') THEN
+            material_req_rec_.code_g := NULL;
+         END IF;
+         IF (project_conn_code_part_ =  'H') THEN
+            material_req_rec_.code_h := NULL;
+         END IF;
+         IF (project_conn_code_part_ =  'I') THEN
+            material_req_rec_.code_i := NULL;
+         END IF;
+         IF (project_conn_code_part_ =  'J') THEN
+            material_req_rec_.code_j := NULL;
+         END IF;
+      END IF;
+      
+      Add_Modify_Code_Parts___(newlinerec_.pre_accounting_id, material_req_rec_.code_a, material_req_rec_.code_b, material_req_rec_.code_c, material_req_rec_.code_d, 
+      material_req_rec_.code_e, material_req_rec_.code_f, material_req_rec_.code_g, material_req_rec_.code_h, material_req_rec_.code_i, material_req_rec_.code_j, 
+      material_req_rec_.company, 'M107', material_req_rec_.contract);
+      
+      ResetRecord(newlinerec_);
+   END LOOP;
+   
+   RETURN newrec_.order_no;
+END Finish_Create_M_R___;
+
+FUNCTION Finish_Issue_Material___ (
+   objkey_               IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   newrec_                     material_requisition_tab%ROWTYPE;
+   newlinerec_                 material_requis_line_tab%ROWTYPE;
+   reserve_qry_                NUMBER;
+   issue_qty_                  NUMBER;
+   line_qty_due_               NUMBER := 0;
+   info_                       VARCHAR2(2000);
+   is_serial_tracking_         BOOLEAN;
+   is_serial_tr_only_rec_iss_  BOOLEAN;
+   key_                        Issue_Material_Virtual_Key;
+   issue_material_rec_         Issue_Material_Virtual_Rec;
+BEGIN
+   key_.Objkey := objkey_;
+   issue_material_rec_ := Get_Record___(key_);
+   User_Allowed_Site_API.Is_Authorized(issue_material_rec_.contract);
+   
+   IF ((issue_material_rec_.program_id IS NOT NULL OR issue_material_rec_.project_id IS NOT NULL OR issue_material_rec_.sub_project_id IS NOT NULL) AND issue_material_rec_.activity_seq IS NULL) THEN
+      Error_SYS.Record_General(lu_name_, 'EXTPROJ: External Projects must have an Activity Seq value.');
+   END IF;
+   
+   is_serial_tracking_ := (Part_Catalog_API.Get_Serial_Tracking_Code_Db(issue_material_rec_.line_part_no) = 'SERIAL TRACKING');
+   is_serial_tr_only_rec_iss_ := Part_Catalog_API.Serial_Tracked_Only_Rece_Issue(issue_material_rec_.line_part_no);
+   
+   newrec_.contract := issue_material_rec_.contract;
+   newrec_.int_customer_no := issue_material_rec_.int_customer_no;
+   newrec_.due_date := issue_material_rec_.due_date;
+   newrec_.destination_id := issue_material_rec_.destination_id;
+   IF issue_material_rec_.internal_destination IS NOT NULL THEN
+      newrec_.internal_destination := issue_material_rec_.internal_destination;
+   END IF;
+   
+   Material_Requisition_API.New(newrec_);
+   Add_Modify_Code_Parts___(newrec_.pre_accounting_id, issue_material_rec_.code_a, issue_material_rec_.code_b, issue_material_rec_.code_c, issue_material_rec_.code_d, 
+   issue_material_rec_.code_e, issue_material_rec_.code_f, issue_material_rec_.code_g, issue_material_rec_.code_h, issue_material_rec_.code_i, issue_material_rec_.code_j, 
+   issue_material_rec_.company, 'M109', issue_material_rec_.contract);
+   
+   FOR line_rec_ IN Get_Location_Set___(key_) LOOP
+      line_qty_due_ := line_qty_due_ + NVL(line_rec_.issue_qty, line_rec_.select_serial);
+   END LOOP;
+   IF (line_qty_due_ > 0) THEN
+      newlinerec_.order_class := newrec_.order_class;
+      newlinerec_.order_no := newrec_.order_no;
+      newlinerec_.contract := issue_material_rec_.contract;
+      newlinerec_.part_no := issue_material_rec_.line_part_no;
+      newlinerec_.qty_due := line_qty_due_;
+      newlinerec_.unit_meas := issue_material_rec_.line_unit_meas;
+      newlinerec_.due_date := issue_material_rec_.line_due_date;
+      -- according to the functional specification supply code should be always INVENTORY_ORDER
+      newlinerec_.supply_code := Material_Requis_Supply_API.DB_INVENTORY_ORDER;
+      newlinerec_.activity_seq := issue_material_rec_.activity_seq;
+
+      Material_Requis_Line_API.New(newlinerec_);
+      -- according to the functional specification supply code should always be INVENTORY_ORDER
+      Material_Requis_Line_API.Change_Supply_Code(newlinerec_.order_class, newlinerec_.order_no, newlinerec_.line_no, newlinerec_.release_no, newlinerec_.line_item_no, Material_Requis_Supply_API.DB_INVENTORY_ORDER);
+      Add_Modify_Code_Parts___(newlinerec_.pre_accounting_id, issue_material_rec_.code_a, issue_material_rec_.code_b, issue_material_rec_.code_c, issue_material_rec_.code_d, 
+      issue_material_rec_.code_e, issue_material_rec_.code_f, issue_material_rec_.code_g, issue_material_rec_.code_h, issue_material_rec_.code_i, issue_material_rec_.code_j, 
+      issue_material_rec_.company, 'M107', issue_material_rec_.contract);
+      
+      FOR detail_rec_ IN Get_Location_Set___(key_) LOOP
+         IF (is_serial_tracking_) OR (is_serial_tr_only_rec_iss_) THEN
+            issue_qty_ := detail_rec_.select_serial;
+         ELSE
+            issue_qty_ := detail_rec_.issue_qty;
+         END IF;
+         IF issue_qty_ > 0 THEN
+            reserve_qry_ := issue_qty_;
+            Make_Part_Res_Issue___ (Material_Requis_Type_API.Decode(newlinerec_.order_class), newlinerec_.order_no, newlinerec_.line_no, newlinerec_.release_no, newlinerec_.line_item_no, newlinerec_.part_no, issue_material_rec_.contract, 
+            detail_rec_.location_no, detail_rec_.configuration_id, detail_rec_.lot_batch_no, detail_rec_.serial_no, detail_rec_.waiv_dev_rej_no, detail_rec_.eng_chg_level, detail_rec_.activity_seq, 
+            detail_rec_.handling_unit_id, reserve_qry_, issue_qty_, detail_rec_.issue_catch_qty, info_, detail_rec_.to_be_identify_serial);
+         END IF;
+      END LOOP;
+   END IF;
+   
+   RETURN newrec_.order_no;
+END Finish_Issue_Material___;
+
+FUNCTION Get_Assistant_Init_Info___(
+   str_code_ IN VARCHAR2,
+   str_line_code_ IN VARCHAR2) RETURN Init_Details_Struct_Rec
+IS
+   details_  Init_Details_Struct_Rec;
+BEGIN
+   details_.contract  := User_Allowed_Site_API.Get_Default_Site;
+   details_.company := Site_API.Get_Company(details_.contract);
+   details_.due_date := Work_Time_Calendar_API.Get_Closest_Work_Day (Site_API.Get_Dist_Calendar_Id(details_.contract), Site_API.Get_Site_Date(details_.contract));
+   details_.project_conn_code_part := Accounting_Code_Parts_API.Get_Codepart_Function_Db(details_.company, 'PRACC');
+   
+   details_.allow_code_a := Pre_Accounting_API.Is_Allowed_Codepart('A', str_code_, '', details_.company);
+   details_.allow_code_b := Pre_Accounting_API.Is_Allowed_Codepart('B', str_code_, '', details_.company);
+   details_.allow_code_c := Pre_Accounting_API.Is_Allowed_Codepart('C', str_code_, '', details_.company);
+   details_.allow_code_d := Pre_Accounting_API.Is_Allowed_Codepart('D', str_code_, '', details_.company);
+   details_.allow_code_e := Pre_Accounting_API.Is_Allowed_Codepart('E', str_code_, '', details_.company);
+   details_.allow_code_f := Pre_Accounting_API.Is_Allowed_Codepart('F', str_code_, '', details_.company);
+   details_.allow_code_g := Pre_Accounting_API.Is_Allowed_Codepart('G', str_code_, '', details_.company);
+   details_.allow_code_h := Pre_Accounting_API.Is_Allowed_Codepart('H', str_code_, '', details_.company);
+   details_.allow_code_i := Pre_Accounting_API.Is_Allowed_Codepart('I', str_code_, '', details_.company);
+   details_.allow_code_j := Pre_Accounting_API.Is_Allowed_Codepart('J', str_code_, '', details_.company);
+   
+   details_.allow_line_code_a := Pre_Accounting_API.Is_Allowed_Codepart('A', str_line_code_, '', details_.company);
+   details_.allow_line_code_b := Pre_Accounting_API.Is_Allowed_Codepart('B', str_line_code_, '', details_.company);
+   details_.allow_line_code_c := Pre_Accounting_API.Is_Allowed_Codepart('C', str_line_code_, '', details_.company);
+   details_.allow_line_code_d := Pre_Accounting_API.Is_Allowed_Codepart('D', str_line_code_, '', details_.company);
+   details_.allow_line_code_e := Pre_Accounting_API.Is_Allowed_Codepart('E', str_line_code_, '', details_.company);
+   details_.allow_line_code_f := Pre_Accounting_API.Is_Allowed_Codepart('F', str_line_code_, '', details_.company);
+   details_.allow_line_code_g := Pre_Accounting_API.Is_Allowed_Codepart('G', str_line_code_, '', details_.company);
+   details_.allow_line_code_h := Pre_Accounting_API.Is_Allowed_Codepart('H', str_line_code_, '', details_.company);
+   details_.allow_line_code_i := Pre_Accounting_API.Is_Allowed_Codepart('I', str_line_code_, '', details_.company);
+   details_.allow_line_code_j := Pre_Accounting_API.Is_Allowed_Codepart('J', str_line_code_, '', details_.company);
+
+   details_.code_name_a := Accounting_Code_Parts_API.Get_Code_Name(details_.company, 'A');
+   details_.code_name_b := Accounting_Code_Parts_API.Get_Code_Name(details_.company, 'B');
+   details_.code_name_c := Accounting_Code_Parts_API.Get_Code_Name(details_.company, 'C');
+   details_.code_name_d := Accounting_Code_Parts_API.Get_Code_Name(details_.company, 'D');
+   details_.code_name_e := Accounting_Code_Parts_API.Get_Code_Name(details_.company, 'E');
+   details_.code_name_f := Accounting_Code_Parts_API.Get_Code_Name(details_.company, 'F');
+   details_.code_name_g := Accounting_Code_Parts_API.Get_Code_Name(details_.company, 'G');
+   details_.code_name_h := Accounting_Code_Parts_API.Get_Code_Name(details_.company, 'H');
+   details_.code_name_i := Accounting_Code_Parts_API.Get_Code_Name(details_.company, 'I');
+   details_.code_name_j := Accounting_Code_Parts_API.Get_Code_Name(details_.company, 'J');
+
+   RETURN details_;
+END Get_Assistant_Init_Info___;
+
+PROCEDURE Add_Modify_Code_Parts___ (
+   pre_accounting_id_ IN NUMBER,
+   code_a_            IN VARCHAR2,
+   code_b_            IN VARCHAR2,
+   code_c_            IN VARCHAR2,
+   code_d_            IN VARCHAR2,
+   code_e_            IN VARCHAR2,
+   code_f_            IN VARCHAR2,
+   code_g_            IN VARCHAR2,
+   code_h_            IN VARCHAR2,
+   code_i_            IN VARCHAR2,
+   code_j_            IN VARCHAR2,
+   company_           IN VARCHAR2,
+   str_code_          IN VARCHAR2,
+   contract_          IN VARCHAR2 ) 
+IS
+   info_              VARCHAR2(32000);
+   objid_             VARCHAR2(20);
+   objversion_        VARCHAR2(100);
+   attr_              VARCHAR2(32000);
+   project_conn_code_part_ VARCHAR2(4);
+
+   allow_code_a_      NUMBER;
+   allow_code_b_      NUMBER;
+   allow_code_c_      NUMBER;
+   allow_code_d_      NUMBER;
+   allow_code_e_      NUMBER;
+   allow_code_f_      NUMBER;
+   allow_code_g_      NUMBER;
+   allow_code_h_      NUMBER;
+   allow_code_i_      NUMBER;
+   allow_code_j_      NUMBER;
+
+   var_code_a_        VARCHAR2(10);
+   var_code_b_        VARCHAR2(10);
+   var_code_c_        VARCHAR2(10);
+   var_code_d_        VARCHAR2(10);
+   var_code_e_        VARCHAR2(10);
+   var_code_f_        VARCHAR2(10);
+   var_code_g_        VARCHAR2(10);
+   var_code_h_        VARCHAR2(10);
+   var_code_i_        VARCHAR2(10);
+   var_code_j_        VARCHAR2(10);
+
+   CURSOR get_pre_accounting_id_version (pre_accounting_id_ IN NUMBER) IS
+   SELECT rowid, to_char(rowversion,'YYYYMMDDHH24MISS')
+   FROM   pre_accounting_tab
+   WHERE  pre_accounting_id = pre_accounting_id_;
+BEGIN
+   allow_code_a_ := Pre_Accounting_API.Is_Allowed_Codepart('A', str_code_, '', company_);
+   allow_code_b_ := Pre_Accounting_API.Is_Allowed_Codepart('B', str_code_, '', company_);
+   allow_code_c_ := Pre_Accounting_API.Is_Allowed_Codepart('C', str_code_, '', company_);
+   allow_code_d_ := Pre_Accounting_API.Is_Allowed_Codepart('D', str_code_, '', company_);
+   allow_code_e_ := Pre_Accounting_API.Is_Allowed_Codepart('E', str_code_, '', company_);
+   allow_code_f_ := Pre_Accounting_API.Is_Allowed_Codepart('F', str_code_, '', company_);
+   allow_code_g_ := Pre_Accounting_API.Is_Allowed_Codepart('G', str_code_, '', company_);
+   allow_code_h_ := Pre_Accounting_API.Is_Allowed_Codepart('H', str_code_, '', company_);
+   allow_code_i_ := Pre_Accounting_API.Is_Allowed_Codepart('I', str_code_, '', company_);
+   allow_code_j_ := Pre_Accounting_API.Is_Allowed_Codepart('J', str_code_, '', company_);
+   project_conn_code_part_ := Accounting_Code_Parts_API.Get_Codepart_Function_Db(company_, 'PRACC');
+   
+   IF str_code_ = 'M109' THEN
+      IF (allow_code_a_ = 1) AND (project_conn_code_part_ !=  'A') THEN
+         var_code_a_ := code_a_;
+      END IF;
+      IF (allow_code_b_ = 1) AND (project_conn_code_part_ !=  'B') THEN
+         var_code_b_ := code_b_;
+      END IF;
+      IF (allow_code_c_ = 1) AND (project_conn_code_part_ !=  'C') THEN
+         var_code_c_ := code_c_;
+      END IF;
+      IF (allow_code_d_ = 1) AND (project_conn_code_part_ !=  'D') THEN
+         var_code_d_ := code_d_;
+      END IF;
+      IF (allow_code_e_ = 1) AND (project_conn_code_part_ !=  'E') THEN
+         var_code_e_ := code_e_;
+      END IF;
+      IF (allow_code_f_ = 1) AND (project_conn_code_part_ !=  'F') THEN
+         var_code_f_ := code_f_;
+      END IF;
+      IF (allow_code_g_ = 1) AND (project_conn_code_part_ !=  'G') THEN
+         var_code_g_ := code_g_;
+      END IF;
+      IF (allow_code_h_ = 1) AND (project_conn_code_part_ !=  'H') THEN
+         var_code_h_ := code_h_;
+      END IF;
+      IF (allow_code_i_ = 1) AND (project_conn_code_part_ !=  'I') THEN
+         var_code_i_ := code_i_;
+      END IF;
+      IF (allow_code_j_ = 1) AND (project_conn_code_part_ !=  'J') THEN
+         var_code_j_ := code_j_;
+      END IF;
+   ELSE
+      IF (allow_code_a_ = 1) THEN
+         var_code_a_ := code_a_;
+      END IF;
+      IF (allow_code_b_ = 1) THEN
+         var_code_b_ := code_b_;
+      END IF;
+      IF (allow_code_c_ = 1) THEN
+         var_code_c_ := code_c_;
+      END IF;
+      IF (allow_code_d_ = 1) THEN
+         var_code_d_ := code_d_;
+      END IF;
+      IF (allow_code_e_ = 1) THEN
+         var_code_e_ := code_e_;
+      END IF;
+      IF (allow_code_f_ = 1) THEN
+         var_code_f_ := code_f_;
+      END IF;
+      IF (allow_code_g_ = 1) THEN
+         var_code_g_ := code_g_;
+      END IF;
+      IF (allow_code_h_ = 1) THEN
+         var_code_h_ := code_h_;
+      END IF;
+      IF (allow_code_i_ = 1) THEN
+         var_code_i_ := code_i_;
+      END IF;
+      IF (allow_code_j_ = 1) THEN
+         var_code_j_ := code_j_;
+      END IF;
+   END IF;
+
+   
+   IF (var_code_a_ IS NOT NULL) OR (var_code_b_ IS NOT NULL) OR (var_code_c_ IS NOT NULL) OR (var_code_d_ IS NOT NULL) OR (var_code_e_ IS NOT NULL) OR
+      (var_code_f_ IS NOT NULL) OR (var_code_g_ IS NOT NULL) OR (var_code_h_ IS NOT NULL) OR (var_code_i_ IS NOT NULL) OR (var_code_j_ IS NOT NULL) THEN
+      IF Pre_Accounting_API.Exists(pre_accounting_id_) THEN
+         OPEN get_pre_accounting_id_version(pre_accounting_id_);
+         FETCH get_pre_accounting_id_version INTO objid_, objversion_;
+         CLOSE get_pre_accounting_id_version;
+
+         IF var_code_a_ IS NOT NULL THEN
+            Client_SYS.Add_To_Attr('ACCOUNT_NO', var_code_a_, attr_);
+         END IF;
+         IF var_code_b_ IS NOT NULL THEN
+            Client_SYS.Add_To_Attr('CODENO_B', var_code_b_, attr_);
+         END IF;
+         IF var_code_c_ IS NOT NULL THEN
+            Client_SYS.Add_To_Attr('CODENO_C', var_code_c_, attr_);
+         END IF;
+         IF var_code_d_ IS NOT NULL THEN
+            Client_SYS.Add_To_Attr('CODENO_D', var_code_d_, attr_);
+         END IF;
+         IF var_code_e_ IS NOT NULL THEN
+            Client_SYS.Add_To_Attr('CODENO_E', var_code_e_, attr_);
+         END IF;
+         IF var_code_f_ IS NOT NULL THEN
+            Client_SYS.Add_To_Attr('CODENO_F', var_code_f_, attr_);
+         END IF;
+         IF var_code_g_ IS NOT NULL THEN
+            Client_SYS.Add_To_Attr('CODENO_G', var_code_g_, attr_);
+         END IF;
+         IF var_code_h_ IS NOT NULL THEN
+            Client_SYS.Add_To_Attr('CODENO_H', var_code_h_, attr_);
+         END IF;
+         IF var_code_i_ IS NOT NULL THEN
+            Client_SYS.Add_To_Attr('CODENO_I', var_code_i_, attr_);
+         END IF;
+         IF var_code_j_ IS NOT NULL THEN
+            Client_SYS.Add_To_Attr('CODENO_J', var_code_j_, attr_);
+         END IF;
+         Client_SYS.Add_To_Attr('COMPANY', company_, attr_);
+         Client_SYS.Add_To_Attr('CONTRACT', contract_, attr_);
+
+         Pre_Accounting_API.Modify__(info_, objid_, objversion_, attr_, 'DO');
+      ELSE
+         Pre_Accounting_API.New(pre_accounting_id_, var_code_a_, var_code_b_, var_code_c_, var_code_d_, var_code_e_, var_code_f_, var_code_g_, var_code_h_, var_code_i_, var_code_j_, company_, str_code_, contract_);
+      END IF;
+   END IF;
+END Add_Modify_Code_Parts___;
+
+PROCEDURE Make_Part_Res_Issue___ (
+   order_class_             IN VARCHAR2,
+   order_no_                IN VARCHAR2,
+   line_no_                 IN VARCHAR2,
+   release_no_              IN VARCHAR2,
+   line_item_no_            IN NUMBER,
+   part_no_                 IN VARCHAR2,
+   contract_                IN VARCHAR2,
+   location_no_             IN VARCHAR2,
+   loc_config_id_           IN VARCHAR2,
+   lot_batch_no_            IN VARCHAR2,
+   serial_no_               IN VARCHAR2,
+   waiv_dev_rej_no_         IN VARCHAR2,
+   eng_chg_level_           IN VARCHAR2,
+   activity_seq_            IN NUMBER,
+   handling_unit_id_        IN NUMBER,
+   reserve_qry_             IN NUMBER,
+   issue_qty_               IN NUMBER,
+   issue_catch_qty_         IN NUMBER,
+   info_                    IN VARCHAR2,
+   to_be_identify_serial_   IN NUMBER) 
+IS
+   total_qty_reserve_        NUMBER;
+   configuration_id_         VARCHAR2(10) := '*';
+   temp_serial_no_           VARCHAR2(50) := '*';
+   new_reserve_qry_          NUMBER;
+   info1_                    VARCHAR2(2000) := info_;
+   result_                   VARCHAR2(32000);
+   objid_                    VARCHAR2(32000);
+   objversion_               VARCHAR2(32000);
+   attr_                     VARCHAR2(32000);
+   part_tracking_session_id_ NUMBER;
+BEGIN
+   IF to_be_identify_serial_ IS NULL THEN
+      Inventory_Part_In_Stock_API.Exist(contract_, part_no_, loc_config_id_, location_no_, lot_batch_no_, serial_no_, eng_chg_level_, waiv_dev_rej_no_, activity_seq_, handling_unit_id_);
+      temp_serial_no_ := serial_no_;
+   END IF;
+   total_qty_reserve_ := nvl(reserve_qry_, 0) + Material_Requis_Reservat_API.Get_Qty_Assigned (order_class_, order_no_, line_no_, release_no_, line_item_no_, part_no_ , contract_,
+   configuration_id_, location_no_, lot_batch_no_, serial_no_, waiv_dev_rej_no_, eng_chg_level_, activity_seq_, handling_unit_id_);
+   
+   IF total_qty_reserve_ >= nvl(issue_qty_, 0) THEN
+      new_reserve_qry_ := nvl(reserve_qry_, 0);
+   ELSIF total_qty_reserve_ < nvl(issue_qty_, 0) THEN
+      new_reserve_qry_ := nvl(issue_qty_, 0) - total_qty_reserve_ + nvl(reserve_qry_, 0);
+   END IF;
+   IF new_reserve_qry_ > 0 THEN
+      Material_Requis_Reservat_API.Make_Part_Reservations(order_class_, order_no_, line_no_, release_no_, line_item_no_, part_no_, contract_, 
+      location_no_, lot_batch_no_, temp_serial_no_, waiv_dev_rej_no_, eng_chg_level_, activity_seq_, handling_unit_id_, new_reserve_qry_);
+   END IF;
+   IF nvl(issue_qty_, 0) > 0 THEN
+      IF to_be_identify_serial_ = 1 THEN
+         part_tracking_session_id_ := Temporary_Part_Tracking_API.Get_Next_Session_Id;
+         Client_SYS.Add_To_Attr('SESSION_ID', part_tracking_session_id_, attr_);
+         Client_SYS.Add_To_Attr('SERIAL_NO', serial_no_, attr_);
+         Client_SYS.Add_To_Attr('PART_NO', part_no_, attr_);
+         Client_SYS.Add_To_Attr('CONTRACT', contract_, attr_);
+         Temporary_Part_Tracking_API.New__(result_, objid_, objversion_, attr_,'DO');
+      END IF;
+      Material_Requis_Reservat_API.Make_Item_Delivery(order_class_, order_no_, line_no_, release_no_, line_item_no_, part_no_, contract_, location_no_, 
+      lot_batch_no_, serial_no_, waiv_dev_rej_no_, eng_chg_level_, activity_seq_, handling_unit_id_, issue_qty_, issue_catch_qty_, info1_, part_tracking_session_id_);
+   END IF;
+END Make_Part_Res_Issue___;
+
+PROCEDURE Add_Part___ (
+   contract_                   IN VARCHAR2,
+   part_no_                    IN VARCHAR2,
+   objkey_                     IN VARCHAR2,
+   description_                IN VARCHAR2,
+   supply_code_                IN VARCHAR2,
+   condition_code_             IN VARCHAR2,
+   condition_code_description_ IN VARCHAR2,
+   unit_meas_                  IN VARCHAR2,
+   qty_due_                    IN NUMBER ) 
+IS
+   master_key_ Material_Req_Virtual_Key;
+   detail_rec_ Part_Virtual_Rec;
+BEGIN
+   master_key_.objkey := objkey_;
+   detail_rec_.contract := contract_;
+   detail_rec_.part_no  := part_no_;
+   detail_rec_.description := description_;
+   detail_rec_.supply_code := supply_code_;
+   detail_rec_.condition_code := condition_code_;
+   detail_rec_.condition_code_description := condition_code_description_;
+   detail_rec_.unit_meas := unit_meas_;
+   detail_rec_.qty_due := qty_due_;
+   New_Detail___(master_key_, detail_rec_);
+   
+   -- Update the header record
+   Modify_Mtrl_Req_Lines_Exist___(master_key_, 'TRUE');
+END Add_Part___;
+
+@Override
+PROCEDURE CRUD_Update___ (
+   old_ IN Part_Virtual_Rec,
+   new_ IN Part_Virtual_Rec )
+IS
+BEGIN   
+   IF (old_.qty_due != new_.qty_due) AND (new_.qty_due <= 0) THEN
+      Error_SYS.Record_General(lu_name_, 'QTY_LESS_THAN_ZERO: Quantity must be greater than zero.');
+   END IF;
+   
+   super(old_, new_);
+   -- Update the header record
+   IF Validate_SYS.Is_Different(old_.qty_due, new_.qty_due) THEN
+      Modify_Mtrl_Req_Lines_Exist_With_Invalid_Qty___(new_.parent_objkey);
+   END IF;   
+END CRUD_Update___;
+
+@Override
+PROCEDURE CRUD_Update___ (
+   old_ IN Location_Virtual_Rec,
+   new_ IN Location_Virtual_Rec )
+IS
+BEGIN   
+   IF (old_.issue_qty != new_.issue_qty) THEN
+      IF (new_.issue_qty <= 0) THEN
+         Error_SYS.Record_General(lu_name_, 'QTY_LESS_THAN_ZERO: Quantity must be greater than zero.');
+      ELSIF (new_.issue_qty > old_.avail_qty) THEN
+         Error_SYS.Record_General(lu_name_, 'QTY_GREATER_THAN_AVAIL: Quantity to issue should not exceed available quantity.');
+      END IF;
+   END IF;
+   
+   super(old_, new_);
+   
+   -- Update the header record
+   Modify_Issue_Mtrl_Qty_Added___(new_.parent_objkey);
+END CRUD_Update___;
+
+PROCEDURE Modify_Mtrl_Req_Lines_Exist___ (
+   parent_key_       IN Material_Req_Virtual_Key,
+   lines_exist_      IN VARCHAR2 ) 
+IS
+   old_rec_       Material_Req_Virtual_Rec;
+   new_rec_       Material_Req_Virtual_Rec;
+BEGIN
+   old_rec_ := Get_Record___(parent_key_);
+   IF Validate_SYS.Is_Different(old_rec_.lines_exist, lines_exist_) THEN
+      new_rec_ := old_rec_;
+      new_rec_.lines_exist := lines_exist_;
+      CRUD_Update___(old_rec_, new_rec_);
+   END IF;
+END Modify_Mtrl_Req_Lines_Exist___;
+
+PROCEDURE Modify_Issue_Mtrl_Qty_Added___ (
+   parent_objkey_     IN VARCHAR2 ) 
+IS
+   parent_key_    Issue_Material_Virtual_Key;
+   old_rec_       Issue_Material_Virtual_Rec;
+   new_rec_       Issue_Material_Virtual_Rec;
+   total_line_qty_ NUMBER := 0;
+   line_qty_added_ VARCHAR2(5) := 'FALSE';
+BEGIN
+   parent_key_.objkey := parent_objkey_;
+   FOR line_rec_ IN Get_Location_Set___(parent_key_) LOOP
+      total_line_qty_ := total_line_qty_ + NVL(line_rec_.issue_qty, line_rec_.select_serial);
+   END LOOP;
+   IF total_line_qty_ > 0 THEN
+      line_qty_added_ := 'TRUE';
+   END IF;
+   
+   old_rec_ := Get_Record___(parent_key_);
+   IF Validate_SYS.Is_Different(old_rec_.line_qty_added, line_qty_added_) THEN
+      new_rec_ := old_rec_;
+      new_rec_.line_qty_added := line_qty_added_;
+      CRUD_Update___(old_rec_, new_rec_);
+   END IF;
+END Modify_Issue_Mtrl_Qty_Added___;
+
+PROCEDURE Modify_Mtrl_Req_Lines_Exist_With_Invalid_Qty___ (
+   parent_objkey_     IN VARCHAR2)
+IS
+   old_rec_          Material_Req_Virtual_Rec;
+   new_rec_          Material_Req_Virtual_Rec;
+   parent_key_       Material_Req_Virtual_Key;
+   invalid_lines     VARCHAR2(10) DEFAULT 'FALSE';
+BEGIN   
+   parent_key_.objkey := parent_objkey_;
+   old_rec_ := Get_Record___(parent_key_);
+   FOR line_rec_ IN Get_Added_Part_Set___(parent_key_) LOOP
+      IF ((line_rec_.qty_due IS NULL) OR line_rec_.qty_due = '' OR line_rec_.qty_due <= 0 ) THEN  
+         invalid_lines := 'TRUE';
+         EXIT;
+      END IF;
+   END LOOP;
+   IF Validate_SYS.Is_Different(old_rec_.lines_with_invalid_qty, invalid_lines) THEN
+      new_rec_ := old_rec_;
+      new_rec_.lines_with_invalid_qty := invalid_lines;
+      CRUD_Update___(old_rec_, new_rec_);
+   END IF;   
+END Modify_Mtrl_Req_Lines_Exist_With_Invalid_Qty___;
+
+@Override
+PROCEDURE CRUD_Delete___(
+   rec_ IN Part_Virtual_Rec )
+IS
+   lines_exist_  NUMBER := 0;
+   master_key_   Material_Req_Virtual_Key;
+BEGIN
+   super(rec_);
+   
+   -- Update the header lines_exist flag if there are no lines added.
+   master_key_.objkey := rec_.parent_objkey;
+   FOR line_rec_ IN Get_Added_Part_Set___(master_key_) LOOP
+      lines_exist_ := 1;
+      EXIT;
+   END LOOP;
+   -- Update the header record.
+   IF lines_exist_ = 0 THEN
+      Modify_Mtrl_Req_Lines_Exist___(master_key_, 'FALSE');
+   END IF;
+END CRUD_Delete___;
+
+FUNCTION Get_Condition_Code_Description___(
+   condition_code_ IN VARCHAR2 )  RETURN VARCHAR2
+IS
+   
+BEGIN
+   RETURN Condition_Code_API.Get_Description(condition_code_);
+END Get_Condition_Code_Description___;
+
+@DynamicComponentDependency PROJ
+FUNCTION Get_Project_Connection_Descriptions___(
+   activity_seq_ IN NUMBER )  RETURN Project_Connection_Desc_Struct_Rec
+IS
+   project_connection_desc_struct_ Project_Connection_Desc_Struct_Rec;
+BEGIN
+   project_connection_desc_struct_.program_desc := Project_Program_Global_API.Get_Description(Activity_API.Get_Program_Id(activity_seq_));
+   project_connection_desc_struct_.project_desc := Project_API.Get_Description(Activity_API.Get_Project_Id(activity_seq_));
+   project_connection_desc_struct_.sub_project_desc := Sub_Project_API.Get_Description(Activity_API.Get_Project_Id(activity_seq_), Activity_API.Get_Sub_Project_Id(activity_seq_));
+   
+   RETURN project_connection_desc_struct_;
+END Get_Project_Connection_Descriptions___;

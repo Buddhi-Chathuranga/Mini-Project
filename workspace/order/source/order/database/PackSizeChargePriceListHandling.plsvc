@@ -1,0 +1,113 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: PackSizeChargePriceListHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  ---------------------------------------------------------------
+-- 2020-04-01  RaVdlk  SCXTEND-4144, Added CRUD_Default_Copy___ method
+-- 2018-07-26  MaEelk  SCUXXW4-1201, Added Add_Sites_From_Site_Cluster___.
+-- 2018-07-12  MaEelk  SCUXXW4-1201, Added Site_Exist___, Sales_Charge_Type_Exist___ and Copy_Charge_Type___.
+-- 2018-07-03  MaEelk  SCUXXW4-9292, Added Fetch_Currency___  and Fetch_Use_Price_Incl_Tax_Ord_Db___.
+--------------------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Fetch_Use_Price_Incl_Tax_Ord_Db___ (
+   contract_ IN VARCHAR2) RETURN BOOLEAN
+IS
+  use_price_incl_tax_ord_db_ BOOLEAN := FALSE; 
+BEGIN
+   use_price_incl_tax_ord_db_ := (Site_Discom_Info_API.Get_Use_Price_Incl_Tax_Ord_Db(contract_) = 'TRUE');  
+   RETURN use_price_incl_tax_ord_db_;
+END Fetch_Use_Price_Incl_Tax_Ord_Db___;
+
+FUNCTION Site_Exist___ (
+   contract_ IN VARCHAR2) RETURN BOOLEAN
+IS
+BEGIN
+   RETURN (User_Allowed_Site_API.Check_Exist(Fnd_Session_API.Get_Fnd_User,contract_));   
+END Site_Exist___;
+
+FUNCTION Sales_Charge_Type_Exist___ (
+   contract_    IN VARCHAR2,
+   charge_type_ IN VARCHAR2) RETURN BOOLEAN
+IS
+   exist_ BOOLEAN := FALSE;   
+BEGIN
+   exist_ := (Sales_Charge_Type_API.Check_Exist(contract_, charge_type_) = 'TRUE');
+   RETURN exist_;   
+END Sales_Charge_Type_Exist___;
+
+PROCEDURE Copy_Charge_Type___ (
+   charge_type_   IN VARCHAR2,
+   from_contract_ IN VARCHAR2,
+   to_contract_   IN VARCHAR2)
+IS
+BEGIN
+   Sales_Charge_Type_API.Copy_Charge_Type(charge_type_, from_contract_, to_contract_);
+END Copy_Charge_Type___;
+
+PROCEDURE Add_Sites_From_Site_Cluster___ (
+   company_              IN VARCHAR2,
+   charge_list_no_       IN VARCHAR2,
+   charge_type_          IN VARCHAR2,
+   from_contract_        IN VARCHAR2,
+   site_cluster_id_      IN VARCHAR2,
+   site_cluster_node_id_ IN VARCHAR2,
+   copy_charge_type_     IN BOOLEAN  )
+IS
+   attr_       VARCHAR2(2000);
+   info_       VARCHAR2(2000);
+   data_found_ BOOLEAN := FALSE;
+   
+   CURSOR get_cluster_connected_site IS
+      SELECT contract
+      FROM SITE_CLUSTER_NODE_JOIN
+      WHERE contract NOT IN (SELECT contract 
+                             FROM PACK_SIZE_CHARGE_LIST_SITE  
+                             WHERE CHARGE_LIST_NO = charge_list_no_) 
+      AND   Site_API.Get_Company(CONTRACT)= company_ 
+      AND   site_cluster_id = site_cluster_id_
+      AND   contract IN (SELECT site 
+                         FROM USER_ALLOWED_SITE_PUB)
+     AND   contract IN (SELECT  contract
+                        FROM    SITE_CLUSTER_NODE
+                        START WITH site_cluster_id = site_cluster_id_
+                        AND  site_cluster_node_id = site_cluster_node_id_
+                        CONNECT BY PRIOR site_cluster_id = site_cluster_id
+                        AND PRIOR site_cluster_node_id =  parent_node);                         
+   
+BEGIN
+   FOR rec_ IN get_cluster_connected_site LOOP 
+      IF (Sales_Charge_Type_Exist___ (rec_.contract, charge_type_)) THEN
+         Client_SYS.Add_To_Attr('CHARGE_LIST_NO', charge_list_no_, attr_);
+         Client_SYS.Add_To_Attr('CONTRACT', rec_.contract, attr_);
+         Pack_Size_Charge_List_Site_API.New(info_, attr_);
+         data_found_ := TRUE;
+      ELSE
+         IF (copy_charge_type_) THEN
+            Copy_Charge_Type___ (charge_type_, from_contract_, rec_.contract);
+            Client_SYS.Add_To_Attr('CHARGE_LIST_NO', charge_list_no_, attr_);
+            Client_SYS.Add_To_Attr('CONTRACT', rec_.contract, attr_);
+            Pack_Size_Charge_List_Site_API.New(info_, attr_); 
+            data_found_ := TRUE;
+         END IF;
+      END IF;
+   END LOOP;
+   IF NOT(data_found_) THEN
+      Error_SYS.Record_General(lu_name_, 'NODATA: No Data found');   
+   END IF;
+END Add_Sites_From_Site_Cluster___;
+
+@Override
+PROCEDURE CRUD_Default_Copy___ (
+   rec_  IN OUT Pack_Size_Charge_List_Rec )
+IS
+BEGIN
+    super(rec_);
+    rec_.charge_list_no := NULL;
+END CRUD_Default_Copy___;

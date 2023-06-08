@@ -1,0 +1,152 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     ConnectPartsToAssortmentNodesAssistant
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+-- Date        Sign    History
+-- ----------  ------  ------------------------------------------------------
+-- 2019-04-25  AwWelk  SCUXXW4-18405, Added the function where clause to AssortmentNodeListArray in the projection.
+-- 2018-10-19  DaZase  Moved server code to this fragment.
+-- 2018-10-09  DaZase  SCUXXW4-5354, Added Assortment_Node_List_Array___(), Pack_Selected_Assortm_List___() and
+-- 2018-10-09          Add_Assortments___() for converted dlgConnectPartsByAssortQuery.
+-- 2018-09-24  DaZase  SCUXXW4-5369, Converted from dlgConnectPartsToAssortmentNodes using MTG Version: 1.29
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Get_Description___ (
+  assortment_id_ IN VARCHAR2, 
+  assortment_node_id_ IN VARCHAR2) RETURN VARCHAR2
+IS
+BEGIN
+   RETURN Assortment_Node_API.Get_Description(assortment_id_, assortment_node_id_);
+END Get_Description___;
+
+-- This method is simulating what ConnectPartsToAssortments(), ConstructPartsAssortmenstMsg() was doing in IEE client
+-- Plus what GetSelectedParts() did in Parts IEE client since here we send the Selection directly to Assistant instead of first packing into a cMessage 
+PROCEDURE Connect_Parts_Assort_Nodes___ (
+   parent_objkey_  IN VARCHAR2,
+   selected_parts_ IN VARCHAR2 )
+IS
+   selection_             VARCHAR2(32000) := CONCAT(selected_parts_, ';');
+   current_selection_     VARCHAR2(32000);
+   current_part_no_       VARCHAR2(25);
+   parent_key_            Connect_Parts_To_Assortment_Nodes_Virtual_Key;
+   child_key_             Assortment_Node_Virtual_Key;
+   child_rec_             Assortment_Node_Virtual_Rec;
+   parts_msg_             VARCHAR2(32000);
+   assortment_detail_msg_ VARCHAR2(32000);
+   assortment_msg_        VARCHAR2(32000);
+   main_msg_              CLOB; 
+   
+BEGIN   
+   
+   parent_key_.objkey := parent_objkey_;
+   parts_msg_ := Message_SYS.Construct('');
+   WHILE (INSTR(selection_, ';') > 0) LOOP  
+      current_selection_  := substr(selection_, 0, INSTR(selection_, ';'));
+      current_part_no_   := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PART_NO'); 
+      Message_SYS.Add_Attribute(parts_msg_, 'PART_NO' , current_part_no_);
+      selection_ := SUBSTR(selection_, (INSTR(selection_, ';') + 1));
+   END LOOP; 
+   
+   assortment_msg_ := Message_SYS.Construct('');   
+   FOR rec_ IN Get_Assortment_Nodes_Array___(parent_key_) LOOP
+      child_key_.objkey := rec_.objkey;
+      child_rec_ := Get_Record___(child_key_);
+
+
+      assortment_detail_msg_ := NULL;
+      assortment_detail_msg_ := Message_SYS.Construct('');      
+      Message_SYS.Add_Attribute(assortment_detail_msg_, 'ASSORTMENT_ID' , child_rec_.assortment_id);
+      Message_SYS.Add_Attribute(assortment_detail_msg_, 'ASSORTMENT_NODE_ID' , child_rec_.assortment_node_id);
+      Message_SYS.Add_Attribute(assortment_detail_msg_, 'DESCRIPTION' , child_rec_.description);
+      Message_SYS.Add_Attribute(assortment_detail_msg_, 'PARENT_NODE' , Assortment_Node_API.Get_Parent_Node(child_rec_.assortment_id, child_rec_.assortment_node_id));
+      
+      Message_SYS.Add_Attribute(assortment_msg_, 'ASSORTMENT' , assortment_detail_msg_);
+
+   END LOOP;
+   main_msg_ := Message_SYS.Construct(''); 
+   Message_SYS.Add_Attribute(main_msg_, 'ASSORTMENTS' , assortment_msg_);
+   Message_SYS.Add_Attribute(main_msg_, 'PARTS' , parts_msg_);
+   
+   Assortment_Node_API.Connect_Parts_To_Assortments(main_msg_);
+
+END Connect_Parts_Assort_Nodes___;   
+
+FUNCTION Pack_Selected_Assortm_List___ (
+   full_selection_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   selection_              VARCHAR2(32000) := CONCAT(full_selection_, ';');
+   current_selection_      VARCHAR2(32000);
+   repacked_out_selection_ VARCHAR2(32000);
+   current_assortment_id_  VARCHAR2(50);
+   current_parent_node_    VARCHAR2(50);
+   
+BEGIN
+
+   WHILE (INSTR(selection_, ';') > 0) LOOP
+      current_selection_  := substr(selection_, 0, INSTR(selection_, ';'));
+      current_assortment_id_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ASSORTMENT_ID');
+      current_parent_node_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PARENT_NODE');
+      -- We are not fetching PART_NO from selection since its not needed when we send this information to previous assistant    
+      repacked_out_selection_ := repacked_out_selection_||'ASSORTMENT_ID='||current_assortment_id_||'^'||'PARENT_NODE='||current_parent_node_||'^;';
+      selection_ := substr(selection_, INSTR(selection_, ';')+1);
+   END LOOP;
+ 
+   RETURN repacked_out_selection_;
+  
+END Pack_Selected_Assortm_List___;    
+
+
+PROCEDURE Add_Assortments___ (
+   parent_objkey_   IN VARCHAR2,
+   selection_list_  IN VARCHAR2 )
+IS 
+   selection_              VARCHAR2(32000) := selection_list_;
+   current_selection_      VARCHAR2(32000);
+   current_assortment_id_  VARCHAR2(50);
+   current_parent_node_    VARCHAR2(50);
+   dummy_                  NUMBER;   
+   list_rec_               Assortment_Node_Virtual_Rec;
+   save_record_            VARCHAR2(5);
+--      FROM CONNECT_PARTS_TO_ASSORTMENT_NODES_ASSISTANT_ASSORTMENT_NODE_VIRTUAL_VRT
+   
+   CURSOR check_exist IS
+      SELECT 1 
+      FROM ${PROJECTION}_ASSORTMENT_NODE_VIRTUAL_VRT
+      WHERE parent_objkey = parent_objkey_
+      AND assortment_id = current_assortment_id_;
+   
+BEGIN
+ 
+   WHILE (INSTR(selection_, ';') > 0) LOOP
+      current_selection_  := substr(selection_, 0, INSTR(selection_, ';'));
+      save_record_ := 'FALSE';
+      current_assortment_id_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ASSORTMENT_ID');
+      current_parent_node_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PARENT_NODE');
+      
+      OPEN check_exist;
+      FETCH check_exist INTO dummy_;
+      IF check_exist%NOTFOUND THEN
+         save_record_ := 'TRUE';
+      END IF;
+      CLOSE check_exist;        
+      
+      IF save_record_ = 'TRUE' THEN
+         list_rec_.objkey             := sys_guid();
+         list_rec_.parent_objkey      := parent_objkey_;
+         list_rec_.assortment_id      := current_assortment_id_;
+         list_rec_.assortment_node_id := current_parent_node_;
+         list_rec_.description        := Assortment_Node_API.Get_Description(current_assortment_id_, current_parent_node_);
+         
+         CRUD_Create___(list_rec_);
+      END IF;
+
+      selection_ := substr(selection_, INSTR(selection_, ';')+1);
+   END LOOP;
+
+END Add_Assortments___;
+

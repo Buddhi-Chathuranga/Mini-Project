@@ -1,0 +1,262 @@
+client PrintDialog;
+component FNDBAS;
+layer Core;
+
+-------------------------------- MAIN PAGES ---------------------------------
+page PrintReport using ReportFormatSet {
+   label = "Report Format & Output";
+   crudactions {
+      new {
+         enabled = [false];
+      }
+      delete {
+         enabled = [false];
+      }
+   }
+   selector MultipleReportsSelector;
+   --kept for metadata generation
+   --page obsolete
+}
+--------------------------------- COMMANDS ----------------------------------
+
+command PrintDilaogOk {
+   --obsolete
+   label = "OK";
+   enabled = [LayoutName != null and LangCode != null];
+   execute {
+      call ReportPrintRequest(ResultKey, LayoutName, LangCode, LangCodeRfc3066, Description, Copies, Pages, Address);
+      exit OK;
+   }
+}
+
+command DirectPrintOk {
+   label = "OK";
+   visible = [substring(PrinterId, 0, 15) = "PhysicalPrinter"];
+   //enabled = [LayoutName != null and LangCode != null];
+   variable AgentEnabledOk Text;
+   execute {
+      call ReportFormatRequestPlap(ResultKey, LayoutName, LangCode, LangCodeRfc3066) into RenderedOutputId;
+      if[RenderedOutputId = null] {
+         alert("PDF not created");
+      }
+      else {
+         agentenabled into AgentEnabledOk;
+         if[AgentEnabledOk = "TRUE"] {
+            call UpdatePrinterId(ResultKey, RenderedOutputId, Description);
+            agentcall DownloadAndPrintTo("PdfArchiveSet(ResultKey=${ResultKey},Id='${RenderedOutputId}')/Pdf", "Report.pdf", Description) {
+               when FAIL {
+                  error("Something is wrong ${error.Message}");
+                  exit OK;
+               }
+            }
+         }
+         else {
+            alert("Aurena Agent Not available");
+         }
+      }
+      exit OK;
+   }
+}
+
+command PrintOk {
+   label = "OK";
+   variable AgentEnabledOk Text;
+   variable PrintResult;
+   variable IsPreview Boolean;
+   execute {
+      set IsPreview = false;
+      if[substring(PrinterId, 0, 15) = "PhysicalPrinter"] {
+         call ReportDirectPrintRequest(ResultKey, LayoutName, LangCode, LangCodeRfc3066, IsPreview) into PrintResult;
+         if[PrintResult.RenderedOutputId = null] {
+            alert("Report **${ReportTitle}** with Result Key/Print Job ID **${ResultKey}/${PrintResult.PrintJobId}** could not be created");
+         }
+         else {
+            agentenabled into AgentEnabledOk;
+            if[AgentEnabledOk = "TRUE"] {
+               call UpdatePrinterId(ResultKey, PrintResult.RenderedOutputId, Description);
+               agentcall DownloadAndPrintTo("PdfArchiveSet(ResultKey=${ResultKey},Id='${PrintResult.RenderedOutputId}')/Pdf", "${ReportId}_${PrintResult.PrintJobId}_${ResultKey}_Report.pdf", Description) {
+                  when FAIL {
+                     error("Error when printing to Aurena Agent ${error.Message}");
+                     exit OK;
+                  }
+                  when SUCCESS {
+                     exit OK;
+                  }
+               }
+            }
+            else {
+               alert("Aurena Agent is not available");
+            }
+            exit OK;
+         }
+      }
+      else {
+         call ReportPrintRequest(ResultKey, LayoutName, LangCode, LangCodeRfc3066, Description, Copies, Pages, Address);
+         exit OK;
+      }
+   }
+}
+
+command PrintDialogBulkOk {
+   label = "OK";
+   visible = [substring(PrinterId, 0, 15) != "PhysicalPrinter"];
+   //enabled = [LayoutName != null and LangCode != null];
+   bulkexecute {
+      bulkcall ReportPrintRequest(ResultKey, LayoutName, LangCode, LangCodeRfc3066, Description, Copies, Pages, Address);
+      exit OK;
+   }
+}
+
+command Preview {
+   label = "Preview";
+   variable PreviewResult;
+   variable IsPreview Boolean;
+   enabled = [LayoutName != null and LangCode != null];
+   execute {
+      set IsPreview = true;
+      call ReportDirectPrintRequest(ResultKey, LayoutName, LangCode, LangCodeRfc3066, IsPreview) into PreviewResult;
+      if[PreviewResult.RenderedOutputId = null] {
+         alert("Report **${ReportTitle}** is taking more time than expected and currently executing in the background. Once completed, a notification will be posted. The report will be available in the Report Archive Documents with the Result Key/Print Job ID **${ResultKey}/${PreviewResult.PrintJobId}**.");
+      }
+      else {
+         download "PdfArchiveSet(ResultKey=$[ResultKey],Id='${PreviewResult.RenderedOutputId}')/Pdf";
+      }
+      exit RETRY;
+   }
+}
+
+command OpenDialog {
+   label = "Open Dialog";
+   execute {
+      dialog PrintDialog(ResultKey, ReportId, ReportTitle) {
+         when OK {
+            exit CANCEL;
+         }
+         when CANCEL {
+            exit CANCEL;
+         }
+      }
+   }
+}
+----------------------------- VISUAL COMPONENTS -----------------------------
+group ReportsInDialog for PrintDialogStruct {
+   label = "Report";
+   field ReportTitle {
+      label = "Report Title";
+      editable = [false];
+      size = Large;
+   }
+   field Notes {
+      label = "Notes";
+      editable = [false];
+      visible = [Notes != null];
+   }
+}
+
+group PrintParametersInDilaog for PrintDialogStruct {
+   label = "Print Parameters";
+
+   lov LayoutNameRef with LayoutSelector using  EnumerateLayout(ReportId) {
+      label = "Layout";
+      description = LayoutNameRef.Layout;
+
+      hidekey = [true];
+      visible = [LayoutName != "N/A"];
+      editable = [LayoutNameFixed != true];
+   }
+
+   lov LangCodeRef with  ReportLanguageSelector using EnumerateReportLanguages(ReportId) {
+      label = "Language";
+      description = LangCode;
+      hidekey = [true];
+      editable = [LangCodeFixed != true];
+   }
+
+   lov NumberFormatRef with DateNumberFormattingSelector using EnumerateReportLanguages(ReportId) {
+      label = "Date/Number Formatting";
+      description = LangCodeRfc3066;
+      hidekey = [true];
+      editable = [LangCodeRfc3066Fixed != true];
+   }
+}
+
+group OutputPrintInDialog for PrintDialogStruct {
+   label = "Print";
+   lov PrinterIdRef with  LogicalPrinterSelector using LogicalPrinterSet {
+      label = "Printer";
+      description = PrinterIdRef.Description;
+      hidekey = [true];
+      editable = [PrinterIdFixed != true];
+   }
+   field Copies {
+      label = "Copies";
+      editable = [CopiesFixed != true];
+   }
+}
+
+group  OutPutEmailInDialog for PrintDialogStruct {
+   label = "Email";
+   field Address {
+      label = "Address";
+      size = Large;
+      editable = [EmailFixed != true];
+   }
+}
+
+selector LayoutSelector for ReportLayoutDefinition {
+   field Layout;
+}
+
+@Override
+selector ReportLanguageSelector for LanguageCode {
+   label = "Language Selector";
+   field LangCode {
+      label = "Language";
+   }
+}
+
+@Override
+selector DateNumberFormattingSelector for LanguageCode {
+   label = "Number/Date Formatting";
+   field LangCodeRfc3066 {
+      label = "Date/Number Formatting";
+   }
+}
+
+@Override
+selector LogicalPrinterSelector for LogicalPrinter {
+   label = "Printer Selector";
+   field PrinterId {
+      visible = [false];
+   }
+   field Description {
+      label = "Description";
+   }
+}
+
+@Override
+selector MultipleReportsSelector for PrintDialogStruct {
+   label = "${ReportTitle}";
+   field ResultKey {
+      label = "Result Key";
+   }
+   field ReportTitle {
+      label = "Report Title";
+   }
+   field Notes {
+      label = "Notes";
+   }
+}
+
+dialog PrintDialog for  PrintDialogStruct {
+   label = "Report Format & Output";
+   input(ResultKey, ReportId, ReportTitle);
+   output(ResultKey);
+
+   group PrintParametersInDilaog;
+   group OutputPrintInDialog;
+   group OutPutEmailInDialog;
+
+   command PrintOk;
+   command Preview;
+}

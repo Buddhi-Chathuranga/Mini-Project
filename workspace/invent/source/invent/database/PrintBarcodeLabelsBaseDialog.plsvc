@@ -1,0 +1,268 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     PrintBarcodeLabelsBaseDialog
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date        Sign    History
+--  ----------  ------  -----------------------------------------------------
+--  2022-01-13  SBalLK  SC21R2-7214, Added Create_Barcode_Report___() method and modified Print_Barcodes___() method to print barcode report
+--  2022-01-13          when report parameter exceeded the variable length.
+--  2021-04-29  JaThlk  Bug 158884(SCZ-14432), Overrode CRUD_Upload___ instead of CRUD_Create___ to support clob attribute.
+--  2020-12-03  JaThlk  SC2020R1-7200, Modified Print_Barcodes___ to print barcodes without the dialog correctly with new framework implementations.
+--  2020-05-11  ErRalk  SC2020R1-6601, Modified CRUD_Create___() to add pack size as 1 for serialized part.
+--  2020-04-29  ErRalk  SC2020R1-6601, Modified CRUD_Create___() to fix predefined pack size issue in Print Barcode Labels Command.
+--  2019-05-17  SucPlk  SCUXXW4-18843, Modified CRUD_Create___() to avoid server error for non-inventory parts.
+--  2019-04-11  SucPlk  SCUXXW4-18631, Modifed Print_Barcodes___() to avoid errors raised when inventory quantity is null.
+--  2019-03-28  SucPlk  SCUXXW4-3751, Modifed CRUD_Create___() by adding is_purch_part_ to restrict showing the dialog for non-purchase parts.
+--  2018-01-07  ShKolk  SCUXXW4-5551, Created from dlgInvPartBarcodeLabels and dlgInvPartBarcodeSingleRecord.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+@Override
+PROCEDURE CRUD_Upload___ (
+   objkey_             IN VARCHAR2,
+   selection##         IN CLOB,
+   pack_size_virtual## IN VARCHAR2)
+IS
+   current_selection_            VARCHAR2(32000);
+   selected_records_             json_array_t := json_array_t.parse(selection##);
+   default_pack_size_            NUMBER;
+   predefined_pack_size_exist_   BOOLEAN := TRUE;
+   only_serial_parts_            BOOLEAN := TRUE;
+   barcode_rec_                  Barcode_Labels_Virtual_Rec;
+   is_purch_part_                NUMBER;
+   parent_rec_                   Pack_Size_Virtual_Rec;
+   parent_key_                   Pack_Size_Virtual_Key;
+BEGIN
+   super(objkey_, selection##, pack_size_virtual##);
+   parent_key_.objkey   := objkey_;   
+   parent_rec_          := Get_Record___(parent_key_);
+   
+   FOR i_ IN 0 .. selected_records_.get_size - 1 LOOP
+      current_selection_ := selected_records_.get_string(i_);
+      
+      -- Let DefaultPacksize = First packsize > 0      
+      IF (Client_SYS.Get_Key_Reference_Value(current_selection_, 'PACK_SIZE') IS NULL) THEN
+         default_pack_size_ := to_number(NULL);
+      ELSE
+         default_pack_size_ := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'PACK_SIZE'));
+      END IF;   
+      
+      IF parent_rec_.user_defined_pack_size IS NULL AND default_pack_size_ > 0 THEN
+         parent_rec_.user_defined_pack_size := default_pack_size_;
+      END IF;
+      IF (default_pack_size_ IS NULL OR Client_SYS.Get_Key_Reference_Value(current_selection_, 'SERIAL_NO') != '*') THEN    
+         parent_rec_.user_defined_pack_size := 1;
+      END IF;
+      
+      -- All records must have a predefined Default Pack Size to enable Use Predefined Pack Size
+      if (predefined_pack_size_exist_) THEN
+          predefined_pack_size_exist_ := NVL(default_pack_size_ > 0,FALSE);
+      END IF;
+      
+      -- Is TRUE if all parts are serialized
+      IF only_serial_parts_ THEN
+         only_serial_parts_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SERIAL_NO') != '*';
+      END IF;
+   END LOOP;
+   parent_rec_.predefined_pack_size_exist := predefined_pack_size_exist_;
+   parent_rec_.only_serial_parts          := only_serial_parts_;
+   parent_rec_.use_predefined_pack_size   := (parent_rec_.predefined_pack_size_exist AND NOT(parent_rec_.only_serial_parts));
+   
+   CRUD_Update___(parent_rec_, parent_rec_);
+
+   FOR i_ IN 0 .. selected_records_.get_size - 1 LOOP
+      current_selection_ := selected_records_.get_string(i_);
+      
+      barcode_rec_.objkey           := sys_guid();
+      barcode_rec_.parent_objkey    := parent_rec_.objkey;
+      barcode_rec_.contract         := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT');
+      barcode_rec_.part_no          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PART_NO');
+      barcode_rec_.lot_batch_no     := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOT_BATCH_NO');
+      barcode_rec_.serial_no        := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SERIAL_NO');
+      barcode_rec_.eng_chg_level    := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ENG_CHG_LEVEL');
+      barcode_rec_.waiv_dev_rej_no  := Client_SYS.Get_Key_Reference_Value(current_selection_, 'WAIV_DEV_REJ_NO');
+      barcode_rec_.configuration_id := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONFIGURATION_ID');
+      barcode_rec_.activity_seq     := NVL(Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'ACTIVITY_SEQ')),0);
+      IF (Client_SYS.Get_Key_Reference_Value(current_selection_, 'QTY') IS NULL) THEN
+         barcode_rec_.qty := NULL;
+      ELSE   
+         barcode_rec_.qty           := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'QTY'));
+      END IF;
+      barcode_rec_.pack_size        := NVL(default_pack_size_,1);
+      is_purch_part_                := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'IS_PURCH_PART'));
+      
+      IF (is_purch_part_ = 0) THEN
+         EXIT;
+      END IF;
+
+      -- Setup data
+      IF barcode_rec_.serial_no != '*' THEN
+         -- Serialized Part MUST have qty 1 or 0
+         IF barcode_rec_.qty > 1 THEN
+            barcode_rec_.qty := 1;
+         ELSIF barcode_rec_.qty < 0 THEN
+            barcode_rec_.qty := 0;
+         END IF;
+         -- Serialized Part MUST have a packzize = 1
+         IF barcode_rec_.pack_size != 1 THEN
+            barcode_rec_.pack_size := 1;
+         END IF;
+      END IF;
+      
+      -- Check recived Data
+      IF barcode_rec_.contract IS NULL THEN
+         Error_SYS.Record_General(lu_name_, 'NOCONTRACTRECEIVED: Site was not received.');
+      END IF;
+      IF barcode_rec_.part_no IS NULL THEN
+         Error_SYS.Record_General(lu_name_, 'NOPARTRECEIVED: Part No was not received.');
+      END IF;
+      
+      CRUD_Create___(barcode_rec_);
+   END LOOP;
+END CRUD_Upload___;
+
+@Override
+PROCEDURE CRUD_Update___(
+   old_ IN Pack_Size_Virtual_Rec,
+   new_ IN Pack_Size_Virtual_Rec )
+IS
+   parent_key_                   Pack_Size_Virtual_Key;
+   barcode_labels_virtual_key_   Barcode_Labels_Virtual_Key;
+   new_barcode_rec_              Barcode_Labels_Virtual_Rec;
+   old_barcode_rec_              Barcode_Labels_Virtual_Rec;
+
+BEGIN
+   super(old_, new_);
+   
+   IF new_.use_predefined_pack_size = FALSE THEN
+      parent_key_.objkey := new_.objkey;
+      FOR rec_ IN Get_Barcode_Labels_Virtual_Array___(parent_key_) LOOP
+         IF rec_.serial_no = '*' THEN
+            barcode_labels_virtual_key_.objkey := rec_.objkey;
+            old_barcode_rec_ := Get_Record___(barcode_labels_virtual_key_);
+            new_barcode_rec_ := old_barcode_rec_;
+            new_barcode_rec_.pack_size := new_.user_defined_pack_size;
+            CRUD_Update___(old_barcode_rec_, new_barcode_rec_);
+         END IF;
+      END LOOP;
+   END IF;
+END CRUD_Update___;
+
+FUNCTION Print_Barcodes___ (
+   parent_objkey_         IN VARCHAR2,
+   number_of_copies_      IN NUMBER,
+   number_of_labels_      IN NUMBER,
+   print_without_preview_ IN BOOLEAN ) RETURN VARCHAR2
+IS
+   parent_key_          Pack_Size_Virtual_Key;
+   
+   pack_count_          NUMBER;
+   label_count_         NUMBER;
+   barcode_id_          NUMBER;
+   barcode_id_list_     VARCHAR2(32000);
+   contract_            VARCHAR2(5);
+   result_key_list_     VARCHAR2(32000);
+BEGIN
+   parent_key_.objkey := parent_objkey_;
+   FOR rec_ IN Get_Barcode_Labels_Virtual_Array___(parent_key_) LOOP
+      pack_count_  := Get_Pack_Count___(rec_.qty, rec_.pack_size);
+      label_count_ := number_of_labels_;
+      IF contract_ IS NULL THEN
+         contract_ := rec_.contract;
+      END IF;
+      WHILE (pack_count_ > 0 OR label_count_ > 0) LOOP
+         -- Security
+         User_Allowed_Site_API.Is_Authorized(rec_.contract); 
+         -- Generate Bar codes
+         Inventory_Part_Barcode_API.New(barcode_id_,
+                                        rec_.contract, 
+                                        rec_.part_no,
+                                        rec_.configuration_id,
+                                        rec_.lot_batch_no,
+                                        rec_.serial_no,
+                                        rec_.eng_chg_level,
+                                        rec_.waiv_dev_rej_no,
+                                        rec_.pack_size,
+                                        rec_.activity_seq);
+         IF (barcode_id_list_ IS NULL) THEN
+            barcode_id_list_ := barcode_id_;
+         ELSE
+            IF (length(barcode_id_list_ || barcode_id_) >= 31000) THEN
+               result_key_list_ := Create_Barcode_Report___(barcode_id_list_, contract_, number_of_copies_, print_without_preview_) || ',';
+               barcode_id_list_ := barcode_id_;
+            ELSE
+               barcode_id_list_ := barcode_id_list_ || ';' || barcode_id_;
+            END IF;
+         END IF;
+         pack_count_  := pack_count_ - 1;
+         label_count_ := label_count_ - 1;
+      END LOOP;
+   END LOOP;
+
+   /* This is to handle errors raised when dialog is called from Receive assistant with null values for inventory quantity. */
+   IF (barcode_id_list_ IS NULL) THEN
+      RETURN NULL;
+   ELSE
+      result_key_list_ := result_key_list_ || Create_Barcode_Report___(barcode_id_list_, contract_, number_of_copies_, print_without_preview_) || ',';
+   END IF;
+   RETURN SUBSTR(result_key_list_, 0, length(result_key_list_) -1);
+END Print_Barcodes___;
+
+FUNCTION Create_Barcode_Report___(
+   barcode_id_list_       IN VARCHAR2,
+   contract_              IN VARCHAR2,
+   number_of_copies_      IN NUMBER,
+   print_without_preview_ IN BOOLEAN ) RETURN VARCHAR2
+IS
+   report_id_           VARCHAR2(30) := 'INVENTORY_PART_BARCODE_REP';
+   report_attr_         VARCHAR2(32000);
+   parameter_attr_      VARCHAR2(32624);
+   print_attr_          VARCHAR2(2000);
+   printer_             VARCHAR2(2000);
+   fnd_user_            VARCHAR2(200) := Fnd_Session_API.Get_Fnd_User;
+   result_key_          NUMBER;
+   print_job_id_        NUMBER;
+BEGIN
+   -- Make Report
+   Client_SYS.Clear_Attr(report_attr_);
+   Client_SYS.Add_To_Attr('REPORT_ID',        report_id_,        report_attr_);
+   Client_SYS.Clear_Attr(parameter_attr_);
+   Client_SYS.Add_To_Attr('BARCODE_ID',       barcode_id_list_,  parameter_attr_);
+   Client_SYS.Add_To_Attr('CONTRACT',         contract_,         parameter_attr_);
+   Client_SYS.Add_To_Attr('NUMBER_OF_COPIES', number_of_copies_, parameter_attr_);
+   IF (print_without_preview_) THEN
+      printer_ := Printer_Connection_API.Get_Default_Printer(Fnd_Session_API.Get_Fnd_User, report_id_);  
+      Client_SYS.Clear_Attr(print_attr_);
+      Client_SYS.Add_To_Attr('PRINTER_ID',printer_, print_attr_);
+      Print_Job_API.New(print_job_id_, print_attr_);
+            
+      Client_SYS.Add_To_Attr('OUTPUT', 'PRINT', parameter_attr_);
+      Archive_API.New_Instance(result_key_, report_attr_, parameter_attr_);
+      
+      Client_SYS.Clear_Attr(print_attr_);
+      Client_SYS.Add_To_Attr('PRINT_JOB_ID', print_job_id_, print_attr_);
+      Client_SYS.Add_To_Attr('RESULT_KEY', result_key_, print_attr_);
+      Print_Job_Contents_API.New_Instance(print_attr_);
+      Print_Job_API.Print(print_job_id_);
+   ELSE
+      result_key_ := Report_Format_API.Create_New_Report(report_attr_, parameter_attr_, fnd_user_);
+   END IF;
+   
+   RETURN result_key_;
+END Create_Barcode_Report___;
+
+FUNCTION Get_Pack_Count___ (
+   qty_       IN NUMBER,
+   pack_size_ IN NUMBER ) RETURN NUMBER
+IS
+BEGIN
+   IF qty_ <= 0 or pack_size_ <= 0 THEN
+      RETURN 0;
+   END IF;
+   -- Always rounds up the quotient of qty divided by size
+   RETURN CEIL(qty_/pack_size_);
+END Get_Pack_Count___;

@@ -1,0 +1,393 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: SubstituteSalesPartHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date        Sign    History
+--  ------      ------  ---------------------------------------------------------
+--  2021-03-25  Hahalk  Bug 158379(SCZ-14184), Modified Set_Substitute_Part___ by adding COPY_STATUS and COPY_DISCOUNT to the Add_To_Attr to correctly fetch Discount Type and Discount Source
+--  2019-06-26  MaAuse  SCUXXW4-20573, Added call to Customer_Order_Charge_API.Remove_Charge_Lines_If_Exist in Set_Substitute_Part___.
+--  2018-10-24  SeJalk  SCUXXW4-8802, Created
+---------------------------------------------------------------------------------
+
+layer Core;
+@Override
+PROCEDURE CRUD_Create___ (
+   rec_  IN  Customer_Order_Line_Virtual_Rec )
+IS
+   rec_dup_               Customer_Order_Line_Virtual_Rec;
+   order_line_rec_        Customer_Order_Line_API.Public_Rec;
+   quotation_line_rec_    Order_Quotation_Line_API.Public_Rec;
+   line_rec_              Substitute_Sales_Part_Virtual_Rec;
+   base_sales_unit_price_ NUMBER;
+   base_sales_unit_price_incl_tax_ NUMBER;
+   curr_rate_ NUMBER;
+   price_source_    VARCHAR2(200);
+   price_source_id_ VARCHAR2(200);
+   limit_sales_to_assort_ VARCHAR2(5);
+  
+   CURSOR  GET_SUBSTITUTE_SALES_PARTS(buy_qty_due_ IN NUMBER, picking_lead_time_ IN NUMBER, catalog_no_ IN VARCHAR2, contract_ IN VARCHAR2, limit_sales_to_assort_ IN VARCHAR2, location_type3_ IN VARCHAR2, location_type4_ IN VARCHAR2, incl_floor_stock_ IN VARCHAR2) IS
+   SELECT CATALOG_NO, CONTRACT, SUBSTITUTE_SALES_PART,
+      Sales_Part_API.Get_Catalog_Desc(CONTRACT,SUBSTITUTE_SALES_PART) catalog_desc, 
+      Sales_Part_API.Get_Sales_Unit_Meas(CONTRACT, SUBSTITUTE_SALES_PART) Sales_Unit_Meas,
+      Inventory_Part_In_Stock_API.Get_Avail_Plan_Qty_Loc_Type(contract_ => CONTRACT, 
+                        part_no_ => Sales_part_API.Get_Part_No(CONTRACT, SUBSTITUTE_SALES_PART),
+                        configuration_id_ => NULL, 
+                        activity_seq_ => NULL, 
+                        qty_type_ => 'AVAILABLE',
+                        date_requested_ => NULL,
+                        location_type1_db_ => 'PICKING',
+                        location_type2_db_ => 'SHIPMENT', 
+                        location_type3_db_ => location_type3_,
+                        location_type4_db_ => location_type3_) qty_avalilable,
+      Order_Supply_Demand_API.Get_Planned_Del_Date_Shell(CONTRACT, 
+                        Sales_part_API.Get_Part_No(CONTRACT, SUBSTITUTE_SALES_PART),
+                        buy_qty_due_ , 
+                        incl_floor_stock_, -- Include Floor Stock
+                        picking_lead_time_ ) full_quantity_date,
+      Sales_Part_API.Get_Price_Unit_Meas(CONTRACT, SUBSTITUTE_SALES_PART) price_unit_meas,
+      Sales_Part_API.Get_Price_Conv_Factor(CONTRACT, SUBSTITUTE_SALES_PART) price_conv_factor,
+      Sales_Part_API.Get_Tax_Code(CONTRACT, SUBSTITUTE_SALES_PART) tax_code,
+      Statutory_Fee_API.Get_Description(Site_API.Get_Company(CONTRACT), Sales_Part_API.Get_Tax_Code(CONTRACT, SUBSTITUTE_SALES_PART)) tax_description,
+      Statutory_Fee_API.Get_Fee_Rate(Site_API.Get_Company(CONTRACT), Sales_Part_API.Get_Tax_Code(CONTRACT, SUBSTITUTE_SALES_PART)) tax_pecentage,
+      Currency_Code_API.Get_Currency_Rounding(Site_API.Get_Company(CONTRACT), Company_Finance_API.Get_Currency_Code(Site_API.Get_Company(CONTRACT))) rounding,
+      Sales_Part_API.Get_Taxable(CONTRACT, SUBSTITUTE_SALES_PART) taxable,
+      Site_API.Get_Company(CONTRACT) company 
+   FROM SUBSTITUTE_SALES_PART2 
+   WHERE CATALOG_NO = catalog_no_ and CONTRACT = contract_
+   AND (limit_sales_to_assort_ = 'FALSE' OR EXISTS (SELECT 1 FROM Limit_To_Assort_Sales_Part_Lov lasp WHERE substitute_sales_part = lasp.catalog_no));
+   
+   
+BEGIN
+   rec_dup_ := rec_;
+   IF rec_.source = 'ORDER' THEN
+      order_line_rec_ := Customer_Order_Line_API.Get(rec_.order_no, rec_.line_no, rec_.rel_no, rec_.line_item_no);  
+      rec_dup_.contract := order_line_rec_.contract;
+      rec_dup_.wanted_delivery_date := order_line_rec_.wanted_delivery_date;
+      rec_dup_.catalog_no := order_line_rec_.catalog_no;
+      rec_dup_.catalog_desc := order_line_rec_.catalog_desc;
+      rec_dup_.buy_qty_due := order_line_rec_.buy_qty_due;
+      rec_dup_.price_qty := order_line_rec_.buy_qty_due * order_line_rec_.price_conv_factor;   
+      rec_dup_.sales_unit_meas := order_line_rec_.sales_unit_meas;
+      rec_dup_.price_unit_meas := SALES_PART_API.Get_Price_Unit_Meas(order_line_rec_.contract,order_line_rec_.catalog_no);
+      IF customer_Order_API.Get_Use_Price_Incl_Tax_Db(rec_.order_no) = 'TRUE' THEN
+         rec_dup_.use_price_incl_tax_db := true;
+      ELSE
+         rec_dup_.use_price_incl_tax_db := false;
+      END IF;
+      rec_dup_.sale_unit_price := order_line_rec_.sale_unit_price;
+      rec_dup_.discount := order_line_rec_.discount;
+      rec_dup_.net_amt :=  Customer_Order_Line_API.Get_Sale_Price_Total(order_line_rec_.order_no, order_line_rec_.line_no, order_line_rec_.rel_no, order_line_rec_.line_item_no);
+      rec_dup_.price_incl_tax := Customer_Order_Line_API.Get_Sale_Price_Incl_Tax_Total(order_line_rec_.order_no, order_line_rec_.line_no, order_line_rec_.rel_no, order_line_rec_.line_item_no);
+      rec_dup_.unit_price_incl_tax := order_line_rec_.unit_price_incl_tax;
+      rec_dup_.gross_amt :=  Customer_Order_Line_API.Get_Sale_Price_Incl_Tax_Total(order_line_rec_.order_no, order_line_rec_.line_no, order_line_rec_.rel_no, order_line_rec_.line_item_no);
+      rec_dup_.price_conv_factor := order_line_rec_.price_conv_factor;
+      rec_dup_.price_list_no := order_line_rec_.price_list_no;
+      rec_dup_.order_discount := order_line_rec_.order_discount;
+      rec_dup_.price_effectivity_date := order_line_rec_.price_effectivity_date;
+      rec_dup_.picking_lead_time := order_line_rec_.picking_leadtime;
+      IF customer_Order_API.Get_Limit_Sales_To_Assortme_Db(rec_.order_no) = 'TRUE' THEN
+         rec_dup_.limit_sales_to_assort := true;
+         limit_sales_to_assort_ := 'TRUE';
+      ELSE
+         rec_dup_.limit_sales_to_assort := false;
+         limit_sales_to_assort_ := 'FALSE';
+      END IF; 
+   ELSIF  rec_.source = 'QUOTATION' THEN  
+      quotation_line_rec_ := Order_Quotation_Line_API.Get(rec_.order_no, rec_.line_no, rec_.rel_no, rec_.line_item_no);  
+      rec_dup_.contract := quotation_line_rec_.contract;
+      rec_dup_.wanted_delivery_date := quotation_line_rec_.wanted_delivery_date;
+      rec_dup_.catalog_no := quotation_line_rec_.catalog_no;
+      rec_dup_.catalog_desc := quotation_line_rec_.catalog_desc;
+      rec_dup_.buy_qty_due := quotation_line_rec_.buy_qty_due;
+      rec_dup_.price_qty := quotation_line_rec_.buy_qty_due * quotation_line_rec_.price_conv_factor;   
+      rec_dup_.sales_unit_meas := quotation_line_rec_.sales_unit_measure;
+      rec_dup_.price_unit_meas := SALES_PART_API.Get_Price_Unit_Meas(quotation_line_rec_.contract,quotation_line_rec_.catalog_no);
+      IF Order_Quotation_API.Get_Use_Price_Incl_Tax_Db(rec_.order_no) = 'TRUE' THEN
+         rec_dup_.use_price_incl_tax_db := true;
+      ELSE
+         rec_dup_.use_price_incl_tax_db := false;
+      END IF;
+      rec_dup_.sale_unit_price := quotation_line_rec_.sale_unit_price;
+      rec_dup_.discount := quotation_line_rec_.discount;
+      rec_dup_.net_amt :=  Order_Quotation_Line_API.Get_Sale_Price_Total(quotation_line_rec_.quotation_no, quotation_line_rec_.line_no, quotation_line_rec_.rel_no, quotation_line_rec_.line_item_no);
+      --rec_dup_.price_incl_tax := Order_Quotation_Line_API.Get_Sale_Price_Incl_Tax_Total(quotation_line_rec_.quotation_no, quotation_line_rec_.line_no, quotation_line_rec_.rel_no, quotation_line_rec_.line_item_no);
+      rec_dup_.unit_price_incl_tax := quotation_line_rec_.unit_price_incl_tax;
+      rec_dup_.gross_amt :=  Order_Quotation_Line_API.Get_Sale_Price_Incl_Tax_Total(quotation_line_rec_.quotation_no, quotation_line_rec_.line_no, quotation_line_rec_.rel_no, quotation_line_rec_.line_item_no);
+      rec_dup_.price_conv_factor := quotation_line_rec_.price_conv_factor;
+      rec_dup_.price_list_no := quotation_line_rec_.price_list_no;
+      rec_dup_.order_discount := quotation_line_rec_.quotation_discount;
+      rec_dup_.picking_lead_time := quotation_line_rec_.picking_leadtime;
+      rec_dup_.price_effectivity_date := Order_Quotation_API.Get_Price_Effectivity_Date(quotation_line_rec_.quotation_no);
+      IF customer_Order_API.Get_Limit_Sales_To_Assortme_Db(rec_.order_no) = 'TRUE' THEN
+         rec_dup_.limit_sales_to_assort := true;
+         limit_sales_to_assort_ := 'TRUE';
+      ELSE
+         rec_dup_.limit_sales_to_assort := false;
+         limit_sales_to_assort_ := 'FALSE';
+      END IF; 
+      
+      rec_dup_.planned_due_date := quotation_line_rec_.planned_due_date ;
+      rec_dup_.probability_to_win := quotation_line_rec_.probability_to_win ;        
+   END  IF;
+
+   super(rec_dup_);
+   IF rec_.source = 'ORDER' THEN
+      FOR sub_rec_ IN GET_SUBSTITUTE_SALES_PARTS(order_line_rec_.buy_qty_due, null, order_line_rec_.catalog_no, order_line_rec_.contract, limit_sales_to_assort_, NULL, NULL, 'FALSE') LOOP
+         line_rec_.objkey        := sys_guid();
+         line_rec_.parent_objkey := rec_.objkey; 
+         line_rec_.catalog_no                     := sub_rec_.catalog_no;
+         line_rec_.contract                       := sub_rec_.contract;
+         line_rec_.buy_qty_due                    := 0;
+         line_rec_.sales_unit_meas                := sub_rec_.sales_unit_meas;
+         line_rec_.substitute_sales_part          := sub_rec_.substitute_sales_part;
+         line_rec_.sub_sales_part_description     := sub_rec_.catalog_desc;
+         line_rec_.qty_available                  := sub_rec_.qty_avalilable;
+         line_rec_.earliest_ship_date             := sub_rec_.full_quantity_date;
+         line_rec_.price_qty                      := 0;
+         line_rec_.price_unit_meas                := sub_rec_.price_unit_meas;
+         line_rec_.net_amt                        := 0;
+         line_rec_.gross_amt                      := 0;
+         line_rec_.price_convfactor               := sub_rec_.price_conv_factor;
+         line_rec_.tax_code                       := sub_rec_.tax_code;
+         line_rec_.tax_code_description           := sub_rec_.tax_description; 
+         line_rec_.tax_percentage                 := sub_rec_.tax_pecentage;
+         IF sub_rec_.taxable = 'TRUE' THEN
+            line_rec_.taxable := true;           
+         ELSE
+            line_rec_.taxable := false;   
+         END IF;          
+         
+         Customer_Order_Pricing_API.Get_Substitute_Part_Price_Info(line_rec_.sale_unit_price,
+                                                                  line_rec_.price_incl_tax,
+                                                                  base_sales_unit_price_,
+                                                                  base_sales_unit_price_incl_tax_,
+                                                                  curr_rate_,
+                                                                  line_rec_.discount,
+                                                                  price_source_,
+                                                                  price_source_id_,
+                                                                  rec_.order_no,
+                                                                  line_rec_.substitute_sales_part,
+                                                                  line_rec_.buy_qty_due,
+                                                                  order_line_rec_.price_effectivity_date,
+                                                                  Customer_Order_API.Get_Use_Price_Incl_Tax_Db(rec_.order_no));
+         
+      
+         CRUD_Create___(line_rec_);
+      END LOOP;
+   ELSIF  rec_.source = 'QUOTATION' THEN  
+      FOR sub_rec_ IN GET_SUBSTITUTE_SALES_PARTS(quotation_line_rec_.buy_qty_due, null, quotation_line_rec_.catalog_no, quotation_line_rec_.contract, limit_sales_to_assort_, 'F', 'MANUFACTURING', 'TRUE') LOOP
+         line_rec_.objkey        := sys_guid();
+         line_rec_.parent_objkey := rec_.objkey; 
+         line_rec_.catalog_no                     := sub_rec_.catalog_no;
+         line_rec_.contract                       := sub_rec_.contract;
+         line_rec_.buy_qty_due                    := 0;
+         line_rec_.sales_unit_meas                := sub_rec_.sales_unit_meas;
+         line_rec_.substitute_sales_part          := sub_rec_.substitute_sales_part;
+         line_rec_.sub_sales_part_description     := sub_rec_.catalog_desc;
+         line_rec_.qty_available                  := sub_rec_.qty_avalilable;
+         line_rec_.earliest_ship_date             := sub_rec_.full_quantity_date;
+         line_rec_.price_qty                      := 0;
+         line_rec_.price_unit_meas                := sub_rec_.price_unit_meas;
+         line_rec_.net_amt                        := 0;
+         line_rec_.gross_amt                      := 0;
+         line_rec_.price_convfactor               := sub_rec_.price_conv_factor;
+         line_rec_.tax_code                       := sub_rec_.tax_code;
+         line_rec_.tax_code_description           := sub_rec_.tax_description; 
+         line_rec_.tax_percentage                 := sub_rec_.tax_pecentage;
+         IF sub_rec_.taxable = 'TRUE' THEN
+            line_rec_.taxable := true;           
+         ELSE
+            line_rec_.taxable := false;   
+         END IF;          
+         
+         Customer_Order_Pricing_API.Get_Qsubstitute_Price_Info(line_rec_.sale_unit_price,
+                                                                  line_rec_.price_incl_tax,
+                                                                  base_sales_unit_price_,
+                                                                  base_sales_unit_price_incl_tax_,
+                                                                  curr_rate_,
+                                                                  line_rec_.discount,
+                                                                  price_source_,
+                                                                  price_source_id_,
+                                                                  rec_.order_no,
+                                                                  line_rec_.substitute_sales_part,
+                                                                  line_rec_.buy_qty_due,
+                                                                  rec_dup_.price_effectivity_date,
+                                                                  Order_Quotation_API.Get_Use_Price_Incl_Tax_Db(rec_.order_no));
+         
+      
+         CRUD_Create___(line_rec_);
+      END LOOP;
+   END IF;
+END CRUD_Create___;
+
+FUNCTION Calculate_Prices___(
+	sale_unit_price_ IN NUMBER,
+	sale_unit_price_incl_tax_ IN NUMBER,
+	tax_calc_base_ IN VARCHAR2,
+	tax_percentage_ IN NUMBER,
+	curr_rounding_ IN NUMBER) RETURN Price_Structure_Rec
+IS
+   rec_ Price_Structure_Rec;
+BEGIN
+   rec_.sale_unit_price := sale_unit_price_;
+   rec_.sale_unit_price_incl_tax := sale_unit_price_incl_tax_;
+	Tax_Handling_Util_API.Calculate_Prices(rec_.sale_unit_price,
+                                          rec_.sale_unit_price_incl_tax, 
+                                          tax_calc_base_, 
+                                          tax_percentage_, 
+                                          curr_rounding_); 
+   RETURN rec_;                                       
+END Calculate_Prices___;
+
+@Override
+PROCEDURE CRUD_Update___(
+   old_ IN Substitute_Sales_Part_Virtual_Rec,
+   new_ IN Substitute_Sales_Part_Virtual_Rec )
+IS
+   parent_rec_   Customer_Order_Line_Virtual_Rec;
+   line_rec_ Substitute_Sales_Part_Virtual_Rec;
+   base_sales_unit_price_ NUMBER;
+   base_sales_unit_price_incl_tax_ NUMBER;
+   curr_rate_ NUMBER;
+   price_source_    VARCHAR2(200);
+   price_source_id_ VARCHAR2(200);
+   key_ Customer_Order_Line_Virtual_Key;
+   sales_price_  NUMBER;
+   discount_amt_ NUMBER;
+   line_total_ NUMBER := 0;
+   tax_amount_base_ NUMBER;
+   net_amount_base_ NUMBER;
+   gross_amount_base_ NUMBER;
+   tax_amount_curr_ NUMBER;
+BEGIN
+  
+   line_rec_ := new_; 
+   key_.objkey := new_.parent_objkey;
+   parent_rec_ := Get_Record___(key_);
+   IF old_.buy_qty_due != new_.buy_qty_due THEN    
+      IF parent_rec_.source = 'ORDER' THEN
+         Customer_Order_Pricing_API.Get_Substitute_Part_Price_Info(line_rec_.sale_unit_price,
+                                                                  line_rec_.price_incl_tax,
+                                                                  base_sales_unit_price_,
+                                                                  base_sales_unit_price_incl_tax_,
+                                                                  curr_rate_,
+                                                                  line_rec_.discount,
+                                                                  price_source_,
+                                                                  price_source_id_,
+                                                                  parent_rec_.order_no,
+                                                                  line_rec_.substitute_sales_part,
+                                                                  line_rec_.buy_qty_due,
+                                                                  parent_rec_.price_effectivity_date,
+                                                                  Customer_Order_API.Get_Use_Price_Incl_Tax_Db(parent_rec_.order_no));
+      ELSIF parent_rec_.source = 'QUOTATION' THEN
+         Customer_Order_Pricing_API.Get_Qsubstitute_Price_Info(line_rec_.sale_unit_price,
+                                                                  line_rec_.price_incl_tax,
+                                                                  base_sales_unit_price_,
+                                                                  base_sales_unit_price_incl_tax_,
+                                                                  curr_rate_,
+                                                                  line_rec_.discount,
+                                                                  price_source_,
+                                                                  price_source_id_,
+                                                                  parent_rec_.order_no,
+                                                                  line_rec_.substitute_sales_part,
+                                                                  line_rec_.buy_qty_due,
+                                                                  parent_rec_.price_effectivity_date,
+                                                                  Order_Quotation_API.Get_Use_Price_Incl_Tax_Db(parent_rec_.order_no));
+      END IF;
+      line_rec_.earliest_ship_date := Order_Supply_Demand_API.Get_Planned_Del_Date_Shell(line_rec_.contract, 
+                                                                                    Sales_part_API.Get_Part_No(line_rec_.contract, line_rec_.substitute_sales_part),
+                                                                                    new_.buy_qty_due , 
+                                                                                    'FALSE',
+                                                                                    parent_rec_.picking_lead_time );
+      line_rec_.price_qty :=  new_.buy_qty_due * line_rec_.price_convfactor;                                                                           
+                                                                                          
+   END IF;
+   sales_price_ := new_.buy_qty_due * parent_rec_.price_conv_factor * line_rec_.sale_unit_price;
+   discount_amt_ := sales_price_ - (sales_price_ * (1 - parent_rec_.discount / 100) * (1 - parent_rec_.order_discount / 100));
+   -- Round each value separately
+   sales_price_ := ROUND(sales_price_, 0);
+   discount_amt_ := ROUND(discount_amt_, 0);
+    
+   -- Assign LineTotal column
+   line_rec_.net_amt := sales_price_ - discount_amt_;
+   sales_price_ := new_.buy_qty_due * parent_rec_.price_conv_factor * line_rec_.price_incl_tax;
+   discount_amt_ := sales_price_ - (sales_price_  * (1 - parent_rec_.discount / 100) * (1 - parent_rec_.order_discount / 100));
+   sales_price_ := ROUND(sales_price_, 0);
+   discount_amt_ := ROUND(discount_amt_, 0);
+   line_rec_.gross_amt := sales_price_ - discount_amt_;
+   
+   IF parent_rec_.source = 'QUOTATION' THEN
+      Tax_Handling_Order_Util_API.Get_Amounts(tax_amount_base_,
+                                             net_amount_base_, 
+                                             gross_amount_base_,
+                                             tax_amount_curr_,
+                                             line_rec_.net_amt,
+                                             line_rec_.gross_amt,
+                                             Site_API.Get_Company(parent_rec_.contract),                                                                        
+                                             'ORDER_QUOTATION_LINE',
+                                             parent_rec_.order_no,
+                                             parent_rec_.line_no,
+                                             parent_rec_.rel_no,
+                                             parent_rec_.rel_no,
+                                             '*');
+   
+   END IF;
+
+   super(old_,line_rec_);
+   FOR rec_ IN Get_Substitute_Sales_Part_Array___(key_) LOOP
+      line_total_ := line_total_ + rec_.buy_qty_due;
+   END LOOP;
+   parent_rec_.line_total := line_total_;
+   CRUD_Update___(parent_rec_,parent_rec_);
+END CRUD_Update___;
+
+PROCEDURE Set_Substitute_Part___ (
+   key_ IN Customer_Order_Line_Virtual_Key,
+   info$_ OUT VARCHAR2 ) 
+IS
+   parent_rec_   Customer_Order_Line_Virtual_Rec;
+   attr_ VARCHAR2(2000);
+
+BEGIN  
+   parent_rec_ := Get_Record___(key_);
+   IF parent_rec_.source = 'ORDER' THEN
+      Customer_Order_Charge_API.Remove_Charge_Lines_If_Exist(parent_rec_.order_no, parent_rec_.line_no, parent_rec_.rel_no, parent_rec_.line_item_no);
+      Customer_Order_line_API.Remove(parent_rec_.order_no, parent_rec_.line_no, parent_rec_.rel_no, parent_rec_.line_item_no);
+   ELSIF parent_rec_.source = 'QUOTATION' THEN
+      Order_Quotation_line_API.Remove(parent_rec_.order_no, parent_rec_.line_no, parent_rec_.rel_no, parent_rec_.line_item_no);
+   END IF;
+   FOR rec_ IN Get_Substitute_Sales_Part_Array___(key_) LOOP  
+      IF rec_.buy_qty_due > 0 THEN      
+         Client_SYS.Clear_Attr(attr_);
+         IF parent_rec_.source = 'ORDER' THEN
+            Client_SYS.Add_To_Attr('ORDER_NO', parent_rec_.order_no, attr_);
+            Client_SYS.Add_To_Attr('CONTRACT', parent_rec_.contract, attr_);
+            Client_SYS.Add_To_Attr('CATALOG_NO', rec_.substitute_sales_part, attr_);
+            Client_SYS.Add_To_Attr('BUY_QTY_DUE', rec_.buy_qty_due, attr_);
+            Client_SYS.Add_To_Attr('SALE_UNIT_PRICE', rec_.sale_unit_price, attr_);
+            Client_SYS.Add_To_Attr('UNIT_PRICE_INCL_TAX', rec_.price_incl_tax, attr_);
+            Client_SYS.Add_To_Attr('ORIGINAL_PART_NO', parent_rec_.catalog_no, attr_);
+            Client_SYS.Add_To_Attr('PRICE_EFFECTIVITY_DATE', parent_rec_.price_effectivity_date, attr_);
+            Client_SYS.Add_To_Attr('WANTED_DELIVERY_DATE', parent_rec_.wanted_delivery_date, attr_);
+            Client_SYS.Add_To_Attr('COPY_DISCOUNT', 'FALSE', attr_);
+            Customer_Order_line_API.new(info$_, attr_);
+         ELSIF parent_rec_.source = 'QUOTATION' THEN
+            Client_SYS.Add_To_Attr('QUOTATION_NO', parent_rec_.order_no, attr_);
+            Client_SYS.Add_To_Attr('CONTRACT', parent_rec_.contract, attr_);
+            Client_SYS.Add_To_Attr('CATALOG_NO', rec_.substitute_sales_part, attr_);
+            Client_SYS.Add_To_Attr('BUY_QTY_DUE', rec_.buy_qty_due, attr_);
+            Client_SYS.Add_To_Attr('SALE_UNIT_PRICE', rec_.sale_unit_price, attr_);
+            Client_SYS.Add_To_Attr('UNIT_PRICE_INCL_TAX', rec_.price_incl_tax, attr_);
+            Client_SYS.Add_To_Attr('ORIGINAL_PART_NO', parent_rec_.catalog_no, attr_);
+            Client_SYS.Add_To_Attr('PLANNED_DUE_DATE', parent_rec_.planned_due_date, attr_);
+            Client_SYS.Add_To_Attr('PROBABILITY_TO_WIN', parent_rec_.probability_to_win, attr_);
+            Client_SYS.Add_To_Attr('PROMISED_DELIVERY_DATE', parent_rec_.promised_delivery_date, attr_);
+            Client_SYS.Add_To_Attr('COPY_STATUS', 'FALSE', attr_);
+            Order_Quotation_Line_API.new(info$_, attr_);
+         END IF; 
+      END IF;
+   END LOOP;
+END Set_Substitute_Part___;

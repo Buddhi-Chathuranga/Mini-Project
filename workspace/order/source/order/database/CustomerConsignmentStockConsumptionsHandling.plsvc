@@ -1,0 +1,194 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: CustomerConsignmentStockConsumptionsHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign    History
+--  ------     ------  ---------------------------------------------------------
+-- 2020-07-27  BudKlk  Bug 154810(SCZ-10801), Modified Report_Consumed___ to changed the expiration_date_ format to date and also to send the aggregated flag 'TRUE' to trigger the refill assistant.
+-- 2020-05-18  BudKLK  Bug 153735(SCZ-9998), Modified the methods Raise_Created_Refill_Orders___ and  Report_Consumed___ to replace the method Customer_Consignment_Stock_API.Get_Consignment_Stock_Qty() to get the consignment stock qty 
+-- 2020-05-18          from Get_Consignment_Stock_Qty__() to retrive the correct values according to the sales part and modified CRUD_Update___ method to pass FALSE for the parameter b2b_client_ to make sure Aurena client works same as the IEE client.
+-- 2020-02-24  ChBnlk  Bug 150797(SCZ-8358), Introduced new parameter expiration_date_ to the method Consume_Consignment_Stock___. Modified CRUD_Update___ and Report_Consumed___
+-- 2020-02-24          in order to pass the proper value for expiration_date_ of the method call Deliver_Customer_Order_API.Consume_Consignment_Stock__.
+-- 2019-10-15  KiSalk  Bug 150523(SCZ-7111), Passed parameter b2b_client_ as VARCHAR2 instead of BOOLEAN when calling Deliver_Customer_Order_API.Consume_Consignment_Stock__.
+-- 2019-05-19  LaThlk  SCUXXW4-18796, Modified the function Raise_Created_Refill_Orders___ to avoid adding duplicates into create_orders_attr_.
+-- 2019-05-13  LaThlk  SCUXXW4-18796, Modified the Consume_Consignment_Stock___() by passing the expiration date to the server call.
+-- 2019-04-02  LaThlk  SCUXXW4-11443, Implemented the procedure Consume_Consignment_Stock___ and the function Report_Consumed___
+-- 2018-10-20  RuLiLk  SCUXXW4-9755, Created
+-----------------------------------------------------------------------------
+
+layer Core;
+@Override
+PROCEDURE CRUD_Update___ (
+   etag_     IN OUT VARCHAR2,
+   key_      IN OUT Customer_Consignment_Stock_Key,
+   attr_     IN OUT VARCHAR2,
+   info_     OUT VARCHAR2,
+   action_   IN VARCHAR2 )
+IS
+   qty_to_consume_ NUMBER;
+BEGIN
+   qty_to_consume_ := Client_SYS.Get_Item_Value_To_Number('QTY_TO_CONSUME',attr_,'CustomerConsignmentStockConsumptionsHandling' );
+   Deliver_Customer_Order_API.Consume_Consignment_Stock__(key_.contract, key_.catalog_no, key_.customer_no,key_.addr_no, qty_to_consume_,
+                                                          NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'FALSE', NULL, 'TRUE'); 
+   super(etag_, key_, attr_, info_, action_);   
+END CRUD_Update___;
+
+
+-- This method will go though the updated liens and check if consignment stock quantity is less than the order point and if the recode is, consignment stock @Override
+-- If those two conditions are true, recod will be added to create re-fill orders.
+FUNCTION Raise_Created_Refill_Orders___ (
+   update_list_            IN VARCHAR2) RETURN VARCHAR2
+IS
+   list_ VARCHAR2(32000) := CONCAT(update_list_ , ';');
+   current_selection_   VARCHAR2(32000);
+   catalog_no_          VARCHAR2(100);
+   contract_            VARCHAR2(100);
+   customer_no_         VARCHAR2(100);
+   addr_no_             VARCHAR2(100);
+   rec_                 Customer_Consignment_Stock_API.Public_Rec;
+   consignment_stock_qty_   NUMBER;
+   create_orders_attr_      VARCHAR2(32000) := '';
+BEGIN
+   WHILE (INSTR(list_, ';') > 0) LOOP
+      current_selection_  := substr(list_, 0, INSTR(list_, ';') - 1);
+      catalog_no_     := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CATALOG_NO');
+      contract_       := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT');
+      customer_no_    := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CUSTOMER_NO');
+      addr_no_        := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ADDR_NO');
+      rec_            := Customer_Consignment_Stock_API.Get(contract_, catalog_no_, customer_no_, addr_no_);
+      
+      IF rec_.consignment_stock = 'CONSIGNMENT STOCK' THEN
+         consignment_stock_qty_ := Deliver_Customer_Order_API.Get_Consignment_Stock_Qty__(contract_, catalog_no_, customer_no_, addr_no_, aggregated_ =>'TRUE');
+         IF (rec_.order_point > consignment_stock_qty_)THEN
+            IF create_orders_attr_ IS NULL THEN
+               create_orders_attr_ := current_selection_ ;
+            ELSE
+               IF NOT(create_orders_attr_ LIKE '%'||catalog_no_||'%') THEN
+                  create_orders_attr_ := create_orders_attr_ || ';' || current_selection_ ;
+               END IF;
+            END IF;  
+             
+         END IF;
+      END IF;     
+      
+      list_ := SUBSTR(list_, (INSTR(list_, ';') + 1));
+   END LOOP;
+   RETURN create_orders_attr_;
+END Raise_Created_Refill_Orders___;
+
+
+PROCEDURE Consume_Consignment_Stock___ (
+   key_                       IN Customer_Consignment_Stock_Detail_Key,
+   qty_to_consume_            IN NUMBER ) 
+IS
+   query_date_                DATE;
+BEGIN
+   IF key_.expiration_date_base IS NULL THEN
+      query_date_ := NULL;
+   ELSE
+      query_date_ := key_.expiration_date_base;
+   END IF;
+   Deliver_Customer_Order_API.Consume_Consignment_Stock__(key_.contract,
+                                                          key_.catalog_no,
+                                                          key_.customer_no,
+                                                          key_.addr_no,
+                                                          qty_to_consume_,
+                                                          key_.configuration_id,
+                                                          key_.lot_batch_no,
+                                                          key_.serial_no,
+                                                          key_.eng_chg_level,
+                                                          key_.waiv_dev_rej_no,
+                                                          key_.activity_seq,
+                                                          key_.handling_unit_id,
+                                                          'FALSE',
+                                                          query_date_);
+END Consume_Consignment_Stock___;
+
+
+PROCEDURE Consume_Consignment_Stock___ (
+	contract_ IN VARCHAR2,
+	catalog_no_ IN VARCHAR2,
+	customer_no_ IN VARCHAR2,
+	addr_no_ IN VARCHAR2,
+	qty_to_report_ IN NUMBER,
+	configuration_id_ IN VARCHAR2,
+	lot_batch_no_ IN VARCHAR2,
+	serial_no_ IN VARCHAR2,
+	eng_chg_level_ IN VARCHAR2,
+	waiv_dev_rej_no_ IN VARCHAR2,
+	activity_seq_ IN NUMBER,
+	handling_unit_id_ IN NUMBER,
+   expiration_date_   IN DATE )
+IS
+BEGIN
+	Deliver_Customer_Order_API.Consume_Consignment_Stock__(contract_,
+                                                          catalog_no_,
+                                                          customer_no_,
+                                                          addr_no_,
+                                                          qty_to_report_,
+                                                          configuration_id_,
+                                                          lot_batch_no_,
+                                                          serial_no_,
+                                                          eng_chg_level_,
+                                                          waiv_dev_rej_no_,
+                                                          activity_seq_,
+                                                          handling_unit_id_,
+                                                          'TRUE',
+                                                          expiration_date_);
+END Consume_Consignment_Stock___;
+
+
+FUNCTION Report_Consumed___ (
+	full_selection_ IN VARCHAR2) RETURN VARCHAR2
+IS
+   selected_records_          json_array_t := json_array_t.parse(full_selection_);
+   consignment_stock_qty_     NUMBER;   
+   current_selection_         VARCHAR2(32000);
+   create_orders_attr_        VARCHAR2(32000);
+   
+   catalog_no_                VARCHAR2(25);
+   contract_                  VARCHAR2(5);
+   customer_no_               VARCHAR2(20);
+   addr_no_                   VARCHAR2(50);
+   quantity_                  NUMBER;
+   configuration_id_          VARCHAR2(50);
+   lot_batch_no_              VARCHAR2(20);
+   serial_no_                 VARCHAR2(50);
+   eng_chg_level_             VARCHAR2(6);
+   waiv_dev_rej_no_           VARCHAR2(15);
+   activity_seq_              NUMBER;
+   handling_unit_id_          NUMBER;
+   rec_                       Customer_Consignment_Stock_API.Public_Rec;
+   expiration_date_           DATE;
+BEGIN
+   FOR record_ IN 0 .. selected_records_.get_size - 1 LOOP
+      current_selection_   := selected_records_.get_string(record_);
+      catalog_no_          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CATALOG_NO');
+      contract_            := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT');
+      customer_no_         := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CUSTOMER_NO');
+      addr_no_             := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ADDR_NO');
+      quantity_            := Client_SYS.Get_Key_Reference_Value(current_selection_, 'QUANTITY');
+      configuration_id_    := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONFIGURATION_ID');
+      lot_batch_no_        := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOT_BATCH_NO');
+      serial_no_           := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SERIAL_NO');
+      eng_chg_level_       := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ENG_CHG_LEVEL');
+      waiv_dev_rej_no_     := Client_SYS.Get_Key_Reference_Value(current_selection_, 'WAIV_DEV_REJ_NO');
+      activity_seq_        := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ACTIVITY_SEQ');
+      handling_unit_id_    := Client_SYS.Get_Key_Reference_Value(current_selection_, 'HANDLING_UNIT_ID');
+      expiration_date_     := Client_SYS.Attr_Value_To_Date(Client_SYS.Get_Key_Reference_Value(current_selection_, 'EXPIRATION_DATE_BASE'));
+      
+      Customer_Consignment_Stock_Initial_Check___ (contract_, catalog_no_, customer_no_, addr_no_);
+      Consume_Consignment_Stock___(contract_, catalog_no_, customer_no_, addr_no_, quantity_, configuration_id_, lot_batch_no_, serial_no_, eng_chg_level_, waiv_dev_rej_no_, activity_seq_, handling_unit_id_, expiration_date_);
+   END LOOP;   
+   rec_ := Customer_Consignment_Stock_API.Get(contract_, catalog_no_, customer_no_, addr_no_);
+   IF rec_.consignment_stock = 'CONSIGNMENT STOCK' THEN
+      consignment_stock_qty_ := Deliver_Customer_Order_API.Get_Consignment_Stock_Qty__(contract_, catalog_no_, customer_no_, addr_no_, aggregated_ =>'TRUE');
+      IF (rec_.order_point > consignment_stock_qty_)THEN
+         create_orders_attr_ := current_selection_ ;
+      END IF;
+   END IF;
+   RETURN create_orders_attr_;
+END Report_Consumed___;

@@ -1,0 +1,554 @@
+client InventoryPartsAvailabilityWithTime;
+component INVENT;
+layer Core;
+projection InventoryPartsAvailabilityWithTimeHandling;
+description "Put some useful description here ...";
+
+@DynamicComponentDependency SHPORD
+include fragment EditShopOrderDialog;
+@DynamicComponentDependency SHPORD
+include fragment AdjustSoNeedDateToDemandDialog;
+include fragment SupplyDemandDetailsCommands;
+include fragment LovCommodityGroup2Selector;
+include fragment LovCommodityGroup1Selector;
+include fragment InventoryPartLov2Selector;
+@DynamicComponentDependency SHPORD
+include fragment ShopOrderPropInitialCheck;
+@DynamicComponentDependency SHPORD
+warningsenabled = UpdateEditShopOrder, AdjustShopOrderNeedDate, AdjustShopOrderLotSize;
+--------------------------------- FRAGMENTS ---------------------------------
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+navigator {
+   entry InventoryPartAvailabilityWithTimeNavEntry parent InventNavigator.SupplyChainPlanningPartPlanning at index 170 {
+      label = "Inventory Parts Intraday Availability";
+      page List;
+   }
+}
+-------------------------------- MAIN PAGES ---------------------------------
+page List {
+   label = "Inventory Parts Intraday Availability";
+   searchcontext PageSearchContext {
+      defaults = GetPageSearchContextDefaults();
+   }
+
+   list SupplyDemandDetailPlanningList using GetPartsAvailablityWithTime(searchcontext.PageSearchContext.TimeHorizon, searchcontext.PageSearchContext.IncludeOnlyFirmSupplies, searchcontext.PageSearchContext.IncludeOnlyFirmDemands, searchcontext.PageSearchContext.IncludeUsableQty);
+
+   list DetailPlanningNestedList(DetailPlanningArray) bind SupplyDemandDetailPlanningList {
+      display = Nested;
+      filter = [DateRequired <= searchcontext.PageSearchContext.TimeHorizonDate and(FirmDb = true or(QtySupply > 0 and ClientFalse = searchcontext.PageSearchContext.IncludeOnlyFirmSupplies) or(QtyDemand > 0 and ClientFalse = searchcontext.PageSearchContext.IncludeOnlyFirmDemands))];
+   }
+}
+
+--------------------------------- COMMANDS ----------------------------------
+@DynamicComponentDependency SHPORD
+command EditShopOrder for OrderSupplyDemandDetailPlanning {
+   label = "Edit Shop Order";
+   mode = SingleRecord;
+   enabled = [OrderSupplyDemandTypeDb = "5"];
+   execute {
+      dialog EditShopOrderDialog(OrderNo, LineNo, RelNo, PartNo) {
+         when OK {
+            exit;
+         }
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+
+@DynamicComponentDependency SHPORD
+command AdjustShopOrdNeedDate for OrderSupplyDemandDetailPlanning {
+   label = "Adjust Need Date to Demand";
+   mode = SingleRecord;
+   enabled = [OrderSupplyDemandTypeDb = "5"];
+   execute {
+      call AdjustShopOrderNeedDate(OrderNo, LineNo, RelNo, searchcontext.PageSearchContext.IncludeOnlyFirmSupplies, searchcontext.PageSearchContext.IncludeOnlyFirmDemands, searchcontext.PageSearchContext.IncludeUsableQty);
+   }
+}
+
+@DynamicComponentDependency SHPORD
+command AdjustShopOrdersNeedDateCommand for InventoryPartsAvailabilityPlanning {
+   label = "Adjust Shop Orders Need Date to Demand";
+   mode = SelectedRecords;
+   variable TimeHorizonVar Number;
+   variable TimeHorizonDateVar Date;
+
+   enabled = [true];
+   bulkexecute {
+      set TimeHorizonVar = searchcontext.PageSearchContext.TimeHorizon;
+      set TimeHorizonDateVar = "#{toDate(addDays(today(), TimeHorizonVar))}";
+
+      dialog AdjustSoNeedDateToDemandDialog(Selection, TimeHorizonDateVar, searchcontext.PageSearchContext.IncludeOnlyFirmSupplies, searchcontext.PageSearchContext.IncludeOnlyFirmDemands, searchcontext.PageSearchContext.IncludeUsableQty) {
+         when OK {
+            exit;
+         }
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+
+@DynamicComponentDependency SHPORD
+command AdjustShopOrdLotSize for OrderSupplyDemandDetailPlanning {
+   label = "Adjust Lot Size to Demand";
+   mode = SingleRecord;
+   variable TimeHorizonVar Number;
+   variable TimeHorizonDateVar Date;
+   enabled = [OrderSupplyDemandTypeDb = "5"];
+   execute {
+      set TimeHorizonVar = searchcontext.PageSearchContext.TimeHorizon;
+      set TimeHorizonDateVar = "#{toDate(addDays(today(), TimeHorizonVar))}";
+      call AdjustShopOrderLotSize(OrderNo, LineNo, RelNo, searchcontext.PageSearchContext.IncludeOnlyFirmSupplies, searchcontext.PageSearchContext.IncludeOnlyFirmDemands, searchcontext.PageSearchContext.IncludeUsableQty, TimeHorizonDateVar);
+   }
+}
+
+@DynamicComponentDependency SHPORD
+command CreateBatchBalance for OrderSupplyDemandDetailPlanning {
+   label = "Create";
+   mode = SingleRecord;
+   variable VarBatchBalanceId {
+      type = Number;
+   }
+   enabled = [(OrderSupplyDemandTypeDb = "5" or OrderSupplyDemandTypeDb = "8" or OrderSupplyDemandTypeDb = "4") and BalanceId = null];
+   execute {
+      call CreateBatchBalance(Contract, PartNo, OrderNo, LineNo, RelNo, OrderSupplyDemandTypeDb) into VarBatchBalanceId;
+      messagebox("", question, "Batch Balance ${VarBatchBalanceId} created. Do you want to view it now?") {
+         when "Yes" {
+            navigate "tree/BatchBalance/Tree?$filter=BalanceId eq $[VarBatchBalanceId]";
+         }
+         when "No" {
+            exit OK;
+         }
+      }
+   }
+}
+
+@DynamicComponentDependency SHPORD
+command BatchBalanceDetails for OrderSupplyDemandDetailPlanning {
+   label = "Details";
+   mode = SingleRecord;
+   enabled = [(OrderSupplyDemandTypeDb = "5" or OrderSupplyDemandTypeDb = "8" or OrderSupplyDemandTypeDb = "4") and BalanceId != null];
+   execute {
+      navigate "tree/BatchBalance/Tree?$filter=BalanceId eq $[BalanceId]";
+   }
+}
+@DynamicComponentDependency MFGVIZ
+command ShopOrdersVisualizer for InventoryPartsAvailabilityPlanning {
+   label = "Visual Shop Orders Planning";
+   variable VarSessionId Number;
+   variable VarObjIdList LongText;
+   mode = SelectedRecords;
+   enableonallfiltered = [true];
+
+   bulkexecute {
+      stringify(records, "CONTRACT=${Contract}^PART_NO=${PartNo}^CONFIGURATION_ID=${ConfigurationId}^", JSON) into VarObjIdList;
+      call CreateVizSessionForShopOrdersPlan(searchcontext.PageSearchContext.TimeHorizon, VarObjIdList) into VarSessionId;
+      navigate "page/ShopOrdersVisualizer/Form?initcontext=SessionId:${VarSessionId}";
+   }
+}
+
+@DynamicComponentDependency MFGVIZ
+command ShopOrderOperationsVisualizer for InventoryPartsAvailabilityPlanning {
+   label = "Visual Shop Order Operations Planning";
+   variable VarSessionId Number;
+   variable VarObjIdList LongText;
+   mode = SelectedRecords;
+   enableonallfiltered = [true];
+
+   bulkexecute {
+      stringify(records, "CONTRACT=${Contract}^PART_NO=${PartNo}^CONFIGURATION_ID=${ConfigurationId}^", JSON) into VarObjIdList;
+      call CreateVizSessionForShopOrderOperation(searchcontext.PageSearchContext.TimeHorizon, VarObjIdList) into VarSessionId;
+      navigate "page/ShopOrderOperationsVisualizer/Form?initcontext=SessionId:${VarSessionId}";
+   }
+}
+--------------------------------- SELECTORS ---------------------------------
+@Overtake
+selector InventoryPartLov2Selector for InventoryPartLov2 {
+   static Contract;
+   static PartNo;
+   static Description;
+   static TypeCode;
+}
+---------------------------------- GROUPS -----------------------------------
+
+
+----------------------------------- LISTS -----------------------------------
+list SupplyDemandDetailPlanningList for InventoryPartsAvailabilityPlanning {
+   label = "";
+   editmode = MultiRowEdit;
+
+   lov ContractRef with ReferenceUserAllowedSiteLovSelector {
+      size = Small;
+   }
+   lov InventoryPartLovRef with InventoryPartLov2Selector {
+      label = "Part";
+      description = Description;
+      size = Large;
+      editable = [false];
+   }
+   @DynamicComponentDependency CFGCHR
+   lov ConfigurationIdRef with ReferenceConfigurationSpecSelector {
+      label = "Configuration ID";
+      size = Small;
+      editable = [false];
+   }
+   measure QtyUsable(UoM) {
+      size = Small;
+   }
+   measure QtySupply(UoM) {
+      size = Small;
+   }
+   measure QtyDemand(UoM) {
+      size = Small;
+   }
+   badge DemandBalance {
+      size = Small;
+      label = "Demand Balance";
+      emphasis Warning = [DemandBalance < 0];
+      emphasis Neutral = [DemandBalance >= 0];
+   }
+   badge ProjectedQtyIndicator {
+      size = Small;
+      label = "Negative Projected Qty";
+      emphasis Warning = [ProjectedQtyIndicator];
+      emphasis Neutral = [not(ProjectedQtyIndicator)];
+   }
+   measure QtyMsForecast(UoM) {
+      size = Small;
+   }
+   badge ForecastBalance {
+      size = Small;
+      label = "Forecast Balance";
+      emphasis Warning = [ForecastBalance < 0];
+      emphasis Neutral = [ForecastBalance >= 0];
+   }
+   field TypeCode {
+      size = Medium;
+   }
+   lov PlannerBuyerRef with InventoryPartPlannerLovSelector {
+      size = Medium;
+      contactwidget {
+         enabled = [true];
+         source = Person;
+         key = PlannerBuyer;
+      }
+   }
+   lov PartProductCodeRef with ReferenceInventoryProductCodeSelector {
+      description = PartProductCodeRef.Description;
+   }
+   lov PartProductFamilyRef with ReferenceInventoryProductFamilySelector {
+      description = PartProductFamilyRef.Description;
+   }
+   lov PrimeCommodityRef with ReferenceLovCommodityGroup1Selector {
+      description = PrimeCommodityRef.Description;
+   }
+   lov SecondCommodityRef with ReferenceLovCommodityGroup2Selector {
+      description = SecondCommodityRef.Description;
+   }
+   lov AccountingGroupRef with ReferenceAccountingGroupSelector {
+      description = AccountingGroupRef.Description;
+   }
+   @DynamicComponentDependency MFGSTD
+   static LowLevel {
+      size = Small;
+   }
+   @DynamicComponentDependency MFGSTD
+   static PlanManufSupOnDueDate {
+      size = Small;
+   }
+   lov PlanningMethodRef with ReferenceInvPartPlanningMethodSelector {
+      size = Small;
+      editable = [false];
+   }
+   static SafetyStock {
+      size = Small;
+   }
+   static SafetyLeadTime {
+      size = Small;
+   }
+   static OrderRequisition {
+      size = Small;
+   }
+   static MinimumLotSize {
+      size = Small;
+   }
+   static MaximumLotSize {
+      size = Small;
+   }
+   static MultipleLotSize {
+      size = Small;
+   }
+   static ScrapFactor {
+      size = Small;
+   }
+   static StandardLotSize {
+      size = Small;
+   }
+   measure QtyOnhand(UoM) {
+      size = Small;
+   }
+   measure OnHandCatchQty(CatchUoM) {
+      size = Small;
+   }
+   measure QtyAvailable(UoM) {
+      size = Small;
+   }
+
+
+   fieldranking ProjectedQtyIndicator, DemandBalance, InventoryPartLovRef, ContractRef, ConfigurationIdRef, QtyUsable, QtySupply, QtyDemand, ForecastBalance, QtyMsForecast, InventoryPartLovRef.TypeCode, PlannerBuyerRef, PartProductCodeRef, PartProductFamilyRef, LowLevel, PrimeCommodityRef, SecondCommodityRef, AccountingGroupRef, PlanManufSupOnDueDate, PlanningMethodRef, SafetyStock, SafetyLeadTime, OrderRequisition, MinimumLotSize, MaximumLotSize, MultipleLotSize, ScrapFactor, StandardLotSize, QtyOnhand, OnHandCatchQty, QtyAvailable;
+
+   @DynamicComponentDependency MFGVIZ
+   commandgroup Visualizer {
+      commandgroup VisualizerSub {
+         icon = "pie-chart";
+         style = IconOnly;
+         command ShopOrdersVisualizer;
+         command ShopOrderOperationsVisualizer;
+      }
+   }
+   @DynamicComponentDependency SHPORD
+   command AdjustShopOrdersNeedDateCommand;
+
+}
+
+list DetailPlanningNestedList for OrderSupplyDemandDetailPlanning {
+   orderby = DateTimeRequired, QtyDemand;
+   label = "Supplies/Demands";
+   toolbar {
+      columnsettingsenabled = [true];
+      exportenabled = [true];
+      filterenabled = [false];
+      sortenabled = [false];
+      viewsettingsenabled = [true];
+
+   }
+
+
+   static DateTimeRequired;
+   static OrderSupplyDemandType;
+   static StatusDesc {
+      size = Small;
+   }
+   static QtySupply {
+      size = Small;
+   }
+   static QtyDemand {
+      size = Small;
+   }
+   badge ProjQty {
+      size = Small;
+      emphasis Warning = [ProjQty < 0];
+      emphasis Neutral = [ProjQty >= 0];
+      columnexclude = [((searchcontext.PageSearchContext.IncludeOnlyFirmDemands or searchcontext.PageSearchContext.IncludeOnlyFirmSupplies) or not(searchcontext.PageSearchContext.IncludeUsableQty))];
+   }
+   badge ProjQtyWthoutOnHand {
+      size = Small;
+      emphasis Warning = [ProjQtyWthoutOnHand < 0];
+      emphasis Neutral = [ProjQtyWthoutOnHand >= 0];
+      columnexclude = [((searchcontext.PageSearchContext.IncludeOnlyFirmDemands or searchcontext.PageSearchContext.IncludeOnlyFirmSupplies) or searchcontext.PageSearchContext.IncludeUsableQty)];
+   }
+   badge ProjQtyFirm {
+      size = Small;
+      emphasis Warning = [ProjQtyFirm < 0];
+      emphasis Neutral = [ProjQtyFirm >= 0];
+      columnexclude = [((not(searchcontext.PageSearchContext.IncludeOnlyFirmDemands) or not(searchcontext.PageSearchContext.IncludeOnlyFirmSupplies)) or not(searchcontext.PageSearchContext.IncludeUsableQty))];
+   }
+   badge ProjQtyFirmWthoutOnHand {
+      size = Small;
+      emphasis Warning = [ProjQtyFirmWthoutOnHand < 0];
+      emphasis Neutral = [ProjQtyFirmWthoutOnHand >= 0];
+      columnexclude = [((not(searchcontext.PageSearchContext.IncludeOnlyFirmDemands) or not(searchcontext.PageSearchContext.IncludeOnlyFirmSupplies)) or(searchcontext.PageSearchContext.IncludeUsableQty))];
+   }
+   badge ProjFirmSupplQty {
+      size = Small;
+      emphasis Warning = [ProjFirmSupplQty < 0];
+      emphasis Neutral = [ProjFirmSupplQty >= 0];
+      columnexclude = [(searchcontext.PageSearchContext.IncludeOnlyFirmDemands or(not(searchcontext.PageSearchContext.IncludeOnlyFirmSupplies)) or not(searchcontext.PageSearchContext.IncludeUsableQty))];
+   }
+   badge ProjFirmSupplQtyWthoutOnHand {
+      size = Small;
+      emphasis Warning = [ProjFirmSupplQtyWthoutOnHand < 0];
+      emphasis Neutral = [ProjFirmSupplQtyWthoutOnHand >= 0];
+      columnexclude = [(searchcontext.PageSearchContext.IncludeOnlyFirmDemands or(not(searchcontext.PageSearchContext.IncludeOnlyFirmSupplies)) or searchcontext.PageSearchContext.IncludeUsableQty)];
+   }
+   badge ProjFirmDemandQty {
+      size = Small;
+      emphasis Warning = [ProjFirmDemandQty < 0];
+      emphasis Neutral = [ProjFirmDemandQty >= 0];
+      columnexclude = [((not(searchcontext.PageSearchContext.IncludeOnlyFirmDemands) or searchcontext.PageSearchContext.IncludeOnlyFirmSupplies) or not(searchcontext.PageSearchContext.IncludeUsableQty))];
+
+   }
+   badge ProjFirmDemandQtyWthoutOnhand {
+      size = Small;
+      emphasis Warning = [ProjFirmDemandQtyWthoutOnhand < 0];
+      emphasis Neutral = [ProjFirmDemandQtyWthoutOnhand >= 0];
+      columnexclude = [((not(searchcontext.PageSearchContext.IncludeOnlyFirmDemands) or searchcontext.PageSearchContext.IncludeOnlyFirmSupplies) or searchcontext.PageSearchContext.IncludeUsableQty)];
+   }
+   static OrderNo {
+      size = Small;
+   }
+   static LineNo {
+      size = Small;
+   }
+   static RelNo {
+      size = Small;
+   }
+   static LineItemNo {
+      size = Small;
+   }
+   static SourceInfo;
+   static QtyPegged {
+      size = Small;
+   }
+   @DynamicComponentDependency SHPORD
+   static BalanceId {
+      size = Small;
+   }
+
+   fieldranking ProjectedQty, ProjectedQtyWithoutOnHandQty, DateTimeRequired, OrderSupplyDemandType, OrderNo, QtySupply, QtyDemand, StatusDesc, LineNo, RelNo, LineItemNo, SourceInfo, QtyPegged;
+
+
+   commandgroup SupplyDemandDetailsCmdGroup {
+      @DynamicComponentDependency SHPORD
+      command SupplyDemandDetailsShpordMaterialCommand;
+      @DynamicComponentDependency SHPORD
+      command SupplyDemandDetailsShopOrderCommand;
+      @DynamicComponentDependency PURCH
+      command SupplyDemandDetailsPurchaseOrderCommand;
+      @DynamicComponentDependency ORDER
+      command SupplyDemandDetailsCustomerOrderCommand;
+      @DynamicComponentDependency PURCH
+      command SupplyDemandDetailsPurchaseRequisitionCommand;
+      command SupplyDemandDetailsMaterialRequisitionCommand;
+      @DynamicComponentDependency PROSCH
+      command SupplyDemandDetailsProdScheduleByLinePartCommand;
+      @DynamicComponentDependency WO
+      command SupplyDemandDetailsPrepareWorkOrderCommand;
+      @DynamicComponentDependency ORDER
+      command SupplyDemandDetailsSalesQuotationCommand;
+      @DynamicComponentDependency PURCH
+      command SupplyDemandDetailsArrivedPurchaseOrderCommand;
+      @DynamicComponentDependency DISORD
+      command SupplyDemandDetailsDistributionOrderCommand;
+      @DynamicComponentDependency PURCH
+      command SupplyDemandDetailsPurOrdComponentCommand;
+      @DynamicComponentDependency ORDER
+      command SupplyDemandDetailsExtCustomerOrderCommand;
+      @DynamicComponentDependency ORDER
+      command SupplyDemandDetailsExtSourceOrderCommand;
+      command SupplyDemandDetailsTransportTaskCommand;
+      @DynamicComponentDependency SHPORD
+      command SupplyDemandDetailsShpordReqCommand;
+      @DynamicComponentDependency MASSCH
+      command SupplyDemandDetailsMsLevel1SupplyCommand;
+      @DynamicComponentDependency MASSCH
+      command SupplyDemandDetailsMsLevel1DemandCommand;
+      @DynamicComponentDependency MRP
+      command SupplyDemandDetailsMrpPartCommand;
+      @DynamicComponentDependency DOP
+      command SupplyDemandDetailsDopOrderDemandCommand;
+      @DynamicComponentDependency DOP
+      command SupplyDemandDetailsDopOrderSupplyCommand;
+      @DynamicComponentDependency PROSCH
+      command SupplyDemandDetailsProdSchDemandCommand;
+      @DynamicComponentDependency MRP
+      command SupplyDemandDetailsMrpSparePartForecastCommand;
+      @DynamicComponentDependency CUSSCH
+      command SupplyDemandDetailsCustomerScheduleCommand;
+      @DynamicComponentDependency SUPSCH
+      command SupplyDemandDetailsSupplierScheduleCommand;
+      @DynamicComponentDependency DOP
+      command SupplyDemandDetailsDopNettedDemandCommand;
+      @DynamicComponentDependency PMRP
+      command SupplyDemandDetailsMsUnconsForecastCommand;
+      @DynamicComponentDependency PM
+      command SupplyDemandDetailsPmActionCommand;
+
+   }
+   @DynamicComponentDependency SHPORD
+   command EditShopOrder;
+   @DynamicComponentDependency SHPORD
+   command AdjustShopOrdNeedDate;
+   @DynamicComponentDependency SHPORD
+   command AdjustShopOrdLotSize;
+
+   commandgroup BatchBalanceCmdGroup {
+      commandgroup BatchBalanceGroup {
+         label = "Batch Balance";
+         @DynamicComponentDependency SHPORD
+         command CreateBatchBalance;
+         @DynamicComponentDependency SHPORD
+         command BatchBalanceDetails;
+      }
+   }
+
+   commandgroup ManualPeggingGroup {
+      @DynamicComponentDependency SHPORD
+      command ManualPeggingShopOrderMaterialLineCommand;
+      @DynamicComponentDependency ORDER
+      command ManualPeggingCustomerOrderLineCommand;
+   }
+}
+
+---------------------------------- DIALOGS ----------------------------------
+
+
+-------------------------------- SINGLETONS ---------------------------------
+
+
+---------------------------------- CHARTS -----------------------------------
+
+
+--------------------------------- CALENDERS ---------------------------------
+
+
+---------------------------------- SHEETS -----------------------------------
+
+
+----------------------------- STATE INDICATORS ------------------------------
+
+
+----------------------------------- TREES -----------------------------------
+
+
+---------------------------------- PLUGINS ----------------------------------
+
+
+------------------------------- IMAGE VIEWERS -------------------------------
+
+
+searchcontext PageSearchContext for PageSearchContextStructure {
+   label = "";
+   field TimeHorizon {
+      defaulttoprevious = [true];
+      validate command {
+         execute {
+            if [TimeHorizon > 7] {
+               error("The time horizon cannot be greater than seven days.");
+               set TimeHorizon = 1;
+               set TimeHorizonDate = "#{toDate(addDays(today(), 1))}";
+            }
+            else {
+               set TimeHorizonDate = "#{toDate(addDays(today(), TimeHorizon))}";
+            }
+         }
+      }
+   }
+   field TimeHorizonDate {
+      defaulttoprevious = [true];
+      visible = [false];
+   }
+   field IncludeOnlyFirmSupplies {
+      defaulttoprevious = [true];
+   }
+   field IncludeOnlyFirmDemands {
+      defaulttoprevious = [true];
+   }
+   field IncludeUsableQty {
+      defaulttoprevious = [true];
+   }
+}
+

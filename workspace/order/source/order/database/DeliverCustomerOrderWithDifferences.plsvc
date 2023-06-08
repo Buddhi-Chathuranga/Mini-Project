@@ -1,0 +1,273 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: DeliverCustomerOrderWithDifferences
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  190526  JaBalk  SCUXXW4-16045, Added Add_Co_Line_Reservations___. Modified Deliver_Inv_With_Diff___ to fetch all reservations from server for a specific co line.
+--  190515  JaBalk  SCUXXW4-17701, Added Deliver_Non_Inv_With_Diff___, Deliver_Inv_With_Diff___.
+--  190508  JaBalk  SCUXXW4-17701, Added warning message for Deliver_With_Differences___ for non inventory parts.
+--  190327  JaBalk  SCUXXW4-1546, Added Deliver_With_Differences___.
+--  190225  KuBalk  SCUXXW4-15894, Function for cancel deliver command added.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+PROCEDURE Cancel_Deliver_Order___ (
+   order_no_ IN  VARCHAR2,
+   info$_    OUT VARCHAR2)
+IS
+   info_ VARCHAR2(32000);
+BEGIN
+	Deliver_Customer_Order_API.Cancel_Deliver_Order__(info_, order_no_);
+   info$_ := info_;    
+END Cancel_Deliver_Order___;
+
+PROCEDURE  Deliver_With_Differences___ (
+   order_no_                 IN  VARCHAR2,
+   inventory_line_details_   IN  CLOB,
+   reservation_line_details_ IN  CLOB, 
+   non_inventory_details_    IN  CLOB,   
+   info$_                    OUT VARCHAR2 )
+IS 
+   inv_noninv_message_ CLOB;
+   clob_info_          CLOB;      
+   value_              VARCHAR2(32000);
+BEGIN   
+   inv_noninv_message_ := Message_SYS.Construct('');
+   -- inventory deliveries 
+   Deliver_Inv_With_Diff___(inv_noninv_message_, order_no_, inventory_line_details_, reservation_line_details_);     
+   -- non inventory deliveries   
+   Deliver_Non_Inv_With_Diff___(inv_noninv_message_, order_no_, non_inventory_details_);          
+   info$_ := Client_SYS.Get_All_Info;
+   clob_info_ := Deliver_Customer_Order_API.Deliver_Order_With_Diff__(inv_noninv_message_, order_no_);
+   -- though the above server method out the info as a clob parameter, it will be only handled for length 32000 
+   value_ := Message_SYS.Find_Clob_Attribute(clob_info_, 'INFO', '');
+   info$_ := info$_||value_;
+   Deliver_Customer_Order_API.To_Order_Flow_When_Delivered__(order_no_);
+END Deliver_With_Differences___;
+
+PROCEDURE Deliver_Non_Inv_With_Diff___ (
+   message_               IN OUT CLOB,
+   order_no_              IN     VARCHAR2,
+   non_inventory_details_ IN     CLOB ) 
+IS
+   non_inv_line_details_rec_    json_array_t := json_array_t.parse(non_inventory_details_);
+   current_selection_           VARCHAR2(32000);    
+   line_no_                     VARCHAR2(4);
+   rel_no_                      VARCHAR2(4);
+   line_item_no_                NUMBER;
+   co_line_rec_                 Customer_Order_Line_API.Public_Rec;
+   qty_to_deliver_              NUMBER;
+   over_delivery_               BOOLEAN:=FALSE;
+BEGIN
+   FOR i_ IN 0 .. non_inv_line_details_rec_.get_size - 1 LOOP  
+      current_selection_     := non_inv_line_details_rec_.get_string(i_);  
+      IF (Client_SYS.Get_Key_Reference_Value(current_selection_, 'NON_INV_MODIFIED') = 'Y') THEN 
+         line_no_               := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_NO');
+         rel_no_                := Client_SYS.Get_Key_Reference_Value(current_selection_, 'REL_NO');
+         line_item_no_          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_ITEM_NO'); 
+         co_line_rec_           := Customer_Order_Line_API.Get(order_no_, line_no_, rel_no_, line_item_no_);
+         qty_to_deliver_        := NVL(to_number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'QTY_TO_DELIVER')),0); 
+         
+         IF (co_line_rec_.buy_qty_due - co_line_rec_.qty_shipped < qty_to_deliver_) THEN  
+            Trace_SYS.Message('over_delivery_ TRUE');
+            over_delivery_ := TRUE;            
+         END IF;
+         IF (i_ = 0 ) THEN            
+            Message_SYS.Add_Attribute(message_, 'CATALOG_TYPE', 'NON'); 
+         END IF;
+         Message_SYS.Add_Attribute(message_, 'LINE_NO', line_no_);
+         Message_SYS.Add_Attribute(message_, 'REL_NO', rel_no_);
+         Message_SYS.Add_Attribute(message_, 'LINE_ITEM_NO', line_item_no_);
+         IF (Client_SYS.Get_Key_Reference_Value(current_selection_, 'CLOSE_LINE') = 'true') THEN
+            Message_SYS.Add_Attribute(message_, 'CLOSE_LINE', 1);
+         ELSE
+            Message_SYS.Add_Attribute(message_, 'CLOSE_LINE', 0);
+         END IF;            
+         Message_SYS.Add_Attribute(message_, 'QTY_TO_DELIVER', qty_to_deliver_);  
+      END IF;   
+   END LOOP;  
+   IF (over_delivery_) THEN 
+      Client_SYS.Add_Warning(lu_name_, 'WARNFOROVERDEL: The quantity on one or several order lines will be greater than the ordered qty.');
+   END IF;
+END Deliver_Non_Inv_With_Diff___;
+
+PROCEDURE Deliver_Inv_With_Diff___ (
+   message_                  IN OUT CLOB,
+   order_no_                 IN     VARCHAR2,
+   inventory_line_details_   IN     CLOB,
+   reservation_line_details_ IN     CLOB ) 
+IS
+   inv_line_details_rec_         json_array_t := json_array_t.parse(inventory_line_details_);
+   reservation_line_details_rec_ json_array_t := json_array_t.parse(reservation_line_details_);
+   current_selection_           VARCHAR2(32000); 
+   res_selection_               VARCHAR2(32000);
+   line_no_                     VARCHAR2(4);
+   rel_no_                      VARCHAR2(4);
+   line_item_no_                NUMBER;   
+   reservation_line_found_      BOOLEAN:= FALSE;
+   close_line_                  NUMBER;  
+   catalog_type_added_          BOOLEAN:= FALSE; 
+BEGIN
+   FOR i_ IN 0 .. inv_line_details_rec_.get_size - 1 LOOP 
+      current_selection_      := inv_line_details_rec_.get_string(i_);
+      close_line_             := 0;
+      reservation_line_found_ := FALSE;
+      line_no_                := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_NO');
+      rel_no_                 := Client_SYS.Get_Key_Reference_Value(current_selection_, 'REL_NO');
+      line_item_no_           := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_ITEM_NO');
+   
+      IF (Client_SYS.Get_Key_Reference_Value(current_selection_, 'CLOSE_LINE') = 'true') THEN
+         close_line_ :=1;
+      END IF;
+      -- customer order line's will be included in the message only if its reservation details are modified
+      -- or close line is set to TRUE. otherwise those co lines will be delivered in Deliver_Order_Inv_With_Diff___ using the variable bfinal_batch 
+      FOR j_ IN 0 .. reservation_line_details_rec_.get_size - 1 LOOP  
+         res_selection_     := reservation_line_details_rec_.get_string(j_);
+         IF (Client_SYS.Get_Key_Reference_Value(res_selection_, 'LINE_NO') = line_no_ AND 
+             Client_SYS.Get_Key_Reference_Value(res_selection_, 'REL_NO') = rel_no_ AND
+             Client_SYS.Get_Key_Reference_Value(res_selection_, 'LINE_ITEM_NO') = line_item_no_ ) THEN
+            reservation_line_found_ := TRUE;
+            EXIT;
+         END IF;
+      END LOOP;   
+      IF (reservation_line_found_ OR close_line_ = 1) THEN
+         IF (NOT catalog_type_added_ ) THEN        
+            Message_SYS.Add_Attribute(message_, 'CATALOG_TYPE', 'INV');
+            catalog_type_added_ := TRUE;
+         END IF;
+         Message_SYS.Add_Attribute(message_, 'LINE_NO', line_no_);
+         Message_SYS.Add_Attribute(message_, 'REL_NO', rel_no_);
+         Message_SYS.Add_Attribute(message_, 'LINE_ITEM_NO', line_item_no_);        
+         Message_SYS.Add_Attribute(message_, 'CLOSE_LINE', close_line_);
+         Add_Co_Line_Reservations___(message_, order_no_, line_no_, rel_no_, line_item_no_, reservation_line_details_);      
+         Message_SYS.Add_Attribute(message_, 'END_OF_LINE', 'END'); 
+      END IF;   
+   END LOOP;   
+END Deliver_Inv_With_Diff___;
+
+
+PROCEDURE Add_Co_Line_Reservations___ (
+   message_                  IN OUT CLOB, 
+   order_no_                 IN     VARCHAR2,
+   line_no_                  IN     VARCHAR2,
+   rel_no_                   IN     VARCHAR2,
+   line_item_no_             IN     NUMBER,
+   reservation_line_details_ IN     CLOB) 
+IS
+   edited_reservations_found_   BOOLEAN;
+   reservation_line_details_rec_ json_array_t := json_array_t.parse(reservation_line_details_);
+   current_selection_           VARCHAR2(32000); 
+   qty_to_deliver_              NUMBER;
+   catch_qty_to_deliver_        NUMBER;
+   input_qty_                   NUMBER;
+   input_conversion_            NUMBER;
+   input_unit_meas_str_         VARCHAR2(32000);
+   input_variable_values_str_   VARCHAR2(32000);
+   
+   CURSOR get_all_reservations IS
+      SELECT location_no, lot_batch_no, serial_no, eng_chg_level, waiv_dev_rej_no, input_unit_meas, SUM(input_qty) input_qty,
+             input_conv_factor, input_variable_values,activity_seq, handling_unit_id, SUM(qty_picked) qty_picked,  SUM(catch_qty) catch_qty_to_deliver
+      FROM   CUSTOMER_ORDER_RESERVATION_TAB
+      WHERE  order_no = order_no_
+      AND    line_no = line_no_
+      AND    rel_no = rel_no_
+      AND    line_item_no = line_item_no_
+      AND    qty_picked > 0
+      GROUP BY location_no, lot_batch_no, serial_no, eng_chg_level, waiv_dev_rej_no,
+               input_unit_meas, input_conv_factor, input_variable_values, activity_seq, handling_unit_id;
+BEGIN
+   -- as the client sends only the edited reservation details, all the reservation lines are fethed from the cursor get_all_reservations
+   -- for a particlular co line and non edited reservations are added to message directly and the edited one's quantity details are fetched
+   -- from parameter reservation_line_details_in order to deliver the line
+   FOR coline_reservation_rec_ IN get_all_reservations LOOP         
+      edited_reservations_found_ := FALSE;
+      FOR i_ IN 0 .. reservation_line_details_rec_.get_size - 1 LOOP    
+         current_selection_     := reservation_line_details_rec_.get_string(i_);
+         
+         -- if reservation line is modified in client QTY_TO_DELIVER, CATCH_QTY_TO_DELIVER will be taken the edited values
+         -- otherwise it will be taken from the get_all_reservations cursor
+         IF (Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO') = order_no_ AND
+             Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_NO') = line_no_ AND
+             Client_SYS.Get_Key_Reference_Value(current_selection_, 'REL_NO') = rel_no_ AND
+             Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_ITEM_NO') = line_item_no_ AND 
+             Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOCATION_NO') = coline_reservation_rec_.location_no AND
+             Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOT_BATCH_NO') = coline_reservation_rec_.lot_batch_no AND
+             Client_SYS.Get_Key_Reference_Value(current_selection_, 'SERIAL_NO') = coline_reservation_rec_.serial_no AND
+             Client_SYS.Get_Key_Reference_Value(current_selection_, 'ENG_CHG_LEVEL') = coline_reservation_rec_.eng_chg_level AND
+             Client_SYS.Get_Key_Reference_Value(current_selection_, 'WAIV_DEV_REJ_NO') = coline_reservation_rec_.waiv_dev_rej_no AND            
+             Client_SYS.Get_Key_Reference_Value(current_selection_, 'HANDLING_UNIT_ID') = coline_reservation_rec_.handling_unit_id AND
+             Client_SYS.Get_Key_Reference_Value(current_selection_, 'ACTIVITY_SEQ') = coline_reservation_rec_.activity_seq) THEN
+
+            catch_qty_to_deliver_:= Client_SYS.Get_Key_Reference_Value(current_selection_, 'CATCH_QTY_TO_DELIVER');
+            qty_to_deliver_ :=  NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'QTY_TO_DELIVER'), 0);
+            input_qty_ := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'INPUT_QUANTITY'));
+            input_conversion_ := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'INPUT_CONV_FACTOR'));
+            input_unit_meas_str_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'INPUT_UNIT_MEAS');
+            input_variable_values_str_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'INPUT_VARIABLE_VALUES');
+            
+            edited_reservations_found_ := TRUE;
+            EXIT;
+         END IF;
+      END LOOP;
+      IF NOT(edited_reservations_found_) THEN
+         catch_qty_to_deliver_ := coline_reservation_rec_.catch_qty_to_deliver;
+         qty_to_deliver_ := coline_reservation_rec_.qty_picked;   
+         input_qty_ := coline_reservation_rec_.input_qty;
+         input_unit_meas_str_ := coline_reservation_rec_.input_unit_meas;
+         input_conversion_ := coline_reservation_rec_.input_conv_factor;
+         input_variable_values_str_ := coline_reservation_rec_.input_variable_values;         
+      END IF;
+      Message_SYS.Add_Attribute(message_, 'QTY_PICKED', coline_reservation_rec_.qty_picked);
+      Message_SYS.Add_Attribute(message_, 'INPUT_UNIT_MEAS', input_unit_meas_str_);
+      Message_SYS.Add_Attribute(message_, 'INPUT_QTY', input_qty_);
+      Message_SYS.Add_Attribute(message_, 'INPUT_CONV_FACTOR', input_conversion_);
+      Message_SYS.Add_Attribute(message_, 'INPUT_VARIABLE_VALUES', input_variable_values_str_);
+      Message_SYS.Add_Attribute(message_, 'LOCATION_NO', coline_reservation_rec_.location_no);
+      Message_SYS.Add_Attribute(message_, 'LOT_BATCH_NO', coline_reservation_rec_.lot_batch_no);
+      Message_SYS.Add_Attribute(message_, 'SERIAL_NO', coline_reservation_rec_.serial_no);
+      Message_SYS.Add_Attribute(message_, 'ENG_CHG_LEVEL', coline_reservation_rec_.eng_chg_level);
+      Message_SYS.Add_Attribute(message_, 'WAIV_DEV_REJ_NO', coline_reservation_rec_.waiv_dev_rej_no);
+      Message_SYS.Add_Attribute(message_, 'ACTIVITY_SEQ', coline_reservation_rec_.activity_seq);
+      Message_SYS.Add_Attribute(message_, 'HANDLING_UNIT_ID', coline_reservation_rec_.handling_unit_id);
+      Message_SYS.Add_Attribute(message_, 'CATCH_QTY_TO_DELIVER', catch_qty_to_deliver_);
+      Message_SYS.Add_Attribute(message_, 'QTY_TO_DELIVER', qty_to_deliver_);
+   END LOOP;   
+END Add_Co_Line_Reservations___;
+
+FUNCTION Check_All_License_Connected___ (
+   order_no_ IN VARCHAR2 ) RETURN NUMBER
+IS
+   display_info_ NUMBER:=0;
+BEGIN
+   Customer_Order_Flow_API.Check_All_License_Connected(display_info_, order_no_);
+   RETURN display_info_;
+END Check_All_License_Connected___;   
+
+FUNCTION Deliver_With_Differences_Initial_Check___ (
+   inventory_line_details_ IN CLOB ) RETURN BOOLEAN
+IS
+   deliver_line_rec_     json_array_t := json_array_t.parse(inventory_line_details_);
+   current_selection_    VARCHAR2(32000);
+   order_no_             VARCHAR2(12);
+   line_no_              VARCHAR2(4);
+   rel_no_               VARCHAR2(4);
+   line_item_no_         NUMBER;
+   intial_check_         BOOLEAN;
+BEGIN
+   FOR i_ IN 0 .. deliver_line_rec_.get_size - 1 LOOP    
+      current_selection_     := deliver_line_rec_.get_string(i_);
+      order_no_              := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');
+      line_no_               := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_NO');
+      rel_no_                := Client_SYS.Get_Key_Reference_Value(current_selection_, 'REL_NO');
+      line_item_no_          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_ITEM_NO');
+      
+      intial_check_ := User_Allowed_Site_API.Is_Authorized(Customer_Order_Line_API.Get_Contract(order_no_, line_no_, rel_no_, line_item_no_)) = 1;
+      EXIT WHEN NOT intial_check_;
+   END LOOP;
+   RETURN intial_check_;
+END Deliver_With_Differences_Initial_Check___;

@@ -1,0 +1,107 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     SalesInterimOrderCommands
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date      Sign    History
+--  --------  ------  ---------------------------------------------------------
+--  20210723  ManWlk  MF21R2-2616, Modified Get_Ctp_Details___() to set required date to planned due date instead of setting it to previous work day.
+--  20210428  jowise  MF21R2-1526, Error when creating interim order from CO Line. Added method to convert Planned Due Date
+--                    from Timestamp to date when source is CO Line.
+--  20201029  MalLlk  GESPRING20-5276, Modified Executing_Interim_Order___() to clear ctp record, after cancel interim order.
+--  20200123  MaEelk  SCXTEND-28, Removed the code fetching values to allocate in Get_Ctp_Details___
+--  20200123          since it ultimately passes an incorrect value to CapabilityCheckCriticalPathAssistant.
+--  20191022  SeJalk  SCUXXW4-15788, Fixed the issue occured when generalising the code.
+--  20190114  MiKulk  Created. 
+-----------------------------------------------------------------------------
+
+layer Core;
+FUNCTION Executing_Interim_Order___ (
+   method_               IN VARCHAR2,
+   source_               IN VARCHAR2,
+   identity1_            IN VARCHAR2,
+   identity2_            IN VARCHAR2,
+   identity3_            IN VARCHAR2,
+   identity4_            IN NUMBER,
+   contract_             IN VARCHAR2,
+   part_no_              IN VARCHAR2,
+   quantity_             IN NUMBER,
+   required_date_        IN DATE,
+   order_supply_type_    IN VARCHAR2) RETURN BOOLEAN
+IS
+   temp_source_ VARCHAR2(100) := source_;
+   dummy_       VARCHAR2(2000);
+   ctp_run_id_  NUMBER;
+BEGIN
+   IF temp_source_ = 'PACKSTRUCTORDER' THEN 
+      temp_source_ := 'CUSTOMERORDER';
+   ELSIF temp_source_ = 'PACKSTRUCTQUOTE' THEN
+      temp_source_ := 'CUSTOMERQUOTE';
+   END IF;
+      
+   IF method_ = 'InterimOrderCreate' THEN
+      Order_Config_Util_API.Evaluate_Usage_For_Cost__( temp_source_, identity1_,  identity2_,  identity3_,  identity4_, contract_,  part_no_,  quantity_, required_date_);                   
+   ELSIF method_ = 'InterimOrderRecalc' THEN      
+      Order_Config_Util_API.Re_Evaluate_Usage_For_Cost__( temp_source_, identity1_,  identity2_, identity3_, identity4_);   
+   ELSIF method_ = 'InterimOrderDelete' THEN
+      $IF Component_Ordstr_SYS.INSTALLED $THEN
+         Interim_Demand_Head_API.Remove_Or_Retain_Interim_Head( temp_source_, identity1_,  identity2_, identity3_, identity4_, 'TRUE');
+      $ELSE
+         NULL;
+      $END     
+   ELSIF method_ = 'InterimOrderCancel' THEN 
+      $IF Component_Ordstr_SYS.INSTALLED $THEN
+         Interim_Ctp_Manager_API.Cancel_Ctp( dummy_, identity1_,  identity2_, identity3_, identity4_, temp_source_, order_supply_type_);  
+         IF (temp_source_ = 'CUSTOMERQUOTE') THEN
+            Order_Quotation_Line_API.Clear_Ctp_Planned( identity1_,  identity2_, identity3_, identity4_); 
+         ELSE
+            Customer_Order_Line_API.Clear_Ctp_Planned( identity1_,  identity2_, identity3_, identity4_);            
+         END IF;
+         -- Remove ctp record
+         ctp_run_id_ := Interim_Ctp_Critical_Path_API.Get_Ctp_Run_Id(temp_source_, identity1_, identity2_, identity3_, identity4_);
+         IF (ctp_run_id_ IS NOT NULL AND ctp_run_id_ > 0) THEN
+            Interim_Ctp_Critical_Path_API.Clear_Ctp_Data(ctp_run_id_);
+         END IF;
+      $ELSE
+         NULL;
+      $END     
+   END IF;
+   RETURN TRUE;
+   
+END Executing_Interim_Order___;
+
+PROCEDURE Refresh_After_Crud___
+IS
+BEGIN
+	-- Dummy method to refresh OrderQuotationLine
+   NULL;
+END Refresh_After_Crud___;
+
+@DynamicComponentDependency ORDSTR
+FUNCTION Ctp_Run_Id_Exist___(
+   source_    IN VARCHAR2,
+   identity1_ IN VARCHAR2,
+   identity2_ IN VARCHAR2,
+   identity3_ IN VARCHAR2,
+   identity4_ IN NUMBER )  RETURN BOOLEAN
+IS
+   ctp_run_id_   NUMBER;
+BEGIN
+   ctp_run_id_ := Interim_Ctp_Critical_Path_API.Get_Ctp_Run_Id(source_, identity1_, identity2_, identity3_, identity4_);
+   IF (ctp_run_id_ IS NOT NULL AND ctp_run_id_ > 0) THEN
+      RETURN TRUE;
+   ELSE
+      RETURN FALSE;
+   END IF;  
+END Ctp_Run_Id_Exist___;
+
+
+FUNCTION Convert_To_Date___ (
+   planned_due_date_ IN DATE) RETURN DATE
+IS
+BEGIN
+	RETURN TRUNC(planned_due_date_);
+END Convert_To_Date___;
+

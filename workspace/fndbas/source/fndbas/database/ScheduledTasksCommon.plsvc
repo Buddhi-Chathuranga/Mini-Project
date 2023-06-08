@@ -1,0 +1,329 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     ScheduledTasksCommon
+--  Component:    FNDBAS
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  181204  RAKUSE  Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+arg_const_TRUE_  CONSTANT VARCHAR2(4)  := 'TRUE';
+arg_const_FALSE_ CONSTANT VARCHAR2(5)  := 'FALSE';
+arg_const_YES_   CONSTANT VARCHAR2(3)  := 'YES';
+arg_const_NO_    CONSTANT VARCHAR2(2)  := 'NO';
+arg_const_1_     CONSTANT VARCHAR2(1)  := '1';
+arg_const_0_     CONSTANT VARCHAR2(1)  := '0';
+
+const_lu_name_   CONSTANT VARCHAR2(20)  := 'BatchSchedule';
+
+PROCEDURE Validate___ (
+   schedule_method_id_ IN NUMBER,
+   arguments_ IN VARCHAR2)
+IS
+   validation_method_ batch_schedule_method_tab.validation_method%TYPE := Batch_Schedule_Method_API.Get_Validation_Method__(schedule_method_id_);
+   argument_type_     batch_schedule_method_tab.argument_type%TYPE;
+   msg_               VARCHAR2(32000);
+   value_             VARCHAR2(2000);
+   
+   CURSOR get_param_name IS
+      SELECT name
+      FROM   BATCH_SCHEDULE_METHOD_PAR_TAB
+      WHERE  schedule_method_id = schedule_method_id_;
+BEGIN
+   IF (validation_method_ IS NULL) THEN
+      Trace_SYS.Message('No Validation Method!');
+      RETURN;
+   END IF;
+   
+   Trace_SYS.Field('Validation Method', validation_method_);
+   argument_type_ := Batch_Schedule_Method_API.Get_Argument_Type_Db(schedule_method_id_);
+   Trace_SYS.Field('Argument Type', argument_type_);
+   msg_ := Message_SYS.Construct('');     
+   FOR param in get_param_name LOOP
+      IF (argument_type_ = 'MESSAGE') THEN
+         value_ := Message_SYS.Find_Attribute(arguments_, param.name, '');
+      ELSE
+         value_ := CASE WHEN Client_SYS.Item_Exist(param.name, arguments_) THEN Client_SYS.Get_Item_Value(param.name, arguments_) ELSE '' END;
+      END IF;
+      Message_SYS.Add_Attribute(msg_ , param.name, value_);
+   END LOOP;
+   
+   Batch_Schedule_Method_API.Validate_Parameters__(schedule_method_id_, msg_ );        
+END Validate___;
+
+PROCEDURE Execute_Task___ (
+   key_ IN Task_Virtual_Key )
+IS
+   virt_rec_  Task_Virtual_Rec;   
+   arguments_ VARCHAR2(32000);
+BEGIN
+   virt_rec_ := Get_Record___(key_);
+   arguments_ := Construct_Param_Attr___(virt_rec_);
+   Validate___(virt_rec_.schedule_method_id, arguments_);
+   Batch_Schedule_Method_API.Execute_Online__(virt_rec_.schedule_method_id, arguments_);
+   Cleanup_Task_Virtual___(key_);
+END Execute_Task___;
+
+FUNCTION Schedule_Task___ (
+   key_ IN Task_Virtual_Key ) RETURN Scheduled_Task_Structure_Rec
+IS
+   virt_rec_       Task_Virtual_Rec;
+   param_rec_      batch_schedule_par_tab%ROWTYPE;
+   attr_           VARCHAR2(32000);
+   arguments_      VARCHAR2(32000);
+   ret_            Entity_Dec;
+   return_         Scheduled_Task_Structure_Rec;
+   execution_plan_ VARCHAR2(2000);
+   next_exec_date_ DATE;
+   start_date_     DATE;
+   
+   -- IFS Message
+   name_arr_      Message_SYS.name_table;
+   value_arr_     Message_SYS.line_table;
+   count_         NUMBER;
+   
+   -- Attribute String
+   ptr_           NUMBER := NULL;
+   name_          VARCHAR2(30);
+   value_         VARCHAR2(2000);
+BEGIN   
+   virt_rec_ := Get_Record___(key_);
+   -- Create parameter attribute and have it validated (if a validate method if defined).
+   arguments_ := Construct_Param_Attr___(virt_rec_);
+   Validate___(virt_rec_.schedule_method_id, arguments_);
+
+   Add_To_Attr_From_Rec___(virt_rec_, attr_);        
+   attr_ := Client_SYS.Remove_Attr('ACTIVE', attr_);
+   Client_SYS.Set_Item_Value('ACTIVE_DB', CASE WHEN virt_rec_.active THEN 'TRUE' ELSE 'FALSE' END, attr_);
+   attr_ := Client_SYS.Remove_Attr('CHECK_EXECUTING', attr_);
+   Client_SYS.Set_Item_Value('CHECK_EXECUTING_DB', CASE WHEN virt_rec_.check_executing THEN 'TRUE' ELSE 'FALSE' END, attr_);
+   attr_ := Client_SYS.Remove_Attr('STREAM_MSG_ON_COMPLETION', attr_);
+   Client_SYS.Set_Item_Value('STREAM_MSG_ON_COMPLETION_DB', CASE WHEN virt_rec_.stream_msg_on_completion THEN 'TRUE' ELSE 'FALSE' END, attr_);
+   
+   -- Evaluate the Execution Plan...
+   Batch_Schedule_API.Parse_Execution_Plan__(virt_rec_.schedule_id, attr_);         
+   execution_plan_ := Client_SYS.Get_Item_Value('EXECUTION_PLAN', attr_);   
+   Trace_SYS.Field('EXECUTION_PLAN', execution_plan_);   
+   start_date_ := NVL(Client_SYS.Attr_Value_To_Date(Client_SYS.Get_Item_Value('START_DATE', attr_)), TRUNC(SYSDATE));
+   
+   -- ...followed by the Next Execution Date   
+   next_exec_date_ := Batch_SYS.Get_Next_Exec_Time__(execution_plan_,
+                                                     NULL,
+                                                     start_date_,
+                                                     Client_SYS.Attr_Value_To_Date(Client_SYS.Get_Item_Value('STOP_DATE', attr_)));
+
+   IF (next_exec_date_ IS NULL) THEN
+      next_exec_date_ := Client_SYS.Attr_Value_To_Date(TO_CHAR(start_date_, 'YYYY-MM-DD') || '-' || TO_CHAR(SYSDATE, 'HH24:MI:SS'));
+   END IF;
+   
+   -- Apply the calculcated Next Execution Date into the attr_
+   Client_SYS.Set_Item_Value('NEXT_EXECUTION_DATE', next_exec_date_, attr_);      
+   Trace_SYS.Field('NEXT_EXECUTION_DATE', next_exec_date_);
+   
+   -- Create the scheduled header
+   ret_ := CRUD_Create(attr_, 'DO', batch_schedule## => '');   
+   virt_rec_.schedule_id := Client_SYS.Get_Item_Value('SCHEDULE_ID', ret_.attr);
+   
+   IF (Batch_Schedule_Method_API.Get_Argument_Type_Db(virt_rec_.schedule_method_id) = 'MESSAGE') THEN
+      -- Create the scheduled parameters as an IFS Message.
+      Message_SYS.Get_Attributes(arguments_, count_, name_arr_, value_arr_);      
+      FOR n_ IN 1..count_ LOOP
+         param_rec_.schedule_id := virt_rec_.schedule_id;
+         param_rec_.name        := name_arr_(n_);
+         param_rec_.value       := value_arr_(n_);
+         Batch_Schedule_Par_API.New__(param_rec_);
+         param_rec_ := NULL;               
+      END LOOP;
+   ELSE
+      -- Create the scheduled parameters as an Attribute String.
+      WHILE (Client_SYS.Get_Next_From_Attr(arguments_, ptr_, name_, value_)) LOOP
+         param_rec_.schedule_id := virt_rec_.schedule_id;
+         param_rec_.name        := name_;
+         param_rec_.value       := value_;
+         Batch_Schedule_Par_API.New__(param_rec_);
+         param_rec_ := NULL;       
+      END LOOP;      
+   END IF;
+   
+   return_.SCHEDULE_ID := virt_rec_.schedule_id;
+   return_.SCHEDULED_DATE := next_exec_date_;
+   return_.SCHEDULED_TIME := next_exec_date_;
+   Cleanup_Task_Virtual___(key_);
+
+   RETURN return_;
+END Schedule_Task___;
+
+@Override
+PROCEDURE CRUD_Default___ (
+   rec_  IN OUT Task_Virtual_Rec )
+IS
+   info_          VARCHAR2(32000);
+   objid_         VARCHAR2(100);
+   objversion_    VARCHAR2(100);
+   attr_          VARCHAR2(32000);
+BEGIN
+   super(rec_);
+   
+   Batch_Schedule_API.New__(info_, objid_, objversion_, attr_, 'PREPARE');   
+   attr_ := Client_SYS.Remove_Attr('EXECUTION_PLAN', attr_);
+   attr_ := Client_SYS.Remove_Attr('NEXT_EXECUTION_DATE', attr_);
+   
+   Add_To_Rec_From_Attr___(attr_, rec_);
+   
+   rec_.batch_schedule_type := 'TASK';
+   IF (Client_SYS.Item_Exist('ACTIVE_DB', attr_)) THEN
+      rec_.active := CASE Client_SYS.Get_Item_Value('ACTIVE_DB', attr_) WHEN 'TRUE' THEN TRUE ELSE FALSE END;
+   END IF;
+   IF (Client_SYS.Item_Exist('CHECK_EXECUTING_DB', attr_)) THEN
+      rec_.check_executing := CASE Client_SYS.Get_Item_Value('CHECK_EXECUTING_DB', attr_) WHEN 'TRUE' THEN TRUE ELSE FALSE END;
+   END IF;
+   IF (Client_SYS.Item_Exist('STREAM_MSG_ON_COMPLETION_DB', attr_)) THEN
+      rec_.stream_msg_on_completion := CASE Client_SYS.Get_Item_Value('STREAM_MSG_ON_COMPLETION_DB', attr_) WHEN 'TRUE' THEN TRUE ELSE FALSE END;
+   END IF;
+   
+   rec_.schedule_option := 'DAILY';
+   rec_.scheduled_day_number := 1;
+   rec_.schedule_datetime := sysdate;
+   rec_.schedule_time := TO_DATE(rec_.schedule_datetime);      
+   rec_.schedule_interval := '00:00';      
+END CRUD_Default___;
+
+FUNCTION Validate_Custom_Execution_Plan___ (
+   execution_plan_ IN VARCHAR2 ) RETURN DATE
+IS
+BEGIN
+   Batch_SYS.Check_Batch_Sched_Cust_Expr__(execution_plan_);   
+   RETURN Batch_SYS.Update_Exec_Time__(execution_plan_);
+END Validate_Custom_Execution_Plan___;
+
+PROCEDURE Cleanup_Task_Virtual___ (
+   key_ IN Task_Virtual_Key ) 
+IS
+BEGIN
+   NULL;
+   -- MFUXXW4-23092 (TEUXX-16760)
+   -- For now, we can't clear the virtual table as last thing within the "Finish" command.
+   -- The FW needs to introduce a managed way (TEUXX-17174?) of clearing these both by adding a dedicated method/design pattern for
+   -- this and/or define scheduled tasks that wipes these periodically. /Rakuse
+   --DELETE FROM ${PROJECTION}_Task_Virtual_VRT WHERE objkey = key_.objkey;
+END Cleanup_Task_Virtual___;
+
+--------------------------------- UTILITY METHODS ----------------------------------
+
+FUNCTION To_Str___(value_ BOOLEAN) RETURN VARCHAR2
+IS
+BEGIN
+   RETURN CASE WHEN value_ THEN 'TRUE' ELSE 'FALSE' END;
+END To_Str___;
+
+PROCEDURE Message_Find_Boolean___(msg_ VARCHAR2, attribute_ VARCHAR2, value_ OUT BOOLEAN, default_ BOOLEAN DEFAULT FALSE )
+IS
+BEGIN
+   Message_Find_Boolean___(msg_, attribute_, arg_const_TRUE_, arg_const_FALSE_, value_, default_);
+END Message_Find_Boolean___;
+
+PROCEDURE Message_Find_Boolean___(msg_ VARCHAR2, attribute_ VARCHAR2, checked_value_ VARCHAR2, unchecked_value_ VARCHAR2, value_ OUT BOOLEAN, default_ BOOLEAN DEFAULT FALSE )
+IS
+   str_value_ VARCHAR2(20) := Message_SYS.Find_Attribute(msg_, attribute_, CASE default_ WHEN TRUE THEN checked_value_ ELSE unchecked_value_ END);
+BEGIN
+   IF (str_value_ IS NULL) THEN
+      value_ := default_;
+   ELSE
+      value_ := CASE str_value_ WHEN checked_value_ THEN TRUE ELSE FALSE END;   
+   END IF;
+END Message_Find_Boolean___;
+
+PROCEDURE Message_Add_Attribute___(msg_ IN OUT VARCHAR2, attribute_ IN VARCHAR2, value_ IN BOOLEAN)
+IS
+BEGIN
+   Message_Add_Attribute___(msg_, attribute_, value_, arg_const_TRUE_, arg_const_FALSE_);
+END Message_Add_Attribute___;
+
+PROCEDURE Message_Add_Attribute___(msg_ IN OUT VARCHAR2, attribute_ IN VARCHAR2, value_ IN BOOLEAN, checked_value_ VARCHAR2, unchecked_value_ VARCHAR2)
+IS
+BEGIN
+   Message_SYS.Add_Attribute(msg_, attribute_, CASE value_ WHEN TRUE THEN checked_value_ ELSE unchecked_value_ END);
+END Message_Add_Attribute___;
+
+PROCEDURE Add_To_Attr_Boolean___(attribute_ IN VARCHAR2, value_ IN BOOLEAN, attr_ IN OUT VARCHAR2)
+IS
+BEGIN
+   Add_To_Attr_Boolean___(attribute_, value_, arg_const_TRUE_, arg_const_FALSE_, attr_);
+END Add_To_Attr_Boolean___;
+
+PROCEDURE Add_To_Attr_Boolean___(attribute_ IN VARCHAR2, value_ IN BOOLEAN, checked_value_ VARCHAR2, unchecked_value_ VARCHAR2, attr_ IN OUT VARCHAR2)
+IS
+BEGIN
+   Client_SYS.Add_To_Attr(attribute_, CASE value_ WHEN TRUE THEN checked_value_ ELSE unchecked_value_ END, attr_);
+END Add_To_Attr_Boolean___;
+
+PROCEDURE Empty_When_Schedule_Option___ (
+   virt_rec_ IN Task_Virtual_Rec,
+   attribute_ IN OUT VARCHAR2 ) 
+IS
+BEGIN  
+   IF virt_rec_.TASK_OPTION = 'Schedule' THEN
+      attribute_ := NULL;
+   END IF;
+END Empty_When_Schedule_Option___;
+
+PROCEDURE Empty_When_Schedule_Option___ (
+   virt_rec_ IN Task_Virtual_Rec,
+   attribute_ IN OUT NUMBER ) 
+IS
+BEGIN  
+   IF virt_rec_.TASK_OPTION = 'Schedule' THEN
+      attribute_ := NULL;
+   END IF;
+END Empty_When_Schedule_Option___;
+
+PROCEDURE Empty_When_Schedule_Option___ (
+   virt_rec_ IN Task_Virtual_Rec,
+   attribute_ IN OUT DATE ) 
+IS
+BEGIN  
+   IF virt_rec_.TASK_OPTION = 'Schedule' THEN
+      attribute_ := NULL;
+   END IF;
+END Empty_When_Schedule_Option___;
+
+PROCEDURE Empty_When_Start_Now_Option___ (
+   virt_rec_ IN Task_Virtual_Rec,
+   attribute_ IN OUT VARCHAR2 ) 
+IS
+BEGIN  
+   IF virt_rec_.TASK_OPTION = 'Now' THEN
+      attribute_ := NULL;
+   END IF;
+END Empty_When_Start_Now_Option___;
+PROCEDURE Empty_When_Start_Now_Option___ (
+   virt_rec_ IN Task_Virtual_Rec,
+   attribute_ IN OUT NUMBER ) 
+IS
+BEGIN  
+   IF virt_rec_.TASK_OPTION = 'Now' THEN
+      attribute_ := NULL;
+   END IF;
+END Empty_When_Start_Now_Option___;
+
+PROCEDURE Empty_When_Start_Now_Option___ (
+   virt_rec_ IN Task_Virtual_Rec,
+   attribute_ IN OUT DATE ) 
+IS
+BEGIN  
+   IF virt_rec_.TASK_OPTION = 'Now' THEN
+      attribute_ := NULL;
+   END IF;
+END Empty_When_Start_Now_Option___;
+
+FUNCTION Get_Parameters___ RETURN Parameters_Structure_Rec
+IS
+   rec_ Parameters_Structure_Rec;
+BEGIN
+   RETURN rec_;
+END Get_Parameters___;

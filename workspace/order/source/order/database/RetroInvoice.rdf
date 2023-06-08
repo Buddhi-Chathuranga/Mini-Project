@@ -1,0 +1,850 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: Customer Agreement
+--
+--  File:         RetroInvoice.rdf
+--  Version:      Foundation1 2.2
+--
+--  Date    Sign  History
+--  ------  ----  -----------------------------------------------------------
+--  150820  ShKolk Bug 119909, Modified report method to restrict users without company access from printing the report.
+--  140724  KoDelk Bug 117850, Modified report method to show company document address name as company name. If it's null show name from company header.
+--  120730  SBalLK Bug 101597, Modified &METHOD ( Report_Retro_Invoice ) to get location specific document phrase id table and for enhance code readability.
+--  111020  ChJalk Modified usage of view CUSTOMER_AGREEMENT to CUSTOMER_AGREEMENT_TAB in cursors.
+--  110717  ChJalk Modified usage of view CUSTOMER_ORDER_LINE to CUSTOMER_ORDER_LINE_TAB in cursors.
+--  100809  NWeelk Bug 92313, Added new blocks to AGREEMENT_NOTES, DOCUMENT_PHRASE and 
+--  100809         added PARENT_ROW_NO, HEADER_ROW_NO to the view.
+--  080617  MaHplk Removed BASE_PRICE_SITE from view.
+--  080619  MiKulk Modified the cursor get_order_lines to consider the date_entered, when the price_effectivity date is null.
+--  080116  MiKulk Removed the contract and added the min_quantity and valid_from_date.
+-------------------------Nice Price------------------------------------------
+--  060720  RoJalk Centralized Part Desc - Use Sales_Part_API.Get_Catalog_Desc.
+--  060626  MiErlk Removed the RULE hint, Because it disables the use of the optimizer.
+--  060601  MiErlk Enlarge Identity - Changed view comments - Description.
+--  060412  RoJalk Enlarge Identity - Changed view comments.
+------------------------ 13.4.0 ---------------------------------------------
+--  060310  DaZase Removed A4 and Letter Qrp references.
+--  060125  DaZase Added Report Designer layout and server handling of that layout.
+--  040604  NaWilk Bug 44975, Modified FROM clause in view RETRO_INVOICE_REP. 
+--  031021  ZiMolk Bug 108611, modified cursor get_order_lines to join COL and customer_order_inv_item with line_no, release_no and line_item_no.
+--  031016  PrJalk Bug fix 106237, Added procedure Init.
+--  030822  KaDilk   Bug 38816, Modified the cursor get_order_lines to compare agreement_id from the order line instead of the header   
+--  011205  CaSt  Bug 23600. Modified cursor get_order_lines.
+--  011005  CaSt  Bug 23600. The report should only show invoiced lines. Invoices in status 'Preliminary' are
+--                excluded.
+--  010827  CaSt  Bug 23600. Change qty to qty_shipped (instead of buy_qty_due). Save a record in
+--                Agreement_Sales_Part_Hist_Tab even if deal_price has not changed, if retrospective amount != 0.
+--  000914  FBen  Added UNDEFINE.
+--  000218  MaGu  Bug fix 29293. Added reference on agreement_id in RETRO_INVOICE_REP.
+--  990503  PaLj  Added Sales_Unit_Meas in insert for previous reports
+--  990429  PaLj  Initialized prev_retro_qty_ to zero. 
+--  990407  JoAn  Corrected syntax in comment causing installation error.
+--  990329  PaLj  Added Customer_Name and Coordinator to header information. Changed some titles.
+--                Removed adress and country information.
+--  990312  PaLj  Added Agreement_Notes and Document_Phrases
+--  990129  CAST  Call id 7622 - Print report even when price_diff = 0.
+--  990128  CAST  Call id 7647 - Added currency_code.
+--  990127  CAST  Qty is shown in both sales unit and price unit.
+--  990127  CAST  Call id 7638 - Layout changes.
+--  990125  CAST  Call id 7624 - Modification of titles.
+--                Call id 7659 - Summary of "Total retro amount excl VAT" and "Amount to invoice"
+--                for the entire report.
+--  990121  CAST  Correction of cursor.
+--  990107  CAST  Adjustments.
+--  981221  CAST  Adjustments.
+--  9812xx  CAST  Created.
+-----------------------------------------------------------------------------
+
+define MODULE             = ORDER
+define LU                 = CustomerAgreement
+define PKG                = RETRO_INVOICE_RPI
+
+define TABLE              = ORDER_INFO_SERVICES_RPT
+define VIEW_RPV           = ORDER_INFO_SERVICES_RPV
+define VIEW               = RETRO_INVOICE_REP
+define METHOD             = Report_Retro_Invoice
+
+define BLOCK_RETRO_LINES  = 1
+define BLOCK_PREV_REPORTS = 2
+define BLOCK_TOTAL        = 3
+define BLOCK_REPORT_TOTAL = 4
+
+define DOCRETROINV        = 61
+
+define AGREEMENT_ID       = S1
+define CUSTOMER_NO        = S2
+define CURRENCY_CODE      = S11
+define REPORT_DATE        = D1
+define CATALOG_NO         = S13
+define CATALOG_DESC       = S14
+define CHANGE_DATE        = D2
+define RETROSPECTIVE_QTY  = N1
+define SALES_UNIT_MEAS    = S15
+define PRICE_QTY          = N2
+define PRICE_UNIT_MEAS    = S16
+define PRICE_DIFF         = N3
+define RETROSPECTIVE_AMOUNT = N4
+define RETROSPECTIVE_REPORT_DATE = D3
+define TOTAL_RETRO_QTY    = N5
+define TOTAL_RETRO_AMOUNT = N6
+define TOTAL_TO_INVOICE   = N7
+define TOT_RETRO_THIS_REPORT = N8
+define TOT_TO_INV_THIS_REPORT = N9
+define BLOCK_NO           = N10
+define AGREEMENT_NOTES    = S18
+define DOCUMENT_PHRASE    = S19
+define CUSTOMER_NAME      = S20
+define COORDINATOR        = S21
+define MIN_QUANTITY       = S22
+define VALID_FROM_DATE    = S23
+DEFINE VALID_TO_DATE      =D4
+
+-----------------------------------------------------------------------------
+-- PACKAGE SPECIFICATION:
+-----------------------------------------------------------------------------
+
+PROMPT Creating &PKG specification
+
+CREATE OR REPLACE PACKAGE &PKG AS
+
+module_  CONSTANT VARCHAR2(6) := '&MODULE';
+lu_name_ CONSTANT VARCHAR2(25) := '&LU';
+
+PROCEDURE &METHOD (
+   report_attr_    IN VARCHAR2,
+   parameter_attr_ IN VARCHAR2 );
+
+PROCEDURE Init;
+
+END &PKG;
+/
+
+SHOW ERROR
+
+-----------------------------------------------------------------------------
+-- REPORTS
+-----------------------------------------------------------------------------
+
+PROMPT Creating report view &VIEW
+
+CREATE OR REPLACE VIEW &VIEW AS
+SELECT 
+       H.RESULT_KEY                            RESULT_KEY,
+       D.ROW_NO                                ROW_NO,
+       H.PARENT_ROW_NO                         PARENT_ROW_NO,
+       H.ROW_NO                                HEADER_ROW_NO,
+       H.&AGREEMENT_ID                         AGREEMENT_ID,
+       H.&CUSTOMER_NO                          CUSTOMER_NO,
+       H.&CUSTOMER_NAME                        CUSTOMER_NAME,
+       H.&COORDINATOR                          COORDINATOR,
+       H.&CURRENCY_CODE                        CURRENCY_CODE,        
+       H.&REPORT_DATE                          REPORT_DATE,
+       D.&AGREEMENT_NOTES                      AGREEMENT_NOTES,
+       D.&DOCUMENT_PHRASE                      DOCUMENT_PHRASE,
+       D.&MIN_QUANTITY                         MIN_QUANTITY,
+       D.&VALID_FROM_DATE                      VALID_FROM_DATE,
+       D.&CATALOG_NO                           CATALOG_NO,
+       D.&CATALOG_DESC                         CATALOG_DESC,
+       D.&CHANGE_DATE                          CHANGE_DATE,
+       D.&RETROSPECTIVE_QTY                    RETROSPECTIVE_QTY,
+       D.&SALES_UNIT_MEAS                      SALES_UNIT_MEAS,
+       D.&PRICE_QTY                            PRICE_QTY,
+       D.&PRICE_UNIT_MEAS                      PRICE_UNIT_MEAS,
+       D.&PRICE_DIFF                           PRICE_DIFF,
+       D.&RETROSPECTIVE_AMOUNT                 RETROSPECTIVE_AMOUNT,
+       D.&RETROSPECTIVE_REPORT_DATE            RETROSPECTIVE_REPORT_DATE,
+       D.&TOTAL_RETRO_QTY                      TOTAL_RETRO_QTY,
+       D.&TOTAL_RETRO_AMOUNT                   TOTAL_RETRO_AMOUNT,
+       D.&TOTAL_TO_INVOICE                     TOTAL_TO_INVOICE,
+       D.&TOT_RETRO_THIS_REPORT                TOT_RETRO_THIS_REPORT,
+       D.&TOT_TO_INV_THIS_REPORT               TOT_TO_INV_THIS_REPORT,
+       D.&BLOCK_NO                             BLOCK_NO,
+       D.&VALID_TO_DATE                        VALID_TO_DATE
+FROM  &VIEW_RPV H, &VIEW_RPV D
+WHERE H.RESULT_KEY = D.RESULT_KEY
+AND   D.PARENT_ROW_NO = H.ROW_NO
+WITH  read only;
+
+COMMENT ON TABLE &VIEW IS
+   'MODULE=&MODULE^LU=&LU^PROMPT=&LU^';
+
+COMMENT ON COLUMN &VIEW..result_key IS
+   'FLAGS=M----^DATATYPE=NUMBER^';
+COMMENT ON COLUMN &VIEW..row_no IS
+   'FLAGS=M----^DATATYPE=NUMBER^';
+COMMENT ON COLUMN &VIEW..agreement_id IS
+   'FLAGS=A----^DATATYPE=STRING(10)/UPPERCASE^PROMPT=Agreement ID^TITLE=Agreement ID:^ITEM_NAME=iAgreementId^QUERY=Agreement ID^QFLAGS=MCS--^REF=CUSTOMER_AGREEMENT^QVALUE=%^';
+COMMENT ON COLUMN &VIEW..customer_no IS
+   'FLAGS=A----^DATATYPE=STRING(20)/UPPERCASE^PROMPT=Customer No^REF=CustOrdCustomer^TITLE=Customer Number:^ITEM_NAME=iCustomerNo^';
+COMMENT ON COLUMN &VIEW..customer_name IS
+   'FLAGS=A----^DATATYPE=STRING(100)/UPPERCASE^PROMPT=Customer Name^TITLE=Customer Name:^ITEM_NAME=iCustomerName^';
+COMMENT ON COLUMN &VIEW..coordinator IS
+   'FLAGS=A----^DATATYPE=STRING(20)/UPPERCASE^PROMPT=Coordinator^TITLE=Coordinator:^ITEM_NAME=iCoordinator^';
+COMMENT ON COLUMN &VIEW..currency_code IS
+   'FLAGS=A----^DATATYPE=STRING(3)^TITLE=Currency Code^ITEM_NAME=iCurrencyCode^';
+COMMENT ON COLUMN &VIEW..report_date IS
+   'FLAGS=A----^DATATYPE=DATE/DATE^PROMPT=Report Date^TITLE=Report Date:^ITEM_NAME=iReportDate^';
+COMMENT ON COLUMN &VIEW..AGREEMENT_NOTES IS
+   'FLAGS=A----^DATATYPE=STRING(2000)^TITLE=Agreement Notes:^ITEM_NAME=iAgreementNotes^';
+COMMENT ON COLUMN &VIEW..document_phrase IS
+   'FLAGS=A----^DATATYPE=STRING(2000)^TITLE=Document Phrase:^ITEM_NAME=iDocumentPhrase^';
+COMMENT ON COLUMN &VIEW..min_quantity IS
+   'FLAGS=A----^DATATYPE=NUMBER^PROMPT=Min Quantity^TITLE=Min Quantity^ITEM_NAME=iMinQuantity^';
+COMMENT ON COLUMN &VIEW..valid_from_date IS
+   'FLAGS=A----^DATATYPE=DATE/DATE^PROMPT=Valid From Date^TITLE=Valid From Date^ITEM_NAME=iValidFromDate^';
+COMMENT ON COLUMN &VIEW..catalog_no IS
+   'FLAGS=A----^DATATYPE=STRING(25)/UPPERCASE^PROMPT=Catalog No^REF=SalesPart(BASE_PRICE_SITE)^TITLE=Sales Part Number:^ITEM_NAME=iCatalogNo^';
+COMMENT ON COLUMN &VIEW..catalog_desc IS
+   'FLAGS=A----^DATATYPE=STRING(200)^PROMPT=Catalog Desc^TITLE=Description:^ITEM_NAME=iCatalogDesc^';
+COMMENT ON COLUMN &VIEW..change_date IS
+   'FLAGS=A----^DATATYPE=DATE/DATE^PROMPT=Change Date^TITLE=Change Date^ITEM_NAME=iChangeDate^';
+COMMENT ON COLUMN &VIEW..retrospective_qty IS
+   'FLAGS=A----^DATATYPE=NUMBER^PROMPT=Retrospective Qty^TITLE=Sales Qty^ITEM_NAME=iRetrospectiveQty^';
+COMMENT ON COLUMN &VIEW..sales_unit_meas IS
+   'FLAGS=A----^DATATYPE=STRING(10)^PROMPT=Sales Unit Meas^TITLE=Unit^ITEM_NAME=iSalesUnitMeas^';
+COMMENT ON COLUMN &VIEW..price_qty IS
+   'FLAGS=A----^DATATYPE=NUMBER^PROMPT=Price Qty^TITLE=Price Qty^ITEM_NAME=iPriceQty^';
+COMMENT ON COLUMN &VIEW..price_unit_meas IS
+   'FLAGS=A----^DATATYPE=STRING(10)^PROMPT=Price Unit Meas^TITLE=Unit^ITEM_NAME=iPriceUnitMeas^';
+COMMENT ON COLUMN &VIEW..price_diff IS
+   'FLAGS=A----^DATATYPE=NUMBER^PROMPT=Price Diff^TITLE=Price Diff^ITEM_NAME=iPriceDiff^';
+COMMENT ON COLUMN &VIEW..retrospective_amount IS
+   'FLAGS=A----^DATATYPE=NUMBER^PROMPT=Retrospective Amount^TITLE=Amount^ITEM_NAME=iRetrospectiveAmount^';
+COMMENT ON COLUMN &VIEW..retrospective_report_date IS
+   'FLAGS=A----^DATATYPE=DATE/DATE^PROMPT=Retrospective Report Date^TITLE=Report Date^ITEM_NAME=iRetrospectiveReportDate^';
+COMMENT ON COLUMN &VIEW..total_retro_qty IS
+   'FLAGS=A----^DATATYPE=NUMBER^PROMPT=Total Retrospective Qty^TITLE=Total Exclusive VAT:^ITEM_NAME=iTotalRetroQty^';
+COMMENT ON COLUMN &VIEW..total_retro_amount IS
+   'FLAGS=A----^DATATYPE=NUMBER^PROMPT=Total Retrospective Amount^TITLE=Total Retrospective Amount^ITEM_NAME=iTotalRetroAmount^';
+COMMENT ON COLUMN &VIEW..total_to_invoice IS
+   'FLAGS=A----^DATATYPE=NUMBER^PROMPT=Total To Invoice^TITLE=Total To Invoice^ITEM_NAME=iTotalToInvoice^';
+COMMENT ON COLUMN &VIEW..tot_retro_this_report IS
+   'FLAGS=A----^DATATYPE=NUMBER^PROMPT=Tot Retro This Report^TITLE=Tot Retro This Report^ITEM_NAME=iTotRetroThisReport^';
+COMMENT ON COLUMN &VIEW..tot_to_inv_this_report IS
+   'FLAGS=A----^DATATYPE=NUMBER^PROMPT=Tot To Inv This Report^TITLE=Amount To Invoice This Report^ITEM_NAME=iTotToInvThisReport^';
+COMMENT ON COLUMN &VIEW..block_no IS
+'FLAGS=A----^DATATYPE=NUMBER(2)^PROMPT=Block No^ITEM_NAME=iBlockNo^TITLE=Block No^';
+COMMENT ON COLUMN RETRO_INVOICE_REP.valid_to_date
+   IS 'FLAGS=A----^DATATYPE=DATE/DATETIME^TITLE=Valid To Date^';
+
+BEGIN
+   Report_SYS.Define_Report_('&VIEW','&MODULE','&LU','Retrospective Invoice Report','&TABLE','&PKG..&METHOD',0,NULL,NULL,NULL,'PLSQL1.2','TRUE','Sales','Invoice');
+   Report_SYS.Define_Report_Text_( '&VIEW', 'REPORT_TITLE', 'Retrospective Invoice Report' );
+   Report_SYS.Define_Report_Text_( '&VIEW', 'PREV_REPORTS_TITLE', 'Previously Printed Retrospective Invoice Reports:' );
+   Report_SYS.Define_Report_Text_( '&VIEW', 'TOT_EXCL_VAT_TITLE', 'Total Retrospective Amount Exclusive VAT:' );
+   Report_SYS.Define_Report_Text_( '&VIEW', 'TOT_PER_SALES_PART', 'Amount On This Report:' );
+   Report_SYS.Define_Report_Text_( '&VIEW', 'TOT_THIS_REPORT', 'Total Amount On This Report:' );
+   Report_SYS.Refresh_('&VIEW');
+END;
+/
+
+COMMIT
+/
+
+-----------------------------------------------------------------------------
+-- PACKAGE IMPLEMENTATION
+-----------------------------------------------------------------------------
+
+PROMPT Creating &PKG implementation
+
+CREATE OR REPLACE PACKAGE BODY &PKG AS
+
+PROCEDURE &METHOD (
+   report_attr_    IN VARCHAR2,
+   parameter_attr_ IN VARCHAR2 )
+IS
+   result_key_                NUMBER;
+   row_no_                    NUMBER := 1;
+   parent_row_no_             NUMBER;
+   count_part_                NUMBER := 0;
+
+   agreement_id_              &VIEW..AGREEMENT_ID%TYPE;
+   change_date_               DATE;
+   retrospective_qty_         NUMBER;
+   price_qty_                 NUMBER;
+   prev_retro_qty_            NUMBER := 0;
+   price_diff_                &VIEW..PRICE_DIFF%TYPE;
+   retrospective_amount_      &VIEW..RETROSPECTIVE_AMOUNT%TYPE;
+   min_quantity_              NUMBER;
+   valid_from_date_           DATE;
+   base_price_site_           VARCHAR2(5);
+   catalog_no_                &VIEW..CATALOG_NO%TYPE;
+   total_retro_qty_           NUMBER := 0;
+   total_retro_amount_        NUMBER := 0;
+   total_to_invoice_          NUMBER := 0;
+   tot_retro_this_report_     NUMBER := 0;
+   tot_to_inv_this_report_    NUMBER := 0;
+   report_date_               DATE;
+
+   customer_name_             &VIEW..CUSTOMER_NAME%TYPE;
+
+   change_no_                 NUMBER;
+   retrospective_report_date_ DATE;
+   deal_price_                NUMBER;
+
+   phrases_                   &VIEW..DOCUMENT_PHRASE%TYPE;
+
+   salespartrec_              Sales_Part_API.Public_Rec;
+   catalog_desc_              &VIEW..CATALOG_DESC%TYPE;
+
+   do_xml_                    BOOLEAN := Report_SYS.Should_Generate_Xml('&VIEW');
+   do_rs_                     BOOLEAN := Report_SYS.Should_Generate_Result_Set('&VIEW');
+   xml_                       CLOB;
+   package_name_              VARCHAR2(100) := 'RETRO_INVOICE_REP';
+   last_calendar_date_        DATE := Database_SYS.Get_Last_Calendar_Date();
+
+   phrase_on_document_tab_    Phrase_On_Document_API.Phrase_Id_Tab;
+   note_text_tab_             Document_Text_API.Note_Text_Table;
+   company_                   VARCHAR2(20);
+   logotype_                  VARCHAR2(100);      
+   company_name_              VARCHAR2(100);
+   agr_sales_part_deal_rec_   Agreement_Sales_Part_Deal_API.Public_Rec;
+   valid_to_date_             DATE;
+   
+   -- Header cursor
+   CURSOR get_header IS
+      SELECT agreement_id,
+             description,
+             company,
+             currency_code,
+             customer_no,
+             authorize_code,
+             assortment_id,
+             note_id
+      FROM   CUSTOMER_AGREEMENT_TAB
+      WHERE  agreement_id = agreement_id_;
+
+   -- Agreement history cursor
+   CURSOR get_break_rows(agreement_id_ VARCHAR2) IS
+      SELECT agreement_id,
+             min_quantity,
+             valid_from_date,
+             catalog_no 
+      FROM   AGREEMENT_SALES_PART_HIST
+      WHERE  agreement_id = agreement_id_
+      AND    change_no = 0;
+
+   -- Agreement history cursor
+   CURSOR get_hist_rec(agreement_id_ VARCHAR2, min_quantity_ NUMBER, valid_from_date_ DATE, catalog_no_ VARCHAR2) IS
+      SELECT *
+      FROM   AGREEMENT_SALES_PART_HIST
+      WHERE  agreement_id = agreement_id_
+      AND    min_quantity = min_quantity_
+      AND    valid_from_date = valid_from_date_
+      AND    catalog_no = catalog_no_;
+
+   -- Order lines cursor
+   CURSOR get_order_lines(agreement_id_ VARCHAR2, min_quantity_ NUMBER, valid_from_date_ DATE, catalog_no_ VARCHAR2, change_date_ DATE) IS
+      SELECT NVL(SUM(col.qty_shipped / price_conv_factor), 0)     retrospective_qty,
+             NVL(SUM(col.qty_shipped), 0)                         price_qty
+      FROM   CUSTOMER_AGREEMENT_TAB ca, CUSTOMER_ORDER_LINE_TAB col, CUSTOMER_ORDER_INV_ITEM ii, customer_order_inv_head ih
+      WHERE  ca.agreement_id = agreement_id_
+      AND    ca.agreement_id = col.price_source_id
+      AND    col.price_source = 'AGREEMENT'
+      AND    col.catalog_no = catalog_no_   
+      AND    ii.company = Site_API.Get_Company(col.contract)
+      AND    ii.order_no = col.order_no
+      AND    ii.line_no = col.line_no
+      AND    ii.release_no = col.rel_no
+      AND    ii.line_item_no = col.line_item_no
+      AND    ii.invoice_type IN ('CUSTORDDEB','CUSTCOLDEB')
+      AND    ii.company = ih.company
+      AND    ii.invoice_id = ih.invoice_id
+      AND    ih.objstate != 'Preliminary'
+      AND    col.date_entered < change_date_
+      AND    NVL(col.price_effectivity_date, col.date_entered) BETWEEN valid_from_date_ AND NVL(ca.valid_until, SYSDATE)
+      AND    NVL(col.price_effectivity_date, col.date_entered) < (SELECT NVL(MIN(valid_from_date), last_calendar_date_)
+                                          FROM agreement_sales_part_deal_tab aspd
+                                          WHERE aspd.agreement_id = agreement_id_
+                                          AND   aspd.min_quantity = min_quantity_
+                                          AND   aspd.valid_from_date > valid_from_date_
+                                          AND   aspd.catalog_no = catalog_no_)
+      AND    col.buy_qty_due > min_quantity_
+      AND    col.buy_qty_due < (SELECT NVL(MIN(min_quantity),999999999999999)
+                               FROM  agreement_sales_part_deal_tab  aspd
+                               WHERE aspd.agreement_id = agreement_id_
+                               AND   aspd.valid_from_date = valid_from_date_
+                               AND   aspd.catalog_no = catalog_no_
+                               AND   aspd.min_quantity > min_quantity_)
+      ORDER BY col.date_entered;
+       
+   -- Agreement history cursor (previous retrospective reports)
+   CURSOR get_previous_reports(agreement_id_ VARCHAR2, min_quantity_ NUMBER, valid_from_date_ DATE, catalog_no_ VARCHAR2) IS
+      SELECT retrospective_report_date,
+             retrospective_qty,
+             retrospective_amount  
+      FROM   AGREEMENT_SALES_PART_HIST
+      WHERE  agreement_id = agreement_id_
+      AND    min_quantity = min_quantity_
+      AND    valid_from_date = valid_from_date_
+      AND    catalog_no = catalog_no_
+      AND    retrospective_report_date IS NOT NULL;
+   
+   CURSOR get_change_no IS
+      SELECT MAX(change_no)
+      FROM   AGREEMENT_SALES_PART_HIST
+      WHERE  agreement_id = agreement_id_
+      AND    min_quantity = min_quantity_
+      AND    valid_from_date = valid_from_date_
+      AND    catalog_no = catalog_no_;
+BEGIN
+   General_SYS.Init_Method(lu_name_, '&PKG', 'Report_Retro_Invoice');
+   
+   result_key_    := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Item_Value('RESULT_KEY', report_attr_));
+   agreement_id_  := Client_SYS.Get_Item_Value('AGREEMENT_ID', parameter_attr_);
+      
+   parent_row_no_ := 0;
+   report_date_   := SYSDATE;
+
+   IF (do_xml_) THEN
+      Xml_Record_Writer_SYS.Create_Report_Header(xml_,'&VIEW',package_name_);
+   END IF;
+
+   FOR header_rec_ IN get_header LOOP
+      User_Finance_API.Exist_User(header_rec_.company, Fnd_Session_API.Get_Fnd_User());
+
+      IF (company_ IS NULL) THEN
+         company_ := header_rec_.company;
+      END IF;
+      
+      customer_name_ := Customer_Info_API.Get_Name(header_rec_.customer_no);
+
+      -- Add the Description, Company, and may be Assortment
+      IF (do_xml_) THEN
+         Xml_Record_Writer_SYS.Add_Element(xml_,'REPORT_DATE', report_date_);
+         Xml_Record_Writer_SYS.Add_Element(xml_,'CURRENCY_CODE', header_rec_.currency_code);
+         Xml_Record_Writer_SYS.Add_Element(xml_,'COORDINATOR', header_rec_.authorize_code);
+         Xml_Record_Writer_SYS.Add_Element(xml_,'CUSTOMER_NAME', customer_name_);
+         Xml_Record_Writer_SYS.Add_Element(xml_,'CUSTOMER_NO', header_rec_.customer_no);
+         Xml_Record_Writer_SYS.Add_Element(xml_,'AGREEMENT_ID', header_rec_.agreement_id);
+      END IF;
+      IF (do_rs_) THEN
+         -- Insert values for header                        
+         INSERT INTO &TABLE
+           (result_key,
+            row_no,
+            parent_row_no,
+            &agreement_id,
+            &customer_no,
+            &customer_name,
+            &coordinator,
+            &currency_code,
+            &report_date)
+         VALUES
+           (result_key_,
+            row_no_,
+            parent_row_no_,
+            header_rec_.agreement_id,
+            header_rec_.customer_no,
+            customer_name_,
+            header_rec_.authorize_code,
+            header_rec_.currency_code,
+            report_date_);
+
+         parent_row_no_ := row_no_;
+         row_no_        := row_no_ + 1;
+      END IF;
+
+      IF (header_rec_.note_id IS NOT NULL) THEN
+         IF (do_xml_) THEN
+            Xml_Record_Writer_SYS.Start_Element(xml_, 'DOC_TEXTS');
+         END IF;
+         note_text_tab_ := Document_Text_API.Get_All_Notes_Tab(header_rec_.note_id, '&DOCRETROINV');
+            
+         IF (note_text_tab_.COUNT > 0) THEN
+            FOR n IN note_text_tab_.FIRST..note_text_tab_.LAST LOOP
+               IF (do_xml_) THEN
+                  Xml_Record_Writer_SYS.Start_Element(xml_, 'DOC_TEXT');
+                  Xml_Record_Writer_SYS.Add_Element(xml_,'AGREEMENT_NOTES', note_text_tab_(n));
+                  Xml_Record_Writer_SYS.End_Element(xml_, 'DOC_TEXT');
+               END IF;
+               IF (do_rs_) THEN
+                  INSERT INTO &TABLE (
+                     result_key, row_no, parent_row_no, &agreement_notes)
+                  VALUES (
+                     result_key_, row_no_, parent_row_no_, note_text_tab_(n));
+               END IF;  
+               row_no_ := row_no_ + 1;
+            END LOOP;                  
+         END IF; 
+         IF (do_xml_) THEN
+            Xml_Record_Writer_SYS.End_Element(xml_, 'DOC_TEXTS');
+         END IF; 
+      END IF;
+      
+      IF (do_xml_) THEN
+         Xml_Record_Writer_SYS.Start_Element(xml_, 'DOC_PHRASES');
+      END IF;
+         
+      IF (Language_SYS.Get_Language IS NOT NULL) THEN
+         phrase_on_document_tab_ := Phrase_On_Document_API.Get_Phrase_Id_Tab ('RETROINV', header_rec_.company, NULL);
+         
+         IF (phrase_on_document_tab_.COUNT > 0) THEN
+            FOR n IN phrase_on_document_tab_.FIRST..phrase_on_document_tab_.LAST LOOP
+               phrases_ := Mpccom_Phrase_Text_API.Get_Phrase_Text( phrase_on_document_tab_(n), Language_SYS.Get_Language);
+               IF (phrases_ IS NOT NULL) THEN
+                  IF (do_xml_) THEN
+                     Xml_Record_Writer_SYS.Start_Element(xml_, 'DOC_PHRASE');
+                     Xml_Record_Writer_SYS.Add_Element(xml_, 'DOCUMENT_PHRASE', phrases_ );
+                     Xml_Record_Writer_SYS.End_Element(xml_, 'DOC_PHRASE');
+                  END IF;
+                  IF (do_rs_) THEN
+                     INSERT INTO &TABLE (
+                        result_key, row_no, parent_row_no, &document_phrase)
+                     VALUES (
+                        result_key_, row_no_, parent_row_no_, phrases_);
+                     row_no_ := row_no_ + 1;
+                  END IF;
+               END IF;
+            END LOOP;
+         END IF;
+      END IF;
+         
+      IF (do_xml_) THEN
+         Xml_Record_Writer_SYS.End_Element(xml_, 'DOC_PHRASES');
+         Xml_Record_Writer_SYS.Start_Element(xml_, 'SALES_PART_ITEMS');
+      END IF;
+
+      FOR break_rec_ IN get_break_rows(header_rec_.agreement_id) LOOP
+         agr_sales_part_deal_rec_ := Agreement_Sales_Part_Deal_API.Get(break_rec_.agreement_id,
+                                                                       break_rec_.min_quantity,
+                                                                       break_rec_.valid_from_date,
+                                                                       break_rec_.catalog_no);
+         base_price_site_ := agr_sales_part_deal_rec_.base_price_site;
+         salespartrec_    := Sales_Part_API.Get(base_price_site_, break_rec_.catalog_no);
+         catalog_desc_    := Sales_part_API.Get_Catalog_Desc(base_price_site_, break_rec_.catalog_no) ; 
+         valid_to_date_   := agr_sales_part_deal_rec_.valid_to_date;
+         IF (do_xml_) THEN
+            Xml_Record_Writer_SYS.Start_Element(xml_, 'SALES_PART_ITEM');
+            Xml_Record_Writer_SYS.Add_Element(xml_,'CATALOG_DESC', catalog_desc_);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'CATALOG_NO', break_rec_.catalog_no);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'MIN_QUANTITY', break_rec_.min_quantity);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'VALID_FROM_DATE', break_rec_.valid_from_date);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'VALID_TO_DATE', valid_to_date_);
+            Xml_Record_Writer_SYS.Start_Element(xml_, 'SALES_PART_HISTORY_ITEMS');
+         END IF;
+
+         FOR next_hist_ IN get_hist_rec(break_rec_.agreement_id, break_rec_.min_quantity, break_rec_.valid_from_date, break_rec_.catalog_no) LOOP
+            agreement_id_              := next_hist_.agreement_id;
+            min_quantity_              := next_hist_.min_quantity;
+            valid_from_date_           := next_hist_.valid_from_date;
+            change_date_               := next_hist_.change_date;
+            catalog_no_                := next_hist_.catalog_no;
+            change_no_                 := next_hist_.change_no;
+            retrospective_report_date_ := next_hist_.retrospective_report_date;
+      
+            OPEN get_order_lines(agreement_id_, min_quantity_, valid_from_date_, catalog_no_, change_date_);
+            FETCH get_order_lines INTO retrospective_qty_, price_qty_;
+            CLOSE get_order_lines;
+
+            deal_price_           := next_hist_.deal_price;
+            price_diff_           := next_hist_.deal_price - next_hist_.old_deal_price;
+            retrospective_amount_ := price_diff_ * price_qty_;
+
+            IF (do_xml_) THEN
+               Xml_Record_Writer_SYS.Start_Element(xml_, 'SALES_PART_HISTORY_ITEM');
+               Xml_Record_Writer_SYS.Add_Element(xml_,'RETROSPECTIVE_AMOUNT', retrospective_amount_);
+               Xml_Record_Writer_SYS.Add_Element(xml_,'PRICE_DIFF', price_diff_);
+               Xml_Record_Writer_SYS.Add_Element(xml_,'PRICE_UNIT_MEAS', salespartrec_.price_unit_meas);
+               Xml_Record_Writer_SYS.Add_Element(xml_,'PRICE_QTY', price_qty_);
+               Xml_Record_Writer_SYS.Add_Element(xml_,'SALES_UNIT_MEAS', salespartrec_.sales_unit_meas);
+               Xml_Record_Writer_SYS.Add_Element(xml_,'RETROSPECTIVE_QTY', retrospective_qty_);
+               Xml_Record_Writer_SYS.Add_Element(xml_,'CHANGE_DATE', next_hist_.change_date);
+               Xml_Record_Writer_SYS.End_Element(xml_, 'SALES_PART_HISTORY_ITEM');
+            END IF;
+            IF (do_rs_) THEN
+               -- Insert values for lines                        
+               INSERT INTO &TABLE 
+                 (result_key, 
+                  row_no,
+                  parent_row_no,
+                  &CATALOG_NO, 
+                  &CATALOG_DESC,
+                  &MIN_QUANTITY,
+                  &VALID_FROM_DATE,
+                  &CHANGE_DATE, 
+                  &RETROSPECTIVE_QTY, 
+                  &SALES_UNIT_MEAS, 
+                  &PRICE_QTY, 
+                  &PRICE_UNIT_MEAS, 
+                  &PRICE_DIFF, 
+                  &RETROSPECTIVE_AMOUNT,
+                  &BLOCK_NO,
+                  &VALID_TO_DATE)
+               VALUES
+                 (result_key_,
+                  row_no_,
+                  parent_row_no_,
+                  next_hist_.catalog_no,
+                  catalog_desc_,
+                  min_quantity_,
+                  valid_from_date_,
+                  next_hist_.change_date,
+                  retrospective_qty_,
+                  salespartrec_.sales_unit_meas,
+                  price_qty_ ,
+                  salespartrec_.price_unit_meas,
+                  price_diff_, 
+                  retrospective_amount_,
+                  &BLOCK_RETRO_LINES,
+                  valid_to_date_);
+   
+               row_no_ := row_no_ + 1;
+            END IF;
+
+            total_retro_qty_    := total_retro_qty_ + (retrospective_qty_ - prev_retro_qty_);
+            total_retro_amount_ := total_retro_amount_ + retrospective_amount_;
+            prev_retro_qty_     := retrospective_qty_;
+         END LOOP;
+
+         IF (do_xml_) THEN
+            Xml_Record_Writer_SYS.End_Element(xml_, 'SALES_PART_HISTORY_ITEMS');
+            Xml_Record_Writer_SYS.Start_Element(xml_, 'HISTORY_TOTAL_ITEMS');
+            Xml_Record_Writer_SYS.Start_Element(xml_, 'HISTORY_TOTAL_ITEM');
+            Xml_Record_Writer_SYS.Add_Element(xml_,'TOTAL_RETRO_AMOUNT', total_retro_amount_);
+            Xml_Record_Writer_SYS.End_Element(xml_, 'HISTORY_TOTAL_ITEM');
+            Xml_Record_Writer_SYS.End_Element(xml_, 'HISTORY_TOTAL_ITEMS');
+         END IF;
+         IF (do_rs_) THEN
+            UPDATE &TABLE 
+            SET   &total_retro_amount = total_retro_amount_ 
+            WHERE result_key = result_key_
+            AND   row_no = row_no_ - 1;
+         END IF;
+         
+         tot_retro_this_report_ := tot_retro_this_report_ + total_retro_amount_;
+
+         IF (do_xml_) THEN
+            Xml_Record_Writer_SYS.Start_Element(xml_, 'PREVIOUS_REPORTS_ITEMS');
+         END IF;
+
+         FOR previous_reports_ IN get_previous_reports(agreement_id_, min_quantity_, valid_from_date_, catalog_no_) LOOP
+            IF (do_xml_) THEN
+               Xml_Record_Writer_SYS.Start_Element(xml_, 'PREVIOUS_REPORTS_ITEM');
+               Xml_Record_Writer_SYS.Add_Element(xml_,'RETROSPECTIVE_REPORT_DATE', previous_reports_.retrospective_report_date);
+               Xml_Record_Writer_SYS.Add_Element(xml_,'RETROSPECTIVE_QTY', previous_reports_.retrospective_qty);
+               Xml_Record_Writer_SYS.Add_Element(xml_,'SALES_UNIT_MEAS', salespartrec_.sales_unit_meas);
+               Xml_Record_Writer_SYS.Add_Element(xml_,'RETROSPECTIVE_AMOUNT', previous_reports_.retrospective_amount);
+               Xml_Record_Writer_SYS.End_Element(xml_, 'PREVIOUS_REPORTS_ITEM');
+            END IF;
+            IF (do_rs_) THEN
+               INSERT INTO &TABLE 
+                  (result_key, 
+                   row_no,
+                   parent_row_no,
+                   &catalog_no, 
+                   &retrospective_qty,
+                   &sales_unit_meas,                  
+                   &retrospective_amount,
+                   &retrospective_report_date,
+                   &block_no)
+               VALUES
+                  (result_key_, 
+                   row_no_, 
+                   parent_row_no_, 
+                   catalog_no_, 
+                   previous_reports_.retrospective_qty,   
+                   salespartrec_.sales_unit_meas,
+                   previous_reports_.retrospective_amount,
+                   previous_reports_.retrospective_report_date,
+                   &BLOCK_PREV_REPORTS);
+                  
+               row_no_ := row_no_ + 1;
+            END IF;
+            total_retro_amount_ := total_retro_amount_ - previous_reports_.retrospective_amount;
+         END LOOP;
+
+         IF (do_xml_) THEN
+            Xml_Record_Writer_SYS.End_Element(xml_, 'PREVIOUS_REPORTS_ITEMS');
+         END IF;
+
+         IF (do_xml_) THEN
+            Xml_Record_Writer_SYS.Start_Element(xml_, 'SALES_PART_TOTAL_ITEMS');
+            Xml_Record_Writer_SYS.Start_Element(xml_, 'SALES_PART_TOTAL_ITEM');
+            Xml_Record_Writer_SYS.Add_Element(xml_,'TOTAL_TO_INVOICE', total_retro_amount_);
+            Xml_Record_Writer_SYS.End_Element(xml_, 'SALES_PART_TOTAL_ITEM');
+            Xml_Record_Writer_SYS.End_Element(xml_, 'SALES_PART_TOTAL_ITEMS');
+         END IF;
+
+         IF (do_rs_) THEN
+            INSERT INTO &TABLE 
+               (result_key, 
+                row_no,
+                parent_row_no,
+                &catalog_no, 
+                &total_to_invoice,
+                &block_no)
+            VALUES
+               (result_key_, 
+                row_no_, 
+                parent_row_no_, 
+                catalog_no_, 
+                total_retro_amount_,
+                &BLOCK_TOTAL);
+         END IF;
+
+         IF (retrospective_report_date_ IS NULL) AND 
+             (total_retro_qty_ != 0 OR total_retro_amount_ != 0) THEN
+            Agreement_Sales_Part_Hist_API.Modify_When_Reported(agreement_id_, min_quantity_, 
+                                                               valid_from_date_, catalog_no_,
+                                                               change_no_, change_date_, 
+                                                               total_retro_qty_, total_retro_amount_);
+         --If total_retro_amount_ != 0 the price has not been changed, but a retrospective invoice report has 
+         --been created and must be saved in Agreement_Sales_Part_Hist.
+         ELSIF (total_retro_amount_ != 0) THEN
+            --deal_price_ contains the latest price
+            Agreement_Sales_Part_Hist_API.New(agreement_id_, min_quantity_, valid_from_date_, 
+                                              catalog_no_, deal_price_, deal_price_);
+            
+            OPEN get_change_no;
+            FETCH get_change_no INTO change_no_;
+            CLOSE get_change_no;
+            
+            Agreement_Sales_Part_Hist_API.Modify_When_Reported(agreement_id_, min_quantity_, 
+                                                               valid_from_date_, catalog_no_,
+                                                               change_no_, change_date_, 
+                                                               total_retro_qty_, total_retro_amount_);
+         END IF;
+
+         tot_to_inv_this_report_ := tot_to_inv_this_report_ + total_retro_amount_;
+         count_part_             := count_part_ + 1;
+         
+         row_no_                 := row_no_ + 1;
+         total_retro_qty_        := 0;
+         total_retro_amount_     := 0;
+         total_to_invoice_       := 0;
+         prev_retro_qty_         := 0;
+
+         IF (do_xml_) THEN
+            Xml_Record_Writer_SYS.End_Element(xml_, 'SALES_PART_ITEM');
+         END IF;
+      END LOOP;
+
+      IF (do_xml_) THEN
+         Xml_Record_Writer_SYS.End_Element(xml_, 'SALES_PART_ITEMS');
+      END IF;
+   
+      -- The report totals are only shown when the agreement contains more than one sales part.
+      IF (count_part_ > 1) THEN
+         IF (do_xml_) THEN
+            Xml_Record_Writer_SYS.Start_Element(xml_, 'REPORT_TOTAL_ITEMS');
+            Xml_Record_Writer_SYS.Start_Element(xml_, 'REPORT_TOTAL_ITEM');
+            Xml_Record_Writer_SYS.Add_Element(xml_,'TOT_RETRO_THIS_REPORT', tot_retro_this_report_);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'TOT_TO_INV_THIS_REPORT', tot_to_inv_this_report_);
+            Xml_Record_Writer_SYS.End_Element(xml_, 'REPORT_TOTAL_ITEM');
+            Xml_Record_Writer_SYS.End_Element(xml_, 'REPORT_TOTAL_ITEMS');
+         END IF;
+
+         IF (do_rs_) THEN
+            INSERT INTO &TABLE 
+               (result_key, 
+                row_no,
+                parent_row_no,
+                &catalog_no, 
+                &tot_retro_this_report,
+                &tot_to_inv_this_report,
+                &block_no)
+            VALUES
+               (result_key_, 
+                row_no_, 
+                parent_row_no_, 
+                catalog_no_, 
+                tot_retro_this_report_,
+                tot_to_inv_this_report_,
+                &BLOCK_REPORT_TOTAL);
+         END IF;
+      END IF;      
+      row_no_                 := row_no_ + 1;
+
+      count_part_             := 0;
+      tot_retro_this_report_  := 0;
+      tot_to_inv_this_report_ := 0;
+   END LOOP;
+
+   IF (do_xml_) THEN
+      Xml_Record_Writer_SYS.End_Element(xml_,'&VIEW');
+      Report_SYS.Finish_Xml_Report('&VIEW',result_key_,xml_);
+   END IF;
+
+   logotype_     :=  Company_API.Get_Logotype(company_);
+   company_name_ :=  NVL(Company_Address_Deliv_Info_API.Get_Address_Name(company_, Company_Address_Type_API.Get_Document_Address(company_)), Company_API.Get_Name(company_));
+   IF (logotype_ IS NOT NULL ) THEN
+      Archive_Variable_API.Set_Object(result_key_, 'rhSysLogo', logotype_);
+      Archive_Variable_API.Set_Variable(result_key_, 'companyName', company_name_);         
+   END IF;
+END &METHOD;
+
+-----------------------------------------------------------------------------
+-------------------- FOUNDATION1 METHODS ------------------------------------
+-----------------------------------------------------------------------------
+-- Init
+--   Dummy procedure that can be called at database startup to ensure that
+--   this package is loaded into memory for performance reasons only.
+-----------------------------------------------------------------------------
+
+PROCEDURE Init
+IS
+BEGIN
+   NULL;
+END Init;
+
+
+END &PKG;
+/
+SHOW ERROR
+
+
+
+
+
+
+
+----------------------------------------------------------
+-- <UNDEFINE_SECTION>
+----------------------------------------------------------
+-- This section is reserved for undefine statements
+-- nothing should be manually written below because
+-- that would be overwritten everytime the IFS / Undefine
+-- tool is run.  
+-- Also do NOT make any changes to the above tag because
+-- this will result in duplicated code
+----------------------------------------------------------
+UNDEFINE MODULE
+UNDEFINE LU
+UNDEFINE PKG
+UNDEFINE TABLE
+UNDEFINE VIEW_RPV
+UNDEFINE VIEW
+UNDEFINE METHOD
+UNDEFINE BLOCK_RETRO_LINES
+UNDEFINE BLOCK_PREV_REPORTS
+UNDEFINE BLOCK_TOTAL
+UNDEFINE BLOCK_REPORT_TOTAL
+UNDEFINE DOCRETROINV
+UNDEFINE AGREEMENT_ID
+UNDEFINE CUSTOMER_NO
+UNDEFINE CURRENCY_CODE
+UNDEFINE REPORT_DATE
+UNDEFINE CONTRACT
+UNDEFINE CATALOG_NO
+UNDEFINE CATALOG_DESC
+UNDEFINE CHANGE_DATE
+UNDEFINE RETROSPECTIVE_QTY
+UNDEFINE SALES_UNIT_MEAS
+UNDEFINE PRICE_QTY
+UNDEFINE PRICE_UNIT_MEAS
+UNDEFINE PRICE_DIFF
+UNDEFINE RETROSPECTIVE_AMOUNT
+UNDEFINE RETROSPECTIVE_REPORT_DATE
+UNDEFINE TOTAL_RETRO_QTY
+UNDEFINE TOTAL_RETRO_AMOUNT
+UNDEFINE TOTAL_TO_INVOICE
+UNDEFINE TOT_RETRO_THIS_REPORT
+UNDEFINE TOT_TO_INV_THIS_REPORT
+UNDEFINE BLOCK_NO
+UNDEFINE CATALOG_NO_AND_CONTRACT
+UNDEFINE AGREEMENT_NOTES
+UNDEFINE DOCUMENT_PHRASE
+UNDEFINE CUSTOMER_NAME
+UNDEFINE COORDINATOR
+UNDEFINE VALID_TO_DATE

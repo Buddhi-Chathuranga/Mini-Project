@@ -1,0 +1,395 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: FndUser
+--
+--  File:         SecurityPerUser.rdf
+--
+--  Date    Sign  History
+--  ------  ----  -----------------------------------------------------------
+--  260404 Bamalk Created.
+--  260105 Bamalk Fixed bug# 49288.  
+--  120405 Bamalk Added Enhancement requests in Bug 47362.
+--  120505 NiWi   When Security Object Type is not 'Method', set include_read_only_modules_ to 'No' (Bug51170).
+--                Used Fnd_Yes_No_API for include_read_only_modules_.
+--  050805 Mesalk Added support for raw data view creation. (Bug id #44975)
+--  051028  MAOL  Removed QRP's (F1PR467).
+--  110503  CHAA  EASTONE-16468 : Remove report layout definitions from RDF
+-----------------------------------------------------------------------------
+
+DEFINE MODULE             = FNDBAS
+DEFINE LU                 = FndUser
+DEFINE PKG                = FND_SECURITY_PER_USER_RPI
+
+DEFINE TABLE              = INFO_SERVICES_RPT
+DEFINE RAWVIEW            = INFO_SERVICES_RPV
+DEFINE VIEW               = FND_SECURITY_PER_USER_REP
+DEFINE METHOD             = Report_Overview
+
+-----------------------------------------------------------------------------
+-- PACKAGE SPECIFICATION:
+-----------------------------------------------------------------------------
+
+PROMPT Creating &PKG specification
+
+CREATE OR REPLACE PACKAGE &PKG AS
+
+module_ CONSTANT VARCHAR2(6) := '&MODULE';
+lu_name_ CONSTANT VARCHAR2(25) := '&LU';
+
+PROCEDURE &METHOD (
+   report_attr_    IN VARCHAR2,
+   parameter_attr_ IN VARCHAR2 );
+   
+--@PoReadOnly(Default_Sub_Object_Type)
+PROCEDURE Default_Sub_Object_Type (
+   sub_type_ OUT VARCHAR2 );
+
+END &PKG;
+/
+SHOW ERROR
+
+-----------------------------------------------------------------------------
+-- REPORTS
+-----------------------------------------------------------------------------
+
+PROMPT Creating report view &VIEW
+
+CREATE OR REPLACE VIEW &VIEW AS
+SELECT RESULT_KEY                              RESULT_KEY,
+       ROW_NO                                  ROW_NO,
+       s1                                      USER_ID,
+       s2                                      ROLE,
+       s3                                      MODULE,
+       s4                                      PRES_OBJ_ID,
+       s5                                      PRES_OBJ_DESC,
+       s6                                      SUB_OBJECT_TYPE,  
+       s7                                      SUB_OBJECT,
+       s8   							              READ_ONLY_METHODS
+FROM  &RAWVIEW
+WITH  read only;
+
+COMMENT ON TABLE &VIEW
+   IS 'LU=&LU^MODULE=&MODULE^';
+COMMENT ON COLUMN &VIEW..result_key IS
+   'FLAGS=M----^DATATYPE=NUMBER^';
+COMMENT ON COLUMN &VIEW..row_no IS
+   'FLAGS=M----^DATATYPE=NUMBER^';
+COMMENT ON COLUMN &VIEW..user_id IS
+   'FLAGS=A----^DATATYPE=STRING(30)/UPPERCASE^PROMPT=User Id^QUERY=User Id:^STATUS=Enter User Id^QFLAGS=MCS-L^TITLE=USER ID^ITEM_NAME=iUserId^REF=FndUser^';      
+COMMENT ON COLUMN &VIEW..role IS
+   'FLAGS=A----^DATATYPE=STRING(30)/UPPERCASE^PROMPT=Role^TITLE=Role^QFLAGS=-C--L^QUERY=Role:^ITEM_NAME=iRole^REF=FND_ROLE^';
+COMMENT ON COLUMN &VIEW..module IS
+   'FLAGS=A----^DATATYPE=STRING(20)/UPPERCASE^PROMPT=Module^TITLE=Module^QFLAGS=-C--L^QUERY=Module:^ITEM_NAME=iModule^REF=MODULE^';
+COMMENT ON COLUMN &VIEW..pres_obj_id IS
+   'FLAGS=A----^DATATYPE=STRING(200)/UPPERCASE^PROMPT=Pres Obj Id^TITLE=Object Id^ITEM_NAME=iPresObjId^';
+COMMENT ON COLUMN &VIEW..pres_obj_desc IS
+   'FLAGS=A----^DATATYPE=STRING(500)/UPPERCASE^PROMPT=Pres Obj Desc^TITLE=Object Title^ITEM_NAME=iPresObjIdDesc^';
+COMMENT ON COLUMN &VIEW..sub_object_type IS
+   'FLAGS=A----^DATATYPE=STRING(200)^PROMPT=Sub Object Type^QFLAGS=-CS--^QUERY=Pres Object Sub Type:^
+   ^ENUMERATE=PRES_OBJECT_SEC_SUB_TYPE_API.Enumerate^TITLE=Sub Object Type^QVALUE=:&PKG..Default_Sub_Object_Type^ITEM_NAME=iSubObjectType^';
+COMMENT ON COLUMN &VIEW..sub_object IS
+   'FLAGS=A----^DATATYPE=STRING(20)^PROMPT=Sub Object^TITLE=Access Granted^ITEM_NAME=iSubObject^';
+COMMENT ON COLUMN &VIEW..read_only_methods IS
+   'FLAGS=A----^DATATYPE=STRING(3)^PROMPT=Include Read Only Methods^QFLAGS=-CS--^QUERY=Include Read Only Methods:^
+   ^ENUMERATE=FND_YES_NO_API.Enumerate^TITLE=Include Read Only Methods^ITEM_NAME=iReadOnlyMethods^';
+
+
+BEGIN
+   Report_SYS.Define_Report_(
+      '&VIEW',
+      '&MODULE',
+      '&LU', 
+      'Security Per User',
+      '&TABLE',
+      '&PKG..&METHOD',
+      7,
+      '',
+      '',
+      '',
+      'PLSQL1.2',
+      'TRUE',
+      'Administration',
+      'Security'
+   );
+ 
+Report_SYS.Refresh_('&VIEW');
+END;
+/
+
+
+-----------------------------------------------------------------------------
+-- PACKAGE IMPLEMENTATION
+-----------------------------------------------------------------------------
+
+PROMPT Creating &PKG implementation
+
+CREATE OR REPLACE PACKAGE BODY &PKG AS
+
+PROCEDURE &METHOD (
+   report_attr_    IN VARCHAR2,
+   parameter_attr_ IN VARCHAR2 )
+IS
+   result_key_           NUMBER;
+   row_no_               NUMBER := 1;
+   parent_row_no_        NUMBER := 0;
+   user_id_              VARCHAR2(100); 
+   role_                 VARCHAR2(2000);
+   module_               VARCHAR2(30);
+   pres_obj_sec_type_    VARCHAR2(200); 
+   pres_obj_sec_type_db_ VARCHAR2(20);
+   include_read_only_modules_ VARCHAR2(20);
+   user_input_read_only_mod_  VARCHAR2(20);
+   pres_obj_cnt_         NUMBER;
+   object_found_         BOOLEAN;
+   module_found_         BOOLEAN;
+   do_xml_               BOOLEAN := Report_SYS.Should_Generate_Xml('&VIEW');
+   do_rs_                BOOLEAN := Report_SYS.Should_Generate_Result_Set('&VIEW');
+   xml_                  CLOB;
+   package_name_         VARCHAR2(100) := 'FND_SECURITY_PER_USER_REP';
+   invalid_option		    EXCEPTION;
+   wildcard_for_user	    EXCEPTION;
+   invalid_read_only_option EXCEPTION;
+  
+  CURSOR Get_Roles  IS
+     SELECT DISTINCT(pog.role) role
+     FROM PRES_OBJECT_GRANT pog, FND_USER_ROLE_RUNTIME furr
+     WHERE pog.role = furr.role
+     AND Report_SYS.Parse_Parameter(pog.role, role_) = 'TRUE'
+     AND furr.identity = user_id_
+     ORDER BY role;
+        
+
+  CURSOR Get_Modules(v_role_ VARCHAR2)  IS
+     SELECT DISTINCT(pot.module) module
+     FROM PRES_OBJECT_GRANT pog, PRES_OBJECT pot 
+     WHERE pog.po_id = pot.po_id 
+     AND pog.role = v_role_
+     AND Report_SYS.Parse_Parameter(pot.module, module_) = 'TRUE'
+     ORDER BY module ;
+        
+  CURSOR Get_Objects(v_role_ VARCHAR2, v_module_ VARCHAR2) IS
+     SELECT pot.po_id,pod.description 
+     FROM PRES_OBJECT_GRANT pog, PRES_OBJECT pot, PRES_OBJECT_DESCRIPTION pod
+     WHERE pot.po_id = pog.po_id
+     AND pot.po_id = pod.po_id
+     AND pog.role = v_role_
+     AND pot.module = v_module_
+     ORDER BY pod.description,pot.po_id;
+  
+  CURSOR Get_sub_Objects(v_obj_id_ VARCHAR2, v_include_read_only_modules_ VARCHAR2)  IS
+     SELECT sec_object 
+     FROM PRES_OBJECT_SECURITY_AVAIL 
+     WHERE pres_object_sec_sub_type_db = pres_obj_sec_type_db_
+     AND po_id = v_obj_id_
+     AND ((v_include_read_only_modules_ = 'NO' AND sec_object_method_type = 'N' AND  NOT(UPPER(sec_object) LIKE '%.GET_%')) OR ( v_include_read_only_modules_ = 'YES')) 
+     ORDER BY sec_object;
+        
+        
+  CURSOR Get_Module_Count(v_role_ VARCHAR2,v_module_ VARCHAR2) IS
+     SELECT 1 
+     FROM PRES_OBJECT_SECURITY_AVAIL posa, PRES_OBJECT_GRANT pog, PRES_OBJECT pot 
+     WHERE pog.po_id = pot.po_id 
+     AND pog.po_id = posa.po_id 
+     AND pog.role = v_role_     
+     AND pot.module = v_module_
+     AND pres_object_sec_sub_type_db = pres_obj_sec_type_db_;
+     
+  CURSOR Get_Pres_Object_Count(v_obj_id_ VARCHAR2, v_include_read_only_modules_ VARCHAR2) IS
+     SELECT 1 
+     FROM PRES_OBJECT_SECURITY_AVAIL
+     WHERE pres_object_sec_sub_type_db = pres_obj_sec_type_db_ 
+     AND po_id = v_obj_id_
+     AND ((v_include_read_only_modules_ = 'NO' AND sec_object_method_type = 'N' AND  NOT(UPPER(sec_object) LIKE '%.GET_%')) OR ( v_include_read_only_modules_ = 'YES')); 
+             
+ BEGIN
+	General_Sys.Init_Method(lu_name_, '&PKG', 'Report_Overview');
+	result_key_ := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Item_Value('RESULT_KEY', report_attr_));
+   user_id_ := Client_SYS.Get_Item_Value('USER_ID', parameter_attr_);
+   role_ := Client_SYS.Get_Item_Value('ROLE', parameter_attr_);
+   module_ := Client_SYS.Get_Item_Value('MODULE', parameter_attr_);                                      
+   pres_obj_sec_type_ := Client_SYS.Get_Item_Value('SUB_OBJECT_TYPE', parameter_attr_);
+   pres_obj_sec_type_db_ :=  PRES_OBJECT_SEC_SUB_TYPE_API.Encode(pres_obj_sec_type_);
+   user_input_read_only_mod_ := Client_SYS.Get_Item_Value('READ_ONLY_METHODS', parameter_attr_);
+
+   IF user_input_read_only_mod_ IS NOT NULL THEN
+	   IF NOT (pres_obj_sec_type_db_ = 2) THEN   			   
+         RAISE invalid_option;
+      END IF;
+   END IF;
+
+   IF user_input_read_only_mod_ IS NOT NULL THEN
+     IF (FND_YES_NO_API.Encode(user_input_read_only_mod_)) IS NULL THEN
+         RAISE invalid_read_only_option;
+     END IF;
+   END IF;
+   
+   include_read_only_modules_ := FND_YES_NO_API.Encode(Client_SYS.Get_Item_Value('READ_ONLY_METHODS', parameter_attr_));
+   
+   IF user_id_ = '%' THEN
+      RAISE wildcard_for_user;
+   END IF;
+                      
+   IF include_read_only_modules_ IS NULL THEN
+      IF pres_obj_sec_type_db_ = 2 THEN   			       	  
+		   include_read_only_modules_ := 'YES';
+      ELSE
+         include_read_only_modules_ := 'NO';
+      END IF;
+   END IF;
+
+   IF (include_read_only_modules_ IS NULL OR include_read_only_modules_ = '') THEN
+	   include_read_only_modules_ := 'NO';   
+   END IF;
+   
+   IF (do_xml_) THEN    
+     Xml_Record_Writer_SYS.Create_Report_Header(xml_, '&VIEW', package_name_);
+     Xml_Record_Writer_SYS.Add_Element(xml_, 'USER_ID', user_id_);
+     Xml_Record_Writer_SYS.Add_Element(xml_, 'READ_ONLY_METHODS', include_read_only_modules_);
+     Xml_Record_Writer_SYS.Start_Element(xml_, 'ROLES');
+   END IF;
+      
+   FOR role_data_ IN Get_Roles LOOP
+       IF (do_xml_) THEN    
+          Xml_Record_Writer_SYS.Start_Element(xml_, 'ROLE');
+          Xml_Record_Writer_SYS.Add_Element(xml_, 'ROLE', role_data_.role);
+          Xml_Record_Writer_SYS.Start_Element(xml_, 'MODULES');  
+       END IF;
+            
+       FOR module_data_ IN Get_Modules(role_data_.role) LOOP
+            module_found_ := FALSE;
+            OPEN Get_Module_Count(role_data_.role,module_data_.module);
+            FETCH Get_Module_Count INTO pres_obj_cnt_;
+            IF Get_Module_Count%FOUND THEN
+               module_found_ := TRUE;
+            END IF; 
+            CLOSE Get_Module_Count; 
+
+            IF (do_xml_ AND module_found_) THEN    
+               Xml_Record_Writer_SYS.Start_Element(xml_, 'MODULE');
+               Xml_Record_Writer_SYS.Add_Element(xml_, 'ROLE', role_data_.role);
+               Xml_Record_Writer_SYS.Add_Element(xml_, 'MODULE', module_data_.module);
+               Xml_Record_Writer_SYS.Start_Element(xml_, 'OBJ_IDS');
+            END IF;
+             
+            FOR object_data_ IN Get_Objects(role_data_.role,module_data_.module) LOOP
+           
+                object_found_ := FALSE;
+                OPEN Get_Pres_Object_Count(object_data_.po_id,include_read_only_modules_);
+                FETCH Get_Pres_Object_Count INTO pres_obj_cnt_;
+                IF Get_Pres_Object_Count%FOUND THEN
+                  object_found_ := TRUE;
+                END IF; 
+                CLOSE Get_Pres_Object_Count; 
+     
+                IF (do_xml_ AND object_found_) THEN     
+                    Xml_Record_Writer_SYS.Start_Element(xml_, 'OBJ_ID');
+                    Xml_Record_Writer_SYS.Add_Element(xml_, 'PRES_OBJ_ID', object_data_.po_id);
+                    Xml_Record_Writer_SYS.Add_Element(xml_, 'PRES_OBJ_DESC', object_data_.description);
+                    Xml_Record_Writer_SYS.Start_Element(xml_, 'SUB_OBJECTS');
+                END IF; 
+                 
+                FOR sub_object_data_ IN Get_Sub_Objects(object_data_.po_id,include_read_only_modules_) LOOP
+               
+                        IF Pres_Object_Util_API.Is_Object_Available( sub_object_data_.sec_object,role_data_.role) =  'TRUE' THEN
+                                IF (do_xml_ AND object_found_) THEN     
+                                    Xml_Record_Writer_SYS.Start_Element(xml_, 'SUB_OBJECT');
+                                    Xml_Record_Writer_SYS.Add_Element(xml_, 'SUB_OBJECT', sub_object_data_.sec_object); 
+                                    Xml_Record_Writer_SYS.Add_Element(xml_, 'SUB_OBJECT_TYPE', pres_obj_sec_type_);
+                                    Xml_Record_Writer_SYS.End_Element(xml_, 'SUB_OBJECT'); 
+                                END IF;  
+        
+                                IF (do_rs_) THEN  
+                                        INSERT INTO &TABLE(
+                                                RESULT_KEY,
+                                                ROW_NO,
+                                                PARENT_ROW_NO,
+                                                s1,
+                                                s2,
+                                                s3,
+                                                s4,
+                                                s5,
+                                                s6,
+                                                s7)
+                                        VALUES(
+                                                result_key_,
+                                                row_no_,
+                                                parent_row_no_,
+                                                user_id_,
+                                                role_data_.role,
+                                                module_data_.module,
+                                                object_data_.po_id,
+                                                object_data_.description,
+                                                pres_obj_sec_type_,
+                                                sub_object_data_.sec_object);
+                                        row_no_ := row_no_ + 1;
+                                END IF;
+                        END IF;        
+                END LOOP;   
+                IF (do_xml_ AND object_found_) THEN
+                    Xml_Record_Writer_SYS.End_Element(xml_, 'SUB_OBJECTS'); 
+                    Xml_Record_Writer_SYS.End_Element(xml_, 'OBJ_ID');
+                END IF;  
+            END LOOP;
+            IF (do_xml_ AND module_found_) THEN
+               Xml_Record_Writer_SYS.End_Element(xml_, 'OBJ_IDS');
+               Xml_Record_Writer_SYS.End_Element(xml_, 'MODULE');
+            END IF; 
+       END LOOP;
+       IF (do_xml_) THEN
+          Xml_Record_Writer_SYS.End_Element(xml_, 'MODULES');
+          Xml_Record_Writer_SYS.End_Element(xml_, 'ROLE'); 
+       END IF;   
+   END LOOP;
+   
+   IF (do_xml_) THEN
+      Xml_Record_Writer_SYS.End_Element(xml_, 'ROLES');
+      Xml_Record_Writer_SYS.End_Element(xml_, '&VIEW');
+      Report_SYS.Finish_Xml_Report('&VIEW', result_key_, xml_);
+   END IF;   
+                                                              
+
+EXCEPTION
+   WHEN wildcard_for_user THEN
+      Error_SYS.Record_General(lu_name_, 'INVALIDUSERID: Wild Cards are not allowed for User Id');
+   WHEN invalid_option THEN
+	   Error_SYS.Record_General(lu_name_, 'INVALIDOPTION: Include Read Only Methods option is not allowed for Pres Object Sub Type [:P1]',pres_obj_sec_type_);
+   WHEN invalid_read_only_option THEN
+      Error_SYS.Record_General(lu_name_, 'INVALIDREADOPTION: Values allowed for Include Read Only Methods are Yes or No');
+   WHEN OTHERS THEN
+      NULL;   
+END &METHOD;
+
+PROCEDURE Default_Sub_Object_Type (
+   sub_type_ OUT VARCHAR2 )
+IS
+BEGIN
+	General_Sys.Init_Method(lu_name_, '&PKG', 'Default_Sub_Object_Type');
+   sub_type_ := PRES_OBJECT_SEC_SUB_TYPE_API.Decode('1');
+END Default_Sub_Object_Type;
+
+END &PKG;
+/
+SHOW ERROR
+
+
+-----------------------------------------------------------------------------
+-- END
+-----------------------------------------------------------------------------
+
+----------------------------------------------------------
+-- <UNDEFINE_SECTION>
+----------------------------------------------------------
+-- This section is reserved for undefine statements
+-- nothing should be manually written below because
+-- that would be overwritten everytime the IFS / Undefine
+-- tool is run.  
+-- Also do NOT make any changes to the above tag because
+-- this will result in duplicated code
+----------------------------------------------------------
+UNDEFINE MODULE
+UNDEFINE LU
+UNDEFINE PKG
+UNDEFINE TABLE
+UNDEFINE RAWVIEW
+UNDEFINE VIEW
+UNDEFINE METHOD

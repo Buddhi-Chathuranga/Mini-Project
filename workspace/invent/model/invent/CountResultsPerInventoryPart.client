@@ -1,0 +1,340 @@
+-----------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  ------------------------------------------------------
+-- 2021-10-28  DigPlk  SC21R2-2884, Replaced the functionality of IdentifySerialsInLocAssistant with IdentifySerialsInLocRepeatAssistant.
+-- 2019-07-30  MeAblk  SCUXXW4-23246, Merge the bug correction 148682 (SCZ-5280), and modified ApproveCommand accordingly.
+-- 2019-07-24  ChFolk  SCUXXW4-22798, Included fragment ProjectDetailsFieldSet.
+-- 2019-07-10  JaThlk  SCUXXW4-23055, Removed multiple calls for better performance.
+-- 2019-07-10  ChFolk  SCUXXW4-22798, Modified Project information by using get methods instead of reference to increase performance.
+-- 2018-06-11  DaZase  SCUXXW4-5929, Converted from frmApproveInventoryPart using MTG Version: 1.20
+-----------------------------------------------------------------------------
+client CountResultsPerInventoryPart;
+component INVENT;
+layer Core;
+projection CountResultsPerInventoryPartHandling;
+include fragment InventoryPartLocationSelector;
+include fragment HandlingUnitLovSelector;
+include fragment UserAllowedSiteLovSelector;
+// Everything needed for the IdentifySerialsInLocationAssistant
+include fragment IdentifySerialsInLocationAssistant;
+include fragment TemporaryPartTrackingSerialSelector;
+include fragment SequenceGeneratorAssistant;
+include fragment IdentifySerialsByBarcodeDynamicAssistant;
+include fragment ProjectDetailsFieldSet;
+
+warningsenabled = ValidateExpirationDate;
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+navigator {
+   entry CountResultPerInventoryPartNavEntry parent InventNavigator.WarehouseManagementCounting at index 800 {
+      label = "Count Result per Inventory Part";
+      page Form;
+   }
+}
+
+-------------------------------- MAIN PAGES ---------------------------------
+page Form using InventoryPartConfigurations {
+   label = "Count Result per Inventory Part";
+   startupmode = search;
+   selector InventoryPartConfigSelector;
+   group ApproveInventoryPartGroup;
+   arrange {
+      arrange {
+         group QuantitiesInInventoryUomGroup;
+      }
+      arrange {
+         group UnitsOfMeasureGroup;
+      }
+   }
+   list CountingResultPartList(CountingResultPartArray);
+
+   commandgroup CommandGroupCmdGroup {
+
+      command ApproveAllRejectedLinesCommand;
+      command CancelAllRejectedLinesCommand;
+      command ViewConfigurationCommand;
+   }
+}
+
+-------------------------------- ASSISTANTS ---------------------------------
+
+--------------------------------- COMMANDS ----------------------------------
+command ApproveAllRejectedLinesCommand for InventoryPartConfiguration {
+   label = "Approve All Rejected Lines";
+   enabled = [not component.CountingResultPartList.IsDirty and PartNo != null];
+   variable PartShortageBool {
+      type = Boolean;
+   }
+   execute {
+      call CompletePart(Contract, PartNo, ConfigurationId, TotalDifferenceQuantity) into PartShortageBool;
+      if [PartShortageBool] {
+         alert("There are shortages for part ${PartNo}");
+      }
+      //set TotalDifferenceQuantity = 0;  // gives update ODP error and is not necessary in Aurena since the record will be gone after the refresh anyway
+      refresh;
+   }
+}
+
+command CancelAllRejectedLinesCommand for InventoryPartConfiguration {
+   label = "Cancel All Rejected Lines";
+   enabled = [not component.CountingResultPartList.IsDirty and PartNo != null];
+   execute {
+      call CancelPart(Contract, PartNo, ConfigurationId);
+      refresh;
+   }
+}
+
+command ViewConfigurationCommand for InventoryPartConfiguration {
+   label = "View Configuration";
+   variable Mode;
+   enabled = [ConfigurationId != "*" and ConfigurationId != ""];
+   execute {
+      set Mode = "View";
+      navigate "assistant/PartConfigurationAssistant/EditConfiguration?$action=InitConfiguration{  VarMode:$[Mode],
+                                                                                                   VarPartNo:$[PartNo],
+                                                                                                   VarConfigurationId:$[ConfigurationId]}";
+   }
+}
+
+command ApproveCommand for CountingResult {
+   label = "Approve";
+   enabled = [Objstate = "Rejected"];
+   mode = SelectedRecords;
+   variable PartShortageBool {
+      type = Boolean;
+   }
+
+   bulkexecute {
+      call CheckPartShortage(Contract, parent.PartNo, parent.TotalDifferenceQuantity) into PartShortageBool;
+      if [PartShortageBool] {
+         alert("There are shortages for part ${PartNo}");
+      }
+      // Calling command in base client file
+      bulkcall Complete();
+      bulkcall ValidateExpirationDate(QtyCounted, Contract, PartNo, ConfigurationId, LocationNo, LotBatchNo, SerialNo, EngChgLevel, WaivDevRejNo, ActivitySeq, HandlingUnitId);
+   }
+}
+
+command CancelCommand for CountingResult {
+   label = "Cancel";
+   enabled = [Objstate = "Rejected"];
+   mode = SelectedRecords;
+   bulkexecute {
+      // Calling command in base client file
+      bulkcall Cancel();
+   }
+}
+
+command BeforeSaveChecks for CountingResult {
+   variable SessionSelection Text;
+   execute {
+      if [(RcptIssuePartTracking = "TRUE" and InvSerialTracking != "SERIAL TRACKING") and
+      QtyCounted != QtyOnhand and QtyCounted != null and SerialNo = "*"] {
+         set SessionIdNum = PartTrackingSessionId;
+         set QtyNum = "#{QtyCounted - QtyOnhand}";
+         // NumberABS
+         if [QtyNum < 0] {
+            set QtyNum = "#{QtyNum * (-1)}";
+         }
+         // Input for assistant (Contract, PartNo, ConfigurationId, LocationNo, LotBatchNo, EngChgLevel, WaivDevRejNo, ActivitySeq, HandlingUnitId, QtyIssue, CatchQtyIssue, AssistantTitle, AssistantContext, SessionId);
+         call GetSessionIdSelection(Contract, PartNo, parent.ConfigurationId, LocationNo, LotBatchNo, EngChgLevel, WaivDevRejNo, ActivitySeq, HandlingUnitId, QtyNum, NULL, NULL, NULL, SessionIdNum) into IdentifySerialsRecStructure;
+         assistant IdentifySerialsInLocRepeatAssistant(IdentifySerialsRecStructure.RemainingSelection, IdentifySerialsRecStructure.Total, null, null) into(SessionSelection) {
+            when OK {
+               if [PartTrackingSessionId = null] {
+                  set PartTrackingSessionId = IdentifySerialsRecStructure.SessionId;
+               }
+            }
+            when CANCEL {
+               exit CANCEL;
+            }
+         }
+      }
+   }
+}
+
+
+--------------------------------- SELECTORS ---------------------------------
+@Override
+selector InventoryPartConfigSelector for InventoryPartConfiguration {
+   label = "${PartNo} - ${Description} - ${Contract}";
+   static PartNo;
+   static Description;
+   static Contract;
+}
+
+---------------------------------- GROUPS -----------------------------------
+group ApproveInventoryPartGroup for InventoryPartConfiguration {
+   label = "";
+   field PartNoRef;
+   field Description;
+   lov ContractRef with ReferenceUserAllowedSiteLovSelector {
+      size = Small;
+   }
+   field ConfigurationId {
+      label = "Configuration ID";
+      size = Small;
+   }
+}
+
+group QuantitiesInInventoryUomGroup for InventoryPartConfiguration {
+   label = "Quantities in Inventory UoM";
+   field QtyOnhand;
+   field QtyReserved;
+   field QtyInTransit;
+   field QtyInOrdTransit;
+   field CountVariance;
+}
+
+group UnitsOfMeasureGroup for InventoryPartConfiguration {
+   label = "Units of Measure";
+   field UnitMeasRef {
+      size = Small;
+   }
+   field EnabledCatchUnitMeas {
+      size = Small;
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+list CountingResultPartList for CountingResult {
+   label = "";
+   crudactions {
+      before command BeforeSaveChecks;
+   }
+
+   field LocationNo {
+      size = Small;
+   }
+   lov HandlingUnitIdRef with ReferenceHandlingUnitLovSelector {
+      size = Small;
+   }
+   field HandlingUnitRef.HandlingUnitTypeId {
+      label = "Handling Unit Type ID";
+   }
+   field TypeDescription;
+   field HandlingUnitRef.Sscc {
+      label = "SSCC";
+   }
+   field HandlingUnitRef.AltHandlingUnitLabelId {
+      label = "Alt Handling Unit Label ID";
+   }
+   field QtyCounted {
+      validate command {
+         execute {
+            // Note: setting the Difference here might cause Odata error first time, maybe because its a fetch with a calculation in projection
+            // error like this The types 'Edm.String' and 'Edm.SByte' are not compatible
+            // We didnt get this error before so something in FW have changed around string interpolation maybe
+            set QtyDifference = "#{QtyCounted - QtyOnhand}";
+            call GetDifference(Contract, QtyCounted, QtyOnhand, InventoryValue) into DiffAmountAndPercentageStructure;
+            set DiffAmount = DiffAmountAndPercentageStructure.DiffAmount;
+            set DiffPercentage = DiffAmountAndPercentageStructure.DiffPercentage;
+            // This is just an ugly workaround so I can use RcptIssuePartTrackingDb/InvSerialTrackingDb without having them visible in the client for the checks in BeforeSaveChecks
+            set WorkaroundStr = RcptIssuePartTracking;
+            set WorkaroundStr = InvSerialTracking;
+         }
+      }
+   }
+   field QtyOnhand;
+   field QtyDifference;
+   field DiffAmount;
+   field CountDiffAmount;
+   field DiffPercentage;
+   field CountDiffPercentage;
+   field CatchQtyCounted {
+      validate command {
+         execute {
+            set CatchQtyDifference = "#{CatchQtyCounted - CatchQtyOnhand}";
+         }
+      }
+   }
+   field CatchQtyOnhand;
+   field CatchQtyDifference;
+   field LotBatchNo {
+      size = Small;
+   }
+   field SerialNo {
+      size = Small;
+   }
+   field ConditionCode {
+      size = Small;
+   }
+   field ConditionCodeRef.Description {
+      size = Small;
+      label = "Condition Code Description";
+   }
+   field InventoryValue;
+   lov WaivDevRejNoRef with ReferenceInventoryPartLocationSelector {
+      size = Small;
+   }
+   field InventoryPartInStockRef.AvailabilityControlId {
+      size = Small;
+      label = "Availability Control ID";
+   }
+   field AvailabilityControlDescription {
+      size = Small;
+   }
+   field EngChgLevel {
+      size = Small;
+   }
+   field CountDate;
+   field CountUserId {
+      size = Small;
+      label = "Count User ID";
+      contactwidget {
+         enabled = [true];
+         source = Person;
+      }
+   }
+   field Objstate {
+      size = Small;
+   }
+   fieldset ProjectDetailsFieldSet;
+   @DynamicComponentDependency PROJ
+   field ActivitySeqRef {
+      size = Small;
+      label = "Activity Sequence";
+   }
+   field TopParenthandlingUnitID;
+   field TopParentHandlingUnitType {
+      size = Small;
+   }
+   field TopParentTypeDescription {
+      size = Small;
+   }
+   field TopParentSSCC;
+   field TopParentAltHandlingUnitlabelID;
+   field NoteText {
+      multiline = true;
+   }
+   field PartTrackingSessionId {
+      columnvisible = [false];
+      columnexclude = [true];
+   }
+
+   fieldranking LocationNo, QtyCounted, CatchQtyCounted;
+
+   commandgroup CommandGroupCmdGroup {
+
+      command ApproveCommand;
+      command CancelCommand;
+   }
+}
+
+----------------------------------- CARDS -----------------------------------
+
+---------------------------------- DIALOGS ----------------------------------
+
+---------------------------------- CHARTS -----------------------------------
+
+--------------------------------- CALENDARS ---------------------------------
+
+---------------------------------- SHEETS -----------------------------------
+
+----------------------------- STATE INDICATORS ------------------------------
+
+----------------------------------- TREES -----------------------------------
+
+---------------------------------- PLUGINS ----------------------------------
+
+------------------------------- IMAGE VIEWERS -------------------------------
+

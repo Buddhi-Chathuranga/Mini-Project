@@ -1,0 +1,262 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     AssortmentCommonObjects
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  201130  NaLrlk  PR2020R1-367, Added Get_Parts_Selection___() for populate parts data(performance enhance).
+--  200709  AyAmlk  PR2020R1-53, Moved common code in AssortmentHandling and ProcurementCategoryAssortmentHandling
+--  200709          to AssortmentCommonObjects fragment.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+
+PROCEDURE Copy_Assortment___ (
+   from_assortment_id_ IN VARCHAR2,
+   new_assortment_id_  IN VARCHAR2,
+   description_        IN VARCHAR2 ) 
+IS
+BEGIN
+   Assortment_Structure_API.Copy_Assortment(from_assortment_id_, new_assortment_id_, description_);
+END Copy_Assortment___;
+
+
+PROCEDURE Change_Status___ (
+   assortment_id_ IN VARCHAR2,
+   status_        IN VARCHAR2 ) 
+IS
+   info_    VARCHAR2(32000);
+   attr_    VARCHAR2(4000);
+   
+   CURSOR get_assortment_objkey_ IS
+   SELECT objid, objversion
+     FROM assortment_structure
+    WHERE assortment_id = assortment_id_;
+BEGIN
+   Client_SYS.Clear_Attr(attr_);
+   FOR rec_ IN get_assortment_objkey_ LOOP
+      IF status_ = 'ACTIVATE' THEN
+         Assortment_Structure_API.Activate__(info_, rec_.objid, rec_.objversion, attr_, 'DO');
+      ELSIF status_ = 'CLOSE' THEN
+         Assortment_Structure_API.Close__(info_, rec_.objid, rec_.objversion, attr_, 'DO');
+      ELSIF status_ = 'PLANNED' THEN
+         Assortment_Structure_API.Change_To_Planned__(info_, rec_.objid, rec_.objversion, attr_, 'DO');
+      END IF;
+   END LOOP;
+END Change_Status___;
+
+
+PROCEDURE Delete_Sub_Nodes___ (
+   selection_     IN VARCHAR2,
+   assortment_id_ IN VARCHAR2 ) 
+IS
+BEGIN
+   FOR rec_ IN (SELECT regexp_substr(selection_ ,'[^;]+', 1, LEVEL) AS rec_ FROM dual CONNECT BY regexp_substr(selection_, '[^;]+', 1, LEVEL) IS NOT NULL) LOOP
+      Assortment_Node_API.Delete_Sub_Node__( assortment_id_, Client_SYS.Get_Key_Reference_Value(rec_.rec_, 'PART_NO'));
+   END LOOP; 
+END Delete_Sub_Nodes___;
+
+
+FUNCTION Check_Exist_Assortment_Node_Id___(
+   assortment_id_      IN VARCHAR2,
+   assortment_node_id_ IN VARCHAR2 )  RETURN BOOLEAN
+IS
+BEGIN
+   IF Assortment_Node_API.Check_Exist(assortment_id_, assortment_node_id_) = 1 THEN
+      RETURN TRUE;
+   ELSE
+      RETURN FALSE;
+   END IF;
+END Check_Exist_Assortment_Node_Id___;
+
+
+PROCEDURE Save_Sub_Nodes___ (
+   key_ IN Assortment_Virtual_Key ) 
+IS
+   attr_    VARCHAR2(32000);
+   dummy_   VARCHAR2(32000);
+BEGIN
+   FOR rec_ IN Get_Sub_Node_Virtual_Array___(key_) LOOP
+      Client_SYS.Clear_Attr(attr_);
+      Client_SYS.Add_To_Attr('ASSORTMENT_ID',         rec_.assortment_id,              attr_);
+      Client_SYS.Add_To_Attr('ASSORTMENT_NODE_ID',    rec_.assortment_node_id,         attr_);
+      Client_SYS.Add_To_Attr('DESCRIPTION',           rec_.description,                attr_);
+      Client_SYS.Add_To_Attr('PARENT_NODE',           rec_.parent_node_id,             attr_);
+      Client_SYS.Add_To_Attr('ENG_ATTRIBUTE',         rec_.characteristic_template,    attr_);
+      
+      Assortment_Node_API.New__(dummy_, dummy_, dummy_, attr_, 'DO');
+   END LOOP;
+END Save_Sub_Nodes___;
+
+
+FUNCTION Check_Part_Catalog_Exists___(
+   part_no_ IN VARCHAR2 )  RETURN BOOLEAN
+IS
+BEGIN
+   IF Part_Catalog_API.Check_Part_Exists2(part_no_) = 1 THEN
+      RETURN TRUE;
+   END IF;
+   RETURN FALSE;
+END Check_Part_Catalog_Exists___;
+
+
+PROCEDURE Connect_Parts___ (
+   key_ IN Assortment_Virtual_Key ) 
+IS
+   info_       VARCHAR2(32000);
+   objid_      VARCHAR2(32000);
+   objversion_ VARCHAR2(32000);
+   attr_       VARCHAR2(32000);
+BEGIN
+   FOR rec_ IN Get_Connect_Parts_Virtual_Array___(key_) LOOP
+      Client_SYS.Clear_Attr(attr_);
+      Client_SYS.Add_To_Attr('ASSORTMENT_ID',         rec_.assortment_id,     attr_);
+      Client_SYS.Add_To_Attr('ASSORTMENT_NODE_ID',    rec_.part_no,           attr_);
+      Client_SYS.Add_To_Attr('PARENT_NODE',           rec_.parent_node_id,    attr_);
+      Client_SYS.Add_To_Attr('DESCRIPTION',           rec_.part_no,           attr_);
+      Client_SYS.Add_To_Attr('PART_NO',               rec_.part_no,           attr_);
+      Assortment_Node_API.New__(info_, objid_, objversion_, attr_, 'DO');
+   END LOOP;
+END Connect_Parts___;
+
+
+PROCEDURE Delete_Assortment_Node___ (
+   assortment_id_      IN VARCHAR2,
+   assortment_node_id_ IN VARCHAR2 ) 
+IS
+   parent_node_   VARCHAR2(100);
+BEGIN
+   parent_node_   := Assortment_Node_API.Get_Parent_Node(assortment_id_, assortment_node_id_);
+   Assortment_Node_API.Delete_Sub_Node__(assortment_id_, assortment_node_id_);
+   Assortment_History_API.New(assortment_id_, 'Assortment node '||assortment_node_id_||' and all its sub nodes have been deleted from its parent node '||parent_node_||'.');
+END Delete_Assortment_Node___;
+
+
+PROCEDURE Copy_Assortment_Node___ (
+   from_assortment_id_      IN VARCHAR2,
+   from_assortment_node_id_ IN VARCHAR2,
+   to_assortment_id_        IN VARCHAR2,
+   description_             IN VARCHAR2,
+   to_assortment_node_id_   IN VARCHAR2,
+   copy_to_type_            IN VARCHAR2 ) 
+IS
+BEGIN
+   Assortment_Structure_API.Copy_Nodes_To_Assortment( from_assortment_id_,
+                                                      from_assortment_node_id_,
+                                                      to_assortment_id_,
+                                                      description_,
+                                                      to_assortment_node_id_,
+                                                      CASE copy_to_type_ WHEN 'NEW' THEN 'TRUE' ELSE 'FALSE' END);
+END Copy_Assortment_Node___;
+
+
+PROCEDURE Move_Assortment_Node___ (
+   from_assortment_id_      IN VARCHAR2,
+   from_assortment_node_id_ IN VARCHAR2,
+   to_assortment_node_id_   IN VARCHAR2 ) 
+IS
+BEGIN
+   Assortment_Node_Api.Move_Sub_Node__(from_assortment_id_ , from_assortment_node_id_ , to_assortment_node_id_ );
+   Assortment_History_Api.New(from_assortment_id_ , 'Assortment node '||from_assortment_node_id_||' and all its sub nodes have been moved from its old parent node UK SCA to new parent node '||to_assortment_node_id_||'.' );
+END Move_Assortment_Node___;
+
+
+FUNCTION Filter_Added_Parts___ (
+	objkey_             IN VARCHAR2,
+   assortment_id_      IN VARCHAR2,
+   parent_node_id_     IN VARCHAR2,
+	selection_list_var_ IN VARCHAR2) RETURN VARCHAR2
+IS
+   selection_             VARCHAR2(32000)  :=  selection_list_var_;
+   warning_msg_           VARCHAR2(32000)  :=  NULL;
+   current_selection_str_ VARCHAR2(250);
+   parent_key_            Assortment_Virtual_Key ;
+   insert_rec_            Connect_Parts_Virtual_Rec;
+   save_data_             VARCHAR2(5) ;
+	
+   CURSOR check_part_exist IS 
+      SELECT part_no
+        FROM ${PROJECTION}_CONNECT_PARTS_VIRTUAL_VRT
+       WHERE parent_objkey = objkey_;
+    
+   CURSOR get_part_catalog_rec(part_ VARCHAR2) IS 
+      SELECT * 
+        FROM PART_CATALOG_PUB
+       WHERE PART_NO = part_;
+BEGIN
+   parent_key_.Objkey := objkey_;
+     
+   FOR rec_ IN (SELECT regexp_substr(selection_ ,'[^;]+', 1, LEVEL) AS rec_ FROM dual CONNECT BY regexp_substr(selection_, '[^;]+', 1, LEVEL) IS NOT NULL) LOOP
+            save_data_ := 'True';
+      current_selection_str_ := Client_SYS.Get_Key_Reference_Value(rec_.rec_, 'PART_NO');
+      FOR rec_part_ IN check_part_exist LOOP 
+         IF (current_selection_str_ = rec_part_.part_no )THEN
+               save_data_ := 'False';
+               EXIT;
+         END IF;        
+      END LOOP;
+      
+      IF ( save_data_ = 'False' ) THEN
+            warning_msg_ := warning_msg_ || current_selection_str_|| ',';            
+      ELSE                                
+         FOR record_ IN get_part_catalog_rec(current_selection_str_) LOOP 
+            insert_rec_.objkey         := sys_guid();
+            insert_rec_.parent_objkey  := objkey_; 
+            insert_rec_.objmodified    := sysdate;             
+            insert_rec_.assortment_id  := assortment_id_;          
+            insert_rec_.parent_node_id := parent_node_id_;               
+            insert_rec_.selection_list := selection_;              
+            insert_rec_.part_no        := record_.part_no;            
+            insert_rec_.part_no        := record_.part_no;
+            New_Detail___(parent_key_, insert_rec_);      
+         END LOOP;      
+      END IF;
+   END LOOP;
+   RETURN warning_msg_;
+END Filter_Added_Parts___;
+
+FUNCTION Get_Parts_Selection___ (
+   assortment_id_      IN VARCHAR2,
+   assortment_node_id_ IN VARCHAR2,
+   part_selection_     IN VARCHAR2) RETURN Objid_Arr
+IS
+   collection_    Objid_Arr := Objid_Arr();
+   CURSOR get_all_nodes_parts IS 
+      SELECT objid 
+      FROM part_catalog
+      WHERE part_no IN (SELECT part_no
+                        FROM assortment_node
+                        WHERE part_no IS NOT NULL
+                        START WITH assortment_id = assortment_id_
+                              AND assortment_node_id = assortment_node_id_
+                        CONNECT BY PRIOR assortment_id = assortment_id
+                                AND PRIOR assortment_node_id = parent_node);
+   CURSOR get_selected_node_parts IS 
+      SELECT objid 
+      FROM part_catalog
+      WHERE part_no IN (SELECT part_no
+                        FROM assortment_node
+                        WHERE part_no IS NOT NULL
+                        AND assortment_id = assortment_id_
+                        AND ((parent_node = assortment_node_id_) OR (part_no = assortment_node_id_)));            
+
+BEGIN
+   IF (part_selection_ = 'ALL') THEN
+      FOR rec_ IN get_all_nodes_parts LOOP
+         collection_.extend;
+         collection_(collection_.last) := rec_.objid;
+      END LOOP;
+   ELSE
+      FOR rec_ IN get_selected_node_parts LOOP
+         collection_.extend;
+         collection_(collection_.last) := rec_.objid;
+      END LOOP;
+   END IF;
+   RETURN collection_;
+END Get_Parts_Selection___;
+
+

@@ -1,0 +1,102 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: CreateCollectiveCustomerInvoicePerOrder
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  180917  RuLiLK   SCUXXW4-8990, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+FUNCTION Check_Rental_Lines_Exist___ (
+   full_selection_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   selection_           VARCHAR2(32000) := CONCAT(full_selection_, ';');
+   current_selection_   VARCHAR2(32000);
+   customer_no_         VARCHAR2(20);
+   contract_            VARCHAR2(5);
+   rental_lines_exist_  VARCHAR2(5):='FALSE';
+BEGIN
+   $IF Component_Rental_SYS.INSTALLED $THEN
+      WHILE (INSTR(selection_, ';') > 0) LOOP
+         current_selection_  := substr(selection_, 0, INSTR(selection_, ';'));
+         customer_no_        := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CUSTOMER_NO');
+         contract_           := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT');
+         rental_lines_exist_ := Invoice_Customer_Order_API.Is_Rental_Lines_Exist(customer_no_, contract_);
+         IF (rental_lines_exist_ = 'TRUE') THEN
+            EXIT;
+         END IF;   
+         selection_          := substr(selection_, INSTR(selection_, ';')+1); 
+      END LOOP;   
+   $ELSE
+      NULL;
+   $END
+   RETURN rental_lines_exist_;
+END Check_Rental_Lines_Exist___;
+
+--  ToDo! When Request TEUXX-6679 is fixed, Interface of this method needs to be changed to accept CLOB variable to handle more than 32000 characters.
+PROCEDURE Make_Collective_Invoice___ (
+   full_selection_                          IN VARCHAR2,
+   tax_country_                             IN VARCHAR2,
+   closest_closing_date_                    IN DATE,
+   customer_invoice_closing_date_selection_ IN VARCHAR2 ) 
+IS
+   selection_                   VARCHAR2(32000) := CONCAT(full_selection_, ';');
+   current_selection_           VARCHAR2(32000);
+   attr_                        VARCHAR2(32000);
+   ignore_closing_date_         VARCHAR2(5):= 'FALSE';  
+   fetch_line_closing_date_     BOOLEAN:= FALSE;
+   closest_closing_date_to_use_ DATE;
+   order_no_                    VARCHAR2(12);
+   header_order_                VARCHAR2(12);
+   order_rec_                   Customer_Order_API.Public_Rec;
+BEGIN
+   IF (customer_invoice_closing_date_selection_ = 'IGNORE_CLOSING_DATE') THEN
+      ignore_closing_date_ := 'TRUE';
+   ELSE
+      IF (customer_invoice_closing_date_selection_ = 'USE_PREDEFINED_CLOSINNG_DATE') THEN
+         fetch_line_closing_date_ := TRUE;
+      ELSE
+         closest_closing_date_to_use_ := closest_closing_date_;
+      END IF;   
+   END IF;
+   
+   WHILE (INSTR(selection_, ';') > 0) LOOP
+      
+      current_selection_ := substr(selection_, 0, INSTR(selection_, ';'));
+      order_no_          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');
+      order_rec_         := Customer_Order_API.Get(order_no_);
+      IF (User_Allowed_Site_API.Is_Authorized(order_rec_.contract) != 1) THEN 
+         Error_SYS.Appl_Failure(lu_name_, err_source_ => 'User_Allowed_Site_Initial_Check___()');
+      END IF;
+      Client_SYS.Add_To_Attr('ORDER_NO',            order_no_,                 attr_);
+      Client_SYS.Add_To_Attr('IGNORE_CLOSING_DATE', ignore_closing_date_,         attr_);
+      IF (attr_ IS NOT NULL AND header_order_ IS NULL) THEN
+         header_order_ := order_no_;
+      END IF;
+      Client_SYS.Add_To_Attr('HEAD_ORDER_NO', header_order_, attr_);
+      IF fetch_line_closing_date_ THEN
+         closest_closing_date_to_use_ := Cust_Invoice_Close_Date_API.Get_Closest_Closing_Day(order_rec_.customer_no, order_rec_.contract);
+      END IF; 
+      
+      Client_SYS.Add_To_Attr('CLOSEST_CLOSING_DATE',     closest_closing_date_to_use_, attr_);    
+      Client_SYS.Add_To_Attr('TAX_LIABILITY_COUNTRY_DB', tax_country_,                 attr_);
+      
+      selection_ := substr(selection_, INSTR(selection_, ';')+1); 
+
+   END LOOP;  
+
+   IF attr_ IS NOT NULL THEN
+      BEGIN
+         --  ToDo! When Request TEUXX-6679 is fixed, Need to override method Batch_Coll_Ivc_Orders__ with CLOB to handle more than 32000 characters.
+         Invoice_Customer_Order_API.Batch_Coll_Ivc_Orders__(attr_, header_order_);              
+      EXCEPTION
+         WHEN OTHERS THEN
+            Error_sys.Record_General('InvoiceCustomerOrder', 'Error occurred while transferring selected orders to the backend process, a background process/job for the creation of a collective invoice has not been created.');
+      END;
+   END IF;
+
+END Make_Collective_Invoice___;

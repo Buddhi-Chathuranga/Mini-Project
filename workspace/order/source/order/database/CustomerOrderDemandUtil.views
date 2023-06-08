@@ -1,0 +1,692 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: CustomerOrderDemandUtil
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  210607  KETKLK   PJ21R2-749, Replaced Project Delivery supply code 'PRD' with Project Deliverables supply code 'PJD' as Project Delivery functionality will be removed. 
+--  210201  JICESE   MFZ-6506, Merged LCS Patch 156015.
+--                   201204  UtSwlk   Bug 156015(MFZ-5680), Adding rel_mtrl_planning column to view Customer_Order_Line_Demand_Oe.
+--  200908  RasDlk   SC2020R1-2072, Modified the view Customer_Order_Line_Demand_Oe by changing the calculation of the column qty_demand and the filtration statement in order to
+--  200908           consider closed quantities for customer order.
+--  200303  BudKlk   Bug 151684(SCZ-9277), Modified views Customer_Order_Line_Demand, Customer_Order_Line_Demand_Oe and Customer_Order_Line_Ext by getting the part_no from
+--  200303           newely added column supply_site_part_no.
+--  190519  Cpeilk   Bug 147826 (SCZ-4760), Modified views Customer_Order_Line_Demand, Customer_Order_Line_Demand_Oe and Customer_Order_Line_Ext by getting the part_no from
+--  190109  JaThlk   SCUXXW4-6457, Added objid to Customer_Order_Line_Shortage.
+--  190519           Sales_Part_API.Get_Supply_Site_Part_No__().
+--  171211  UdGnlk   Bug 138727, Modified Customer_Order_Line_Demand by including PT and IPT to exclude the supply codes.
+--  170629  CHINLK   STRMF-12397, Mearged LCS patch 136277
+--                   170619  CHINLK   Bug 136277, Modified CUSTOMER_ORDER_LINE_MS to remove unnecessary condition which excluded all project demands to MS.
+--  170209  DilMlk   Bug 133819, Modified the WHERE clause of view CUSTOMER_ORDER_LINE_EXT to fetch CO lines with supply code 'IPT' or 'PT' which are Credit Blocked but have reserved quantity.
+--  161024  Hairlk   APPUXX-5312, Modified Sales_Quotation_Line_Demand, Sales_Quotation_Line_Demand_Oe, Sales_Quotation_Line_Ext, Sales_Quotation_Line_Ms
+--                   to include rejected quoation lines for demand
+--  160825  SWeelk   Bug 127923, Modified the view CUSTOMER_ORDER_LINE_MS. When supply code is 'PD' or 'IPD', the value of 'date_required' 
+--  160825           is 'planned_delivery_date'. Else 'planned_due_date' is taken as the 'date_required'. 
+--  160629  TiRalk  STRSC-2702, Changed the places where it has used CreditBlocked from CustomerOrder has changed to state Blocked.
+--  160121  ThEdlk   Bug 126667, Modified view CUSTOMER_ORDER_LINE_EXT WHERE clause by including supply code 'PRD' to visible Project Deleivery Customer Order Lines.
+--  160118  ManWlk   STRMF-2404, Modified view CUSTOMER_ORDER_LINE_MS to fetch order keys and order supply demand type correctly based on demand code.
+--  140917  ErSrLK   Bug 118743, Modified view CUSTOMER_ORDER_LINE_MS to add supply code Production Schedule as well to be considered for MS.
+--  140902  ErSrLK   Bug 118528, Modified view CUSTOMER_ORDER_LINE_EXT WHERE clause to include supply code 'PS' in state 'Planned' and 'CreditBlocked' for customer order header.
+--  140716  ThImlk   Bug 117913, Modified view CUSTOMER_ORDER_LINE_MS to add a condition to exclude project connected customer order lines, for supply codes, 'SO','DOP','PD','PT','IPD' and 'IPT'.
+--  140211  RaNhlk   Bug 114746, Modified view CUSTOMER_ORDER_LINE_EXT WHERE clause to include supply code 'DOP' and 'SO' in state 'Planned' and 'CreditBlocked' for customer order header.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+-------------------- COMMON COLUMN DEFINITIONS ------------------------------
+
+-------------------- PUBLIC VIEW DEFINITIONS --------------------------------
+
+
+-------------------- PRIVATE VIEW DEFINITIONS -------------------------------
+
+   
+VIEW Customer_Order_Line_Demand IS
+   Prompt = 'Customer Order Line Demand'
+SELECT
+       DECODE(demand_code, 'DO', l.demand_order_ref1,l.order_no)  order_no,
+       DECODE(demand_code, 'DO', NULL,l.line_no)                  line_no,
+       DECODE(demand_code, 'DO', NULL,l.rel_no)                   rel_no,
+       DECODE(demand_code, 'DO', to_number(NULL),l.line_item_no)  line_item_no,
+       DECODE(demand_code, 'DO', Order_Supply_Demand_Type_API.Get_Client_Value(27), Order_Supply_Demand_Type_API.Get_Client_Value(1)) order_supply_demand_type,
+       l.part_no                                                  part_no,
+       l.configuration_id                                         configuration_id,
+       l.contract                                                 contract,
+       0                                                          qty_supply,
+       l.revised_qty_due - (l.qty_shipped - l.qty_shipdiff)       qty_demand,
+       l.qty_short                                                qty_short,
+       l.qty_on_order                                             qty_pegged,
+       l.qty_assigned                                             qty_reserved,
+       DECODE(l.supply_code, 'PD', l.planned_delivery_date, 'IPD', l.planned_delivery_date, l.planned_due_date) date_required,
+       l.condition_code                                           condition_code,
+       l.rowstate                                                 status_code,
+       Customer_Order_Line_API.Finite_State_Decode__(l.rowstate)  status_desc
+FROM   customer_order_line_tab l, customer_order_tab o
+WHERE  l.rowstate IN ('Released', 'Reserved', 'Picked', 'PartiallyDelivered')
+AND    l.line_item_no >= 0
+AND    l.revised_qty_due - (l.qty_shipped - l.qty_shipdiff) > 0
+AND    l.part_ownership IN ('COMPANY OWNED','CONSIGNMENT')
+AND    (((o.rowstate = 'Planned' OR o.rowstate = 'Blocked') AND (l.supply_code = 'IO')) OR
+       ((o.rowstate = 'Blocked') AND (l.supply_code IN ('PT', 'IPT', 'SO', 'DOP') AND (l.qty_on_order > 0))) OR
+       (o.rowstate IN ('Released','Reserved','Picked','PartiallyDelivered') AND ((NOT (l.supply_code IN ('PT','IPT') AND l.activity_seq IS NOT NULL)) AND l.supply_code NOT IN ('SEO','ND', 'PI', 'IPD', 'PD', 'PJD'))))
+AND    o.order_no = l.order_no
+AND    l.rel_mtrl_planning = 'TRUE'
+UNION
+SELECT 
+       order_no                                 order_no,
+       line_no                                  line_no,
+       rel_no                                   rel_no,
+       line_item_no                             line_item_no,
+       Order_Supply_Demand_Type_API.Decode('23') order_supply_demand_type,
+       supply_site_part_no                      part_no,
+       configuration_id                         configuration_id,
+       supply_site                              contract,
+       0                                        qty_supply,
+       Inventory_Part_API.Get_Site_Converted_Qty(contract,part_no,revised_qty_due,supply_site,'ADD','INVENT', supply_site_part_no) qty_demand,
+       0                                        qty_short,
+       Inventory_Part_API.Get_Site_Converted_Qty(contract,part_no,qty_on_order,supply_site,'ADD','INVENT', supply_site_part_no)  qty_pegged,
+       Inventory_Part_API.Get_Site_Converted_Qty(contract,part_no,qty_assigned,supply_site,'ADD','INVENT', supply_site_part_no)  qty_reserved,
+       supply_site_due_date                     date_required,
+       condition_code                           condition_code,
+       rowstate                                status_code,
+       Customer_Order_Line_API.Finite_State_Decode__(rowstate)  status_desc
+FROM   customer_order_line_tab
+WHERE  rowstate IN ('Released', 'Reserved', 'Picked', 'PartiallyDelivered')
+AND    line_item_no >= 0
+AND    revised_qty_due > 0
+AND    supply_code IN ('IPT','IPD')
+AND    release_planning = 'RELEASED'
+AND    part_ownership IN ('COMPANY OWNED','CONSIGNMENT')
+AND    rel_mtrl_planning = 'TRUE';
+
+VIEW Customer_Order_Line_Demand_Oe IS
+   Prompt = 'Customer Order Line Demand'
+SELECT
+       rowidtochar(l.rowid)                    row_id,
+       l.order_no                               order_no,
+       l.line_no                                line_no,
+       l.rel_no                                 rel_no,
+       l.line_item_no                           line_item_no,
+       Order_Supply_Demand_Type_API.Decode('1') order_supply_demand_type,
+       l.part_no                                part_no,
+       l.configuration_id                       configuration_id,
+       l.contract                               contract,
+       0                                        qty_supply,
+       l.revised_qty_due - (l.qty_shipped - l.qty_shipdiff) qty_demand,
+       l.qty_on_order                           qty_pegged,
+       l.qty_assigned                           qty_reserved,
+       DECODE(l.supply_code, 'PD', l.planned_delivery_date, 'IPD', l.planned_delivery_date, l.planned_due_date) date_required,
+       l.condition_code                         condition_code,
+       l.rowstate                               status_code,
+       3                                        sort_order,
+       Customer_Order_Line_API.Finite_State_Decode__(l.rowstate)  state,
+       decode(l.supply_code, 'IO', NULL, l.project_id) project_id,
+       decode(l.supply_code, 'IO', to_number(NULL), l.activity_seq) activity_seq,
+       l.rel_mtrl_planning                       rel_mtrl_planning
+FROM   customer_order_line_tab l, customer_order_tab o
+WHERE  l.rowstate IN ('Released', 'Reserved', 'Picked', 'PartiallyDelivered')
+AND    l.line_item_no >= 0
+AND    l.revised_qty_due - (l.qty_shipped - l.qty_shipdiff) > 0
+AND    l.part_ownership IN ('COMPANY OWNED','CONSIGNMENT')
+AND    (((o.rowstate = 'Planned' OR o.rowstate = 'Blocked') AND (l.supply_code IN ('IO', 'PI'))) OR
+       ((o.rowstate = 'Blocked') AND (l.supply_code IN ('PT', 'PD', 'IPT', 'IPD', 'SO', 'DOP') AND (l.qty_on_order > 0))) OR
+       (o.rowstate IN ('Released','Reserved','Picked','PartiallyDelivered') AND l.supply_code NOT IN ('SEO','ND', 'PJD')))
+AND    o.order_no = l.order_no
+UNION
+SELECT 
+       rowidtochar(l.rowid)                                   row_id,
+       l.order_no                                              order_no,
+       l.line_no                                               line_no,
+       l.rel_no                                                rel_no,
+       l.line_item_no                                          line_item_no,
+       Order_Supply_Demand_Type_API.Decode('23')               order_supply_demand_type,
+       l.supply_site_part_no                                     part_no,
+       l.configuration_id                                      configuration_id,
+       l.supply_site                                           contract,
+       0                                                       qty_supply,
+       Inventory_Part_API.Get_Site_Converted_Qty(l.contract,l.part_no,l.revised_qty_due,l.supply_site,'ADD','INVENT', l.supply_site_part_no) - NVL(r.supply_site_qty_reserved, 0)  qty_demand,
+       Inventory_Part_API.Get_Site_Converted_Qty(l.contract,l.part_no,l.qty_on_order,l.supply_site,'ADD','INVENT', l.supply_site_part_no)  qty_pegged,
+       Inventory_Part_API.Get_Site_Converted_Qty(l.contract,l.part_no,l.qty_assigned,l.supply_site,'ADD','INVENT', l.supply_site_part_no)  qty_reserved,
+       l.supply_site_due_date                                  date_required,
+       l.condition_code                                        condition_code,
+       l.rowstate                                              status_code,
+       3                                                       sort_order,
+       Customer_Order_Line_API.Finite_State_Decode__(l.rowstate) state,
+       decode(l.supply_code, 'IO', NULL, l.project_id)         project_id,
+       decode(l.supply_code, 'IO', to_number(NULL), l.activity_seq)       activity_seq,
+       l.rel_mtrl_planning                                     rel_mtrl_planning
+FROM   customer_order_line_tab l, co_supply_site_reservation_sum r
+WHERE  l.rowstate IN ('Released', 'Reserved', 'Picked', 'PartiallyDelivered')
+AND    l.line_item_no >= 0
+AND    Inventory_Part_API.Get_Site_Converted_Qty(l.contract,l.part_no,l.revised_qty_due,l.supply_site,'ADD','INVENT', l.supply_site_part_no) - NVL(r.supply_site_qty_reserved, 0) > 0
+AND    supply_code IN ('IPT','IPD')
+AND    release_planning = 'RELEASED'
+AND    l.part_ownership IN ('COMPANY OWNED','CONSIGNMENT')
+AND    l.order_no = r.order_no(+)
+AND    l.line_no = r.line_no(+)
+AND    l.rel_no = r.rel_no(+)
+AND    l.line_item_no = r.line_item_no(+);
+
+VIEW Customer_Order_Line_Ext IS
+   Prompt = 'Customer Order Line Demand Simulation'
+SELECT
+       DECODE(demand_code, 'DO', l.demand_order_ref1,l.order_no)  order_no,
+       DECODE(demand_code, 'DO', NULL,l.line_no)                  line_no,
+       DECODE(demand_code, 'DO', NULL,l.rel_no)                   rel_no,
+       DECODE(demand_code, 'DO', to_number(NULL),l.line_item_no)  line_item_no,
+       DECODE(demand_code, 'DO', Order_Supply_Demand_Type_API.Get_Client_Value(27), Order_Supply_Demand_Type_API.Get_Client_Value(1)) order_supply_demand_type,
+       l.part_no                                                  part_no,
+       l.configuration_id                                         configuration_id,
+       l.contract                                                 contract,
+       0                                                          qty_supply,
+       l.revised_qty_due - (l.qty_shipped - l.qty_shipdiff)       qty_demand,
+       l.qty_short                                                qty_short,
+       l.qty_on_order                                             qty_pegged,
+       l.qty_assigned                                             qty_reserved,
+       DECODE(l.supply_code, 'PD', l.planned_delivery_date, 'IPD', l.planned_delivery_date, l.planned_due_date) date_required,
+       l.condition_code                                           condition_code,
+       l.rowstate                                                 status_code,
+       Customer_Order_Line_API.Finite_State_Decode__(l.rowstate)  status_desc,
+       l.customer_no                                              info,
+       decode(l.supply_code,'IO', NULL, l.project_id)             project_id,
+       decode(l.supply_code,'IO', to_number(NULL),l.activity_seq) activity_seq
+FROM   customer_order_line_tab l, customer_order_tab o
+WHERE  l.rowstate IN ('Released', 'Reserved', 'Picked', 'PartiallyDelivered')
+AND    l.line_item_no >= 0
+AND    l.revised_qty_due - (l.qty_shipped - l.qty_shipdiff) > 0
+AND    l.part_ownership IN ('COMPANY OWNED','CONSIGNMENT')
+AND    (((o.rowstate = 'Planned' OR o.rowstate = 'Blocked') AND (l.supply_code IN ('IO', 'PI', 'DOP', 'SO', 'PS'))) OR 
+       ((o.rowstate = 'Blocked') AND (l.supply_code IN ('PT', 'PD', 'IPT', 'IPD') AND (l.qty_on_order > 0))) OR
+       ((o.rowstate = 'Blocked') AND (l.supply_code IN ('PT', 'IPT') AND (l.qty_assigned > 0))) OR
+       (o.rowstate IN ('Released','Reserved','Picked','PartiallyDelivered') AND l.supply_code NOT IN ('SEO','ND')))
+AND    o.order_no = l.order_no
+AND    l.rel_mtrl_planning = 'TRUE'
+UNION
+SELECT 
+       order_no                                 order_no,
+       line_no                                  line_no,
+       rel_no                                   rel_no,
+       line_item_no                             line_item_no,
+       Order_Supply_Demand_Type_API.Decode('23')order_supply_demand_type,
+       supply_site_part_no         part_no,
+       configuration_id                         configuration_id,
+       supply_site                              contract,
+       0                                        qty_supply,
+       Inventory_Part_API.Get_Site_Converted_Qty(contract,part_no,revised_qty_due,supply_site,'ADD','INVENT', supply_site_part_no) qty_demand,
+       0                                        qty_short,
+       Inventory_Part_API.Get_Site_Converted_Qty(contract,part_no,qty_on_order,supply_site,'ADD','INVENT', supply_site_part_no) qty_pegged,
+       Inventory_Part_API.Get_Site_Converted_Qty(contract,part_no,qty_assigned,supply_site,'ADD','INVENT', supply_site_part_no) qty_reserved,
+       supply_site_due_date                     date_required,
+       condition_code                           condition_code,
+       rowstate                                status_code,
+       Customer_Order_Line_API.Finite_State_Decode__(rowstate)   status_desc,
+       customer_no                              info,
+       decode(supply_code, 'IO', NULL, project_id) project_id,
+       decode(supply_code, 'IO', to_number(NULL), activity_seq) activity_seq
+FROM   customer_order_line_tab
+WHERE  rowstate IN ('Released', 'Reserved', 'Picked', 'PartiallyDelivered')
+AND    line_item_no >= 0
+AND    revised_qty_due > 0
+AND    supply_code IN ('IPT','IPD')
+AND    release_planning = 'RELEASED'
+AND    part_ownership IN ('COMPANY OWNED','CONSIGNMENT')
+AND    rel_mtrl_planning = 'TRUE';
+
+VIEW Customer_Order_Line_Ms IS
+   Prompt = 'Customer Order Line Demand Simulation'
+SELECT
+       DECODE(demand_code, 'DO', l.demand_order_ref1,l.order_no)  order_no,
+       DECODE(demand_code, 'DO', NULL,l.line_no)                  line_no,
+       DECODE(demand_code, 'DO', NULL,l.rel_no)                   rel_no,
+       DECODE(demand_code, 'DO', to_number(NULL),l.line_item_no)  line_item_no,
+       DECODE(demand_code, 'DO', Order_Supply_Demand_Type_API.Get_Client_Value(27), Order_Supply_Demand_Type_API.Get_Client_Value(1)) order_supply_demand_type,
+       l.part_no                                                  part_no,
+       l.configuration_id                                         configuration_id,
+       l.contract                                                 contract,
+       0                                                          qty_supply,
+       l.revised_qty_due - (l.qty_shipped - l.qty_shipdiff)       qty_demand,
+       l.qty_on_order                                             qty_pegged,
+       l.qty_assigned                                             qty_reserved,
+       DECODE(l.supply_code, 'PD', l.planned_delivery_date, 'IPD', l.planned_delivery_date, l.planned_due_date) date_required,
+       l.condition_code                                           condition_code,
+       l.rowstate                                                 status_code,
+       Customer_Order_Line_API.Finite_State_Decode__(l.rowstate)  status_desc,
+       l.rowkey                                                   objkey
+FROM  customer_order_line_tab l
+WHERE l.rowstate IN ('Released', 'Reserved', 'Picked', 'PartiallyDelivered')
+AND   l.line_item_no >= 0
+AND   l.revised_qty_due - (l.qty_shipped - l.qty_shipdiff) > 0
+AND   l.part_ownership IN ('COMPANY OWNED','CONSIGNMENT')
+AND   (l.supply_code = 'IO' OR
+      ((l.supply_code IN ('PS','SO','DOP','PD','PT','IPD','IPT')) AND ((l.activity_seq IS NULL) OR (l.activity_seq = 0))))
+AND   l.rel_mtrl_planning = 'TRUE'
+AND   l.exchange_item != 'EXCHANGED ITEM';
+
+VIEW Customer_Order_Line_Shortage IS
+   Prompt = 'Customer Order Line Short'
+SELECT
+       Order_Supply_Demand_Type_API.Decode('1') order_type,
+       col.order_no                             order_no,
+       col.line_no                              line_no,
+       col.rel_no                               rel_no,
+       col.line_item_no                         line_item_no,
+       col.contract                             contract,
+       col.part_no                              part_no,
+       col.configuration_id                     configuration_id,
+       col.planned_due_date                     date_required,
+       col.revised_qty_due                      qty_required,
+       col.qty_assigned                         qty_reserved,
+       col.qty_picked                           qty_issued,
+       col.qty_short                            qty_short,
+       col.condition_code                       condition_code,
+       col.rowstate                            status_code,
+       Customer_Order_Line_API.Finite_State_Decode__(col.rowstate)  status_desc,
+       col.part_ownership                       part_ownership,
+       col.owning_customer_no                   owning_customer_no,
+       decode(col.part_ownership,'SUPPLIER LOANED',Customer_Order_Line_API.Get_Owner_For_Part_Ownership(col.order_no, col.line_no, col.rel_no, col.line_item_no, col.part_ownership),NULL)       owning_vendor_no,
+       DECODE(supply_code, 'PI', col.project_id, NULL)    project_id,
+       DECODE(supply_code, 'PI', activity_seq, TO_NUMBER(NULL)) activity_seq,
+       decode(supply_code, 'PI', 'Y', 'N')      project_sourced,
+       col.rowkey                               objkey,
+       '1'||'^'||col.rowid                      objid
+FROM   customer_order_line_tab col,
+       customer_order_tab coh
+WHERE col.rowstate IN ('Released', 'Reserved', 'Picked', 'PartiallyDelivered')
+AND   coh.order_no = col.order_no
+AND   coh.rowstate != 'Blocked'
+AND   col.line_item_no >= 0
+AND   col.qty_short > 0
+AND   col.supply_code <> 'SEO'
+AND   col.order_no IN (SELECT order_no FROM customer_order_shortage_tab);
+
+VIEW Sales_Quotation_Line_Demand IS
+   Prompt = 'Order Quotation Line Demand'
+SELECT
+       quotation_no                             order_no,
+       line_no                                  line_no,
+       rel_no                                   rel_no,
+       line_item_no                             line_item_no,
+       Order_Supply_Demand_Type_API.Decode('21') order_supply_demand_type,
+       part_no                                  part_no,
+       configuration_id                         configuration_id,
+       contract                                 contract,
+       0                                        qty_supply,
+       revised_qty_due                          qty_demand,
+       0                                        qty_short,
+       0                                        qty_pegged,
+       0                                        qty_reserved,
+       planned_due_date                         date_required,
+       condition_code                           condition_code,
+       rowstate                                status_code,
+       Order_Quotation_Line_API.Finite_State_Decode__(rowstate)  status_desc,
+       rowkey                                  objkey
+FROM   order_quotation_line_tab
+WHERE  rowstate IN ('Released', 'Revised', 'Rejected')
+AND    release_planning = 'RELEASED'
+AND    line_item_no >= 0
+AND    revised_qty_due > 0
+AND    order_supply_type <> 'SEO';
+
+VIEW Sales_Quotation_Line_Demand_Oe IS
+   Prompt = 'Order Quotation Line Demand'
+SELECT
+       rowidtochar(rowid)                    row_id,
+       quotation_no                           order_no,
+       line_no                                line_no,
+       rel_no                                 rel_no,
+       line_item_no                           line_item_no,
+       Order_Supply_Demand_Type_API.Decode('21') order_supply_demand_type,
+       part_no                                part_no,
+       configuration_id                       configuration_id,
+       contract                               contract,
+       0                                      qty_supply,
+       revised_qty_due                        qty_demand,
+       0                                      qty_pegged,
+       0                                      qty_reserved,
+       planned_due_date                       date_required,
+       rowstate                               status_code,
+       3                                      sort_order,
+       condition_code                         condition_code,
+       Order_Quotation_Line_API.Finite_State_Decode__(rowstate) state,
+       NULL                                   project_id,
+       to_number(NULL)                        activity_seq,
+       rowkey                                objkey
+FROM   order_quotation_line_tab
+WHERE  rowstate IN ('Released', 'Revised', 'Rejected')
+AND    release_planning = 'RELEASED'
+AND    line_item_no >= 0
+AND    revised_qty_due > 0
+AND    order_supply_type <> 'SEO';
+
+VIEW Sales_Quotation_Line_Ext IS
+   Prompt = 'Order Quotation Line Demand Simulation'
+SELECT
+       quotation_no                             order_no,
+       line_no                                  line_no,
+       rel_no                                   rel_no,
+       line_item_no                             line_item_no,
+       Order_Supply_Demand_Type_API.Decode('21') order_supply_demand_type,
+       part_no                                  part_no,
+       configuration_id                         configuration_id,
+       contract                                 contract,
+       0                                        qty_supply,
+       revised_qty_due                          qty_demand,
+       0                                        qty_short,
+       0                                        qty_pegged,
+       0                                        qty_reserved,
+       planned_due_date                         date_required,
+       condition_code                           condition_code,
+       rowstate                                status_code,
+       Order_Quotation_Line_API.Finite_State_Decode__(rowstate)   status_desc,
+       customer_no                              info,
+       NULL                                     project_id,
+       to_number(NULL)                          activity_seq,
+       rowkey                                  objkey
+FROM   order_quotation_line_tab
+WHERE  rowstate IN ('Released', 'Revised', 'Rejected')
+AND    release_planning = 'RELEASED'
+AND    line_item_no >= 0
+AND    revised_qty_due > 0
+AND    order_supply_type <> 'SEO';
+
+VIEW Sales_Quotation_Line_Ms IS
+   Prompt = 'Order Quotation Line Demand Simulation'
+SELECT
+       quotation_no                             order_no,
+       line_no                                  line_no,
+       rel_no                                   rel_no,
+       line_item_no                             line_item_no,
+       Order_Supply_Demand_Type_API.Decode('21') order_supply_demand_type,
+       part_no                                  part_no,
+       configuration_id                         configuration_id,
+       contract                                 contract,
+       0                                        qty_supply,
+       revised_qty_due                          qty_demand,
+       0                                        qty_pegged,
+       0                                        qty_reserved,
+       planned_due_date                         date_required,
+       condition_code                           condition_code,
+       rowstate                                status_code,
+       Order_Quotation_Line_API.Finite_State_Decode__(rowstate)  status_desc,
+       rowkey                                  objkey
+FROM   order_quotation_line_tab
+WHERE rowstate IN ('Released', 'Revised', 'Rejected')
+AND   release_planning = 'RELEASED'
+AND   line_item_no >= 0
+AND   revised_qty_due  > 0
+AND   order_supply_type IN ('IO','SO','DOP','PD','PT','IPD','IPT');
+
+VIEW Sourced_Order_Line_Ext IS
+   Prompt = 'Sourced Order Line Demand Simulation'
+SELECT
+       sc.order_no                                 order_no,
+       sc.line_no                                  line_no,
+       sc.rel_no                                   rel_no,
+       sc.line_item_no                             line_item_no,
+       Order_Supply_Demand_Type_API.Decode('25')   order_supply_demand_type,
+       col.part_no                                 part_no,
+       col.configuration_id                        configuration_id,
+       col.contract                                contract,
+       0                                           qty_supply,
+       sc.sourced_qty                              sourced_qty,
+       0                                           qty_short,
+       0                                           qty_pegged,
+       NVL(scs.supply_site_qty_reserved, 0)        qty_reserved,
+       sc.planned_due_date                         date_required,
+       col.condition_code                          condition_code,
+       col.rowstate                                status_code,
+       Customer_Order_Line_API.Finite_State_Decode(col.rowstate) status_desc,
+       col.customer_no                             info,
+       NULL                                        project_id,
+       to_number(NULL)                             activity_seq
+FROM   customer_order_line_tab col, sourced_cust_order_line_tab sc, sourced_co_supply_site_res_sum scs
+WHERE  col.order_no = sc.order_no
+AND    col.line_no = sc.line_no
+AND    col.rel_no = sc.rel_no
+AND    col.line_item_no = sc.line_item_no
+AND    sc.order_no = scs.order_no (+)
+AND    sc.line_no = scs.line_no(+)
+AND    sc.rel_no = scs.rel_no(+)
+AND    sc.line_item_no = scs.line_item_no(+)
+AND    sc.source_id     = scs.source_id (+)
+AND    sc.sourced_qty - NVL(scs.supply_site_qty_reserved, 0) > 0
+AND    sc.line_item_no >= 0
+AND    sc.supply_code = 'IO'
+UNION ALL
+SELECT 
+       sc.order_no                                 order_no,
+       sc.line_no                                  line_no,
+       sc.rel_no                                   rel_no,
+       sc.line_item_no                             line_item_no,
+       Order_Supply_Demand_Type_API.Decode('24')   order_supply_demand_type,
+       col.part_no                                 part_no,
+       col.configuration_id                        configuration_id,
+       sc.supply_site                              contract,
+       0                                           qty_supply,
+       Inventory_Part_API.Get_Site_Converted_Qty(col.contract,col.part_no,sc.sourced_qty,sc.supply_site,'ADD')  sourced_qty,
+       0                                           qty_short,
+       0                                           qty_pegged,
+       NVL(scs.supply_site_qty_reserved, 0)        qty_reserved,
+       sc.supply_site_due_date                     date_required,
+       col.condition_code                          condition_code,
+       col.rowstate                                status_code,
+       Customer_Order_Line_API.Finite_State_Decode(col.rowstate) status_desc,
+       col.customer_no                             info,
+       NULL                                        project_id,
+       to_number(NULL)                             activity_seq
+FROM   customer_order_line_tab col, sourced_cust_order_line_tab sc, sourced_co_supply_site_res_sum scs
+WHERE  col.order_no = sc.order_no
+AND    col.line_no = sc.line_no
+AND    col.rel_no = sc.rel_no
+AND    col.line_item_no = sc.line_item_no
+AND    sc.order_no = scs.order_no (+)
+AND    sc.line_no = scs.line_no(+)
+AND    sc.rel_no = scs.rel_no(+)
+AND    sc.line_item_no = scs.line_item_no(+)
+AND    sc.source_id     = scs.source_id (+)
+AND    Inventory_Part_API.Get_Site_Converted_Qty(col.contract,col.part_no,sc.sourced_qty,sc.supply_site,'ADD') - NVL(scs.supply_site_qty_reserved, 0) > 0
+AND    sc.line_item_no >= 0
+AND    sc.supply_code IN ('IPD', 'IPT');
+
+VIEW Sourced_Order_Line_Demand IS
+   Prompt = 'Sourced Order Line Demand for Own Site'
+SELECT
+       sc.order_no                                 order_no,
+       sc.line_no                                  line_no,
+       sc.rel_no                                   rel_no,
+       sc.line_item_no                             line_item_no,
+       Order_Supply_Demand_Type_API.Decode('25')   order_supply_demand_type,
+       col.part_no                                 part_no,
+       col.configuration_id                        configuration_id,
+       col.contract                                contract,
+       0                                           qty_supply,
+       sc.sourced_qty                              sourced_qty,
+       0                                           qty_short,
+       0                                           qty_pegged,
+       NVL(scs.supply_site_qty_reserved, 0)        qty_reserved,
+       sc.planned_due_date                         date_required,
+       col.condition_code                          condition_code,
+       col.rowstate                                status_code,
+       Customer_Order_Line_API.Finite_State_Decode(col.rowstate) status_desc
+FROM   customer_order_line_tab col, sourced_cust_order_line_tab sc, sourced_co_supply_site_res_sum scs
+WHERE  col.order_no = sc.order_no
+AND    col.line_no = sc.line_no
+AND    col.rel_no = sc.rel_no
+AND    col.line_item_no = sc.line_item_no
+AND    sc.order_no = scs.order_no (+)
+AND    sc.line_no = scs.line_no(+)
+AND    sc.rel_no = scs.rel_no(+)
+AND    sc.line_item_no = scs.line_item_no(+)
+AND    sc.source_id     = scs.source_id (+)
+AND    sc.sourced_qty - NVL(scs.supply_site_qty_reserved, 0) > 0
+AND    sc.line_item_no >= 0
+AND    sc.supply_code = 'IO'
+UNION
+SELECT sc.order_no                                 order_no,
+       sc.line_no                                  line_no,
+       sc.rel_no                                   rel_no,
+       sc.line_item_no                             line_item_no,
+       Order_Supply_Demand_Type_API.Decode('24')   order_supply_demand_type,
+       col.part_no                                 part_no,
+       col.configuration_id                        configuration_id,
+       sc.supply_site                              contract,
+       0                                           qty_supply,
+       Inventory_Part_API.Get_Site_Converted_Qty(col.contract,col.part_no,sc.sourced_qty,sc.supply_site,'ADD')  sourced_qty,
+       0                                           qty_short,
+       0                                           qty_pegged,
+       NVL(scs.supply_site_qty_reserved, 0)        qty_reserved,
+       sc.supply_site_due_date                     date_required,
+       col.condition_code                          condition_code,
+       col.rowstate                                status_code,
+       Customer_Order_Line_API.Finite_State_Decode(col.rowstate) status_desc
+FROM   customer_order_line_tab col, sourced_cust_order_line_tab sc, sourced_co_supply_site_res_sum scs
+WHERE  col.order_no = sc.order_no
+AND    col.line_no = sc.line_no
+AND    col.rel_no = sc.rel_no
+AND    col.line_item_no = sc.line_item_no
+AND    sc.order_no = scs.order_no (+)
+AND    sc.line_no = scs.line_no(+)
+AND    sc.rel_no = scs.rel_no(+)
+AND    sc.line_item_no = scs.line_item_no(+)
+AND    sc.source_id     = scs.source_id (+)
+AND    Inventory_Part_API.Get_Site_Converted_Qty(col.contract,col.part_no,sc.sourced_qty,sc.supply_site,'ADD') - NVL(scs.supply_site_qty_reserved, 0) > 0
+AND    sc.line_item_no >= 0
+AND    sc.supply_code IN ('IPD', 'IPT');
+
+VIEW Sourced_Order_Line_Demand_Oe IS
+   Prompt = 'Sourced Order Line Demand'
+SELECT
+       rowidtochar(sc.ROWID)                        row_id,
+       sc.order_no                                  order_no,
+       sc.line_no                                   line_no,
+       sc.rel_no                                    rel_no,
+       sc.line_item_no                              line_item_no,
+       Order_Supply_Demand_Type_API.Decode('25')    order_supply_demand_type,
+       col.part_no                                  part_no,
+       col.configuration_id                         configuration_id,
+       col.contract                                 contract,
+       0                                            qty_supply,
+       sc.sourced_qty                               qty_demand,
+       0                                            qty_pegged,
+       NVL(scs.supply_site_qty_reserved, 0)         qty_reserved,
+       sc.planned_due_date                          date_required,
+       col.condition_code                           condition_code,
+       col.rowstate                                 status_code,
+       3                                            sort_order,
+       Customer_Order_Line_API.Finite_State_Decode(col.rowstate) status_desc,
+       NULL                                         project_id,
+       to_number(NULL)                              activity_seq
+FROM   customer_order_line_tab col, sourced_cust_order_line_tab sc, sourced_co_supply_site_res_sum scs
+WHERE  col.order_no = sc.order_no
+AND    col.line_no = sc.line_no
+AND    col.rel_no = sc.rel_no
+AND    col.line_item_no = sc.line_item_no
+AND    sc.order_no = scs.order_no (+)
+AND    sc.line_no = scs.line_no(+)
+AND    sc.rel_no = scs.rel_no(+)
+AND    sc.line_item_no = scs.line_item_no(+)
+AND    sc.source_id     = scs.source_id (+)
+AND    sc.sourced_qty > 0
+AND    sc.line_item_no >= 0
+AND    sc.supply_code = 'IO'
+UNION
+SELECT rowidtochar(sc.ROWID)                        row_id,
+       sc.order_no                                  order_no,
+       sc.line_no                                   line_no,
+       sc.rel_no                                    rel_no,
+       sc.line_item_no                              line_item_no,
+       Order_Supply_Demand_Type_API.Decode('24')    order_supply_demand_type,
+       col.part_no                                  part_no,
+       col.configuration_id                         configuration_id,
+       sc.supply_site                               contract,
+       0                                            qty_supply,
+       Inventory_Part_API.Get_Site_Converted_Qty(col.contract,col.part_no,sc.sourced_qty,sc.supply_site,'ADD')  qty_demand,
+       0                                            qty_pegged,
+       NVL(scs.supply_site_qty_reserved, 0)         qty_reserved,
+       sc.supply_site_due_date                      date_required,
+       col.condition_code                           condition_code,
+       col.rowstate                                 status_code,
+       3                                            sort_order,
+       Customer_Order_Line_API.Finite_State_Decode(col.rowstate) status_desc,
+       NULL                                         project_id,
+       to_number(NULL)                              activity_seq
+FROM   customer_order_line_tab col, sourced_cust_order_line_tab sc, sourced_co_supply_site_res_sum scs
+WHERE  col.order_no = sc.order_no
+AND    col.line_no = sc.line_no
+AND    col.rel_no = sc.rel_no
+AND    col.line_item_no = sc.line_item_no
+AND    sc.order_no = scs.order_no (+)
+AND    sc.line_no = scs.line_no(+)
+AND    sc.rel_no = scs.rel_no(+)
+AND    sc.line_item_no = scs.line_item_no(+)
+AND    sc.source_id     = scs.source_id (+)
+AND    Inventory_Part_API.Get_Site_Converted_Qty(col.contract,col.part_no,sc.sourced_qty,sc.supply_site,'ADD') > 0
+AND    sc.line_item_no >= 0
+AND    sc.supply_code IN ('IPD', 'IPT');
+
+VIEW Sourced_Order_Line_Ms IS
+   Prompt = 'Sourced Order Line Demand Simulation'
+SELECT
+       sc.order_no                                 order_no,
+       sc.line_no                                  line_no,
+       sc.rel_no                                   rel_no,
+       sc.line_item_no                             line_item_no,
+       Order_Supply_Demand_Type_API.Decode('25')   order_supply_demand_type,
+       col.part_no                                 part_no,
+       col.configuration_id                        configuration_id,
+       col.contract                                contract,
+       0                                           qty_supply,
+       0                                           qty_pegged,
+       NVL(scs.supply_site_qty_reserved, 0)        qty_reserved,
+       sc.sourced_qty                              sourced_qty,
+       sc.planned_due_date                         date_required,
+       col.condition_code                          condition_code,
+       col.rowstate                                status_code,
+       Customer_Order_Line_API.Finite_State_Decode(col.rowstate) status_desc
+FROM   customer_order_line_tab col, sourced_cust_order_line_tab sc, sourced_co_supply_site_res_sum scs
+WHERE  col.order_no = sc.order_no
+AND    col.line_no = sc.line_no
+AND    col.rel_no = sc.rel_no
+AND    col.line_item_no = sc.line_item_no
+AND    sc.order_no = scs.order_no (+)
+AND    sc.line_no = scs.line_no(+)
+AND    sc.rel_no = scs.rel_no(+)
+AND    sc.line_item_no = scs.line_item_no(+)
+AND    sc.source_id     = scs.source_id (+)
+AND    sc.sourced_qty - NVL(scs.supply_site_qty_reserved, 0) > 0
+AND    sc.line_item_no >= 0
+AND    sc.supply_code = 'IO'
+UNION
+SELECT sc.order_no                                 order_no,
+       sc.line_no                                  line_no,
+       sc.rel_no                                   rel_no,
+       sc.line_item_no                             line_item_no,
+       Order_Supply_Demand_Type_API.Decode('24')   order_supply_demand_type,
+       col.part_no                                 part_no,
+       col.configuration_id                        configuration_id,
+       sc.supply_site                              contract,
+       0                                           qty_supply,
+       0                                           qty_pegged,
+       NVL(scs.supply_site_qty_reserved, 0)        qty_reserved,
+       Inventory_Part_API.Get_Site_Converted_Qty(col.contract,col.part_no,sc.sourced_qty,sc.supply_site,'ADD')  sourced_qty,
+       sc.supply_site_due_date                     date_required,
+       col.condition_code                          condition_code,
+       col.rowstate                                status_code,
+       Customer_Order_Line_API.Finite_State_Decode(col.rowstate) status_desc
+FROM   customer_order_line_tab col, sourced_cust_order_line_tab sc, sourced_co_supply_site_res_sum scs
+WHERE  col.order_no = sc.order_no
+AND    col.line_no = sc.line_no
+AND    col.rel_no = sc.rel_no
+AND    col.line_item_no = sc.line_item_no
+AND    sc.order_no = scs.order_no (+)
+AND    sc.line_no = scs.line_no(+)
+AND    sc.rel_no = scs.rel_no(+)
+AND    sc.line_item_no = scs.line_item_no(+)
+AND    sc.source_id     = scs.source_id (+)
+AND    Inventory_Part_API.Get_Site_Converted_Qty(col.contract,col.part_no,sc.sourced_qty,sc.supply_site,'ADD') - NVL(scs.supply_site_qty_reserved, 0) > 0
+AND    sc.line_item_no >= 0
+AND    sc.supply_code IN ('IPD', 'IPT');
+

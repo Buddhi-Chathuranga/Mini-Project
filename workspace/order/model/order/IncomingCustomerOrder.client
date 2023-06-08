@@ -1,0 +1,777 @@
+------------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  -------------------------------------------------------------------
+-- 2021-12-23  Skanlk  Bug 161134(SC21R2-6825), Modified command BulkValidateTaxIdNumberCommand by passing the TAX_ID_TYPE to validate Tax ID other than EU countires.
+-- 2021-05-14  Hahalk  SC21R2-981, Handled the enuemration values for IntrastatExempt.
+-- 2020-11-09  RavDlk  SC2020R1-11228, Handled boolean 'Rental' and enumeration 'IntrastatExempt'
+-- 2019-11-07  Satglk  SCXTEND-886, Added Received date.
+-- 2019-11-01  chlelk  SCXTEND-1302, The startupmode was set to "Search"
+-- 2019-10-03  Satglk  SCXTEND-886, Added created date.
+-- 2019-09-26  chlelk  SCXTEND-413, Field ranking was done for 40 fields.
+-- 2019-03-25  MaEelk  SCUXXW4-18030, Added Dynamic Component Dependency.
+-- 2018-11-27  Akhalk  SCUXXW4-8430, Added dlgExternalCustOrderChar Assistant using MTG Version: 1.23
+-- 2018-04-09  SeJalk  SCUXXW4-11279, Changes done acording to standards using MTG Version: 1.15
+-- 2017-12-08  SeJalk  SCUXXW4-659, created from frmExternalCustomerOrder,tbwExternalCustOrderLine and dlgApproveOrder.
+------------------------------------------------------------------------------------------
+client IncomingCustomerOrder;
+component ORDER;
+layer Core;
+projection IncomingCustomerOrderHandling;
+include fragment UserAllowedSiteLovSelector;
+include fragment OrderCoordinatorLovSelector;
+include fragment OrderDeliveryTermLovSelector;
+include fragment CustOrdCust5Selector;
+include fragment CustOrdCust2Selector;
+include fragment SalesPartSalesmanLovSelector;
+include fragment CityCode1LovSelector;
+include fragment StateCodeLovSelector;
+include fragment CountyCode1LovSelector;
+include fragment TaxIdNumbersValidation;
+include fragment ShipmentTypeSelector;
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+navigator {
+   entry IncomingCustomerOrderNavEntry parent OrderNavigator.OrderIncomingMessages at index 100 {
+      label = "Incoming Customer Order";
+      page Form home ExternalCustomerOrder;
+   }
+}
+
+-------------------------------- MAIN PAGES ---------------------------------
+page Form using IncomingCustomerOrders {
+   label = "Incoming Customer Order";
+   startupmode = search;
+   stateindicator IncomingCustOrderStateIndicator;
+
+   crudactions {
+      edit {
+         enabled = [(Objstate != "Created" and Objstate != "Cancelled")];
+      }
+   }
+
+   selector IncomingCustomerOrderSelector;
+
+   group GeneralGroup;
+   group OrderHeadGroup;
+   group IncomingCustomerOrderErrorGroup;
+
+
+   arrange {
+      group CardAddressGroup;
+      arrange {
+         group EANAddressLocationsGroup;
+         group OrderAddressGroup;
+      }
+   }
+
+   list IncomingCustOrderLine(IncomingCustomerOrderLineArray);
+
+   commandgroup CommandGroup {
+
+      command Approve;
+      command Cancel;
+   }
+
+   commandgroup CommandGroup2 {
+
+      command CustomerOrder;
+      command SalesQuotation;
+      command BulkValidateTaxIdNumberCommand;
+   }
+}
+
+--------------------------------- SELECTORS ---------------------------------
+@Override
+selector IncomingCustomerOrderSelector for IncomingCustomerOrder {
+   label = "${MessageId}";
+   field MessageId;
+   field MessageType;
+   field OrderNo;
+   field Contract;
+   field CustomerNo;
+   field CustomerName;
+   badge Objstate {
+      label = "Status";
+      showlabel = false;
+      style = TextOnly;
+      emphasis Progress1 = [Objstate = "RequiresApproval"];
+      emphasis Progress6 = [Objstate = "Changed"];
+      emphasis Progress12 = [Objstate = "Created"];
+      emphasis StateBlocked = [Objstate = "Stopped"];
+      emphasis StateCancelled = [Objstate = "Cancelled"];
+   }
+   fieldorder = MessageId, OrderNo, CustomerNo, CustomerName, Contract, MessageType, Objstate;
+}
+
+--------------------------------- COMMANDS ----------------------------------
+@Override
+command Cancel for IncomingCustomerOrder {
+   enabled = [Objstate in("RequiresApproval", "Stopped", "Changed")];
+   execute {
+      confirm("The incoming customer order will be cancelled. Do you want to continue?") {
+         when OK {
+            call Cancel();
+            refresh;
+         }
+      }
+   }
+}
+
+@Override
+command Cancel for IncomingCustomerOrderLine {
+   enabled = [Objstate in("Changed", "RequiresApproval", "Stopped")];
+   mode = SelectedRecords;
+   bulkexecute {
+      confirm("Order line(s) will be cancelled. Do you want to continue?") {
+         when OK {
+            bulkcall Cancel();
+            refresh;
+         }
+      }
+   }
+}
+
+@DynamicComponentDependency CFGCHR
+command ViewConfigurationCommand for IncomingCustomerOrderLine {
+   label = "View Configuration";
+   enabled = [HasConfiguration != 0];
+   execute {
+      assistant ViewConfigurationAssistant(RelNo, LineNo, MessageId, MessageLine) {
+         when OK {
+            exit;
+         }
+      }
+   }
+}
+
+command CustomerOrder for IncomingCustomerOrder {
+   label = "Customer Order";
+
+   enabled = [OrderNo != null and(ImportMode = "ORDER" or ImportMode = null)];
+
+   execute {
+
+      navigate "page/CustomerOrder/Form?$filter=OrderNo eq $[OrderNo]";
+   }
+}
+
+command SalesQuotation for IncomingCustomerOrder {
+   label = "Sales Quotation";
+   enabled = [OrderNo != null and ImportMode = "QUOTATION"];
+   execute {
+      navigate "page/SalesQuotation/Form?$filter= QuotationNo eq $[OrderNo]";
+   }
+}
+
+@Override
+command BulkValidateTaxIdNumberCommand for IncomingCustomerOrder {
+   enabled = [not isDirty and VatNo != null];
+   bulkexecute {
+      stringify(records, "${keyref}TAX_ID_NUMBER=${VatNo}^COUNTRY_CODE=${CountryCode}^TAX_ID_TYPE=${TaxIdType}^;") into TaxIdNumberSelectionVar;
+      set ProjectionNameVar = "IncomingCustomerOrderHandling";
+      super;
+   }
+}
+
+@Override
+command Approve for IncomingCustomerOrder {
+   variable StrInternalCustomer;
+   variable NumCount;
+   variable StrAuthorizeCode;
+   variable StrOrderId;
+   variable BoolRestrictSalesByAssort Boolean;
+   enabled = [Objstate in("Changed", "RequiresApproval", "Stopped")];
+   execute {
+      if [InternalCustomerSite != null]
+         {
+         call GetInternalCustomerNo(InternalCustomerSite) into InternalCustomer;
+      }
+      else
+         {
+         set InternalCustomerSite = CustomerNo;
+      }
+
+      if [ExternalRef != null] {
+         call GetCount(ExternalRef) into NumCount;
+         if [NumCount > 1] {
+            confirm("Other incoming orders with same external id found - Approve anyway?") {
+               when CANCEL {
+                  refresh;
+               }
+            }
+         }
+      }
+
+      call GetDefaults(InternalCustomer, Contract) into DefaultValStructure;
+      if [DefaultValStructure.LimitSalesToAssortments = "TRUE"] {
+         set BoolRestrictSalesByAssort = true;
+      }
+      else {
+         set BoolRestrictSalesByAssort = false;
+      }
+      dialog ApproveOrderDialog(StrInternalCustomer, Contract, DefaultValStructure.AuthorizeCode, DefaultValStructure.OrderId, BoolRestrictSalesByAssort, DefaultValStructure.OverruleLimitSaleToAssort) into(StrAuthorizeCode, StrOrderId, BoolRestrictSalesByAssort) {
+         when OK {
+            if [StrOrderId = null] {
+               set StrOrderId = "";
+            }
+            call ApproveCustOrder(StrAuthorizeCode, StrOrderId, BoolRestrictSalesByAssort);
+            refresh;
+         }
+      }
+   }
+}
+
+----------------------------- STATE INDICATORS ------------------------------
+stateindicator IncomingCustOrderStateIndicator for IncomingCustomerOrder {
+   state "RequiresApproval" {
+      completed = 8%;
+      emphasis Progress1 = [Objstate = "RequiresApproval"];
+   }
+   state "Stopped" {
+      completed = 50%;
+      emphasis StateBlocked = [Objstate = "Stopped"];
+   }
+   state "Changed" {
+      completed = 50%;
+      emphasis Progress6 = [Objstate = "Changed"];
+   }
+   state "Created" {
+      completed = 100%;
+      emphasis Progress12 = [Objstate = "Created"];
+   }
+   state "Cancelled" {
+      completed = 100%;
+      emphasis StateCancelled = [Objstate = "Cancelled"];
+   }
+}
+
+---------------------------------- GROUPS -----------------------------------
+
+group GeneralGroup for IncomingCustomerOrder {
+   label = "";
+   field MessageId {
+      label = "Message ID";
+      size = Small;
+   }
+   field MessageType {
+      label = "Message Type";
+      size = Small;
+   }
+   field OrderNo {
+      label = "Order No";
+      visible = [ImportMode != "QUOTATION"];
+      size = Small;
+   }
+   field OrderNo {
+      label = "Quotation No";
+      visible = [ImportMode = "QUOTATION"];
+      size = Small;
+   }
+   lov ContractRef with ReferenceUserAllowedSiteLovSelector {
+      size = Small;
+      visible = [true];
+      description = ContractRef.ContractDesc;
+      search = ContractDesc;
+   }
+   lov CustomerNoRef with ReferenceCustOrdCust5Selector {
+      visible = [true];
+      description = CustomerDescription;
+      contactwidget {
+         enabled = [true];
+         source = Customer;
+      }
+      --details = "page/CrmCustomer/CrmCustomerPage?$filter=CustomerId eq $[CustomerNo]";
+   }
+   field DeliveryDate {
+      label = "Wanted Delivery Date/Time";
+      size = Small;
+   }
+   lov CurrencyCodeRef with ReferenceIsoCurrencySelector {
+      label = "Currency";
+      visible = [true];
+   }
+   field LanguageCode {
+      label = "Language";
+      size = Small;
+   }
+   field ReceivedDate {
+      size = Small;
+   }
+   field CreatedDate;
+}
+group OrderHeadGroup for IncomingCustomerOrder {
+   label = "Order Head";
+   field CustRef {
+      label = "Cust Reference";
+      size = Small;
+   }
+   field InternalPoNo {
+      label = "Internal PO No";
+      size = Small;
+   }
+   field CustomerPoNo {
+      label = "Customer PO No";
+      size = Small;
+   }
+   lov CustomerNoPayRef with ReferenceCustOrdCust2Selector {
+      visible = [true];
+      size = Small;
+      description = CustomerNoPayRef.Name;
+      contactwidget {
+         enabled = [true];
+         source = Customer;
+      }
+     -- details = "page/CrmCustomer/CrmCustomerPage?$filter=CustomerId eq $[CustomerNoPay]";
+   }
+   field ExternalRef {
+      label = "External ID";
+      size = Small;
+   }
+   lov SalesmanCodeRef with ReferenceSalesPartSalesmanLovSelector {
+      visible = [true];
+      description = SalesmanCodeRef.Name;
+      contactwidget {
+         enabled = [true];
+         source = Person;
+      }
+      size = Small;
+   }
+   lov ForwardAgentIdRef with ReferenceForwarderInfoSelector {
+      size = Small;
+      visible = [true];
+      description = ForwardAgentIdRef.Name;
+   }
+
+   field BackorderOption {
+      label = "Backorder Option";
+      size = Small;
+      editable = [BackorderOption != null];
+   }
+   field InternalCustomerSite {
+      label = "Internal Cust Site";
+      size = Small;
+   }
+   field LabelNote {
+      label = "External CO Label Note";
+      size = Small;
+   }
+   field InternalPoLabelNote {
+      label = "External PO Label Note";
+      size = Small;
+   }
+   field InternalRef {
+      label = "Internal PO Ref";
+      size = Small;
+   }
+   field JinsuiInvoice {
+      label = "Jinsui Invoice";
+      size = Small;
+   }
+   field NoteText {
+      size = Medium;
+      multiline = true;
+   }
+}
+
+group IncomingCustomerOrderErrorGroup for IncomingCustomerOrder {
+   label = "Error Message";
+   visible = [ErrorMessage != NULL];
+   field ErrorMessage {
+      multiline = true;
+      showlabel = false;
+   }
+}
+group OrderAddressGroup for IncomingCustomerOrder {
+   label = "Delivery Info";
+
+   lov DeliveryTermsRef with ReferenceOrderDeliveryTermLovSelector {
+      visible = [true];
+      description = DeliveryTermsRef.Description;
+   }
+
+   lov ShipViaCodeRef with ReferenceMpccomShipViaSelector {
+      visible = [true];
+      description = ShipViaDesc;
+   }
+
+   lov PayTermIdRef with ReferencePaymentTermSelector {
+      visible = [true];
+      description = PayTermIdRef.Description;
+   }
+   field DelTermsLocation {
+      label = "Del Terms Location";
+      size = Small;
+   }
+
+   lov RouteIdRef with ReferenceDeliveryRouteSelector {
+      visible = [true];
+      description = RouteIdRef.Description;
+   }
+
+   field DeliveryLeadtime {
+      label = "External Transport Lead Time";
+      size = Small;
+   }
+   field PickingLeadtime {
+      label = "Picking Lead Time";
+      size = Small;
+   }
+   lov ShipmentTypeRef with ShipmentTypeCoLovSelector {
+      advancedview ShipmentTypeCoLovList;
+      size = Small;
+      description = ShipmentTypeDesc;
+   }
+}
+
+group CardAddressGroup for IncomingCustomerOrder {
+   label = "Delivery Address";
+
+   field DeliveryAddressName {
+      label = "NAME";
+   }
+
+   addressfield {
+      address1 ShipAddress1;
+      address2 ShipAddress2;
+      address3 ShipAddress3;
+      address4 ShipAddress4;
+      address5 ShipAddress5;
+      address6 ShipAddress6;
+      city ShipCity;
+      country Country;
+      county ShipCounty;
+      state ShipState;
+      zipcode ShipZipCode;
+      countrycode CountryCode;
+   }
+   field VatNo {
+      label = "Tax ID";
+   }
+   field TaxIdValidatedDate {
+      label = "Tax ID validated date";
+   }
+}
+
+group EANAddressLocationsGroup for IncomingCustomerOrder {
+   label = "EAN Address Locations";
+   field EanLocationDocAddr {
+      label = "Document";
+   }
+   field EanLocationDelAddr {
+      label = "Delivery";
+   }
+   field EanLocationPayerAddr {
+      label = "Invoice";
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+
+list IncomingCustOrderLine for IncomingCustomerOrderLine {
+   label = "Order Lines";
+   crudactions {
+      edit {
+         visible = [parent.Objstate != "Cancelled"];
+      }
+   }
+   field MessageLine {
+      size = Small;
+   }
+   field LineNo {
+      size = Small;
+   }
+   field RelNo {
+      size = Small;
+   }
+   field Rental;
+   field CustomerPONo;
+   field CustomerPoLineNo;
+   field CustomerPoRelNo;
+   field CustomerPartNo;
+   field CustomerQuantity;
+   field CatalogNo;
+
+   field GtinNo {
+      size = Small;
+   }
+   field BuyQtyDue;
+   field WantedDeliveryDate {
+      size = Large;
+   }
+   field PlannedRentalStartDate {
+      editable = [Rental = true];
+   }
+   field PlannedRentalEndDate {
+      editable = [Rental = true];
+   }
+   field InputUoM;
+
+   field InputQty;
+   field InputConvFactor;
+   badge Objstate {
+      emphasis StateBlocked = [Objstate = "Stopped"];
+      emphasis Progress1 = [Objstate = "RequiresApproval"];
+      emphasis StateCancelled = [Objstate = "Cancelled"];
+      emphasis Progress6 = [Objstate = "Changed"];
+      emphasis Progress12 = [Objstate = "Created"];
+      style = TextOnly;
+   }
+   field ErrorMessage {
+      size = Large;
+   }
+   field Notes {
+      size = Large;
+   }
+   field Contact;
+   field DeliveryAddressName {
+      size = Large;
+   }
+   field ShipAddress1 {
+      size = Large;
+   }
+   field ShipAddress2 {
+      size = Large;
+   }
+   field ShipAddress3 {
+      size = Large;
+   }
+   field ShipAddress4 {
+      size = Large;
+   }
+   field ShipAddress5 {
+      size = Large;
+   }
+   field ShipAddress6 {
+      size = Large;
+   }
+   field ShipZipCode {
+      size = Large;
+   }
+   field ShipCity {
+      size = Large;
+   }
+   field ShipState {
+      size = Large;
+   }
+   field ShipCounty {
+      size = Large;
+   }
+   field CountryCodeRef {
+      size = Large;
+   }
+   field DeliverToCustomerNo {
+      size = Small;
+   }
+   field DeliveryTermsRef {
+      size = Small;
+      validate command {
+         execute {
+            set DeliveryTermsDesc = DeliveryTermsRef.Description;
+            if [DeliveryTerms = null] {
+               set DeliveryTermsDesc = null;
+            }
+         }
+      }
+   }
+   field DeliveryTermsDesc {
+      size = Small;
+      editable = [false];
+
+   }
+   field DelTermsLocation {
+      size = Large;
+   }
+   field ShipViaCodeRef {
+      size = Small;
+      validate command {
+         execute {
+            set ShipViaDesc = ShipViaCodeRef.Description;
+            if [ShipViaCode = null] {
+               set ShipViaDesc = null;
+            }
+         }
+      }
+   }
+   field ShipViaDesc {
+      size = Small;
+      editable = [false];
+   }
+   field EanLocationDelAddr {
+      size = Large;
+   }
+   field PickingLeadtime {
+      size = Large;
+   }
+   field DeliveryLeadtime {
+      size = Large;
+   }
+   field ShipmentType {
+      size = Small;
+   }
+   field RouteIdRef {
+      size = Large;
+   }
+   field DistrictCodeRef {
+      size = Small;
+   }
+   field RegionCodeRef {
+      size = Small;
+   }
+   field ForwardAgentIdRef {
+      size = Large;
+   }
+   field IntrastatExempt {
+      enumerationtrue = "Exempt";
+      enumerationfalse = "Include";
+      truelabel = "Yes";
+      falselabel = "No";
+   }
+   field DockCode {
+      size = Large;
+   }
+   field SubDockCode {
+      size = Large;
+   }
+   field Location {
+      size = Large;
+   }
+   field OriginalBuyQtyDue {
+      size = Large;
+   }
+   field OriginalPlanDelivDate {
+      size = Large;
+   }
+   field OriginalRentalStartDate {
+      size = Large;
+   }
+   field OriginalRentalEndDate {
+      size = Large;
+   }
+   field SaleUnitPrice {
+      size = Large;
+   }
+   field Discount {
+      size = Large;
+   }
+   field UnitPriceInclTax {
+      size = Large;
+   }
+   field CatalogDesc {
+      size = Large;
+   }
+
+   field VendorPartDesc {
+      size = Large;
+   }
+
+   field HasConfiguration {
+      columnexclude = [true];
+   }
+   field VatNo;
+   field VatFreeVatCode {
+      size = Small;
+   }
+
+   field TaxLiability {
+      size = Small;
+   }
+   field ConditionCodeRef {
+      size = Large;
+   }
+   field ClassificationStandardRef {
+      size = Small;
+   }
+   field ClassificationPartNo {
+      size = Small;
+   }
+   field CustCalendarId {
+      size = Small;
+   }
+   field ExtTransportCalendarIdRef {
+      size = Small;
+   }
+   field ClassificationUnitMeas {
+      size = Small;
+   }
+   field ShipmentCreation {
+      size = Large;
+   }
+   fieldranking MessageLine, LineNo, RelNo, RentalDb, CustomerPoNo, CustomerPoLineNo, CustomerPoRelNo, CustomerPartNo, CustomerQuantity, CatalogNo, BuyQtyDue, WantedDeliveryDate, PlannedRentalStartDate, PlannedRentalEndDate, Objstate, ErrorMessage, Contact, DeliveryAddressName, ShipCounty, CountryCodeRef, DeliverToCustomerNo, DeliveryTermsRef, ShipViaCodeRef, ShipmentType, RouteIdRef, ForwardAgentIdRef, Location, OriginalBuyQtyDue, OriginalPlanDelivDate, OriginalRentalStartDate, OriginalRentalEndDate, SaleUnitPrice, Discount, UnitPriceInclTax, ConditionCodeRef, ClassificationStandardRef, ClassificationPartNo, ClassificationUnitMeas, CustCalendarId, ExtTransportCalendarIdRef;
+   fieldorder = MessageLine, LineNo, RelNo, RentalDb, CustomerPoNo, CustomerPoLineNo, CustomerPoRelNo, CustomerPartNo, CustomerQuantity, CatalogNo, BuyQtyDue, WantedDeliveryDate, PlannedRentalStartDate, PlannedRentalEndDate, Objstate, ErrorMessage, Contact, DeliveryAddressName, ShipCounty, CountryCodeRef, DeliverToCustomerNo, DeliveryTermsRef, ShipViaCodeRef, ShipmentType, RouteIdRef, ForwardAgentIdRef, Location, OriginalBuyQtyDue, OriginalPlanDelivDate, OriginalRentalStartDate, OriginalRentalEndDate, SaleUnitPrice, Discount, UnitPriceInclTax, ConditionCodeRef, ClassificationStandardRef, ClassificationPartNo, ClassificationUnitMeas, CustCalendarId, ExtTransportCalendarIdRef;
+
+   commandgroup CommandGroup {
+      command Cancel;
+   }
+
+   @DynamicComponentDependency CFGCHR
+   commandgroup CommandGroup2 {
+      command ViewConfigurationCommand;
+   }
+}
+list ExternalCustOrderCharList for ExternalCustOrderChar {
+   field CharacteristicId {
+      size = Small;
+   }
+   field CharacteristicIdDesc {
+      size = Small;
+   }
+   field CharacteristicValue {
+      size = Small;
+   }
+   field CharacteristicValueDesc {
+      size = Small;
+   }
+   field QtyOfOption;
+   field CharacteristicUom {
+      size = Small;
+   }
+   @DynamicComponentDependency CFGCHR
+   field ConfigDataType {
+      size = Small;
+   }
+   @DynamicComponentDependency CFGCHR
+   field ConfigValueType {
+      size = Small;
+   }
+   field LanguageCode {
+      size = Small;
+   }
+
+   // fieldranking CharacteristicId, CharacteristicIdDesc, CharacteristicValue, CharacteristicValueDesc, QtyOfOption, CharacteristicUom, ConfigDataType, ConfigValueType, LanguageCode;
+}
+
+---------------------------------- DIALOGS ----------------------------------
+
+dialog ApproveOrderDialog for ApproveOrderStructure {
+   label = "Approve Incoming Customer Order";
+   input(CustomerNo, Contract, AuthorizeCode, CustOrderType, LimitSalesToAssortments, OverruleLimitSaleToAssort);
+   output(AuthorizeCode, CustOrderType, LimitSalesToAssortments);
+   group ApproveGroup;
+   command Ok;
+   command Cancel;
+}
+
+group ApproveGroup for ApproveOrderStructure {
+   label = "Parameters";
+
+   field AuthorizeCodeRef;
+   field CustOrderTypeRef;
+   field LimitSalesToAssortments {
+      required = [true];
+      editable = [OverruleLimitSaleToAssort = "TRUE"];
+   }
+}
+assistant ViewConfigurationAssistant using ViewConfigurationInputVirtualSet {
+   label = "View Configuration";
+   input(RelNo, LineNo, MessageId, MessageLine);
+
+   singlestep {
+      list ExternalCustOrderCharList(ExternalCustOrderCharArray);
+   }
+   commandgroup CommandGroup2CmdGroup {
+
+      command Ok {
+         enabled = [true];
+      }
+   }
+}

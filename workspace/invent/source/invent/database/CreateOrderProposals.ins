@@ -1,0 +1,137 @@
+-------------------------------------------------------------------------------------------- 
+-- Export file for Task ORDER_PROPOSAL_MANAGER_API.CREATE_ORDER_PROPOSAL.
+-- 
+--  Date    Sign    History
+--  ------  ------  -----------------------------------------------------------
+--  180612  ChJalk  Bug 142212, Removed the default value for  AUTHORIZE_CODE.
+--  170425  AwWelk  STRSC-7322, Added user default coordinator for  AUTHORIZE_CODE.
+--  150622  MatKse  Added parameters VENDOR_NO AND ROUTE_ID.
+--  120320  MaEelk  Removed ORDER_DAYS from the parameter list.
+--  100714  DAYJLK  Bug 91834, Added log_user to Upgrade_Background_Job to set the correct
+--  100714	        user on converted scheduled tasks.
+--  060213  JOHESE  Changed method in call to Batch_SYS.New_Batch_Schedule
+--  050328  IFSAPP  Export file for task ORDER_PROPOSAL_MANAGER_API.CREATE_ORDER_PROPOSAL.
+-------------------------------------------------------------------------------------------- 
+
+PROMPT Register Batch Schedule Method "ORDER_PROPOSAL_MANAGER_API.CREATE_ORDER_PROPOSAL"
+DECLARE
+   schedule_method_id_ NUMBER          := NULL;
+   seq_no_             NUMBER          := NULL;
+   info_msg_           VARCHAR2(32000) := NULL;
+BEGIN
+-- Construct Main Message
+   info_msg_    := Message_SYS.Construct('');
+   Message_SYS.Add_Attribute(info_msg_, 'METHOD_NAME', 'ORDER_PROPOSAL_MANAGER_API.CREATE_ORDER_PROPOSAL');
+   Message_SYS.Add_Attribute(info_msg_, 'DESCRIPTION', 'Create Order Proposal');
+   Message_SYS.Add_Attribute(info_msg_, 'MODULE', 'INVENT');
+   Message_SYS.Add_Attribute(info_msg_, 'SINGLE_EXECUTION_DB', 'FALSE');
+   Message_SYS.Add_Attribute(info_msg_, 'ARGUMENT_TYPE_DB', 'ATTRIBUTE');
+   Message_SYS.Add_Attribute(info_msg_, 'VALIDATION_METHOD', 'ORDER_PROPOSAL_MANAGER_API.VALIDATE_PARAMS');
+-- Register Batch Schedule Method
+   Batch_SYS.Register_Batch_Schedule_Method(schedule_method_id_, info_msg_);
+-- Adding parameters
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'CONTRACT', to_char(NULL), 'TRUE', 'User_Allowed_Site_API.Get_Default_Site');
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'PART_NO', '%', 'FALSE', NULL);
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'SECOND_COMMODITY', '%', 'FALSE', NULL);
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'PLANNER_BUYER', '%', 'FALSE', NULL);
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'AUTHORIZE_CODE', to_char(NULL), 'FALSE', NULL);
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'VENDOR_NO', '%', 'FALSE', NULL);
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'ROUTE_ID', '%', 'FALSE', NULL);
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'RECALC_DATA', 'FALSE', 'FALSE', NULL);
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'ALL_PARTS', 'FALSE', 'FALSE', NULL);
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'CREATE_REQ', 'TRUE', 'FALSE', NULL);
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'PROCESS_PUR', 'TRUE', 'FALSE', NULL);
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'PROCESS_SHP', 'TRUE', 'FALSE', NULL);
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'DELETE_REQ', 'TRUE', 'FALSE', NULL);
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'PERIODS', to_number(NULL), 'FALSE', 'Mpccom_System_Parameter_API.Get_Parameter_Value1(''DEFAULT_PLAN_DATA_PERIODS'')');
+END;
+/
+
+
+
+------------------------------------------------------------------------------------------
+-- Inventory Tasks (Upgraded from background jobs)
+-----------------------------------------------------------------------------------------
+DECLARE   
+   PROCEDURE Upgrade_Background_Job (
+      method_name_ IN VARCHAR2,
+      schedule_name_  IN VARCHAR2)
+   IS
+      parameters_          VARCHAR2(4000);
+      execution_plan_      VARCHAR2(4000);
+      param_start_         NUMBER;
+      param_stop_          NUMBER;
+      next_execution_date_ DATE;
+      start_date_          DATE := sysdate;
+
+      seq_no_              NUMBER;
+      schedule_id_         NUMBER;
+      ptr_                 NUMBER;      
+      name_                VARCHAR2(30);
+      value_               VARCHAR2(2000);
+
+      CURSOR get_jobs IS
+       SELECT what, interval, log_user 
+       FROM   user_jobs
+       WHERE  UPPER(what) like '%'||method_name_||'%';
+   BEGIN
+      FOR rec IN get_jobs LOOP
+        execution_plan_ := rec.interval;
+        param_start_ := instr(execution_plan_, '(');
+        param_stop_  := instr(execution_plan_, ')');
+        execution_plan_ := substr(execution_plan_, param_start_ + 2, param_stop_ - param_start_- 3);
+
+        Batch_SYS.New_Batch_Schedule(schedule_id_, next_execution_date_, start_date_, NULL, schedule_name_, 'ORDER_PROPOSAL_MANAGER_API.CREATE_ORDER_PROPOSAL', 'TRUE', execution_plan_);
+        
+         -- Update batch schedule with correct user name 
+         UPDATE batch_schedule_tab SET username = rec.log_user WHERE schedule_id = schedule_id_; 
+
+        parameters_ := rec.what;
+        param_start_ := instr(parameters_, '(''');
+        param_stop_  := instr(parameters_, ''')');
+        parameters_  := substr(parameters_, param_start_ + 3, param_stop_ - param_start_- 3);
+        ptr_ := NULL;        
+        WHILE (Client_SYS.Get_Next_From_Attr(parameters_, ptr_, name_, value_)) LOOP
+           IF (name_ = 'CREATE_REQ' OR name_ = 'DELETE_REQ') THEN
+              value_:=REPLACE(REPLACE(value_, 'Y', 'TRUE'), 'N', 'FALSE');
+           ELSIF (name_ = 'ALL_PARTS' OR name_ = 'RECALC_DATA') THEN
+               value_:=REPLACE(REPLACE(Gen_Yes_No_API.Encode(value_), 'Y', 'TRUE'), 'N', 'FALSE');
+           ELSIF (name_ = 'PROCESS_PUR' OR name_ = 'PROCESS_SHP') THEN
+               value_:=REPLACE(REPLACE(Gen_Yes_No_API.Encode(value_), 'Y', 'TRUE'), 'N', 'FALSE');
+           END IF; 
+           Batch_SYS.New_Batch_Schedule_Param(seq_no_, schedule_id_, name_, value_);           
+        END LOOP;
+      END LOOP;
+   END Upgrade_Background_Job;
+   
+   PROCEDURE Remove_Server_Process (
+      method_name_ IN VARCHAR2 )
+   IS
+      job_   NUMBER;
+      CURSOR get_job IS
+      SELECT job
+      FROM   user_jobs
+      WHERE  UPPER(what) like '%'||method_name_||'%';
+   BEGIN
+      FOR rec_ IN get_job LOOP
+         dbms_job.remove(rec_.job);
+      END LOOP;
+            
+   EXCEPTION
+      WHEN OTHERS THEN
+         NULL;
+   END Remove_Server_Process;
+
+BEGIN   
+   ------------------------------------------------------------------------------------------
+   -- Upgrading Background Jobs to Scheduled Tasks
+   ------------------------------------------------------------------------------------------
+   Upgrade_Background_Job('INV_PART_ORDER_PNT_REP_RPI.MAKE_ORDER_POINT_REQ_SHELL__', 'Make Order Point Req');
+   Remove_Server_Process('INV_PART_ORDER_PNT_REP_RPI.MAKE_ORDER_POINT_REQ_SHELL__');
+END;
+/
+
+COMMIT
+/
+
+

@@ -1,0 +1,1048 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: ShipmentHandlingUnitStructureHandling
+--  Component:    SHPMNT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  220404  ErRalk  SCZ-18215, Modified Print_This_Shipment_Handling_Unit_Label___ by changing the parameter type into Clob text to avoid the character string buffer error.
+--  210805  Aabalk  SC21R2-1652, Modified Packaccording_Packing_Proposal___ by adding info as an out parameter to support warnings.
+--  210614  RoJalk  SC21R2-1030, Added the procedure Packaccording_Packing_Proposal___,
+--  200515  ChFolk  Bug 153521 (SCZ-9877), Modified Add_Reservation_To_Handling_Unit___ to add new check when setting the value for attr_for_identify_ to check the
+--  200515          remaining_qty when only shipment line is not fully reserved. This was done to avoid setting value for it when slight differnce in quantities due to conversion.
+--  190708  SBalLK  SCUXXW4-22605, Added Generate_Shipment_Hu_For_Navigate___() to implement navigation for Handling Units in Shipment Inventory window.
+--  190506  RoJalk  SCUXXW4-18410, Moved the logic in Get_Children_Handling_Units_List___ to projection level.
+--  190301  KuBaLk  SCUXXW4-4814,  Added function for print HU labels RMB's.
+--  190225  KuBaLk  SCUXXW4-4789,  Added functions for print RMB's for Handling unit structure.
+--  190207  SBalLK  SCUXXW4-4654,  Added ConnectPartsToHandlingUnitAssistant related functionalities.
+--  190131  SBalLK  SCUXXW4-4729,  Added AddExistingHandlingUnitsAssistant related functionalities.
+--  190130  SBalLK  SCUXXW4-4664,  Added IdentifyPartsToHandlingUnitAssistant related functionalities.
+--  190116  SBalLK  SCUXXW4-4689,  Added ReassignHandlingUnitDialog related functionalities.
+--  190211  RoJalk  SCUXXW4-4814,  Distribute_Reservations___, Auto_Pack_Shipment_Lines___, Pack_According_To_Handling_Unit_Capacity___, 
+--  190211          Shipment_Line_Connected_To_Handling_Unit___, Remove_All_Handling_Unit_On_Shipment___, Disconnect_Handling_Unit_From_Shipment___,
+--  190211          Create_Ssccs_For_Shipment___, Create_Ssccs_For_Structure___, Create_Sscc___, Disconnect_All_Handling_Unit_On_Shipment___,
+--  190211          Disconnect_Empty_Handling_Unit___, Children_Exist___, Handling_Unit_Connected_To_Shipment_Lines___, Remove_Handling_Unit_From_Shipment___,
+--  190211          Get_Max_Quantity_Capacity___, Repack_Accessory_In_Handling_Unit___, Modify_Parent_Handling_Unit___, Validate_On_Copy_Move___,
+--  190211          Copy_Structure___, Move_Shipment_Line_Node___, Repack_Shipment_Line_Quantity___, Repack_Reservation_Quantity___, Refresh_Handling_Unit_Node_With_Shipment___.
+--  190210  RoJalk  SCUXXW4-4774,  Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Get_Selected_Handling_Units___ (
+   selection_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   key_list_                 VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_        VARCHAR2(32000);
+   current_handling_unit_id_ NUMBER;
+   handling_unit_id_list_    VARCHAR2(2000);
+BEGIN
+   WHILE (INSTR(key_list_, ';') > 0) LOOP
+      current_selection_  := substr(key_list_, 0, INSTR(key_list_, ';'));
+      current_handling_unit_id_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'HANDLING_UNIT_ID');      
+      
+      IF (handling_unit_id_list_ IS NULL) THEN
+         handling_unit_id_list_ := current_handling_unit_id_;
+      ELSE
+         handling_unit_id_list_ := handling_unit_id_list_ || ',' || current_handling_unit_id_;
+      END IF;
+      key_list_ := SUBSTR(key_list_, (INSTR(key_list_, ';') + 1));
+   END LOOP;   
+   RETURN handling_unit_id_list_;
+END Get_Selected_Handling_Units___;
+
+PROCEDURE Distribute_Reservations___ (
+   selection_ IN CLOB ) 
+IS
+   orders_                        json_array_t := json_array_t.parse(selection_);    
+   current_selection_             VARCHAR2(32000);
+   shipment_id_                   NUMBER;
+   shipment_line_no_              NUMBER;
+   handling_unit_id_              NUMBER;
+   reserved_qty_left_to_attach_   NUMBER;
+   msg_                           CLOB;
+BEGIN
+   FOR order_ IN 0 .. orders_.get_size - 1 LOOP 
+      current_selection_ := orders_.get_string(order_);
+      
+      handling_unit_id_            := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'HANDLING_UNIT_ID'));
+      shipment_id_                 := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'SHIPMENT_ID'));
+      shipment_line_no_            := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'SHIPMENT_LINE_NO'));
+      reserved_qty_left_to_attach_ := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'RESERVED_QTY_LEFT_TO_ATTACH'));
+      
+      Shipment_Initial_Check___(shipment_id_);
+      Handling_Unit_Extended_Initial_Check___(handling_unit_id_);
+      
+      Message_SYS.Add_Attribute(msg_,'HANDLING_UNIT_ID', handling_unit_id_);
+      Message_SYS.Add_Attribute(msg_,'SHIPMENT_ID',      shipment_id_);
+      Message_SYS.Add_Attribute(msg_,'SHIPMENT_LINE_NO', shipment_line_no_);
+      Message_SYS.Add_Attribute(msg_,'QUANTITY',         reserved_qty_left_to_attach_);
+      
+   END LOOP; 
+   
+   Shipment_Reserv_Handl_Unit_API.Distribute_Reservations__(msg_);
+   
+END Distribute_Reservations___;
+
+PROCEDURE Auto_Pack_Shipment_Lines___ (
+   selection_ IN  VARCHAR2,
+   info$_     OUT VARCHAR2   ) 
+IS
+   shipment_lines_      json_array_t := json_array_t.parse(selection_);    
+   current_selection_   VARCHAR2(32000);
+   msg_                 VARCHAR2(32000);
+   info_                VARCHAR2(2000) ;
+   shipment_id_         NUMBER;
+BEGIN
+   FOR shipment_line_ IN 0 .. shipment_lines_.get_size - 1 LOOP 
+      current_selection_   := shipment_lines_.get_string(shipment_line_);
+      
+      shipment_id_         := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SHIPMENT_ID');
+      Shipment_Initial_Check___(shipment_id_);
+      
+      Message_SYS.Add_Attribute(msg_,'SHIPMENT_ID',      Client_SYS.Get_Key_Reference_Value(current_selection_, 'SHIPMENT_ID'));
+      Message_SYS.Add_Attribute(msg_,'SHIPMENT_LINE_NO', Client_SYS.Get_Key_Reference_Value(current_selection_, 'SHIPMENT_LINE_NO'));
+      Message_SYS.Add_Attribute(msg_,'SOURCE_REF1',      Client_SYS.Get_Key_Reference_Value(current_selection_, 'SOURCE_REF1'));
+      Message_SYS.Add_Attribute(msg_,'SOURCE_REF2',      Client_SYS.Get_Key_Reference_Value(current_selection_, 'SOURCE_REF2'));
+      Message_SYS.Add_Attribute(msg_,'SOURCE_REF3',      Client_SYS.Get_Key_Reference_Value(current_selection_, 'SOURCE_REF3'));
+      Message_SYS.Add_Attribute(msg_,'SOURCE_REF4',      Client_SYS.Get_Key_Reference_Value(current_selection_, 'SOURCE_REF4'));
+      Message_SYS.Add_Attribute(msg_,'SOURCE_REF_TYPE',  Client_SYS.Get_Key_Reference_Value(current_selection_, 'SOURCE_REF_TYPE_DB'));
+   END LOOP; 
+   
+   Shipment_Auto_Packing_Util_API.Auto_Pack_Shipment_Lines(info_, msg_);
+   info$_ := info_;
+   
+END Auto_Pack_Shipment_Lines___;
+
+PROCEDURE Pack_According_To_Handling_Unit_Capacity___ (
+	key_                     IN  Shipment_Line_Key,
+   source_ref1_             IN  VARCHAR2,
+   source_ref2_             IN  VARCHAR2,
+   source_ref3_             IN  VARCHAR2,
+   source_ref4_             IN  VARCHAR2,
+   handling_unit_type_id_   IN  VARCHAR2,
+   remaining_qty_to_attach_ IN  NUMBER,
+   parent_handling_unit_id_ IN  NUMBER,
+   info$_                   OUT VARCHAR2 ) 
+IS
+   
+BEGIN
+   Shipment_Line_API.Connect_To_New_Handling_Units(info$_, key_.shipment_id, key_.shipment_line_no, source_ref1_, source_ref2_, source_ref3_, source_ref4_,
+                                                   handling_unit_type_id_, remaining_qty_to_attach_, parent_handling_unit_id_);
+   
+END Pack_According_To_Handling_Unit_Capacity___;
+
+FUNCTION Get_Packing_Instruction_Description___(
+   packing_instruction_id_ IN VARCHAR2 )  RETURN VARCHAR2
+IS
+   
+BEGIN
+   RETURN Packing_Instruction_API.Get_Description(packing_instruction_id_);
+END Get_Packing_Instruction_Description___;
+
+FUNCTION Shipment_Line_Connected_To_Handling_Unit___(
+   shipment_id_ IN NUMBER )  RETURN BOOLEAN
+IS
+   shipment_line_connected_to_hu_  BOOLEAN:=FALSE;
+BEGIN
+   IF (Shipment_Line_Handl_Unit_API.Shipment_Exist(shipment_id_) = 'TRUE') THEN
+      shipment_line_connected_to_hu_ := TRUE;
+   END IF;   
+   RETURN shipment_line_connected_to_hu_;
+END Shipment_Line_Connected_To_Handling_Unit___;
+
+PROCEDURE Remove_All_Handling_Unit_On_Shipment___ (
+	key_ IN Shipment_Key)
+IS
+BEGIN
+   Shipment_Handling_Utility_API.Remove_All_Hu_On_Shipment(key_.shipment_id);
+END Remove_All_Handling_Unit_On_Shipment___;
+
+PROCEDURE Disconnect_Handling_Unit_From_Shipment___ (
+	key_                 IN Shipment_Handling_Unit_With_History_Key,
+	remove_structure_db_ IN VARCHAR2)
+IS
+   
+BEGIN
+   Shipment_Handling_Utility_API.Disconnect_Hu_From_Shipment(key_.handling_unit_id, remove_structure_db_);
+END Disconnect_Handling_Unit_From_Shipment___;
+
+PROCEDURE Create_Ssccs_For_Shipment___ (
+	key_ IN Shipment_Key)
+IS
+BEGIN
+   Handling_Unit_Ship_Util_API.Create_Ssccs_For_Shipment(key_.shipment_id);
+END Create_Ssccs_For_Shipment___;
+
+PROCEDURE Packaccording_Packing_Proposal___ (
+   key_ IN Shipment_Key,
+   info$_ OUT VARCHAR2)
+IS 
+BEGIN
+   Shipment_Auto_Packing_Util_API.Pack_Acc_Pack_Proposal(key_.shipment_id);
+   info$_ := Client_SYS.Get_All_Info;
+END Packaccording_Packing_Proposal___;
+
+
+PROCEDURE Create_Ssccs_For_Structure___ (
+	key_ IN Shipment_Handling_Unit_With_History_Key)
+IS
+BEGIN
+   Handling_Unit_API.Create_Ssccs_For_Structure(key_.handling_unit_id);
+END Create_Ssccs_For_Structure___;
+
+PROCEDURE Create_Sscc___ (
+   handling_unit_id_ IN NUMBER ) 
+IS
+BEGIN
+   Handling_Unit_API.Create_Sscc(handling_unit_id_);
+END Create_Sscc___;
+
+PROCEDURE Disconnect_All_Handling_Unit_On_Shipment___ (
+	key_ IN Shipment_Key)
+IS
+   
+BEGIN
+   Shipment_Handling_Utility_API.Disconn_All_Hu_On_Shipment(key_.shipment_id);
+END Disconnect_All_Handling_Unit_On_Shipment___;
+
+PROCEDURE Disconnect_Empty_Handling_Unit___ (
+	shipment_id_      IN NUMBER,
+   handling_unit_id_ IN NUMBER ) 
+IS
+   
+BEGIN
+   Shipment_Handling_Utility_API.Disconnect_Empty_Hu_On_Ship(shipment_id_, handling_unit_id_);
+END Disconnect_Empty_Handling_Unit___;
+
+FUNCTION Children_Exist___ (
+   handling_unit_id_ IN NUMBER ) RETURN BOOLEAN 
+IS
+   children_exist_  BOOLEAN:=TRUE;
+BEGIN
+   IF (Handling_Unit_API.Get_No_Of_Children(handling_unit_id_) = 0) THEN
+      children_exist_ := FALSE;
+   END IF;
+   RETURN children_exist_;
+END Children_Exist___;
+
+FUNCTION Handling_Unit_Connected_To_Shipment_Lines___ (
+   shipment_id_      IN NUMBER,
+   handling_unit_id_ IN NUMBER ) RETURN BOOLEAN 
+IS
+   hu_connected_to_shipment_lines_  BOOLEAN:=FALSE;
+BEGIN
+   IF (Handling_Unit_Ship_Util_API.Is_Connected_To_Shipment_Lines(shipment_id_, handling_unit_id_) = 'TRUE') THEN
+      hu_connected_to_shipment_lines_ := TRUE;
+   END IF;
+   RETURN hu_connected_to_shipment_lines_;
+END Handling_Unit_Connected_To_Shipment_Lines___;
+
+PROCEDURE Remove_Handling_Unit_From_Shipment___ (
+	key_                 IN Shipment_Handling_Unit_With_History_Key,
+	remove_structure_db_ IN VARCHAR2)
+IS
+   
+BEGIN
+   Shipment_Handling_Utility_API.Remove_Hu_From_Shipment(key_.handling_unit_id, remove_structure_db_);
+END Remove_Handling_Unit_From_Shipment___;
+
+FUNCTION Get_Max_Quantity_Capacity___ (
+   source_part_no_        IN VARCHAR2,
+   handling_unit_type_id_ IN VARCHAR2,
+   unit_code_             IN VARCHAR2 ) RETURN NUMBER 
+IS
+   max_quantity_capacity_  NUMBER;
+BEGIN
+   max_quantity_capacity_ := Part_Handling_Unit_API.Get_Max_Quantity_Capacity(source_part_no_, handling_unit_type_id_, unit_code_);
+   RETURN max_quantity_capacity_;
+END Get_Max_Quantity_Capacity___;
+
+FUNCTION Print_This_Handling_Unit_Label___ (
+   selection_ IN VARCHAR2) RETURN VARCHAR2
+IS
+   current_selection_            VARCHAR2(32000);
+   handling_unit_id_             VARCHAR2(50);
+   shipment_delivered_           VARCHAR2(50);
+   no_of_handling_unit_labels_   VARCHAR2(50);
+   parameter_attr_               VARCHAR2(32000);
+   report_attr_                  VARCHAR2(1000);
+   result_key_                   NUMBER;
+   result_key_list_              VARCHAR2(5000);
+   orders_                       json_array_t := json_array_t.parse(selection_);
+   count_                        NUMBER := 0;
+   shipment_id_                  NUMBER;
+BEGIN
+   
+   Client_SYS.Clear_Attr(report_attr_);
+   Client_SYS.Add_To_Attr('REPORT_ID', 'HANDLING_UNIT_LABEL_REP', report_attr_);
+   Client_SYS.Add_To_Attr('LU_NAME', 'HandlingUnitLabel', report_attr_);
+   
+   FOR order_ IN 0 .. orders_.get_size - 1 LOOP 
+      current_selection_            := orders_.get_string(order_);
+      handling_unit_id_             := Client_SYS.Get_Key_Reference_Value(current_selection_, 'Handling_Unit_Id');
+      shipment_id_                  := to_number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'Shipment_Id'));
+      shipment_delivered_           := Shipment_API.Shipment_Delivered(shipment_id_);
+      no_of_handling_unit_labels_   := Client_SYS.Get_Key_Reference_Value(current_selection_, 'No_Of_Handling_Unit_Labels');
+
+      User_Allowed_Site_API.Is_Authorized(Shipment_API.Get_Contract(shipment_id_));
+      
+      Client_SYS.Clear_Attr(parameter_attr_);
+      Client_SYS.Add_To_Attr('HANDLING_UNIT_ID', handling_unit_id_, parameter_attr_);
+      Client_SYS.Add_To_Attr('SHPMNT_DELIVERED', shipment_delivered_, parameter_attr_);     
+      
+      count_ := 0;
+      WHILE ( count_ < no_of_handling_unit_labels_ ) LOOP        
+         result_key_ := Report_Format_API.Create_New_Report(report_attr_, parameter_attr_, Fnd_Session_API.Get_Fnd_User);
+         IF (result_key_list_ IS NULL) THEN
+            result_key_list_ := result_key_;        
+         ELSE
+            result_key_list_ := result_key_list_ || ',' || result_key_;
+         END IF;
+         count_ := count_ + 1;     
+      END LOOP;
+   END LOOP;
+   
+   RETURN result_key_list_;
+END Print_This_Handling_Unit_Label___;
+
+
+FUNCTION Print_This_Shipment_Handling_Unit_Label___ (
+   selection_ IN CLOB) RETURN CLOB
+IS
+   current_selection_            VARCHAR2(32000);
+   handling_unit_id_             VARCHAR2(50);
+   shipment_id_                  VARCHAR2(50);
+   shipment_delivered_           VARCHAR2(50);
+   no_of_shipment_labels_        VARCHAR2(50);
+   parameter_attr_               VARCHAR2(32000);
+   report_attr_                  VARCHAR2(1000);
+   result_key_                   NUMBER;
+   result_key_list_              VARCHAR2(32000);
+   orders_                       json_array_t := json_array_t.parse(selection_);
+   count_                        NUMBER := 0;
+   shipment_                     NUMBER;
+BEGIN
+   Client_SYS.Clear_Attr(report_attr_);
+   Client_SYS.Add_To_Attr('REPORT_ID', 'SHPMNT_HANDL_UNIT_LABEL_REP', report_attr_);
+   Client_SYS.Add_To_Attr('LU_NAME', 'ShpmntHandlUnitLabel', report_attr_);
+   
+	FOR order_ IN 0 .. orders_.get_size - 1 LOOP 
+      current_selection_ := orders_.get_string(order_);
+      shipment_id_ := (Client_SYS.Get_Key_Reference_Value(current_selection_, 'Shipment_Id'));
+      handling_unit_id_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'Handling_Unit_Id');      
+      shipment_ := to_number(shipment_id_);
+      shipment_delivered_ := Shipment_API.Shipment_Delivered(shipment_);
+      no_of_shipment_labels_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'No_Of_Shipment_Labels');
+      
+      Client_SYS.Clear_Attr(parameter_attr_);
+      Client_SYS.Add_To_Attr('SHIPMENT_ID', shipment_id_, parameter_attr_);
+      Client_SYS.Add_To_Attr('HANDLING_UNIT_ID', handling_unit_id_, parameter_attr_);
+      Client_SYS.Add_To_Attr('SHPMNT_DELIVERED', shipment_delivered_, parameter_attr_);
+      
+      count_ := 0;
+      WHILE ( count_ < no_of_shipment_labels_ ) LOOP
+         result_key_ := Report_Format_API.Create_New_Report(report_attr_, parameter_attr_, Fnd_Session_API.Get_Fnd_User);
+         
+         IF (result_key_list_ IS NULL) THEN
+            result_key_list_ := result_key_;        
+         ELSE
+            result_key_list_ := result_key_list_ || ',' || result_key_;
+         END IF;
+         count_ := count_ + 1;     
+      END LOOP;
+   END LOOP;
+   
+   RETURN result_key_list_;
+END Print_This_Shipment_Handling_Unit_Label___;
+
+
+FUNCTION Print_This_Packing_List___ (
+   selection_ IN VARCHAR2) RETURN VARCHAR2
+IS
+   current_selection_            VARCHAR2(32000);
+   handling_unit_id_             VARCHAR2(50);
+   shipment_id_                  VARCHAR2(50);
+   no_of_handling_unit_labels_   VARCHAR2(50);
+   parameter_attr_               VARCHAR2(32000);
+   report_attr_                  VARCHAR2(1000);
+   result_key_                   NUMBER;
+   result_key_list_              VARCHAR2(5000);
+   orders_                       json_array_t := json_array_t.parse(selection_);
+   count_                        NUMBER := 0;
+BEGIN
+   
+   Client_SYS.Clear_Attr(report_attr_);
+   Client_SYS.Add_To_Attr('REPORT_ID', 'SHIPMENT_PACKING_LIST_REP', report_attr_);
+   Client_SYS.Add_To_Attr('LU_NAME', 'ShipmentLine', report_attr_);
+   
+	FOR order_ IN 0 .. orders_.get_size - 1 LOOP 
+      current_selection_ := orders_.get_string(order_);
+      shipment_id_ := (Client_SYS.Get_Key_Reference_Value(current_selection_, 'Shipment_Id'));
+      
+      User_Allowed_Site_API.Is_Authorized(Shipment_API.Get_Contract(shipment_id_));
+
+      handling_unit_id_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'Handling_Unit_Id');
+      no_of_handling_unit_labels_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'No_Of_Handling_Unit_Labels');
+      
+      Client_SYS.Clear_Attr(parameter_attr_);
+      Client_SYS.Add_To_Attr('SHIPMENT_ID', shipment_id_, parameter_attr_);
+      Client_SYS.Add_To_Attr('HANDLING_UNIT_ID', handling_unit_id_, parameter_attr_);
+      
+      count_ := 0;
+      WHILE ( count_ < no_of_handling_unit_labels_ ) LOOP
+         result_key_ := Report_Format_API.Create_New_Report(report_attr_, parameter_attr_, Fnd_Session_API.Get_Fnd_User);
+         
+         IF (result_key_list_ IS NULL) THEN
+            result_key_list_ := result_key_;        
+         ELSE
+            result_key_list_ := result_key_list_ || ',' || result_key_;
+         END IF;
+         count_ := count_ + 1;     
+      END LOOP;
+   END LOOP;
+   
+   RETURN result_key_list_;
+END Print_This_Packing_List___;
+
+
+FUNCTION Print_Shipment_Labels___ (
+   shipment_id_        IN NUMBER,
+   handling_unit_id_   IN NUMBER,
+   report_view_        IN VARCHAR2,
+   shipment_delivered_ IN VARCHAR2) RETURN VARCHAR2
+IS
+   handling_unit_info_list_         VARCHAR2(2000);
+   handling_unit_info_list_lists_   Utility_SYS.STRING_TABLE;
+   token_count_                     NUMBER;
+   parameter_attr_                  VARCHAR2(32000);
+   report_attr_                     VARCHAR2(1000);
+   result_key_                      NUMBER;
+   result_key_list_                 VARCHAR2(5000);
+   loop_count_                      NUMBER;
+BEGIN
+   User_Allowed_Site_API.Is_Authorized(Shipment_API.Get_Contract(shipment_id_));
+   IF (report_view_ = 'HANDLING_UNIT_LABEL_REP') THEN
+      IF (handling_unit_id_ = 0) THEN
+         Handling_Unit_Ship_Util_API.Get_Print_Labels_For_Shipment(handling_unit_info_list_, shipment_id_);
+      ELSE
+         Handling_Unit_Ship_Util_API.Get_Print_Labels_For_Shipment(handling_unit_info_list_, shipment_id_, handling_unit_id_);
+      END IF;      
+   ELSIF (report_view_ = 'SHPMNT_HANDL_UNIT_LABEL_REP') THEN
+      IF (handling_unit_id_ = 0) THEN
+         Handling_Unit_Ship_Util_API.Get_Print_Shp_Labels_For_Shp(handling_unit_info_list_ , shipment_id_);
+      ELSE
+         Handling_Unit_Ship_Util_API.Get_Print_Shp_Labels_For_Shp(handling_unit_info_list_ , shipment_id_, handling_unit_id_);
+      END IF;
+   END IF;   
+   IF (handling_unit_info_list_ IS NOT NULL) THEN
+      Utility_SYS.Tokenize(handling_unit_info_list_, '^', handling_unit_info_list_lists_, token_count_);
+      IF ( token_count_ > 0 ) THEN         
+         FOR count_ IN handling_unit_info_list_lists_.FIRST..handling_unit_info_list_lists_.LAST LOOP            
+               IF mod(count_, 2) = 1 THEN
+                  IF (report_view_ = 'SHPMNT_HANDL_UNIT_LABEL_REP') THEN
+                     Client_SYS.Clear_Attr(report_attr_);
+                     Client_SYS.Add_To_Attr('REPORT_ID', 'SHPMNT_HANDL_UNIT_LABEL_REP', report_attr_);
+                     Client_SYS.Add_To_Attr('LU_NAME', 'ShpmntHandlUnitLabel', report_attr_);
+                     
+                     Client_SYS.Clear_Attr(parameter_attr_);
+                     Client_SYS.Add_To_Attr('SHIPMENT_ID', shipment_id_, parameter_attr_);
+                     Client_SYS.Add_To_Attr('HANDLING_UNIT_ID', handling_unit_info_list_lists_(count_), parameter_attr_);
+                     Client_SYS.Add_To_Attr('SHPMNT_DELIVERED', shipment_delivered_, parameter_attr_);                     
+                  ELSIF (report_view_ = 'HANDLING_UNIT_LABEL_REP') THEN
+                     Client_SYS.Clear_Attr(report_attr_);
+                     Client_SYS.Add_To_Attr('REPORT_ID', 'HANDLING_UNIT_LABEL_REP', report_attr_);
+                     Client_SYS.Add_To_Attr('LU_NAME', 'HandlingUnitLabel', report_attr_);
+                     
+                     Client_SYS.Clear_Attr(parameter_attr_);
+                     Client_SYS.Add_To_Attr('HANDLING_UNIT_ID', handling_unit_info_list_lists_(count_), parameter_attr_);
+                     Client_SYS.Add_To_Attr('SHPMNT_DELIVERED', shipment_delivered_, parameter_attr_);                       
+                  END IF;
+               END IF;
+               IF mod(count_, 2) = 0 THEN
+                  loop_count_ := 0;
+                  WHILE (loop_count_ < to_number(handling_unit_info_list_lists_(count_))) LOOP
+                     result_key_ := Report_Format_API.Create_New_Report(report_attr_, parameter_attr_, Fnd_Session_API.Get_Fnd_User);
+                     
+                     IF (result_key_list_ IS NULL) THEN
+                        result_key_list_ := result_key_;        
+                     ELSE
+                        result_key_list_ := result_key_list_ || ',' || result_key_;
+                     END IF;
+
+                     loop_count_ := loop_count_ + 1;
+                  END LOOP;
+               END IF;
+            END LOOP;
+      END IF;
+      RETURN result_key_list_;
+   END IF;   
+END Print_Shipment_Labels___;
+
+-- Code to Drag and move tree nodes.
+
+PROCEDURE Repack_Accessory_In_Handling_Unit___ (
+   shipment_id_                IN NUMBER,
+   old_handling_unit_id_       IN  NUMBER,
+   new_handling_unit_id_       IN  NUMBER,
+   handling_unit_accessory_id_ IN  VARCHAR2,
+   qty_to_move_                IN  NUMBER,
+   info$_                      OUT VARCHAR2 ) 
+IS
+BEGIN
+   Validate_On_Copy_Move___(Shipment_API.Get_Objstate(shipment_id_)); 
+   Accessory_On_Handling_Unit_API.Change_Handling_Unit_Id(old_handling_unit_id_       => old_handling_unit_id_,
+                                                          new_handling_unit_id_       => new_handling_unit_id_, 
+                                                          handling_unit_accessory_id_ => handling_unit_accessory_id_,
+                                                          quantity_                   => qty_to_move_);
+   info$_ := Handling_Unit_API.Get_Max_Capacity_Exceeded_Info(new_handling_unit_id_);                                                          
+END Repack_Accessory_In_Handling_Unit___;
+
+PROCEDURE Modify_Parent_Handling_Unit___ (
+   handling_unit_id_        IN  NUMBER,
+   parent_handling_unit_id_ IN  NUMBER,
+   shipment_objstate_       IN  VARCHAR2,
+   info$_                   OUT VARCHAR2 ) 
+IS
+BEGIN
+   Validate_On_Copy_Move___(shipment_objstate_); 
+   IF (parent_handling_unit_id_ IS NOT NULL) THEN
+      Handling_Unit_Extended_Initial_Check___(parent_handling_unit_id_);
+   END IF;   
+   Handling_Unit_API.Modify_Parent_Handling_Unit_Id(handling_unit_id_, parent_handling_unit_id_);
+   info$_ := Handling_Unit_API.Get_Max_Capacity_Exceeded_Info(handling_unit_id_);
+END Modify_Parent_Handling_Unit___;
+
+PROCEDURE Validate_On_Copy_Move___ (
+   shipment_objstate_ IN VARCHAR2 ) 
+IS
+BEGIN
+   IF (shipment_objstate_ != 'Preliminary') THEN
+      Error_SYS.Record_General(lu_name_, 'COPYMOVENTALLOW: Copy/Move allowed only for shipments in Preliminary state.');
+   END IF;   
+END Validate_On_Copy_Move___;
+
+PROCEDURE Copy_Structure___ (
+   from_handling_unit_id_      IN NUMBER,
+   to_parent_handling_unit_id_ IN NUMBER,
+   to_shipment_id_             IN NUMBER,
+   shipment_objstate_          IN VARCHAR2 ) 
+IS
+   handling_unit_id_ NUMBER;
+BEGIN
+   Validate_On_Copy_Move___(shipment_objstate_);
+   IF to_parent_handling_unit_id_ IS NULL THEN
+      Handling_Unit_API.Copy_Structure(handling_unit_id_      => handling_unit_id_,
+                                       from_handling_unit_id_ => from_handling_unit_id_,
+                                       to_shipment_id_        => to_shipment_id_);
+   ELSE
+      Handling_Unit_API.Copy_Structure(handling_unit_id_           => handling_unit_id_,
+                                       from_handling_unit_id_      => from_handling_unit_id_,
+                                       to_parent_handling_unit_id_ => to_parent_handling_unit_id_,
+                                       to_shipment_id_             => to_shipment_id_);
+   END IF;   
+END Copy_Structure___;
+
+PROCEDURE Move_Shipment_Line_Node___ (
+   shipment_id_                IN  NUMBER,
+   from_handling_unit_id_      IN  NUMBER,
+   to_handling_unit_id_        IN  NUMBER,
+   quantity_                   IN  NUMBER,
+   shipment_line_no_           IN  NUMBER,
+   shipment_objstate_          IN VARCHAR2, 
+   info$_                      OUT VARCHAR2 ) 
+IS
+   unattached_quantity_   NUMBER:=0;     
+   
+   CURSOR get_shipment_reserv_handl_unit_info IS
+      SELECT source_ref1, source_ref2, source_ref3, source_ref4, contract, part_no,
+             location_no, lot_batch_no, serial_no, eng_chg_level, waiv_dev_rej_no, 
+             activity_seq, reserv_handling_unit_id, configuration_id, pick_list_no,
+             quantity, catch_qty_to_reassign
+        FROM SHIPMENT_RESERV_HANDL_UNIT
+       WHERE shipment_id      = shipment_id_
+         AND handling_unit_id = from_handling_unit_id_
+         AND shipment_line_no = shipment_line_no_;
+         
+   TYPE Shipment_Reserv_Handl_Unit_Info_Tab IS TABLE OF get_shipment_reserv_handl_unit_info%ROWTYPE;
+   shipment_reserv_handl_unit_info_tab_   Shipment_Reserv_Handl_Unit_Info_Tab;
+BEGIN
+   Validate_On_Copy_Move___(shipment_objstate_);
+   
+   OPEN  get_shipment_reserv_handl_unit_info;
+   FETCH get_shipment_reserv_handl_unit_info BULK COLLECT INTO shipment_reserv_handl_unit_info_tab_;
+   CLOSE get_shipment_reserv_handl_unit_info;
+   
+   unattached_quantity_ := quantity_;
+   
+   IF (shipment_reserv_handl_unit_info_tab_.COUNT > 0) THEN
+      FOR i IN shipment_reserv_handl_unit_info_tab_.FIRST .. shipment_reserv_handl_unit_info_tab_.LAST LOOP
+         Shipment_Reserv_Handl_Unit_API.Change_Handling_Unit_id(
+                                        source_ref1_ 	           => shipment_reserv_handl_unit_info_tab_(i).source_ref1, 
+                                        source_ref2_ 	           => shipment_reserv_handl_unit_info_tab_(i).source_ref2, 
+                                        source_ref3_ 	           => shipment_reserv_handl_unit_info_tab_(i).source_ref3, 
+                                        source_ref4_ 	           => shipment_reserv_handl_unit_info_tab_(i).source_ref4, 
+                                        contract_  	           => shipment_reserv_handl_unit_info_tab_(i).contract, 
+                                        part_no_ 	              => shipment_reserv_handl_unit_info_tab_(i).part_no,  
+                                        location_no_ 	           => shipment_reserv_handl_unit_info_tab_(i).location_no, 
+                                        lot_batch_no_  	        => shipment_reserv_handl_unit_info_tab_(i).lot_batch_no, 
+                                        serial_no_ 	           => shipment_reserv_handl_unit_info_tab_(i).serial_no, 
+                                        eng_chg_level_ 	        => shipment_reserv_handl_unit_info_tab_(i).eng_chg_level, 
+                                        waiv_dev_rej_no_ 	     => shipment_reserv_handl_unit_info_tab_(i).waiv_dev_rej_no, 
+                                        activity_seq_  	        => shipment_reserv_handl_unit_info_tab_(i).activity_seq, 
+                                        reserv_handling_unit_id_ => shipment_reserv_handl_unit_info_tab_(i).reserv_handling_unit_id, 
+                                        configuration_id_  	     => shipment_reserv_handl_unit_info_tab_(i).configuration_id, 
+                                        pick_list_no_  	        => shipment_reserv_handl_unit_info_tab_(i).pick_list_no, 
+                                        shipment_id_ 	           => shipment_id_, 
+                                        shipment_line_no_  	     => shipment_line_no_, 
+                                        from_handling_unit_id_   => from_handling_unit_id_, 
+                                        to_handling_unit_id_     => to_handling_unit_id_, 
+                                        quantity_to_move_  	     => shipment_reserv_handl_unit_info_tab_(i).quantity, 
+                                        catch_quantity_to_move_  => shipment_reserv_handl_unit_info_tab_(i).catch_qty_to_reassign);
+                                        
+         unattached_quantity_ := unattached_quantity_ - shipment_reserv_handl_unit_info_tab_(i).quantity;                               
+                                                                  
+      END LOOP;  
+      
+   END IF;
+         
+   IF (unattached_quantity_ != 0) THEN
+      Shipment_Line_Handl_Unit_API.Reduce_Quantity(shipment_id_         => shipment_id_,
+                                                   shipment_line_no_    => shipment_line_no_,
+                                                   handling_unit_id_    => from_handling_unit_id_,
+                                                   qty_to_reduce_with_  => unattached_quantity_);
+
+      Shipment_Line_Handl_Unit_API.New_Or_Add_To_Existing(shipment_id_           => shipment_id_,
+                                                          shipment_line_no_      => shipment_line_no_,
+                                                          handling_unit_id_      => to_handling_unit_id_,
+                                                          quantity_to_be_added_  => unattached_quantity_);  
+
+      info$_ := Handling_Unit_API.Get_Max_Capacity_Exceeded_Info(handling_unit_id_ => to_handling_unit_id_);
+
+   END IF;
+      
+END Move_Shipment_Line_Node___;
+
+PROCEDURE Repack_Shipment_Line_Quantity___ (
+   source_ref1_             IN  VARCHAR2,
+   source_ref2_             IN  VARCHAR2,
+   source_ref3_             IN  VARCHAR2,
+   source_ref4_             IN  VARCHAR2,
+   contract_                IN  VARCHAR2,
+   part_no_                 IN  VARCHAR2,
+   location_no_             IN  VARCHAR2,
+   lot_batch_no_            IN  VARCHAR2,
+   serial_no_               IN  VARCHAR2,
+   eng_chg_level_           IN  VARCHAR2,
+   waiv_dev_rej_no_         IN  VARCHAR2,
+   activity_seq_            IN  NUMBER,
+   reserv_handling_unit_id_ IN  NUMBER,
+   configuration_id_        IN  VARCHAR2,
+   pick_list_no_            IN  VARCHAR2,
+   shipment_id_             IN  NUMBER,
+   shipment_line_no_        IN  NUMBER,
+   from_handling_unit_id_   IN  NUMBER,
+   to_handling_unit_id_     IN  NUMBER,
+   quantity_to_move_        IN  NUMBER,
+   catch_quantity_to_move_  IN  NUMBER,
+   unattached_quantity_     IN  NUMBER,
+   info$_                   OUT VARCHAR2 ) 
+IS
+   
+BEGIN
+   Shipment_Reserv_Handl_Unit_API.Change_Handling_Unit_id(source_ref1_ 	           , 
+                                                          source_ref2_ 	           , 
+                                                          source_ref3_ 	           , 
+                                                          source_ref4_ 	           , 
+                                                          contract_  	           , 
+                                                          part_no_ 	              , 
+                                                          location_no_ 	           ,
+                                                          lot_batch_no_  	        ,
+                                                          serial_no_ 	           ,
+                                                          eng_chg_level_ 	        ,
+                                                          waiv_dev_rej_no_ 	     ,
+                                                          activity_seq_  	        , 
+                                                          reserv_handling_unit_id_ , 
+                                                          configuration_id_  	     ,
+                                                          pick_list_no_  	        ,
+                                                          shipment_id_ 	           ,
+                                                          shipment_line_no_  	     ,
+                                                          from_handling_unit_id_ 	,
+                                                          to_handling_unit_id_      ,
+                                                          quantity_to_move_  	      ,
+                                                          catch_quantity_to_move_ );
+                                                          
+   IF unattached_quantity_ != 0 THEN
+      
+      Shipment_Line_Handl_Unit_API.Reduce_Quantity(shipment_id_         => shipment_id_,
+                                                   shipment_line_no_    => shipment_line_no_,
+                                                   handling_unit_id_    => from_handling_unit_id_,
+                                                   qty_to_reduce_with_  => unattached_quantity_);
+                                                   
+      Shipment_Line_Handl_Unit_API.New_Or_Add_To_Existing(shipment_id_           => shipment_id_,
+                                                          shipment_line_no_      => shipment_line_no_,
+                                                          handling_unit_id_      => to_handling_unit_id_,
+                                                          quantity_to_be_added_  => unattached_quantity_);    
+                                                          
+      info$_ := Handling_Unit_API.Get_Max_Capacity_Exceeded_Info(handling_unit_id_ => to_handling_unit_id_);
+      
+   END IF;   
+END Repack_Shipment_Line_Quantity___;
+
+-- ToDo this method is not used (SCUXXW4-17085).
+PROCEDURE Repack_Reservation_Quantity___ (
+   source_ref1_             IN  VARCHAR2,
+   source_ref2_             IN  VARCHAR2,
+   source_ref3_             IN  VARCHAR2,
+   source_ref4_             IN  VARCHAR2,
+   contract_                IN  VARCHAR2,
+   part_no_                 IN  VARCHAR2,
+   location_no_             IN  VARCHAR2,
+   lot_batch_no_            IN  VARCHAR2,
+   serial_no_               IN  VARCHAR2,
+   eng_chg_level_           IN  VARCHAR2,
+   waiv_dev_rej_no_         IN  VARCHAR2,
+   activity_seq_            IN  NUMBER,
+   reserv_handling_unit_id_ IN  NUMBER,
+   configuration_id_        IN  VARCHAR2,
+   pick_list_no_            IN  VARCHAR2,
+   shipment_id_             IN  NUMBER,
+   shipment_line_no_        IN  NUMBER,
+   from_handling_unit_id_   IN  NUMBER,
+   to_handling_unit_id_     IN  NUMBER,
+   quantity_to_move_        IN  NUMBER,
+   catch_quantity_to_move_  IN  NUMBER,
+   info$_                   OUT VARCHAR2 ) 
+IS
+   
+BEGIN
+   Shipment_Reserv_Handl_Unit_API.Change_Handling_Unit_id(source_ref1_ 	           , 
+                                                          source_ref2_ 	           , 
+                                                          source_ref3_ 	           , 
+                                                          source_ref4_ 	           , 
+                                                          contract_  	           , 
+                                                          part_no_ 	              , 
+                                                          location_no_ 	           ,
+                                                          lot_batch_no_  	        ,
+                                                          serial_no_ 	           ,
+                                                          eng_chg_level_ 	        ,
+                                                          waiv_dev_rej_no_ 	     ,
+                                                          activity_seq_  	        , 
+                                                          reserv_handling_unit_id_ , 
+                                                          configuration_id_  	     ,
+                                                          pick_list_no_  	        ,
+                                                          shipment_id_ 	           ,
+                                                          shipment_line_no_  	     ,
+                                                          from_handling_unit_id_ 	,
+                                                          to_handling_unit_id_      ,
+                                                          quantity_to_move_  	      ,
+                                                          catch_quantity_to_move_ );
+                                                          
+   info$_ := Handling_Unit_API.Get_Max_Capacity_Exceeded_Info(to_handling_unit_id_);
+   
+END Repack_Reservation_Quantity___;
+
+FUNCTION Add_Reservation_To_Handling_Unit___ (
+	shipment_id_                   IN  NUMBER,
+	handling_unit_id_              IN  NUMBER,
+	attached_line_list_            IN  VARCHAR2,
+	remainning_qty_to_attach_list_ IN  VARCHAR2,
+	info$_                         OUT VARCHAR2) RETURN Attach_Reservation_Result_Structure_Rec
+IS
+   TYPE Connected_Line_Rec IS RECORD(shipment_line_no NUMBER, attached_qty NUMBER, qty_to_attach NUMBER);
+   TYPE Connected_Line_Tab IS TABLE OF Connected_Line_Rec INDEX BY PLS_INTEGER;
+   connected_line_list_       Connected_Line_Tab;
+   
+   quantity_list_             json_array_t := json_array_t.parse(remainning_qty_to_attach_list_);
+   current_selection_         VARCHAR2(4000);
+   shipment_line_no_          NUMBER;
+   qty_to_attach_             NUMBER;
+   counter_                   NUMBER;
+   temp_connected_line_list_  json_array_t := json_array_t.parse(attached_line_list_);
+   
+   shipment_line_rec_        Shipment_Line_API.Public_Rec;
+   attr_for_identify_        VARCHAR2(4000);
+   attr_for_warnning_        VARCHAR2(4000);
+   remaining_parcel_qty_in_inv_uom_ NUMBER;
+   reservation_line_count_          NUMBER;
+   line_attached_qty_               NUMBER;
+   quantity_to_add_                 NUMBER;
+   quantity_to_reduce_              NUMBER;
+   info_                            VARCHAR2(32000);
+   attach_reservation_result_       Attach_Reservation_Result_Structure_Rec;
+BEGIN
+   Shipment_Initial_Check___(shipment_id_);
+   Handling_Unit_Extended_Initial_Check___(handling_unit_id_);
+   
+   IF attached_line_list_ IS NOT NULL THEN
+      -- This loop tokanize the shipment line with connected quantity which connect to handling unit through Connect Parts to Handling Unit Dialog.
+      FOR count_ IN 0..temp_connected_line_list_.get_size - 1 LOOP
+         counter_ := connected_line_list_.COUNT + 1;
+         current_selection_ := temp_connected_line_list_.get_string(count_);
+         connected_line_list_(counter_).shipment_line_no := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'SHIPMENT_LINE_NO'));
+         connected_line_list_(counter_).attached_qty     := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'QUANTITY'));
+      END LOOP;
+
+      -- This loop tokanize the original shipment line which initite to connect to handling unit with desiered quantities filled in to the table for used  for Attach Reservation.
+      FOR count_ IN 0 .. quantity_list_.get_size - 1 LOOP
+         current_selection_ := quantity_list_.get_string(count_);
+         shipment_line_no_ := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'SHIPMENT_LINE_NO'));
+         qty_to_attach_    := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'REMAINING_QTY_TO_ATTACH'));
+         FOR count_ IN connected_line_list_.FIRST..connected_line_list_.LAST LOOP
+            IF connected_line_list_(count_).shipment_line_no = shipment_line_no_ THEN
+               connected_line_list_(count_).qty_to_attach := qty_to_attach_;
+               EXIT;
+            END IF;
+         END LOOP;
+      END LOOP;
+      
+      Client_SYS.Clear_Attr(attr_for_identify_);
+      Client_SYS.Clear_Attr(attr_for_warnning_);
+      FOR count_ IN connected_line_list_.FIRST..connected_line_list_.LAST LOOP
+         
+         shipment_line_rec_ := Shipment_Line_API.Get(shipment_id_, connected_line_list_(count_).shipment_line_no);
+         remaining_parcel_qty_in_inv_uom_ := connected_line_list_(count_).qty_to_attach * shipment_line_rec_.conv_factor /shipment_line_rec_.inverted_conv_factor;
+         reservation_line_count_ := Shipment_Reserv_Handl_Unit_API.Get_Number_Of_Lines(shipment_id_, shipment_line_rec_.source_ref1, NVL(shipment_line_rec_.source_ref2, '*'), NVL(shipment_line_rec_.source_ref3, '*'), NVL(shipment_line_rec_.source_ref4, '*'), shipment_line_rec_.source_ref_type);
+         line_attached_qty_      := Shipment_Reserv_Handl_Unit_API.Get_Line_Attached_Qty(shipment_line_rec_.source_ref1, NVL(shipment_line_rec_.source_ref2, '*'), NVL(shipment_line_rec_.source_ref3, '*'), NVL(shipment_line_rec_.source_ref4, '*'), shipment_id_, connected_line_list_(count_).shipment_line_no, NULL);
+         -- This condition filter the attached shipmentline which should flow through the Attach Reservation Dialog for user involvement.
+         IF ( connected_line_list_(count_).qty_to_attach != connected_line_list_(count_).attached_qty AND reservation_line_count_ > 1) OR
+              Part_Catalog_API.Get_Catch_Unit_Enabled_Db(shipment_line_rec_.source_part_no) ='TRUE' OR
+              ((shipment_line_rec_.qty_assigned != shipment_line_rec_.inventory_qty) AND (remaining_parcel_qty_in_inv_uom_ != (shipment_line_rec_.qty_assigned - line_attached_qty_) AND reservation_line_count_ >= 1))THEN
+              attr_for_identify_ := CONCAT(attr_for_identify_, REPLACE(REPLACE('"SHIPMENT_LINE_NO=:P1^QUANTITY=:P2^",', ':P1', connected_line_list_(count_).shipment_line_no), ':P2', connected_line_list_(count_).attached_qty));
+         ELSIF reservation_line_count_ > 0 THEN
+            IF (connected_line_list_(count_).qty_to_attach != connected_line_list_(count_).attached_qty) THEN
+               quantity_to_add_ := connected_line_list_(count_).attached_qty * shipment_line_rec_.conv_factor /shipment_line_rec_.inverted_conv_factor;
+               quantity_to_reduce_ := connected_line_list_(count_).attached_qty;
+            ELSE
+               quantity_to_add_ := 0;
+               quantity_to_reduce_ := connected_line_list_(count_).attached_qty;
+            END IF;
+            @ApproveTransactionStatement(2019-04-17, sballk)
+            SAVEPOINT before_add_reservation;
+            BEGIN
+               -- This method does connect the reservations in to the Handling unit.
+               Shipment_Reserv_Handl_Unit_API.Add_Reservations_To_Handl_Unit(info_, shipment_line_rec_.source_ref1, NVL(shipment_line_rec_.source_ref2, '*'), NVL(shipment_line_rec_.source_ref3, '*'), NVL(shipment_line_rec_.source_ref4, '*'), shipment_line_rec_.source_ref_type,
+                                                                             shipment_id_, connected_line_list_(count_).shipment_line_no, handling_unit_id_, quantity_to_add_);
+            EXCEPTION
+               WHEN OTHERS THEN
+                  @ApproveTransactionStatement(2019-04-17, sballk)
+                  ROLLBACK TO before_add_reservation;
+                  -- This information gathered to get user input to roleback the attached quntities when Attach Reservation functionality fails.
+                  attr_for_warnning_ := CONCAT(attr_for_warnning_, REPLACE(REPLACE('"SHIPMENT_LINE_NO=:P1^QUANTITY=:P2^",', ':P1', connected_line_list_(count_).shipment_line_no), ':P2', connected_line_list_(count_).attached_qty));
+            END;
+         END IF;
+         info$_ := info$_ || info_;
+      END LOOP;
+      
+      IF attr_for_identify_ IS NOT NULL THEN
+         attach_reservation_result_.identify_parts_attr := CONCAT(CONCAT('[', SUBSTR(attr_for_identify_, 1, LENGTH(attr_for_identify_) -1 )), ']');
+      END IF;
+      IF attr_for_warnning_ IS NOT NULL THEN
+         attach_reservation_result_.reservation_warnning_attr := CONCAT(CONCAT('[', SUBSTR(attr_for_warnning_, 1, LENGTH(attr_for_warnning_) -1 )), ']');
+      END IF;
+      IF info$_ IS NOT NULL THEN
+         info$_ := Remove_Duplicate_Info___(info$_);
+      END IF;
+   END IF;
+   RETURN attach_reservation_result_;
+END Add_Reservation_To_Handling_Unit___;
+
+FUNCTION Remove_Duplicate_Info___(
+   info_ IN VARCHAR2) RETURN VARCHAR2
+IS
+   message_list_          Utility_SYS.STRING_TABLE;
+   distinct_message_list_ Utility_SYS.STRING_TABLE;
+   message_count_         NUMBER;
+   info$_                 VARCHAR2(32000);
+
+   CURSOR get_distinct_info IS
+      SELECT DISTINCT *
+      FROM   TABLE(message_list_);
+BEGIN
+   Utility_SYS.Tokenize(info_, Client_SYS.record_separator_, message_list_, message_count_);
+   IF message_list_.COUNT > 0 THEN
+      OPEN get_distinct_info;
+      FETCH get_distinct_info BULK COLLECT INTO distinct_message_list_;
+      CLOSE get_distinct_info;
+      IF distinct_message_list_.count > 0 THEN
+         FOR count_ IN distinct_message_list_.FIRST..distinct_message_list_.LAST LOOP
+            info$_ := CONCAT(CONCAT(info$_, distinct_message_list_(count_)), Client_SYS.record_separator_);
+         END LOOP;
+      END IF;
+   END IF;
+   RETURN info$_;
+END Remove_Duplicate_Info___;
+
+
+-- This method Disconnect the parts connected to the Handling unit through Connect Part to Handling Unit Dialog when user decide not to connect.
+PROCEDURE Remove_Connected_Parts___ (
+	shipment_id_             IN NUMBER,
+	handling_unit_id_        IN NUMBER,
+	shipment_line_to_remove_ IN VARCHAR2)
+IS
+   shipment_line_to_remove_list_ json_array_t := json_array_t.parse(shipment_line_to_remove_);
+   current_selection_            VARCHAR2(4000);
+   shipment_line_no_ NUMBER;
+   quantity_         NUMBER;
+BEGIN
+   Shipment_Initial_Check___(shipment_id_);
+   Handling_Unit_Extended_Initial_Check___(handling_unit_id_);
+   
+	FOR count_ IN 0..shipment_line_to_remove_list_.get_size - 1 LOOP
+      current_selection_ := shipment_line_to_remove_list_.get_string(count_);
+      shipment_line_no_  := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'SHIPMENT_LINE_NO'));
+      quantity_          := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'QUANTITY'));
+
+      Shipment_Line_Handl_Unit_API.Reduce_Quantity(shipment_id_, shipment_line_no_, handling_unit_id_, quantity_);
+   END LOOP;
+END Remove_Connected_Parts___;
+
+-- This method tokanize the stringified shipment line in to a structure whcih can use to initiate the Attach Reservation Dialog.
+FUNCTION Get_Shipment_Line_Data___ (
+	selection_ IN VARCHAR2) RETURN Shipment_Line_Hnadling_Unit_Array_Structure_Rec
+IS
+   shipment_line_list_  json_array_t := json_array_t.parse(selection_);
+   result_rec_          Shipment_Line_Hnadling_Unit_Array_Structure_Rec;
+   current_selection_   VARCHAR2(4000);
+   shipment_line_no_    NUMBER;
+   quantity_            NUMBER;
+BEGIN
+   FOR count_ IN 0..shipment_line_list_.get_size - 1 LOOP
+      current_selection_ := shipment_line_list_.get_string(count_);
+      IF result_rec_.shipment_id IS NULL THEN
+         result_rec_.shipment_id := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'SHIPMENT_ID'));
+         result_rec_.handling_unit_id := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'HANDLING_UNIT_ID'));
+      END IF;
+      shipment_line_no_  := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'SHIPMENT_LINE_NO'));
+      quantity_          := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'QUANTITY'));
+      result_rec_.shipment_line_data := CONCAT(result_rec_.shipment_line_data, REPLACE(REPLACE('"SHIPMENT_LINE_NO=:P1^QUANTITY=:P2^",', ':P1', shipment_line_no_), ':P2', quantity_));
+      
+   END LOOP;
+   IF result_rec_.shipment_line_data IS NOT NULL THEN
+      result_rec_.shipment_line_data := CONCAT(CONCAT('[', SUBSTR(result_rec_.shipment_line_data, 1, LENGTH(result_rec_.shipment_line_data) -1 )), ']');
+   END IF;
+   RETURN result_rec_;
+END Get_Shipment_Line_Data___;
+
+FUNCTION Get_Shipment_Line_Data___(
+   shipment_line_no_ IN NUMBER,
+   quantity_         IN NUMBER )  RETURN Shipment_Line_Hnadling_Unit_Array_Structure_Rec
+IS
+   result_rec_       Shipment_Line_Hnadling_Unit_Array_Structure_Rec;
+BEGIN
+   result_rec_.shipment_line_data := REPLACE(REPLACE('"SHIPMENT_LINE_NO=:P1^QUANTITY=:P2^",', ':P1', shipment_line_no_), ':P2', quantity_);
+   result_rec_.shipment_line_data := CONCAT(CONCAT('[', SUBSTR(result_rec_.shipment_line_data, 1, LENGTH(result_rec_.shipment_line_data) -1 )), ']');
+   RETURN result_rec_;
+END Get_Shipment_Line_Data___;
+
+@Override
+PROCEDURE CRUD_Update___ (
+   etag_   IN OUT VARCHAR2,
+   key_    IN OUT Handling_Unit_Key,
+   attr_   IN OUT VARCHAR2,
+   info_   OUT VARCHAR2,
+   action_ IN  VARCHAR2 )
+IS
+   old_handling_unit_rec_   Handling_Unit_API.Public_Rec;
+   new_handling_unit_rec_   Handling_Unit_API.Public_Rec;
+   post_action_info_        VARCHAR2(2000); 
+BEGIN
+   old_handling_unit_rec_ := Handling_Unit_API.Get(key_.handling_unit_id);
+   
+   super(etag_, key_, attr_, info_, action_);
+   
+   new_handling_unit_rec_ := Handling_Unit_API.Get(key_.handling_unit_id);
+   IF (old_handling_unit_rec_.manual_gross_weight !=  new_handling_unit_rec_.manual_gross_weight) OR
+      (old_handling_unit_rec_.manual_volume       !=  new_handling_unit_rec_.manual_volume) THEN
+      post_action_info_ := Handling_Unit_API.Get_Max_Capacity_Exceeded_Info(key_.handling_unit_id);
+   END IF;   
+   
+   info_ := info_|| post_action_info_;
+END CRUD_Update___;
+
+PROCEDURE Refresh_Handling_Unit_Node___
+IS
+   
+BEGIN
+   NULL;
+END Refresh_Handling_Unit_Node___;
+
+PROCEDURE Refresh_Handling_Unit___
+IS
+   
+BEGIN
+   NULL;
+END Refresh_Handling_Unit___;
+
+PROCEDURE Refresh_Handling_Unit_History___
+IS
+   
+BEGIN
+   NULL;
+END Refresh_Handling_Unit_History___;
+
+PROCEDURE Refresh_Accessories_Node___
+IS
+   
+BEGIN
+   NULL;
+END Refresh_Accessories_Node___;
+
+PROCEDURE Refresh_Handling_Unit_Node_With_Shipment___
+IS
+   
+BEGIN
+   NULL;
+END Refresh_Handling_Unit_Node_With_Shipment___;
+
+
+PROCEDURE Disconnect_Empty_Handling_Unit___ (
+	key_ IN Shipment_Handling_Unit_With_History_Key)
+IS
+BEGIN
+	Disconnect_Empty_Handling_Unit___(key_.shipment_id, key_.handling_unit_id);
+END Disconnect_Empty_Handling_Unit___;
+
+
+PROCEDURE Disconnect_Empty_Handling_Unit___ (
+	key_ IN Shipment_Key)
+IS
+BEGIN
+	Disconnect_Empty_Handling_Unit___(key_.shipment_id, NULL);
+END Disconnect_Empty_Handling_Unit___;
+
+
+PROCEDURE Create_Sscc___ (
+	key_ IN Handling_Unit_Key)
+IS
+BEGIN
+	Create_Sscc___(key_.handling_unit_id);
+END Create_Sscc___;
+
+
+PROCEDURE Create_Sscc___ (
+	key_ IN Handling_Unit_History_Key)
+IS
+BEGIN
+	Create_Sscc___(key_.handling_unit_id);
+END Create_Sscc___;
+
+
+FUNCTION Generate_Shipment_Hu_For_Navigate___ (
+	full_selection_ IN VARCHAR2) RETURN VARCHAR2
+IS
+   selection_           VARCHAR2(32000) := CONCAT(full_selection_, ';');
+   current_selection_   VARCHAR2(32000);
+   shipment_id_list_    VARCHAR2(32000);
+BEGIN
+   WHILE (INSTR(selection_, ';') > 0) LOOP
+      current_selection_  := substr(selection_, 0, INSTR(selection_, ';'));
+      shipment_id_list_ := CONCAT(CONCAT(shipment_id_list_, Client_SYS.Get_Key_Reference_Value(current_selection_, 'HANDLING_UNIT_ID')), ';');
+      selection_ := substr(selection_, INSTR(selection_, ';')+1); 
+   END LOOP;
+   RETURN SUBSTR(shipment_id_list_, 1, (length(shipment_id_list_)-1));
+END Generate_Shipment_Hu_For_Navigate___;
+
+

@@ -1,0 +1,261 @@
+----------------------------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  -----------------------------------------------------------------------------------
+-- 2019-05-21  DaZase  SCUXXW4-19701, Added initialcheck to all unbounded actions.
+-- 2019-04-26  fandse  SCUXXW4-18710, Added ludependencies for to refresh project related fields.
+-- 2018-03-14  ChFolk  SCUXXW4-17203, Added dynamic dependency where necessary.
+-- 2018-10-10  ChFolk  SCUXXW4-5846, Included from dlgTransferHuToProjectInventory.
+----------------------------------------------------------------------------------------------------------
+fragment TransferHandlingUnitInStockToProjectInventoryDialog;
+component INVENT;
+layer Core;
+description "Use this dialog box to transfer the handling units to project inventory. You can transfer the handling units from standard inventory or from one project inventory to another.
+             You can also transfer the handling units between activities of the same project.";
+
+@DynamicComponentDependency PROJ
+include fragment ProjectLovSelector;
+include fragment HandlingUnitExtendedInitialCheck;
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+--------------------------------- COMMANDS ----------------------------------
+
+--------------------------------- COMMANDS ----------------------------------
+command TransferHuToProjInitCommand for TransferHuToProjectInventoryStructure {
+   execute {
+      set ReportEarnedValues = true;
+   }
+}
+---------------------------------- GROUPS -----------------------------------
+group TransferHuToProjectInventoryGroup for TransferHuToProjectInventoryStructure {
+   label = "Transfer to";
+   @DynamicComponentDependency PROJ
+   lov ProgramIdRef with ReferenceProjectProgramGlobalSelector using GetProgramIds(Company) {
+      label = "Program";
+      description = ProgramIdRef.Description;
+      editable = [true];
+   }
+   @DynamicComponentDependency PROJ
+   lov ProjectIdRef with ReferenceProjectLovSelector using GetProjectsHu(Company, ProgramId) {
+      label = "Project";
+      description = ProjectIdRef.Name;
+      validate command {
+         variable DummyNumber {
+            type = Number;
+         }
+         execute {
+            call GetProgramIdHu(ProjectId) into ProgramId;
+
+            if [SubProjectId != null] {
+               set SubProjectId = null;
+            }
+            if [ActivitySeq != null] {
+               set ActivitySeq = DummyNumber;
+            }
+            if [ActivityNo != null] {
+               set ActivityNo = null;
+            }
+         }
+      }
+   }
+   @DynamicComponentDependency PROJ
+   lov SubProjectIdRef with ReferenceSubProjectSelector using GetSubProjectHu(ProjectId) {
+      label = "Sub Project";
+      description = SubProjectIdRef.Description;
+      validate command {
+         variable DummyNumber {
+            type = Number;
+         }
+         execute {
+            set ProjectId = SubProjectIdRef.ProjectId;
+            if [ActivitySeq != null] {
+               set ActivitySeq = DummyNumber;
+            }
+         }
+      }
+   }
+   @DynamicComponentDependency PROJ
+   lov ActivityNoRef with ReferenceActivitySelector using GetActivityNoHu(ProjectId, SubProjectId) {
+      label = "Activity";
+      description = ActivityNoRef.Description;
+      validate command {
+         variable DummyNumber {
+            type = Number;
+         }
+         execute {
+            if [ActivityNo = null] {
+               set ActivitySeq = DummyNumber;
+            }
+            else {
+               call GetProgramIdHu(ActivityNoRef.ProjectId) into ProgramId;
+               set ProjectId = ActivityNoRef.ProjectId;
+               set SubProjectId = ActivityNoRef.SubProjectId;
+               set ActivitySeq = ActivityNoRef.ActivitySeq;
+               set ActivityNo = ActivityNoRef.ActivityNo;
+            }
+
+         }
+      }
+   }
+   @DynamicComponentDependency PROJ
+   lov ActivitySeqRef with ReferenceActivitySelector using GetActivitySeqHu(ProjectId, SubProjectId, ActivityNo) {
+      label = "Activity Sequence";
+      description = ActivitySeqRef.Description;
+      validate command {
+         execute {
+            if [ActivitySeq = null] {
+               set ActivityNo = null;
+            }
+            else {
+               call GetProgramIdHu(ActivitySeqRef.ProjectId) into ProgramId;
+               set ProjectId = ActivitySeqRef.ProjectId;
+               set SubProjectId = ActivitySeqRef.SubProjectId;
+               set ActivityNo = ActivitySeqRef.ActivityNo;
+            }
+
+         }
+      }
+   }
+}
+
+group TransferInformationGroupHU for TransferHuToProjectInventoryStructure {
+   label = "Transfer Information";
+   field Note;
+   field ReportEarnedValues;
+}
+
+---------------------------------- DIALOGS ----------------------------------
+dialog TransferHandlingUnitInStockToProjectInventoryDialog for TransferHuToProjectInventoryStructure {
+   label = "Transfer to Project Inventory";
+   input(SelectedHandlingUnits, Company) {
+      command TransferHuToProjInitCommand;
+   }
+   group TransferHuToProjectInventoryGroup;
+   group TransferInformationGroupHU;
+   command Ok {
+      enabled = [ProjectId != null and SubProjectId != null and ActivitySeq != null];
+      variable ReportEarnedValuesVar {
+         type = Text;
+      }
+      execute {
+         if [ReportEarnedValues] {
+            set ReportEarnedValuesVar = "TRUE";
+         }
+         else {
+            set ReportEarnedValuesVar = "FALSE";
+         }
+         call TransferHuToProjectInventory(SelectedHandlingUnits, ActivitySeq, Note, ReportEarnedValuesVar);
+         exit OK;
+      }
+   }
+   command Cancel;
+}
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+---------------------------------- ACTIONS ----------------------------------
+action TransferHuToProjectInventory {
+   initialcheck implementation;
+   parameter SelectedHandlingUnits Text;
+   parameter ActivitySeq Number;
+   parameter Note Text;
+   parameter ReportEarnedValues Text;
+   ludependencies = HandlingUnit, InventoryPartInStock;
+}
+
+--------------------------------- FUNCTIONS ---------------------------------
+@DynamicComponentDependency PROJ
+function GetProgramIdHu Text {
+   parameter ProjectId Text;
+}
+
+@DynamicComponentDependency PROJ
+function GetProgramIds List < Entity(ProjectProgram) > {
+   parameter Company Text;
+   where = "(COMPANY = :Company OR :Company IS NULL)";
+}
+@DynamicComponentDependency PROJ
+function GetProjectsHu List < Entity(ProjectLov) > {
+   parameter Company Text;
+   parameter ProgramId Text;
+   where = "(PROGRAM_ID = :ProgramId OR :ProgramId IS NULL)
+      AND   (COMPANY = :Company OR :Company IS NULL)
+      AND   (OBJSTATE IN ('Approved','Started'))";
+}
+@DynamicComponentDependency PROJ
+function GetSubProjectHu List < Entity(SubProject) > {
+   parameter ProjectId Text;
+   where = "(PROJECT_ID = :ProjectId OR :ProjectId IS NULL)";
+}
+@DynamicComponentDependency PROJ
+function GetActivitySeqHu List < Entity(Activity) > {
+   parameter ProjectId Text;
+   parameter SubProjectId Text;
+   parameter ActivityNo Text;
+   where = "(PROJECT_ID = :ProjectId OR :ProjectId IS NULL)
+      AND   (SUB_PROJECT_ID = :SubProjectId OR :SubProjectId IS NULL)
+      AND   (ACTIVITY_NO = :ActivityNo OR :ActivityNo IS NULL)
+      AND   (OBJSTATE = 'Released')";
+}
+@DynamicComponentDependency PROJ
+function GetActivityNoHu List < Entity(Activity) > {
+   parameter ProjectId Text;
+   parameter SubProjectId Text;
+   where = "(PROJECT_ID = :ProjectId OR :ProjectId IS NULL)
+      AND   (SUB_PROJECT_ID = :SubProjectId OR :SubProjectId IS NULL)
+      AND   (OBJSTATE = 'Released')";
+
+}
+
+-------------------------------- STRUCTURES ---------------------------------
+structure TransferHuToProjectInventoryStructure {
+   attribute ProgramId Text {
+      label = "Program ID";
+      maxlength = 2000;
+      format = uppercase;
+   }
+   attribute ProjectId Text {
+      label = "Project ID ";
+      maxlength = 10;
+      format = uppercase;
+      required = [true];
+   }
+   attribute SubProjectId Text {
+      label = "Sub Project ID ";
+      maxlength = 10;
+      format = uppercase;
+      required = [true];
+   }
+   attribute ActivityNo Text {
+      label = "Activity ID ";
+      maxlength = 10;
+      format = uppercase;
+      required = [true];
+   }
+   attribute ActivitySeq Number {
+      label = "Activity Sequence ";
+      required = [true];
+   }
+   attribute Note Text {
+      label = "Notes";
+      maxlength = 25;
+   }
+   attribute ReportEarnedValues Boolean("TRUE", "FALSE") {
+      label = "Report Earned Value";
+      required = [true];
+   }
+   attribute SelectedHandlingUnits Text {
+      label = "";
+   }
+   attribute Company Text {
+      label = "Company";
+   }
+   @DynamicComponentDependency PROJ
+   reference ProgramIdRef(ProgramId) to ProjectProgramGlobal(ProgramId);
+   @DynamicComponentDependency PROJ
+   reference ProjectIdRef(ProjectId) to ProjectLov(ProjectId);
+   @DynamicComponentDependency PROJ
+   reference SubProjectIdRef(ProjectId, SubProjectId) to SubProject(ProjectId, SubProjectId);
+   @DynamicComponentDependency PROJ
+   reference ActivitySeqRef(ActivitySeq) to Activity(ActivitySeq);
+   @DynamicComponentDependency PROJ
+   reference ActivityNoRef(ActivitySeq, ActivityNo) to Activity(ActivitySeq, ActivityNo);
+}

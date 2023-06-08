@@ -1,0 +1,554 @@
+--------------------------------------------------------------------------------------------------------
+-- Date        Sign     History
+-- ----------  ------   --------------------------------------------------------------------------------
+-- 2022-02-01  PumJlk   SCZ-17478, Added 'Details' command in CustRefRef lov in OrderQuotationOverviewList.
+-- 2021-01-18  KiSalk   Bug 157485(SCZ-13238), Enabled search for the Name on Customer field.
+-- 2020-11-12  RavDlk   SC2020R1-11228, Handled booleans and enumerations for some attrbutes
+-- 2019-09-19  chlelk   SCXTEND-415, Field ranking was done for 40 fields.
+-- 2019-06-24  Satglk   SCUXXW4-21621, Contact Widget removed from Customer Reference.
+-- 2019-05-28  fgusse   SCUXXW4-21219, Edited LostQuotationCommand.
+-- 2019-02-05  MaIklk   SCUXX-5323,   Removed FNDAB1 condition.
+-- 2018-10-05  JeLise   SCUXXW4-13352, Added warningsenabled for SetQuotationWon and SetQuotationLost.
+-- 2018-07-24  HaPulk   SCUXXW4-8185, Added fragment CancelSalesQuotationDialog to "Cancel Quotations".
+-- 2018-05-29  JeLise   SCUXXW4-8497, Converted from dlgOrderQuotationEmailOvw using MTG Version: 1.19
+-- 2018-05-24  JeLise   SCUXXW4-1001, Converted from tbwOrderQuotationOverview using MTG Version: 1.19
+--------------------------------------------------------------------------------------------------------
+
+client SalesQuotations;
+component ORDER;
+layer Core;
+projection SalesQuotationsHandling;
+
+include fragment LostWonQuotationDialog;
+include fragment LoseWinReasonLovSelector;
+include fragment CustBillAddressLovSelector;
+include fragment CustAddressShipLovSelector;
+include fragment SalesPartAllSalesmanLovSelector;
+include fragment OrderDeliveryTermLovSelector;
+@DynamicComponentDependency PURCH
+include fragment ValidSupplierLovSelector;
+include fragment CustInfoContactLovPubSelector;
+include fragment OrderCoordinatorLovSelector;
+include fragment OutputTypeLovSelector;
+include fragment MpccomPhraseTextLovSelector;
+include fragment CloseSalesQuotationDialog;
+
+-- Used to "Cancel Sales Quotations"
+include fragment CancelSalesQuotationDialog;
+include fragment OrderCancelReasonLovSelector;
+-- Used to "Reject Quotation"
+include fragment RejectSalesQuotationDialog;
+
+warningsenabled = SetQuotationWon, SetQuotationLost;
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+
+navigator {
+   entry OrderQuotationOverviewNavEntry parent MpccomNavigator.SalesQuotation at index 200 {
+      label = "Sales Quotations";
+      page List;
+   }
+}
+
+-------------------------------- MAIN PAGES ---------------------------------
+
+page List using OrderQuotationSet {
+   label = "Sales Quotations";
+   startupmode = search;
+   list OrderQuotationOverviewList {
+      details = "page/SalesQuotation/Form?$filter=QuotationNo eq $[QuotationNo]";
+   }
+}
+
+-------------------------------- ASSISTANTS ---------------------------------
+
+assistant SalesQuotationEmailAssistant using SalesQuotationVirtualSet {
+   label = "E-mail Sales Quotation";
+   input(Selection);
+
+   init command {
+      execute {
+         set SelectionList = Selection;
+      }
+   }
+   steps {
+      step {
+         list SalesQuotationEmailList(SalesQuotationEmailArray);
+      }
+      final step {
+      }
+   }
+   finish command {
+      execute {
+         call EmailSalesQuotation(Selection);
+         exit OK;
+      }
+   }
+}
+
+--------------------------------- COMMANDS ----------------------------------
+command CancelQuotationCommand for OrderQuotation {
+   label = "Cancel Quotation";
+   mode = SelectedRecords;
+   enabled = [substring(Condition, 0, 1) != "*"];
+
+   variable CancelReasonVar;
+   bulkexecute {
+      dialog CancelSalesQuotationDialog into(CancelReasonVar) {
+         when OK {
+            call SetCancelQuotations(component.OrderQuotationOverviewList.Selection, CancelReasonVar);
+         }
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+
+command ReleaseQuotationCommand for OrderQuotation {
+   label = "Release Quotation";
+   mode = SelectedRecords;
+   variable AmountStruct {
+      type = AmountStructure;
+   }
+   enabled = [substring(Condition, 1, 1) != "*"];
+   bulkexecute {
+      confirm("The Quotation will be released.") {
+         when OK {
+            call GetAmounts(Contract, QuotationNo, CustomerNo, Company) into AmountStruct;
+            if [AmountStruct.CustomerMinSalesAmount != null] {
+               if [AmountStruct.CustomerMinSalesAmount > AmountStruct.TotalValue] {
+                  confirm("The minimum sales amount for customer ${CustomerNo} is ${AmountStruct.CustomerMinSalesAmount} ${AmountStruct.CurrencyCode}.") {
+                     when CANCEL {
+                        exit;
+                     }
+                     when OK {
+                        bulkcall Release();
+                     }
+                  }
+               }
+            }
+            else {
+               bulkcall Release();
+            }
+         }
+      }
+   }
+}
+
+command RejectQuotationCommand for OrderQuotation {
+   label = "Reject Quotation";
+   enabled = [substring(Condition, 7, 1) != "*"];
+   variable RejectedNoteVar {
+      type = Text;
+   }
+   execute {
+      dialog OrderQuotationRejectDialog into(RejectedNoteVar) {
+         when OK {
+            call SetRejected(QuotationNo, RejectedNoteVar);
+         }
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+
+command CloseQuotationCommand for OrderQuotation {
+   label = "Close Quotation";
+   mode = SelectedRecords;
+   enabled = [QuotationNo != null and Objstate != "Closed" and Objstate != "Cancelled" and Objstate != "Planned" and substring(Condition, 0, 1) = "*"];
+   variable ReasonIdVar {
+      type = Text;
+   }
+   variable LostToVar {
+      type = Text;
+   }
+   variable LoseWinRejectNoteVar {
+      type = Text;
+   }
+   variable ClosedStatusVar Enumeration(LostWon);
+   execute {
+      dialog CloseQuotationDialog(QuotationNo, ClosedStatus, ReasonId, ReasonDescription, LoseWinRejectNote) into(ClosedStatusVar, ReasonIdVar, LostToVar, LoseWinRejectNoteVar) {
+         when OK {
+
+            call CloseQuotation(QuotationNo, ClosedStatusVar, ReasonIdVar, LostToVar, LoseWinRejectNoteVar);
+         }
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+
+command WonQuotationCommand for OrderQuotation {
+   label = "Won Quotation";
+   enabled = [substring(Condition, 3, 1) != "*" and CustomerInfoRef.CustomerCategory != "Prospect"];
+   variable ReasonIdVar {
+      type = Text;
+   }
+   variable WonNoteVar {
+      type = Text;
+   }
+   execute {
+      dialog OrderQuotationWonDialog(QuotationNo, "", "", "") into(ReasonIdVar, WonNoteVar) {
+         when OK {
+            call SetQuotationWon(QuotationNo, ReasonIdVar, WonNoteVar);
+         }
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+
+command LostQuotationCommand for OrderQuotation {
+   label = "Lost Quotation";
+   enabled = [substring(Condition, 2, 1) != "*"];
+   variable ReasonIdVar {
+      type = Text;
+   }
+   variable LostToVar {
+      type = Text;
+   }
+   variable LostNoteVar {
+      type = Text;
+   }
+   execute {
+      dialog OrderQuotationLostDialog(QuotationNo, "", "", "") into(ReasonIdVar, LostToVar, LostNoteVar) {
+         when OK {
+            call SetQuotationLost(QuotationNo, ReasonIdVar, LostToVar, LostNoteVar);
+         }
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+
+command CreateOrderfromQuotationCommand for OrderQuotation {
+   label = "Create Order";
+   enabled = [substring(Condition, 3, 1) != "*"];
+   execute {
+      if [CustomerInfoRef.CustomerCategory != "Customer"] {
+         error("You are not allowed to create a customer order. Convert prospect ${CustomerNo} to a customer.");
+         exit;
+      }
+      navigate "assistant/CreateOrderFromQuotation/Assistant?$action=SetupSourceInfo{QuotationNoStr:$[QuotationNo], ReasonIdStr:$[ReasonId], LoseWinNoteStr:$[LoseWinRejectNote], ContractStr:$[Contract]}";
+   }
+}
+
+command PrintQuotationCommand for OrderQuotation {
+   label = "Print Quotation";
+   mode = SelectedRecords;
+   variable ResultKeyVar {
+      type = Text;
+   }
+   enabled = [substring(Condition, 5, 1) != "*"];
+   bulkexecute {
+      call GetResultKeyList(Selection) into ResultKeyVar;
+      printdialog ResultKeyVar;
+   }
+}
+
+command EmailQuotationCommand for OrderQuotation {
+   label = "E-mail Quotation";
+   mode = SelectedRecords;
+   enabled = [substring(Condition, 6, 1) != "*"];
+   bulkexecute {
+      assistant SalesQuotationEmailAssistant(Selection) {
+         when OK {
+            exit OK;
+         }
+      }
+   }
+}
+
+command CopyQuotationCommand for OrderQuotation {
+   label = "Copy Quotation";
+   mode = SingleRecord;
+   enabled = [not isDirty];
+   execute {
+      navigate "assistant/CopySalesQuotation/Assistant?$action=SetupQuotationInfo{
+                QuotationNoStr:$[QuotationNo], WantedDeliveryDateDt:$[WantedDeliveryDate], RequestReceiptDateDt:$[RequestReceivedDate],
+                AnsweringDateDt:$[AnsweringDate], ExpirationDateDt:$[ExpirationDate], PriceEffectiveDateDt:$[PriceEffectivityDate]}";
+   }
+}
+
+command DocumentTextCommand for OrderQuotation {
+   label = "Document Text";
+   enabled = [NoteId != null];
+   variable Label;
+   execute {
+      set Label = " for Sales Quotation - ${QuotationNo}" {
+         translatable = true;
+      }
+      assistant DocumentText.DocumentText(NoteId, Label) {
+         when NO {
+            exit CANCEL;
+         }
+      }
+   }
+}
+
+--------------------------------- SELECTORS ---------------------------------
+
+---------------------------------- GROUPS -----------------------------------
+
+----------------------------------- LISTS -----------------------------------
+
+list OrderQuotationOverviewList for OrderQuotation {
+   field QuotationNo;
+   field RevisionNo {
+      size = Small;
+   }
+   field ContractRef {
+      size = Small;
+   }
+   badge Objstate {
+      label = "Status";
+      style = TextOnly;
+      emphasis Progress1 = [Objstate = "Planned"];
+      emphasis Progress3 = [Objstate = "Released"];
+      emphasis Progress5 = [Objstate = "Revised"];
+
+      emphasis StateCancelled = [Objstate = "Rejected"];
+      emphasis Progress12 = [Objstate = "Closed"];
+      emphasis StateCancelled = [Objstate = "Cancelled"];
+   }
+   lov AuthorizeCodeRef with ReferenceOrderCoordinatorLovSelector {
+      contactwidget {
+         enabled = [AuthorizeCode != null];
+         source = Person;
+      }
+   }
+   field AdditionalDiscount;
+   field CustomerQuoNo;
+   lov CustomerNoRef with ReferenceCustOrdCustomerSelector {
+      search = CustomerNo, Name;
+      contactwidget {
+         enabled = [CustomerNo != null];
+         source = Customer;
+      }
+      description = CustomerInfoRef.Name;
+   }
+   field CustomerInfoRef.CustomerCategory {
+      label = "Customer Category";
+   }
+   lov CustRefRef with ReferenceCustInfoContactLovPubSelector {
+      description = ReferenceName;
+      details = "page/Customer/AddressInfo?$filter=CustomerId eq $[CustomerNo] ";
+   }
+   field ExternalRef {
+      size = Small;
+   }
+   field CurrencyCodeRef {
+      size = Small;
+   }
+   field NoteText {
+      size = Large;
+      multiline = true;
+   }
+   field DocumentText {
+      size = Small;
+   }
+   field DateEntered;
+   field WantedDeliveryDate;
+   field QuotationDate;
+   field ExpirationDate;
+   field FollowUpDate;
+   field RequestReceivedDate;
+   field AnsweringDate;
+   field PriceEffectivityDate;
+   field QuotationProbability {
+      size = Small;
+   }
+   field QuotationNote;
+   field LanguageCodeRef {
+      size = Small;
+   }
+   @DynamicComponentDependency PURCH
+   lov VendorNoRef with ReferenceValidSupplierLovSelector {
+      size = Small;
+   }
+   lov ShipViaCodeRef with ReferenceMpccomShipViaSelector {
+      description = ShipViaCodeRef.Description;
+   }
+   lov DeliveryTermsRef with ReferenceOrderDeliveryTermLovSelector {
+      description = DeliveryTermsRef.Description;
+   }
+   field DelTermsLocation;
+   field ForwardAgentIdRef {
+      size = Small;
+   }
+   field FreightMapIdRef {
+      size = Small;
+   }
+   field ZoneIdRef {
+      size = Small;
+   }
+   field FreightPriceListNoRef {
+      size = Small;
+   }
+   field ApplyFixDelivFreight {
+      size = Small;
+      searchable = false;
+   }
+   field FixDelivFreight {
+      size = Small;
+   }
+   field BaseCurrency {
+      size = Small;
+   }
+   field AgreementIdRef {
+      size = Small;
+   }
+   field PickingLeadtime {
+      size = Small;
+   }
+   field DeliveryLeadtime {
+      size = Small;
+   }
+   lov ExtTransportCalendarIdRef with ReferenceWorkTimeCalendarSelector {
+      description = WorkTimeCalendarRef.Description;
+      label = "External Transport Calendar";
+   }
+   lov PayTermIdRef with ReferencePaymentTermSelector {
+      description = PaymentTermRef.Description;
+   }
+   field MarketCodeRef {
+      size = Small;
+   }
+   field DistrictCodeRef {
+      size = Small;
+   }
+   field RegionCodeRef {
+      size = Small;
+   }
+   lov SalesmanCodeRef with ReferenceSalesPartAllSalesmanLovSelector {
+      contactwidget {
+         enabled = [SalesmanCode != null];
+         source = Person;
+      }
+   }
+   lov ShipAddrNoRef with ReferenceCustAddressShipLovSelector;
+   field SingleOccAddrFlag {
+      size = Small;
+   }
+   lov BillAddrNoRef with ReferenceCustBillAddressLovSelector;
+   field CalcDiscFlag {
+      size = Small;
+   }
+   field Printed {
+      enumerationtrue = "Printed";
+      enumerationfalse = "NotPrinted";
+      truelabel = "Yes";
+      falselabel = "No";
+      size = Small;
+   }
+   field UsePriceInclTax {
+      size = Small;
+   }
+   field TaxLiability {
+      size = Small;
+   }
+   field LabelNote;
+   field LostToRef {
+      size = Small;
+   }
+   lov ReasonIdRef with ReferenceLoseWinReasonSelector {
+      description = ReasonIdRef.ReasonDescription;
+   }
+   field LoseWinRejectNote {
+      editable = [ReasonId != null];
+   }
+   badge ClosedStatus {
+      style = TextOnly;
+      emphasis Progress12 = [ClosedStatus = "Won"];
+      emphasis StateCancelled = [ClosedStatus = "Lost"];
+   }
+   field PrintControlCodeRef {
+      size = Small;
+   }
+   lov CancelReasonRef with ReferenceOrderCancelReasonSelector {
+      editable = [Objstate = "Cancelled"];
+      description = CancellationReasonDescription;
+   }
+   field TotalNetAmtBase;
+   field TotalNetAmtCurr;
+   field AddDiscountAmtCurr;
+   field TotTaxAmtCurr;
+   field TotalGrossAmtCurr;
+   field TotalGrossinclChrgCurr;
+   field NoteId {
+      searchable = false;
+      columnvisible = [false];
+   }
+
+   fieldranking QuotationNo, RevisionNo, ContractRef, Objstate, AuthorizeCodeRef, CustomerNoRef, ExternalRef, CurrencyCodeRef, WantedDeliveryDate, QuotationDate, ExpirationDate, FollowUpDate, RequestReceivedDate, AnsweringDate, PriceEffectivityDate, QuotationProbability, LanguageCodeRef, ShipViaCodeRef, DeliveryTermsRef, ForwardAgentIdRef, PayTermIdRef, SalesmanCodeRef, ShipAddrNoRef, SingleOccAddrFlag, BillAddrNoRef, LostToRef, ReasonIdRef, LoseWinRejectNote, ClosedStatus, PrintControlCodeRef, CancelReasonRef, TotalNetAmtBase, TotalNetAmtCurr, AddDiscountAmtCurr, TotTaxAmtCurr, TotalGrossAmtCurr, TotalGrossinclChrgCurr, CalcDiscFlag, PrintedDb, UsePriceInclTax;
+   fieldorder = QuotationNo, RevisionNo, ContractRef, Objstate, AuthorizeCodeRef, CustomerNoRef, ExternalRef, CurrencyCodeRef, WantedDeliveryDate, QuotationDate, ExpirationDate, FollowUpDate, RequestReceivedDate, AnsweringDate, PriceEffectivityDate, QuotationProbability, LanguageCodeRef, ShipViaCodeRef, DeliveryTermsRef, ForwardAgentIdRef, PayTermIdRef, SalesmanCodeRef, ShipAddrNoRef, SingleOccAddrFlag, BillAddrNoRef, LostToRef, ReasonIdRef, LoseWinRejectNote, ClosedStatus, PrintControlCodeRef, CancelReasonRef, TotalNetAmtBase, TotalNetAmtCurr, AddDiscountAmtCurr, TotTaxAmtCurr, TotalGrossAmtCurr, TotalGrossinclChrgCurr, CalcDiscFlag, PrintedDb, UsePriceInclTax;
+
+   commandgroup StatusL1CmdGroup {
+
+      commandgroup StatusCmdGroup {
+         label = "Status";
+         command ReleaseQuotationCommand;
+         command RejectQuotationCommand;
+         command WonQuotationCommand;
+         command LostQuotationCommand;
+         command CancelQuotationCommand;
+         command CloseQuotationCommand;
+
+      }
+   }
+   commandgroup ShareL1CmdGroup {
+
+      commandgroup ShareCmdGroup {
+         label = "Share";
+         command PrintQuotationCommand;
+         command EmailQuotationCommand;
+      }
+   }
+
+
+   command CreateOrderfromQuotationCommand;
+   command CopyQuotationCommand;
+   command DocumentTextCommand;
+
+}
+
+list SalesQuotationEmailList for SalesQuotationEmailVirtual {
+   editmode = SingleCellEdit;
+   field QuotationNo {
+      searchable = false;
+   }
+   field CustomerNo {
+      size = Small;
+      searchable = false;
+   }
+   field CustRef {
+      size = Small;
+      searchable = false;
+   }
+   field Email {
+      searchable = false;
+   }
+}
+
+----------------------------------- CARDS -----------------------------------
+
+---------------------------------- DIALOGS ----------------------------------
+
+---------------------------------- CHARTS -----------------------------------
+
+--------------------------------- CALENDARS ---------------------------------
+
+---------------------------------- SHEETS -----------------------------------
+
+----------------------------- STATE INDICATORS ------------------------------
+
+----------------------------------- TREES -----------------------------------
+
+---------------------------------- PLUGINS ----------------------------------
+
+------------------------------- IMAGE VIEWERS -------------------------------
+

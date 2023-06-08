@@ -1,0 +1,142 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     CreateRefillOrderAssistant
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign    History
+--  ------     ------  ---------------------------------------------------------
+-- 2019-07-03  MaAuse  SCUXXW4-20846, Modified CRUD_Create___() by adding CURSOR sum_buy_qty_due.
+-- 2019-05-19  LaThlk  SCUXXW4-18796, Modified CRUD_Create___() by Increasing the size of variable selection_.
+-- 2018-09-21  RasDlk  SCUXXW4-751, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Create_Refill_Order_Virtual_Rec )
+IS   
+   refill_order_line_rec_     Refill_Order_Virtual_Rec;
+   selection_                 VARCHAR2(32000):= CONCAT(rec_.selection, ';');
+   current_selection_         VARCHAR2(3000);
+
+   CURSOR sum_buy_qty_due IS 
+      SELECT SUM(buy_qty_due)
+      FROM CUSTOMER_ORDER_LINE
+      WHERE contract     = refill_order_line_rec_.contract
+      AND   catalog_no   = refill_order_line_rec_.catalog_no
+      AND   customer_no  = refill_order_line_rec_.customer_no
+      AND   ship_addr_no = refill_order_line_rec_.addr_no
+      AND   objstate IN ('Released', 'Quoted', 'Reserved', 'Picked', 'PartiallyPicked', 'PartiallyDelivered');
+
+BEGIN
+   super(rec_);
+   WHILE (INSTR(selection_, ';') > 0) LOOP
+      current_selection_  := substr(selection_, 0, INSTR(selection_, ';'));
+      refill_order_line_rec_.objkey          := sys_guid();
+      refill_order_line_rec_.parent_objkey   := rec_.objkey;
+      refill_order_line_rec_.catalog_no      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CATALOG_NO');
+      refill_order_line_rec_.contract        := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT');
+      refill_order_line_rec_.customer_no     := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CUSTOMER_NO');
+      refill_order_line_rec_.addr_no         := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ADDR_NO');      
+      refill_order_line_rec_.name            := Cust_Ord_Customer_API.Get_Name(refill_order_line_rec_.customer_no);
+      refill_order_line_rec_.description     := Sales_Part_API.Get_Catalog_Desc(refill_order_line_rec_.contract, refill_order_line_rec_.catalog_no);
+      refill_order_line_rec_.order_id        := NVL(Message_Defaults_Per_Cust_API.Get_Order_Id(refill_order_line_rec_.contract, refill_order_line_rec_.customer_no), NVL(Site_Discom_Info_API.Get_Order_Id(refill_order_line_rec_.contract), Cust_Ord_Customer_API.Get_Order_Id(refill_order_line_rec_.customer_no)));
+      refill_order_line_rec_.authorize_code  := User_Default_API.Get_Authorize_Code;
+      refill_order_line_rec_.order_qty       := Customer_Consignment_Stock_API.Get_Order_Qty(refill_order_line_rec_.contract, refill_order_line_rec_.catalog_no, refill_order_line_rec_.customer_no, refill_order_line_rec_.addr_no);
+      IF (refill_order_line_rec_.order_id IS NULL OR refill_order_line_rec_.authorize_code IS NULL OR refill_order_line_rec_.order_qty <=0) THEN
+         refill_order_line_rec_.create_order := FALSE;
+      ELSE
+         refill_order_line_rec_.create_order := TRUE; 
+      END IF;
+      OPEN sum_buy_qty_due;
+      FETCH sum_buy_qty_due INTO refill_order_line_rec_.sum_buy_qty_due;
+      CLOSE sum_buy_qty_due;
+
+      CRUD_Create___(refill_order_line_rec_);
+      selection_ := SUBSTR(selection_, (INSTR(selection_, ';') + 1));
+   END LOOP;
+END CRUD_Create___;
+
+FUNCTION Create_Refill_Orders___ (
+   key_ IN Create_Refill_Order_Virtual_Key) RETURN VARCHAR2
+IS   
+   attr_          VARCHAR2(32000);
+   order_no_      customer_order_tab.order_no%TYPE;
+   order_info_    VARCHAR2(32000);
+BEGIN   
+   IF (Validate_Order_Creation___ (key_)) THEN
+      FOR refill_order_ IN Get_Refill_Order_Array___(key_) LOOP
+         IF (refill_order_.create_order = 1) THEN
+            Create_CO_Header___(refill_order_.contract, refill_order_.customer_no, refill_order_.addr_no, refill_order_.order_id, refill_order_.authorize_code, attr_);
+            order_no_ := Client_SYS.Get_Item_Value('ORDER_NO', attr_);
+            Create_CO_Line___(order_no_, refill_order_.catalog_no, refill_order_.order_qty);
+            IF (order_info_ IS NULL) THEN
+               order_info_ := 'Order No ' || order_no_ || ' - Site ' || refill_order_.contract || ' - Sales Part No ' || refill_order_.catalog_no || ' - Order Quantity ' || refill_order_.order_qty;
+               order_info_ := CONCAT(order_info_, ';');
+            ELSE
+               order_info_ := CONCAT(order_info_, 'Order No ' || order_no_ || ' - Site ' || refill_order_.contract || ' - Sales Part No ' || refill_order_.catalog_no || ' - Order Quantity ' || refill_order_.order_qty);
+               order_info_ := CONCAT(order_info_, ';');
+            END IF;
+         END IF;
+      END LOOP;
+   ELSE
+      NULL;
+   END IF;   
+   RETURN order_info_;
+END Create_Refill_Orders___;
+
+FUNCTION Validate_Order_Creation___ (
+   key_ IN Create_Refill_Order_Virtual_Key) RETURN BOOLEAN
+IS   
+   validate_create_orders_    BOOLEAN := TRUE;
+BEGIN
+   FOR refill_order_ IN Get_Refill_Order_Array___(key_) LOOP
+      IF (refill_order_.create_order = 1) THEN         
+         IF(refill_order_.order_id IS NULL OR refill_order_.authorize_code IS NULL OR refill_order_.order_qty IS NULL) THEN
+            validate_create_orders_ := FALSE;
+            EXIT;
+         END IF;                 
+      END IF;
+   END LOOP;
+   RETURN validate_create_orders_;
+END Validate_Order_Creation___;
+
+PROCEDURE Create_CO_Header___ (
+   contract_         IN VARCHAR2,
+   customer_no_      IN VARCHAR2,
+   addr_no_          IN VARCHAR2,
+   order_id_         IN VARCHAR2,
+   authorize_code_   IN VARCHAR2,
+   attr_            OUT VARCHAR2) 
+IS
+   info_       VARCHAR2(32000);
+BEGIN
+   Client_SYS.Add_To_Attr('CONTRACT', contract_, attr_);
+   Client_SYS.Add_To_Attr('CUSTOMER_NO', customer_no_, attr_);
+   Client_SYS.Add_To_Attr('SHIP_ADDR_NO', addr_no_, attr_);
+   Client_SYS.Add_To_Attr('ORDER_ID', order_id_, attr_);
+   Client_SYS.Add_To_Attr('AUTHORIZE_CODE', authorize_code_, attr_);
+   Customer_Order_API.New(info_, attr_);   
+END Create_CO_Header___;
+
+PROCEDURE Create_CO_Line___ (
+   order_no_         IN VARCHAR2,
+   catalog_no_       IN VARCHAR2,
+   order_qty_        IN NUMBER) 
+IS
+   info_       VARCHAR2(32000);
+   attr_       VARCHAR2(32000);
+BEGIN
+   Client_SYS.Add_To_Attr('ORDER_NO', order_no_, attr_);
+   Client_SYS.Add_To_Attr('CATALOG_NO', catalog_no_, attr_);
+   Client_SYS.Add_To_Attr('BUY_QTY_DUE', order_qty_, attr_);
+   Customer_Order_Line_API.New(info_, attr_);   
+END Create_CO_Line___;
+
+
+
+
+

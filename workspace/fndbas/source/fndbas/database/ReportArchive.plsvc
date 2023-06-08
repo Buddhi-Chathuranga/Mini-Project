@@ -1,0 +1,335 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: ReportArchive
+--  Component:    FNDBAS
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+-----------------------------------------------------------------------------
+
+layer Core;
+
+-------------------- PRIVATE DECLARATIONS -----------------------------------
+selection_sep_  CONSTANT VARCHAR2(1) := ';';
+
+FUNCTION Multiple_Documents___(
+   result_key_ IN NUMBER ) RETURN VARCHAR2
+IS
+   row_count_ NUMBER;
+   doc_id_    VARCHAR2(400);
+   
+   CURSOR Document_Count_Cur(rstl_key_ NUMBER) IS
+      SELECT count(*) FROM pdf_archive 
+      WHERE result_key= rstl_key_;
+   
+   CURSOR Document_Id(rstl_key_ NUMBER) IS
+      SELECT Id FROM pdf_archive 
+      WHERE result_key= rstl_key_;    
+BEGIN
+      OPEN Document_Count_Cur(result_key_);
+      FETCH Document_Count_Cur INTO row_count_;
+      CLOSE Document_Count_Cur;
+      IF row_count_ >1 THEN       
+         doc_id_ := 'TRUE';
+      ELSE
+         IF row_count_ = 1 THEN      
+            OPEN Document_Id(result_key_);
+               FETCH Document_Id INTO doc_id_;
+            CLOSE Document_Id;
+         ELSE
+            doc_id_ :='FALSE';         
+         END IF;
+      END IF;
+      RETURN doc_id_;
+END Multiple_Documents___;
+
+FUNCTION Get_Result_Key___(
+   print_job_id_ IN NUMBER)  RETURN VARCHAR2
+IS
+   result_key_ VARCHAR2(100);
+BEGIN
+   SELECT result_key INTO result_key_
+   FROM pdf_archive 
+   WHERE print_job_id= print_job_id_;
+   RETURN result_key_;
+END Get_Result_Key___;
+
+
+FUNCTION Get_Full_Xml___(print_job_id_ NUMBER) RETURN VARCHAR2
+  
+IS
+   rec_ Xml_Virtual_Rec;
+   full_xml_blob_ BLOB;
+   full_xml_clob_ CLOB;
+   xml_header_ CLOB;
+   xml_data_ CLOB;
+   xml_footer_ CLOB;
+   result_key_ NUMBER;
+   dest_offset_ NUMBER := 1;
+   src_offset_ NUMBER  := 1;
+   lang_context_ NUMBER := DBMS_LOB.default_lang_ctx;
+   warning_ NUMBER := DBMS_LOB.warn_inconvertible_char;
+   --Curser to fetch XML HEADER and XML FOOTER
+   CURSOR Get_Header_Footer (result_key_ NUMBER) IS
+   select XML_HEADER , XML_FOOTER
+   from XML_REPORT_ARCHIVE t 
+   where t.result_key = result_key_;
+   
+BEGIN
+   result_key_ := Print_Job_Contents_API.Get_Result_Key(print_job_id_,0);
+   IF(result_key_ IS NOT NULL) THEN
+      Archive_API.Check_Authorized(result_key_);
+      xml_data_ := xml_report_data_api.get_xml_data(result_key_);
+
+      OPEN Get_Header_Footer(result_key_);
+      FETCH Get_Header_Footer INTO xml_header_,xml_footer_;
+      CLOSE Get_Header_Footer;
+
+
+      full_xml_clob_ := xml_header_ || xml_data_ || xml_footer_;
+
+      DBMS_LOB.createtemporary(
+       lob_loc => full_xml_blob_,
+       cache   => TRUE);
+      --Convert Clob full xml to Binary
+      dbms_lob.Converttoblob(full_xml_blob_,
+                             full_xml_clob_,
+                             DBMS_lob.lobmaxsize,
+                             dest_offset_,
+                             src_offset_,
+                             DBMS_LOB.default_csid,
+                             lang_context_,
+                             warning_
+                             );
+   END IF;
+   rec_.objkey := sys_guid;
+   rec_.obj_created_by := Fnd_Session_API.Get_Fnd_User();
+   rec_.file_name := Archive_API.Get_Report_Id(result_key_)||print_job_id_||'.xml';
+   rec_.file_data := full_xml_blob_;
+   CRUD_Create___(rec_);   
+   RETURN rec_.objkey;
+END Get_Full_Xml___;
+
+
+
+PROCEDURE Restart___ (
+   print_job_id_ IN NUMBER ) 
+IS
+  result_key_ VARCHAR2(100);   
+BEGIN
+  result_key_ := Print_Job_Contents_API.Get_Result_Key(print_job_id_,0);
+  Archive_API.Check_Authorized(result_key_);    
+  Print_Job_API.Restart( print_job_id_  );
+END Restart___;
+
+PROCEDURE Change_Exp_Date___ (
+   key_ IN Archive_Key,
+   exp_date_ IN DATE)
+IS
+   
+BEGIN
+	Archive_API.Set_Expire_Date(key_.result_key, exp_date_, key_.owner);
+END Change_Exp_Date___;
+
+@Override
+PROCEDURE CRUD_Create___ (
+   rec_ IN OUT Forward_Assistant_Virtual_Rec )
+IS
+BEGIN
+   super(rec_);
+   Update_User_Group_Virtual_Rec(rec_);
+   Update_Distribution_Group_Virtual_Rec(rec_);
+END CRUD_Create___;
+
+PROCEDURE Update_User_Group_Virtual_Rec (
+   rec_ IN Forward_Assistant_Virtual_Rec )
+IS
+   key_      Forward_Assistant_Virtual_Key;
+   newrec_   User_Group_Virtual_Rec;
+   oldrec_   User_Group_Virtual_Rec;
+   line_key_ User_Group_Virtual_Key;
+   
+   CURSOR get_user_groups_ IS
+      SELECT identity,description
+      FROM fnd_user_tab;
+      
+BEGIN 
+   key_.objkey := rec_.objkey;
+   FOR line_rec_ IN Get_User_Group_Array___(key_) LOOP
+      line_key_.objkey := line_rec_.objkey;
+      oldrec_          := Get_Record___(line_key_);
+      CRUD_Delete___(oldrec_);
+   END LOOP;
+      FOR user_groups_ IN get_user_groups_ LOOP
+            newrec_.parent_objkey := rec_.objkey;
+            newrec_.objkey        := sys_guid();
+            newrec_.identity      := user_groups_.identity;
+            newrec_.description   := user_groups_.description;
+            CRUD_Create___(newrec_);
+         END LOOP;
+      END Update_User_Group_Virtual_Rec;
+      
+PROCEDURE Update_Distribution_Group_Virtual_Rec (
+   rec_ IN Forward_Assistant_Virtual_Rec )
+IS
+   key_      Forward_Assistant_Virtual_Key;
+   newrec_   Distribution_Group_Virtual_Rec;
+   oldrec_   Distribution_Group_Virtual_Rec;
+   line_key_ Distribution_Group_Virtual_Key;
+   
+   CURSOR get_distribution_groups_ IS
+      SELECT group_name,description
+      FROM distribution_group_tab;
+      
+BEGIN 
+   key_.objkey := rec_.objkey;
+   FOR line_rec_ IN Get_Distribution_Group_Array___(key_) LOOP
+      line_key_.objkey := line_rec_.objkey;
+      oldrec_          := Get_Record___(line_key_);
+      CRUD_Delete___(oldrec_);
+   END LOOP;
+      FOR distribution_groups_ IN get_distribution_groups_ LOOP
+            newrec_.parent_objkey := rec_.objkey;
+            newrec_.objkey        := sys_guid();
+            newrec_.group_name    := distribution_groups_.group_name;
+            newrec_.description   := distribution_groups_.description;
+            CRUD_Create___(newrec_);
+      END LOOP;
+END Update_Distribution_Group_Virtual_Rec;
+      
+
+PROCEDURE Update_Selected_User_Group_List___ (
+   key_ IN Forward_Assistant_Virtual_Key,
+   selected_user_group_list_ IN VARCHAR2)
+IS
+   tab_ Utility_SYS.String_Table;
+   user_group_key_ User_Group_Virtual_Key;
+   old_user_group_rec_ User_Group_Virtual_Rec;
+   new_user_group_rec_ User_Group_Virtual_Rec;
+BEGIN
+   FOR line_rec_ IN Get_User_Group_Array___(key_) LOOP
+      user_group_key_.objkey          := line_rec_.objkey;
+      new_user_group_rec_             := Get_Record___(user_group_key_);
+      old_user_group_rec_             := new_user_group_rec_;      
+      new_user_group_rec_.is_selected := NULL;
+      CRUD_Update___(old_user_group_rec_,new_user_group_rec_);
+   END LOOP;
+      
+   tab_ := Unpack_Selection_To_Tbl_Attr (selected_user_group_list_);
+   FOR i_ IN 1..tab_.COUNT LOOP
+      user_group_key_.objkey          := tab_(i_);
+      old_user_group_rec_             := Get_Record___(user_group_key_);
+      new_user_group_rec_             := old_user_group_rec_;
+      new_user_group_rec_.is_selected := TRUE;
+      CRUD_Update___(old_user_group_rec_,new_user_group_rec_);
+   END LOOP;
+END Update_Selected_User_Group_List___;
+
+FUNCTION Unpack_Selection_To_Tbl_Attr (
+   selection_        IN VARCHAR2) RETURN Utility_SYS.String_Table
+IS 
+BEGIN   
+   RETURN Unpack_Sel_To_Tbl_Attr___(selection_);
+END Unpack_Selection_To_Tbl_Attr;
+
+FUNCTION Unpack_Sel_To_Tbl_Attr___ (
+   selection_        IN VARCHAR2) RETURN Utility_SYS.String_Table
+IS 
+   string_table_        Utility_SYS.String_Table := Unpack_Selection_To_Tbl___(selection_);
+BEGIN      
+   FOR i_ IN 1..string_table_.COUNT LOOP
+      string_table_(i_) := REPLACE(string_table_(i_), Client_SYS.text_separator_, Client_SYS.record_separator_);
+      string_table_(i_) := REPLACE(string_table_(i_), '=', Client_SYS.field_separator_);      
+   END LOOP;
+   RETURN string_table_;
+END Unpack_Sel_To_Tbl_Attr___;
+
+FUNCTION Unpack_Selection_To_Tbl___ (
+   selection_        IN VARCHAR2) RETURN Utility_SYS.String_Table
+IS 
+   string_table_        Utility_SYS.String_Table;
+   cnt_                 NUMBER;
+BEGIN   
+   Utility_SYS.Tokenize(selection_, selection_sep_, string_table_, cnt_);
+   RETURN string_table_;
+END Unpack_Selection_To_Tbl___;
+
+
+PROCEDURE Update_Selected_Distribution_Group_List___ (
+   key_ IN Forward_Assistant_Virtual_Key,
+   selected_distribution_group_list_ IN VARCHAR2)
+IS
+   tab_ Utility_SYS.String_Table;
+   distribution_group_key_         Distribution_Group_Virtual_Key;
+   old_distribution_group_rec_     Distribution_Group_Virtual_Rec;
+   new_distribution_group_rec_     Distribution_Group_Virtual_Rec;
+BEGIN
+   FOR line_rec_ IN Get_Distribution_Group_Array___(key_) LOOP
+      distribution_group_key_.objkey          := line_rec_.objkey;
+      new_distribution_group_rec_             := Get_Record___(distribution_group_key_);
+      old_distribution_group_rec_             := new_distribution_group_rec_;      
+      new_distribution_group_rec_.is_selected := NULL;
+      CRUD_Update___(old_distribution_group_rec_,new_distribution_group_rec_);
+   END LOOP;
+      
+   tab_ := Unpack_Selection_To_Tbl_Attr (selected_distribution_group_list_);
+   
+   FOR i_ IN 1..tab_.COUNT LOOP
+      distribution_group_key_.objkey          := tab_(i_);
+      old_distribution_group_rec_             := Get_Record___(distribution_group_key_);
+      new_distribution_group_rec_             := old_distribution_group_rec_;
+      new_distribution_group_rec_.is_selected := TRUE;
+      CRUD_Update___(old_distribution_group_rec_,new_distribution_group_rec_);
+   END LOOP;
+END Update_Selected_Distribution_Group_List___;
+
+
+PROCEDURE Forward_Archive___ (
+   result_key_ IN NUMBER,
+   user_list_ IN VARCHAR2,
+   group_list_ IN VARCHAR2)
+IS
+   field_separator_          VARCHAR2(1) := Client_SYS.field_separator_;
+   items_user_               VARCHAR2(2000);
+   items_group_              VARCHAR2(2000);
+   from_                     NUMBER := 0;
+   to_                       NUMBER;
+   from_group_               NUMBER := 0;
+   to_group_                 NUMBER;
+   user_value_               VARCHAR2(500);
+   group_value_              VARCHAR2(500);
+   list_user_names_          VARCHAR2(2000);
+   list_group_names_         VARCHAR2(2000);
+   user_rec_                 User_Group_Virtual_Rec;
+   user_group_key_           User_Group_Virtual_Key;
+   distribution_rec_         Distribution_Group_Virtual_Rec;
+   distribution_group_key_   Distribution_Group_Virtual_Key;
+   distribution_list_        VARCHAR2(2000);
+BEGIN  
+   IF(user_list_ IS NOT NULL) THEN
+      items_user_ := user_list_ || ';';
+      WHILE (instr(items_user_,';',from_+1)> 0) LOOP
+      to_                    := instr(items_user_,';',from_+1);
+      user_value_            := substr(items_user_,from_+1,to_-from_-1);
+      user_group_key_.objkey := user_value_;
+      user_rec_              := Get_Record___(user_group_key_);
+      from_                  := to_;
+      list_user_names_       := list_user_names_ || user_rec_.identity || field_separator_;
+      END LOOP;
+   END IF;        
+   IF(group_list_ IS NOT NULL) THEN
+      items_group_ := group_list_ || ';';
+      WHILE (instr(items_group_,';',from_group_+1)> 0) LOOP
+      to_group_                      := instr(items_group_,';',from_group_+1);
+      group_value_                   := substr(items_group_,from_group_+1,to_group_-from_group_-1);
+      distribution_group_key_.objkey := group_value_;
+      distribution_rec_              := Get_Record___(distribution_group_key_);
+      from_group_                    := to_group_;
+      list_group_names_              := list_group_names_ || distribution_rec_.group_name || field_separator_;
+      END LOOP; 
+   END IF;  
+   distribution_list_ := list_user_names_ || list_group_names_;
+   Archive_API.Redirect_Report(result_key_,distribution_list_);
+END Forward_Archive___;

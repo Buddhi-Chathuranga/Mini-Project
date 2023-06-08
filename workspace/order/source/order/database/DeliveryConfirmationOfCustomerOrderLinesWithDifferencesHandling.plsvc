@@ -1,0 +1,155 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: DeliveryConfirmationOfCustomerOrderLinesWithDifferencesHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date        Sign    History
+--  ----------  ------  -----------------------------------------------------
+--  2021-06-14  KiSalk  Bug 157257(SCZ-14970), Called Deliv_Confirm_Cust_Order_API.Confirm_Delivery__ instead of Deliv_Confirm_Cust_Order_API.Confirm_Delivery.
+--  2021-06-14         Added parameters delnote_no_ and last_confirmed_ to a method Confirm_Delivery___. Re-written Confirm_Deliveries___ to send last_confirmed_ correctly when calling Confirm_Delivery___.
+--  2019-03-22  ShKolk  SCUXXW4-841, Created for tbwDeliveryConfCOLinesWithDiff
+-----------------------------------------------------------------------------
+
+layer Core;
+
+PROCEDURE Confirm_Delivery___ (
+   key_           IN Customer_Order_Delivery_Key,
+   qty_confirmed_ IN NUMBER,
+   info$_         OUT VARCHAR2 )
+IS
+BEGIN
+   Confirm_Delivery___(info$_, key_.order_no, key_.line_no, key_.rel_no, key_.line_item_no, key_.deliv_no, qty_confirmed_);
+END Confirm_Delivery___;
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Co_Delivery_Virtual_Rec )
+IS
+   newrec_         Co_Delivery_Virtual_Rec;
+   pkg_line_rec_   Package_Line_Virtual_Rec;
+   deliv_rec_      co_delivery_join_uiv%ROWTYPE;
+   
+   CURSOR get_data IS
+      SELECT *
+      FROM co_delivery_join_uiv
+      WHERE order_no = rec_.order_no
+      AND   line_no = rec_.line_no
+      AND   rel_no = rec_.rel_no
+      AND   line_item_no  = rec_.line_item_no
+      AND   deliv_no = rec_.deliv_no;
+      
+   CURSOR get_line_data IS
+      SELECT t.*, DECODE(t.date_confirmed, null,(t.qty_shipped / t.conv_factor * t.inverted_conv_factor), t.qty_to_invoice) qty_confirmed
+      FROM co_delivery_join_uiv t
+      WHERE order_no = rec_.order_no
+      AND   line_no = rec_.line_no
+      AND   rel_no = rec_.rel_no
+      AND   line_item_no > 0 AND date_confirmed IS NULL;
+      
+BEGIN
+   newrec_ := rec_;
+   
+   OPEN get_data;
+   FETCH get_data INTO deliv_rec_;
+   CLOSE get_data;
+   
+   newrec_.contract := deliv_rec_.contract;
+   newrec_.delnote_no := deliv_rec_.delnote_no;
+   newrec_.line_state := deliv_rec_.line_state;
+   newrec_.package_part := deliv_rec_.catalog_no ||' - '|| deliv_rec_.catalog_desc;
+   newrec_.qty_shipped := deliv_rec_.qty_shipped;
+   newrec_.incorrect_del_confirmation_db := Fndcg_Projection_Svc_Util_API.To_Boolean(deliv_rec_.incorrect_del_confirmation_db);
+   
+   super(newrec_);
+   
+   FOR line_rec_ IN get_line_data LOOP
+      pkg_line_rec_.objkey := sys_guid();
+      pkg_line_rec_.parent_objkey := newrec_.objkey;
+      
+      pkg_line_rec_.order_no := line_rec_.order_no;
+      pkg_line_rec_.line_no := line_rec_.line_no;
+      pkg_line_rec_.rel_no := line_rec_.rel_no;
+      pkg_line_rec_.line_item_no := line_rec_.line_item_no;
+      pkg_line_rec_.deliv_no := line_rec_.deliv_no;
+      
+      pkg_line_rec_.delnote_no := line_rec_.delnote_no;
+      pkg_line_rec_.ref_id := line_rec_.ref_id;
+      pkg_line_rec_.shipment_id := line_rec_.shipment_id;
+      pkg_line_rec_.qty_confirmed := line_rec_.qty_confirmed;
+      pkg_line_rec_.date_confirmed := line_rec_.date_confirmed;
+      pkg_line_rec_.qty_shipped := line_rec_.qty_shipped;
+      pkg_line_rec_.date_delivered := line_rec_.date_delivered;
+      pkg_line_rec_.line_state := line_rec_.line_state;
+      pkg_line_rec_.sales_part := line_rec_.catalog_no||' - '||line_rec_.catalog_desc;
+      pkg_line_rec_.buy_qty_due := line_rec_.buy_qty_due;
+      pkg_line_rec_.sales_unit_meas := line_rec_.sales_unit_meas;
+      pkg_line_rec_.cost := line_rec_.cost;
+      CRUD_Create___(pkg_line_rec_);
+   END LOOP;
+END CRUD_Create___;
+
+PROCEDURE Confirm_Deliveries___ (
+   key_   IN Co_Delivery_Virtual_Key,
+   info$_ OUT VARCHAR2 )
+IS
+   next_line_rec_     Get_Package_Line_Array___%ROWTYPE;
+   line_rec_          Get_Package_Line_Array___%ROWTYPE;
+BEGIN
+   OPEN Get_Package_Line_Array___(key_);
+   FETCH Get_Package_Line_Array___ INTO line_rec_;
+   LOOP 
+      FETCH Get_Package_Line_Array___ INTO next_line_rec_;
+      EXIT WHEN Get_Package_Line_Array___%NOTFOUND;
+      Confirm_Delivery___(info$_, line_rec_.order_no, line_rec_.line_no, line_rec_.rel_no, line_rec_.line_item_no, line_rec_.deliv_no, line_rec_.qty_confirmed, line_rec_.delnote_no, 'FALSE');
+      line_rec_ := next_line_rec_;
+   END LOOP;
+   IF (line_rec_.order_no IS NOT NULL) THEN
+      -- Call method for last line with last_confirmed_ 'TRUE'
+      Confirm_Delivery___(info$_, line_rec_.order_no, line_rec_.line_no, line_rec_.rel_no, line_rec_.line_item_no, line_rec_.deliv_no, line_rec_.qty_confirmed, line_rec_.delnote_no, 'TRUE');
+   END IF;
+   CLOSE Get_Package_Line_Array___;
+END Confirm_Deliveries___;
+
+PROCEDURE Confirm_Delivery___  (
+   info_          IN OUT VARCHAR2,
+   order_no_      IN VARCHAR2,
+   line_no_       IN VARCHAR2,
+   rel_no_        IN VARCHAR2,
+   line_item_no_  IN NUMBER,
+   deliv_no_      IN NUMBER,
+   qty_confirmed_ IN NUMBER,
+   delnote_no_     IN NUMBER DEFAULT NULL,
+   last_confirmed_ IN VARCHAR2 DEFAULT NULL)
+IS
+   objid_               VARCHAR2(32000);
+   objversion_          VARCHAR2(32000);
+   old_qty_confirmed_   NUMBER;
+   attr_                VARCHAR2(32000);
+   
+   CURSOR get_data IS
+      SELECT objid, 
+             objversion,
+             DECODE(date_confirmed, NULL, (qty_shipped/conv_factor*inverted_conv_factor), qty_to_invoice)
+      FROM CO_DELIVERY_JOIN
+      WHERE order_no = order_no_
+      AND   line_no = line_no_
+      AND   rel_no = rel_no_
+      AND   line_item_no  = line_item_no_
+      AND   deliv_no = deliv_no_;
+      
+BEGIN
+   OPEN get_data; 
+   FETCH get_data INTO objid_, objversion_, old_qty_confirmed_;
+   CLOSE get_data;
+   
+   IF qty_confirmed_ != old_qty_confirmed_ THEN
+      Client_SYS.Clear_Attr(attr_);
+      Client_SYS.Add_To_Attr('QTY_CONFIRMED', qty_confirmed_, attr_);
+      Client_SYS.Add_To_Attr('CLIENT_FORM',   'CONFIRM',      attr_);
+      Deliv_Confirm_Cust_Order_API.Modify__(info_, objid_, objversion_, attr_, 'CHECK');
+
+      Deliv_Confirm_Cust_Order_API.Confirm_Delivery__(order_no_, line_no_, rel_no_, line_item_no_, deliv_no_, qty_confirmed_, delnote_no_, last_confirmed_);
+   END IF;
+END Confirm_Delivery___;

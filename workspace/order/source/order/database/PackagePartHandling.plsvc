@@ -1,0 +1,232 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: PackagePartHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+-- 2021-05-24  ChFolk  SCZ-14841(Bug 159133), Modified Validate_Catalog_No___ to use new method Get_Desc_For_New_Sales_Part to get the Catalog_Desc.
+-- 2021-02-24  WaSalk  SC2020R1-12575, Modified contract_info_rec_ by adding enabled_lcc_params to Validate_Contract___().
+-- 2020-02-19  MaEelk  SCXTEND-2224, Modified CRUD_Default_Copy___ to work duplicate correctly.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Validate_Contract___(
+   contract_ IN VARCHAR2 )  RETURN Contract_Info_Rec
+IS
+   contract_info_rec_  Contract_Info_Rec;
+   company_            VARCHAR2(20);
+   taxable_            VARCHAR2(10);
+   tax_code_           VARCHAR2(20);
+BEGIN
+   company_                              := Site_API.Get_Company(contract_);
+   contract_info_rec_.currency           := Company_Finance_API.Get_Currency_Code(company_);
+   contract_info_rec_.use_price_incl_tax := (Site_Discom_Info_API.Get_Use_Price_Incl_Tax_Ord_Db(contract_) = 'TRUE');
+   contract_info_rec_.company            := company_;
+   
+   Tax_Handling_Order_Util_API.Get_Tax_Info_For_Sales_Object(tax_code_, taxable_, company_);
+   
+   contract_info_rec_.taxable            := (taxable_ = 'TRUE');
+   contract_info_rec_.tax_code           := tax_code_;
+   -- gelr:localization_control_center, begin
+   contract_info_rec_.enabled_lcc_params := Company_Localization_Info_API.Get_Enabled_Params_per_Company(company_);
+   -- gelr:localization_control_center, end
+   RETURN contract_info_rec_;
+END Validate_Contract___;
+
+FUNCTION Unit_Measure_Exist___ (
+   sales_unit_meas_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   
+BEGIN
+   Iso_Unit_API.Exist(sales_unit_meas_);
+   RETURN NULL;
+END Unit_Measure_Exist___;
+
+FUNCTION Get_Price_Conv_Factor___(
+   sales_unit_meas_ IN VARCHAR2,
+   price_unit_meas_ IN VARCHAR2 )  RETURN NUMBER
+IS
+   
+BEGIN
+   RETURN Technical_Unit_Conv_API.Get_Valid_Conv_Factor(sales_unit_meas_, price_unit_meas_);
+END Get_Price_Conv_Factor___;
+
+FUNCTION Calculate_Price___(
+   sales_price_incl_tax_ IN NUMBER,
+   tax_code_             IN VARCHAR2,
+   taxable_              IN BOOLEAN,
+   company_              IN VARCHAR2,
+   total_sales_cost_     IN NUMBER )  RETURN Price_Info_Rec
+IS
+   tax_percent_          NUMBER := 0;
+   list_price_           NUMBER;
+   contribution_margin_  NUMBER;
+   price_info_rec_       Price_Info_Rec;
+BEGIN
+   IF sales_price_incl_tax_ IS NOT NULL THEN
+      IF taxable_ AND tax_code_ IS NOT NULL  THEN
+         tax_percent_ := Get_Tax_Percentage___(tax_code_, company_);
+         list_price_  := sales_price_incl_tax_/((tax_percent_/100)+1);
+      ELSE
+         list_price_ := sales_price_incl_tax_;
+      END IF;
+   ELSE
+      list_price_ := NULL;
+   END IF;
+   
+   contribution_margin_ := Get_Contribution_Margin___(list_price_, total_sales_cost_);
+   price_info_rec_.price := list_price_;
+   price_info_rec_.con_margin := contribution_margin_;
+   RETURN price_info_rec_;
+END Calculate_Price___;
+
+FUNCTION Calculate_Price_Including_Tax___(
+   list_price_       IN NUMBER,
+   tax_code_         IN VARCHAR2,
+   taxable_          IN BOOLEAN,
+   company_          IN VARCHAR2,
+   total_sales_cost_ IN NUMBER )  RETURN Price_Info_Rec
+IS
+   tax_percent_          NUMBER := 0;
+   list_price_incl_tax_  NUMBER;
+   contribution_margin_  NUMBER;
+   price_info_rec_       Price_Info_Rec;
+BEGIN
+   IF list_price_ IS NOT NULL THEN
+      IF taxable_ AND tax_code_ IS NOT NULL  THEN
+         tax_percent_ := Get_Tax_Percentage___(tax_code_, company_);
+         list_price_incl_tax_  := list_price_ * ((tax_percent_/100)+1);
+      ELSE
+         list_price_incl_tax_ := list_price_;
+      END IF;
+   ELSE
+      list_price_incl_tax_ := NULL;
+   END IF;
+   
+   contribution_margin_ := Get_Contribution_Margin___(list_price_, total_sales_cost_);
+   price_info_rec_.price := list_price_incl_tax_;
+   price_info_rec_.con_margin := contribution_margin_;
+   RETURN price_info_rec_;
+END Calculate_Price_Including_Tax___;
+
+FUNCTION Get_Tax_Percentage___(
+   tax_code_             IN VARCHAR2,
+   company_              IN VARCHAR2 )  RETURN NUMBER
+IS
+BEGIN
+   RETURN Statutory_Fee_API.Get_Fee_Rate(company_, tax_code_);
+END Get_Tax_Percentage___;
+
+FUNCTION Get_Contribution_Margin___(
+   list_price_        IN NUMBER,
+   total_sales_price_ IN NUMBER )  RETURN NUMBER
+IS
+   contribution_margin_ NUMBER := 0;
+BEGIN
+   IF list_price_ = 0 OR list_price_ IS NULL THEN
+      contribution_margin_ := 0;
+   ELSE
+      contribution_margin_ := ((list_price_ - total_sales_price_) / list_price_)*100;
+   END IF;
+   RETURN contribution_margin_;
+END Get_Contribution_Margin___;
+
+FUNCTION Validate_Catalog_No___(
+   catelog_no_ IN VARCHAR2,
+   contract_   IN VARCHAR2 )  RETURN Catalog_Info_Rec
+IS
+   sales_part_catalog_desc_ VARCHAR2(200);
+   catalog_desc_            VARCHAR2(200);
+   unit_code_               VARCHAR2(10);
+   use_part_catalog_desc_   VARCHAR2(20);
+   info_message_            VARCHAR2(30) := NULL;
+   catalog_info_rec_        Catalog_Info_Rec;
+BEGIN
+   sales_part_catalog_desc_ := Sales_Part_API.Get_Catalog_Desc(contract_, catelog_no_);
+   unit_code_               := Part_Catalog_API.Get_Unit_Code(catelog_no_);
+   use_part_catalog_desc_   := Site_Discom_Info_API.Get_Use_Partca_Desc_Order_Db(contract_);
+
+   IF sales_part_catalog_desc_ IS NOT NULL AND use_part_catalog_desc_ = 'FLASE' THEN
+      info_message_ := 'This part already exists';
+      catalog_info_rec_.info_message := info_message_;
+      RETURN catalog_info_rec_;
+   END IF;
+   catalog_info_rec_.catalog_desc := Sales_Part_API.Get_Desc_For_New_Sales_Part(contract_, catelog_no_);
+   catalog_info_rec_.unit_code := unit_code_;
+
+   RETURN catalog_info_rec_;
+END Validate_Catalog_No___;
+   
+@Override
+PROCEDURE CRUD_Default___ (
+   key_  IN  Sales_Part_Key,
+   attr_ IN OUT VARCHAR2,
+   info_ OUT VARCHAR2 )
+IS
+BEGIN
+   super(key_, attr_, info_);
+   Client_SYS.Add_To_Attr('CATALOG_TYPE_DB', 'PKG', attr_);
+   Client_SYS.Add_To_Attr('LIST_PRICE', 0, attr_);
+   Client_SYS.Add_To_Attr('LIST_PRICE_INCL_TAX', 0, attr_);
+END CRUD_Default___;
+   
+FUNCTION Validate_Margin_Rate___(
+   con_margin_       IN NUMBER,
+   total_sales_cost_ IN NUMBER,
+   tax_code_         IN VARCHAR2,
+   company_          IN VARCHAR2 )  RETURN Price_Values_Rec
+IS
+   tax_percent_      NUMBER := 0;
+   price_values_rec_ Price_Values_Rec;
+BEGIN
+   price_values_rec_.Price := (100 * total_sales_cost_) / (100 - con_margin_);
+   tax_percent_ := Get_Tax_Percentage___(tax_code_, company_);
+   price_values_rec_.price_including_tax := price_values_rec_.Price *((tax_percent_ / 100) + 1);
+   RETURN price_values_rec_;
+END Validate_Margin_Rate___;
+
+FUNCTION Get_Catalog_Info___(
+   contract_   IN VARCHAR2,
+   catalog_no_ IN VARCHAR2 )  RETURN Part_Catalog_Info_Rec
+IS
+  part_catalog_info_rec_ Part_Catalog_Info_Rec; 
+BEGIN
+   part_catalog_info_rec_.catalog_description := SALES_PART_API.Get_Catalog_Desc(contract_, catalog_no_);
+   part_catalog_info_rec_.unit_measure        := Sales_Part_API.Get_Sales_Unit_Meas(contract_, catalog_no_);
+   
+   RETURN part_catalog_info_rec_;
+END Get_Catalog_Info___;
+
+FUNCTION Check_Characteristic_Code_Exist___(
+   objkey_              IN VARCHAR2,
+   part_no_             IN VARCHAR2,
+   characteristic_code_ IN VARCHAR2 )  RETURN BOOLEAN
+IS
+   CURSOR getCharacteristics IS
+   SELECT 1
+   FROM package_part_handling_copy_characteristics_template_virtual_vrt t
+   WHERE t.parent_objkey = objkey_ AND t.characteristic_code = characteristic_code_ AND t.catalog_no = part_no_;
+   
+   dummy_ NUMBER;
+   exist_ BOOLEAN;
+BEGIN                            
+      OPEN getCharacteristics;
+      FETCH getCharacteristics INTO dummy_;
+      exist_ := getCharacteristics%FOUND;
+      CLOSE getCharacteristics;
+
+   RETURN exist_;
+END Check_Characteristic_Code_Exist___;
+
+@Override
+PROCEDURE CRUD_Default_Copy___ (
+   rec_  IN OUT Sales_Part_Rec )
+IS
+BEGIN
+   super(rec_);   
+   rec_.eng_attribute := NULL;
+END CRUD_Default_Copy___;

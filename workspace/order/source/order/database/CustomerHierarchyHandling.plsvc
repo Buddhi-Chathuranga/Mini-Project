@@ -1,0 +1,177 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: CustomerHierarchyHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign    History
+--  ------     ------  ---------------------------------------------------------
+-- 2018-10-04  SeJalk  SCUXXW4-9837, Created
+-----------------------------------------------------------------------------
+
+layer Core;
+PROCEDURE Create_Hierachy___ (
+   hierarchy_   IN VARCHAR2,
+   description_ IN VARCHAR2 ) 
+IS
+   info_       VARCHAR2(2000);
+   objid_      VARCHAR2(20);
+   objversion_ VARCHAR2(100);
+   attr_  VARCHAR2(2000);
+   
+BEGIN
+   Client_SYS.Clear_Attr(attr_);
+   Client_SYS.Add_To_Attr('HIERARCHY_ID', hierarchy_, attr_);
+   Client_SYS.Add_To_Attr('DESCRIPTION', description_, attr_);
+   Customer_Hierarchy_API.new__(info_, objid_, objversion_, attr_, 'DO');
+END Create_Hierachy___;
+
+
+FUNCTION Change_Parent_Customer___ (
+	hierarchy_id_  IN VARCHAR2,
+	customer_no_   IN VARCHAR2,
+	new_parent_    IN VARCHAR2) RETURN VARCHAR2
+IS
+BEGIN
+   Cust_Hierarchy_Struct_API.Modify_Customer_Parent(hierarchy_id_, customer_no_, new_parent_);
+   RETURN 'SUCCESS';
+END Change_Parent_Customer___;
+
+
+PROCEDURE Remove_Customer___ (
+   hierarchy_id_  IN VARCHAR2,
+   customer_no_   IN VARCHAR2 ) 
+IS
+BEGIN
+   Cust_Hierarchy_Struct_API.Remove_Customer(hierarchy_id_, customer_no_ );
+END Remove_Customer___;
+
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Customer_Connect_Virtual_Rec )
+IS
+   detail_rec_ Customer_Detail_Virtual_Rec;  
+   CURSOR get_connected_customers IS
+    SELECT CUSTOMER_NO, Cust_Ord_Customer_API.Get_Name(CUSTOMER_NO) AS customer_name
+    FROM CUST_HIERARCHY_STRUCT 
+    WHERE HIERARCHY_ID = rec_.hierarchy_id 
+    AND CUSTOMER_PARENT = rec_.parent_cust_id;      
+       
+BEGIN
+   super(rec_);
+   FOR cust_rec_ IN get_connected_customers LOOP
+      detail_rec_.objkey                := sys_guid();  
+      detail_rec_.parent_objkey         := rec_.objkey;
+      detail_rec_.customer_id           := cust_rec_.customer_no;    
+      CRUD_Create___(detail_rec_);
+   END LOOP;
+END CRUD_Create___;
+
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Customer_Detail_Virtual_Rec )
+IS
+   parent_key_ Customer_Connect_Virtual_Key;
+BEGIN
+   parent_key_.objkey := rec_.parent_objkey;
+   FOR child_rec_ IN Get_Cust_Hierarchy_Struct_Array___(parent_key_) LOOP     
+      IF rec_.parent_customer_id = '*' AND  child_rec_.parent_customer_id = '*' THEN
+         Error_SYS.Record_General(lu_name_, 'ONLYONEPARENT: Only one root customer can exists.',  rec_.customer_id);
+      END IF;
+      IF child_rec_.customer_id = rec_.customer_id THEN
+         Error_SYS.Record_General(lu_name_, 'CUSTOMEEXISTS: Customer :P1 is already connected to a hierarchy.',  rec_.customer_id);
+      END IF;
+   END LOOP;
+   super(rec_);
+END CRUD_Create___;
+
+
+
+PROCEDURE Connect_Customer___ (
+   key_            IN Customer_Connect_Virtual_Key,
+   hierarchy_id_   IN VARCHAR2,
+   parent_cust_id_ IN VARCHAR2 ) 
+IS
+   cust_id_          VARCHAR2(30);
+   info_             VARCHAR2(32000);
+   objid_            VARCHAR2(2000);
+   objversion_       VARCHAR2(2000);
+   attr_             VARCHAR2(2000);
+         
+   CURSOR get_existing IS
+      SELECT customer_no
+      FROM CUST_HIERARCHY_STRUCT_TAB
+      WHERE HIERARCHY_ID = hierarchy_id_ 
+      AND CUSTOMER_PARENT = parent_cust_id_;      
+  BEGIN
+  
+     FOR exist_rec_ IN get_existing LOOP 
+        Cust_Hierarchy_Struct_API.Remove_Customer(hierarchy_id_, exist_rec_.customer_no );
+     END LOOP;
+      
+     FOR rec_ IN Get_Cust_Hierarchy_Struct_Array___(key_) LOOP      
+       Client_SYS.Clear_Attr(attr_); 
+       cust_id_ := rec_.customer_id;
+      IF Customer_Info_API.Exists(cust_id_) THEN
+         Client_SYS.Add_To_Attr('HIERARCHY_ID', hierarchy_id_, attr_);
+         Client_SYS.Add_To_Attr('CUSTOMER_PARENT', parent_cust_id_, attr_);
+         Client_SYS.Add_To_Attr('CUSTOMER_NO', cust_id_, attr_);
+         Cust_Hierarchy_Struct_API.New__(info_, objid_, objversion_, attr_, 'DO');
+      END IF;
+   END LOOP;
+
+END Connect_Customer___;
+
+FUNCTION Get_Record_Count___(
+	customer_no_ IN VARCHAR2,
+	customer_name_ IN VARCHAR2,
+	cust_grp_ IN VARCHAR2,
+	cust_price_group_id_ IN VARCHAR2) RETURN NUMBER
+IS
+   count_ NUMBER;
+   CURSOR REC_COUNT  IS
+   SELECT count(*) FROM CUST_ORD_CUSTOMER 
+   WHERE CUSTOMER_NO NOT IN (SELECT CUSTOMER_NO FROM CUST_HIERARCHY_STRUCT)
+   AND CUSTOMER_NO IN (select CUSTOMER_ID from CUSTOMER_INFO WHERE CUSTOMER_CATEGORY_DB = 'CUSTOMER')
+   AND (NVL(customer_no_,'null') = 'null' OR (customer_no_ IS NOT NULL AND CUSTOMER_NO LIKE customer_no_  ))
+   AND (NVL(customer_name_,'null') = 'null' OR (customer_name_ IS NOT NULL AND Cust_Ord_Customer_API.Get_Name(CUSTOMER_NO) LIKE customer_name_))
+   AND (NVL(cust_grp_,'null') = 'null' OR (cust_grp_ IS NOT NULL AND CUST_GRP LIKE cust_grp_ )) 
+   AND (NVL(cust_price_group_id_,'null') = 'null' OR (cust_price_group_id_ IS NOT NULL AND CUST_PRICE_GROUP_ID LIKE cust_price_group_id_ )); 
+
+BEGIN
+   OPEN REC_COUNT;
+   FETCH REC_COUNT INTO count_;
+   CLOSE REC_COUNT;
+  
+	RETURN count_;
+END Get_Record_Count___;
+
+PROCEDURE Add_Customers___ (
+   key_                 IN Customer_Connect_Virtual_Key,
+   customer_no_         IN VARCHAR2,
+   customer_name_       IN VARCHAR2,
+   cust_grp_            IN VARCHAR2,
+   cust_price_group_id_ IN VARCHAR2 ) 
+IS
+   detail_rec_ Customer_Detail_Virtual_Rec;
+   CURSOR GET_CUSTOMERS IS
+      SELECT CUSTOMER_NO FROM CUST_ORD_CUSTOMER 
+      WHERE CUSTOMER_NO NOT IN (SELECT CUSTOMER_NO FROM CUST_HIERARCHY_STRUCT)
+      AND CUSTOMER_NO IN (select CUSTOMER_ID from CUSTOMER_INFO WHERE CUSTOMER_CATEGORY_DB = 'CUSTOMER')
+      AND (NVL(customer_no_,'null') = 'null' OR (customer_no_ IS NOT NULL AND CUSTOMER_NO LIKE customer_no_  ))
+      AND (NVL(customer_name_,'null') = 'null' OR (customer_name_ IS NOT NULL AND Cust_Ord_Customer_API.Get_Name(CUSTOMER_NO) LIKE customer_name_))
+      AND (NVL(cust_grp_,'null') = 'null' OR (cust_grp_ IS NOT NULL AND CUST_GRP LIKE cust_grp_ )) 
+      AND (NVL(cust_price_group_id_,'null') = 'null' OR (cust_price_group_id_ IS NOT NULL AND CUST_PRICE_GROUP_ID LIKE cust_price_group_id_ )); 
+BEGIN
+   FOR cust_rec_ IN GET_CUSTOMERS LOOP
+      detail_rec_.objkey                := sys_guid();  
+      detail_rec_.parent_objkey         := key_.objkey;
+      detail_rec_.customer_id           := cust_rec_.customer_no; 
+      CRUD_Create___(detail_rec_);
+   END LOOP;
+END Add_Customers___;
+
+

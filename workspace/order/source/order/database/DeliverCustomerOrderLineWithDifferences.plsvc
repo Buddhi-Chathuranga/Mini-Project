@@ -1,0 +1,222 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: DeliverCustomerOrderLineWithDifferences
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  201202  MaRalk  SCZ-11882, Updated Cancel_Deliver_Line___ key_ parameter type as Cust_Order_Line_For_Deliv_Line_With_Diff_Key instead of Customer_Order_Line_Key.
+--  190905  RoJalk  SCFALL19-334, Modified Deliver_Line_Inv_With_Diff___ and set rows_completed_ as false when row count is 69.
+--  190515  RasDlk  SCUXXW4-20751, Added a condition to check the value of Input UoM and Input Variable Value before adding it to the attr to prevent an unnecessary error.
+--  190322  RoJalk  SCUXXW4-9150, Added the method Deliver_Line_Inv_With_Diff___.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+PROCEDURE Cancel_Deliver_Line___ (
+	key_   IN  Cust_Order_Line_For_Deliv_Line_With_Diff_Key,
+	info$_ OUT VARCHAR2)
+IS
+BEGIN
+   Deliver_Customer_Order_API.Cancel_Deliver_Line__(info$_, key_.order_no, key_.line_no, key_.rel_no, key_.line_item_no);
+END Cancel_Deliver_Line___;
+
+PROCEDURE Deliver_Non_Inv_Line_With_Diff___ (
+   order_no_       IN  VARCHAR2,
+   line_no_        IN  VARCHAR2,
+   rel_no_         IN  VARCHAR2,
+   line_item_no_   IN  NUMBER,
+   close_line_     IN  NUMBER,
+   qty_to_deliver_ IN  NUMBER,
+   info$_          OUT VARCHAR2) 
+IS
+BEGIN
+    Deliver_Line_Non_With_Diff___ (info_           => info$_,
+                                   order_no_       => order_no_,
+                                   line_no_        => line_no_,
+                                   rel_no_         => rel_no_,
+                                   line_item_no_   => line_item_no_,
+                                   close_line_     => close_line_,
+                                   qty_to_deliver_ => qty_to_deliver_);
+END Deliver_Non_Inv_Line_With_Diff___;
+
+
+PROCEDURE Deliver_Line_Non_With_Diff___ (
+   info_             OUT VARCHAR2,
+   order_no_         IN  VARCHAR2,
+   line_no_          IN  VARCHAR2,
+   rel_no_           IN  VARCHAR2,
+   line_item_no_     IN  NUMBER,
+   close_line_       IN  NUMBER,
+   qty_to_deliver_   IN  NUMBER) 
+IS
+BEGIN
+   Deliver_Customer_Order_API.Deliver_Line_Non_With_Diff__(info_,
+                                                           order_no_,
+                                                           line_no_, 
+                                                           rel_no_,
+                                                           line_item_no_, 
+                                                           close_line_, 
+                                                           qty_to_deliver_);
+END Deliver_Line_Non_With_Diff___;
+
+FUNCTION Check_All_License_Connected___(
+   order_no_ IN VARCHAR2 )  RETURN NUMBER
+IS
+   display_info_  NUMBER:=0;
+BEGIN
+   Customer_Order_Flow_API.Check_All_License_Connected(display_info_, order_no_);
+   RETURN display_info_;
+END Check_All_License_Connected___;
+
+PROCEDURE Deliver_Line_Inv_With_Diff___ (
+   info_             OUT VARCHAR2,
+   order_no_         IN  VARCHAR2,
+   line_no_          IN  VARCHAR2,
+   rel_no_           IN  VARCHAR2,
+   line_item_no_     IN  NUMBER,
+   close_line_       IN  NUMBER,
+   selection_        IN  CLOB ) 
+IS
+   struc_ownership_info_      VARCHAR2(2000);
+   orders_to_deliver_         json_array_t := json_array_t.parse(selection_);  
+   current_selection_         VARCHAR2(32000);
+   attr_                      VARCHAR2(32000);
+   qty_to_deliver_            NUMBER:=0;
+   qty_picked_                NUMBER:=0;
+   edited_row_count_          NUMBER:=0;
+   added_row_count_           NUMBER:=0; 
+   row_count_                 NUMBER:=0;
+   lot_batch_no_              VARCHAR2(12);
+   serial_no_                 VARCHAR2(50);
+   part_no_                   VARCHAR2(25);
+   owner_                     VARCHAR2(20);
+   customer_order_line_rec_   Customer_Order_Line_API.Public_Rec;
+   rows_completed_            BOOLEAN:=FALSE;
+BEGIN
+   customer_order_line_rec_ := Customer_Order_Line_API.Get(order_no_, line_no_, rel_no_, line_item_no_);
+   owner_                   := Customer_Order_Line_API.Get_Owner_For_Part_Ownership(order_no_, line_no_, rel_no_, line_item_no_, customer_order_line_rec_.part_ownership);
+     
+   FOR order_to_deliver_ IN 0 .. orders_to_deliver_.get_size - 1 LOOP 
+      current_selection_ := orders_to_deliver_.get_string(order_to_deliver_);
+      qty_picked_     := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'QTY_PICKED'));
+      qty_to_deliver_ := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'QTY_TO_DELIVER'));
+      
+      -- edited_row_count_ to be used in the second loop
+      IF (qty_picked_ != qty_to_deliver_) THEN
+         edited_row_count_ := edited_row_count_ + 1; 
+      END IF;
+      
+      IF (qty_to_deliver_ > 0 AND customer_order_line_rec_.rental = 'FALSE') THEN
+         
+         lot_batch_no_   := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOT_BATCH_NO');
+         serial_no_      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SERIAL_NO');
+         part_no_        := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PART_NO');
+      
+         Customer_Order_Flow_API.Validate_Struc_Ownership(struc_ownership_info_, 
+                                                          order_no_, 
+                                                          part_no_, 
+                                                          serial_no_, 
+                                                          lot_batch_no_, 
+                                                          Part_Ownership_API.Decode(customer_order_line_rec_.part_ownership), 
+                                                          owner_);
+      END IF;                                                 
+   END LOOP;  
+   
+   FOR order_to_deliver_ IN 0 .. orders_to_deliver_.get_size - 1 LOOP 
+      rows_completed_    := TRUE;      
+      current_selection_ := orders_to_deliver_.get_string(order_to_deliver_);
+      qty_picked_        := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'QTY_PICKED'));
+      qty_to_deliver_    := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'QTY_TO_DELIVER'));
+      
+      IF (qty_picked_ != qty_to_deliver_) THEN
+         rows_completed_    := FALSE;  
+         added_row_count_   := added_row_count_ + 1;
+         row_count_         := row_count_ + 1;
+
+         Client_SYS.Add_To_Attr('LOCATION_NO', Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOCATION_NO'), attr_);
+         Client_SYS.Add_To_Attr('LOT_BATCH_NO', Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOT_BATCH_NO'), attr_);
+         Client_SYS.Add_To_Attr('SERIAL_NO', Client_SYS.Get_Key_Reference_Value(current_selection_, 'SERIAL_NO'), attr_);
+         Client_SYS.Add_To_Attr('ENG_CHG_LEVEL', Client_SYS.Get_Key_Reference_Value(current_selection_, 'ENG_CHG_LEVEL'), attr_);
+         Client_SYS.Add_To_Attr('WAIV_DEV_REJ_NO', Client_SYS.Get_Key_Reference_Value(current_selection_, 'WAIV_DEV_REJ_NO'), attr_);
+         Client_SYS.Add_To_Attr('INPUT_QUANTITY', Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'INPUT_QUANTITY')), attr_);
+         Client_SYS.Add_To_Attr('INPUT_CONV_FACTOR', Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'INPUT_CONV_FACTOR')), attr_);
+         Client_SYS.Add_To_Attr('INPUT_UNIT_MEAS', Client_SYS.Get_Key_Reference_Value(current_selection_, 'INPUT_UNIT_MEAS'), attr_);
+         Client_SYS.Add_To_Attr('INPUT_VARIABLE_VALUES', Client_SYS.Get_Key_Reference_Value(current_selection_, 'INPUT_VARIABLE_VALUES'), attr_);
+         Client_SYS.Add_To_Attr('ACTIVITY_SEQ', Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'ACTIVITY_SEQ')), attr_);
+         Client_SYS.Add_To_Attr('HANDLING_UNIT_ID', Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'HANDLING_UNIT_ID')), attr_);
+         Client_SYS.Add_To_Attr('CATCH_QTY_TO_DELIVER', Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'CATCH_QTY_TO_DELIVER')), attr_);
+         Client_SYS.Add_To_Attr('QTY_PICKED', Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'QTY_PICKED')), attr_);
+         Client_SYS.Add_To_Attr('QTY_TO_DELIVER', Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'QTY_TO_DELIVER')), attr_);
+         Client_SYS.Add_To_Attr('END_OF_LINE', 'END', attr_);
+
+         IF (added_row_count_ = edited_row_count_) THEN
+            Client_SYS.Add_To_Attr('ROW_COMPLETE', 'Y', attr_);
+            rows_completed_ := TRUE;  
+         ELSE
+            Client_SYS.Add_To_Attr('ROW_COMPLETE', 'N', attr_);
+         END IF; 
+         
+         IF (row_count_ = 69) THEN
+            Deliver_Customer_Order_API.Deliver_Line_Inv_With_Diff__(info_,
+                                                                    order_no_,
+                                                                    line_no_,
+                                                                    rel_no_,
+                                                                    line_item_no_, 
+                                                                    close_line_, 
+                                                                    attr_);
+            row_count_      := 0;
+            attr_           := NULL;
+            rows_completed_ := FALSE;  
+         END IF;   
+         
+      END IF;
+   END LOOP;
+   
+   IF rows_completed_ THEN  
+      Deliver_Customer_Order_API.Deliver_Line_Inv_With_Diff__(info_,
+                                                              order_no_,
+                                                              line_no_,
+                                                              rel_no_,
+                                                              line_item_no_, 
+                                                              close_line_, 
+                                                              attr_);
+   END IF;                                                        
+                                                                                                                                                                   
+   info_ := struc_ownership_info_ || info_;
+END Deliver_Line_Inv_With_Diff___;
+
+PROCEDURE Deliver_Inventory_Line_With_Diff___ (
+   order_no_     IN  VARCHAR2,
+   line_no_      IN  VARCHAR2,
+   rel_no_       IN  VARCHAR2,
+   line_item_no_ IN  NUMBER,
+   close_line_   IN  NUMBER,
+   selection_    IN  CLOB,
+   info$_        OUT VARCHAR2 ) 
+IS
+BEGIN
+    Deliver_Line_Inv_With_Diff___(info_         => info$_,
+                                  order_no_     => order_no_,
+                                  line_no_      => line_no_,
+                                  rel_no_       => rel_no_,
+                                  line_item_no_ => line_item_no_,
+                                  close_line_   => close_line_,
+                                  selection_    => selection_);
+                                  
+END Deliver_Inventory_Line_With_Diff___;
+
+PROCEDURE Validate_Qty_To_Deliver___ (
+   qty_to_deliver_   IN NUMBER,
+   qty_picked_       IN NUMBER ) 
+IS
+BEGIN
+   IF (qty_to_deliver_ < 0) THEN
+      Error_SYS.Record_General(lu_name_, 'QTYTODELLESSTHENZERO: No negative quantity allowed.');
+   END IF;   
+   IF (qty_to_deliver_ > qty_picked_) THEN
+      Error_SYS.Record_General(lu_name_, 'DELMORETHENPICK: Only :P1 have been picked. Can not deliver more than picked.', qty_picked_);
+   END IF;
+END Validate_Qty_To_Deliver___;

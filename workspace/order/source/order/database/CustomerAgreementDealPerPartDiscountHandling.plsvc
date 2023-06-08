@@ -1,0 +1,180 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: CustomerAgreementDealPerPartDiscountHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign    History
+--  ------     ------  ---------------------------------------------------------
+-- 2018-08-09  IzShlk  SCUXXW4-8127, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+@Override
+PROCEDURE CRUD_Create___ (
+   rec_  IN  Agreement_Sales_Part_Deal_Virtual_Rec )
+IS
+   rec_dup_   Agreement_Sales_Part_Deal_Virtual_Rec;
+BEGIN
+   rec_dup_ := rec_;
+   rec_dup_.discount := ROUND(Agreement_Sales_Part_Deal_API.Get_Discount(rec_.agreement_id, rec_.min_quantity, rec_.valid_from_date, rec_.catalog_no)/100, 4);
+   rec_dup_.deal_price := NVL(rec_dup_.deal_price, 0);
+   rec_dup_.deal_price_incl_tax := NVL(rec_dup_.deal_price_incl_tax, 0); 
+   Calculate_Discount_Amounts___(rec_dup_.acc_discount_net_amount, rec_dup_.acc_discount_gross_amount, rec_dup_.agreement_id, rec_dup_.discount, rec_dup_.deal_price_incl_tax, rec_dup_.deal_price, rec_dup_.catalog_no, rec_dup_.base_price_site, rec_dup_.currency_code);
+   
+   super(rec_dup_);
+END CRUD_Create___;
+
+PROCEDURE Calc_Discount___ (
+   agreement_id_ IN VARCHAR2,
+   min_quantity_ IN NUMBER,
+   valid_from_   IN DATE,
+   catalog_no_   IN VARCHAR2 ) 
+IS
+BEGIN
+   Agreement_Part_Discount_API.Calc_Discount_Upd_Agr_Line__(agreement_id_, min_quantity_, valid_from_, catalog_no_);
+END Calc_Discount___;
+
+PROCEDURE Calculate_Discount_Amounts___(
+   acc_discount_amount_       IN OUT NUMBER,
+   acc_discount_incl_tax_     IN OUT NUMBER,
+   agreement_id_              IN VARCHAR2,
+   acc_discount_              IN NUMBER,
+   sales_unit_price_incl_tax_ IN NUMBER,
+   sales_unit_price_          IN NUMBER,
+   catalog_no_                IN VARCHAR2,
+   base_price_site_           IN VARCHAR2,
+   currency_code_             IN VARCHAR2 ) 
+IS
+   tax_calc_base_      VARCHAR2(100) := NULL;
+   curr_rounding_      NUMBER;
+   rounding_           NUMBER;
+   calc_prices_        BOOLEAN := TRUE; 
+   use_price_incl_tax_ BOOLEAN;
+   pay_tax_            BOOLEAN;
+BEGIN  
+   use_price_incl_tax_ := Customer_Agreement_API.Get_Use_Price_Incl_Tax_Db(agreement_id_) = 'TRUE';
+   curr_rounding_      := Customer_Agreement_API.Get_Agreement_Curr_Rounding(agreement_id_);
+   pay_tax_            := Sales_Part_API.Get_Taxable_Db(base_price_site_, catalog_no_)= 'TRUE';
+
+   IF use_price_incl_tax_ THEN
+      acc_discount_incl_tax_ := ROUND(sales_unit_price_incl_tax_ * acc_discount_, curr_rounding_);
+      tax_calc_base_ := 'GROSS_BASE';
+      
+   IF acc_discount_incl_tax_ IS NULL OR NOT(pay_tax_) THEN
+         acc_discount_amount_ := acc_discount_incl_tax_;
+         calc_prices_ := FALSE;
+      END IF;
+   ELSE
+      acc_discount_amount_ := ROUND(sales_unit_price_ * acc_discount_, curr_rounding_);
+      tax_calc_base_ := 'NET_BASE';
+      
+      IF acc_discount_amount_ IS NULL OR NOT(pay_tax_) THEN
+         acc_discount_incl_tax_ := acc_discount_amount_;
+         calc_prices_ := FALSE;
+      END IF;
+   END IF;
+   
+   IF calc_prices_ THEN
+      -- Amounts are calculated. So if there is no rounding specified in the agreement, rounding specified in the currency codes should be used. Not the ifs client rounding.
+      rounding_ :=  NVL(curr_rounding_, Currency_Code_API.Get_Currency_Rounding(Site_API.Get_Company(base_price_site_), currency_code_));      
+      Tax_Handling_Order_Util_API.Calc_Price_Source_Prices(acc_discount_amount_, acc_discount_incl_tax_, base_price_site_, catalog_no_, tax_calc_base_, rounding_);   
+   END IF;
+END Calculate_Discount_Amounts___;
+
+PROCEDURE Update_Parent___ (
+   obj_key_ IN VARCHAR2 ) 
+IS
+   key_   Agreement_Sales_Part_Deal_Virtual_Key;
+   rec_   Agreement_Sales_Part_Deal_Virtual_Rec;
+   new_rec_   Agreement_Sales_Part_Deal_Virtual_Rec;
+BEGIN
+   key_.Objkey := obj_key_;
+   rec_ := Get_Record___(key_);
+   new_rec_ := rec_;
+   new_rec_.discount := ROUND(Agreement_Sales_Part_Deal_API.Get_Discount(rec_.agreement_id, rec_.min_quantity, rec_.valid_from_date, rec_.catalog_no)/100, 4);
+   Calculate_Discount_Amounts___(new_rec_.acc_discount_net_amount, new_rec_.acc_discount_gross_amount, new_rec_.agreement_id, new_rec_.discount, new_rec_.deal_price_incl_tax, new_rec_.deal_price, new_rec_.catalog_no, new_rec_.base_price_site, new_rec_.currency_code);
+   CRUD_Update___(rec_, new_rec_);
+END Update_Parent___;
+
+@Override
+PROCEDURE CRUD_Default___ (
+   key_  IN Agreement_Part_Discount_Key,
+   attr_ IN OUT VARCHAR2,
+   info_ OUT VARCHAR2)
+IS
+   agreement_id_ agreement_part_discount_tab.agreement_id%TYPE;
+   min_quantity_ agreement_part_discount_tab.min_quantity%TYPE;
+   valid_from_   agreement_part_discount_tab.valid_from_date%TYPE;
+   catalog_no_   agreement_part_discount_tab.catalog_no%TYPE;
+   disc_line_no_ NUMBER;
+BEGIN
+   agreement_id_ := Client_SYS.Get_Item_Value('AGREEMENT_ID', attr_);
+   min_quantity_ := Client_SYS.Get_Item_Value('MIN_QUANTITY', attr_);
+   valid_from_   := Client_SYS.Get_Item_Value_To_Date('VALID_FROM_DATE', attr_, 'AgreementPartDiscount');
+   catalog_no_   := Client_SYS.Get_Item_Value('CATALOG_NO', attr_);
+
+   SELECT NVL(MAX(DISCOUNT_LINE_NO),0) INTO  disc_line_no_ FROM AGREEMENT_PART_DISCOUNT
+   WHERE AGREEMENT_ID    = agreement_id_ AND
+         MIN_QUANTITY    = min_quantity_ AND
+         VALID_FROM_DATE = valid_from_ AND
+         CATALOG_NO      = catalog_no_; 
+   super(key_, attr_, info_);
+   Client_SYS.Add_To_Attr('DISCOUNT_LINE_NO', disc_line_no_ + 1, attr_);  
+END CRUD_Default___;
+
+PROCEDURE Update_Discount_Line_No___ (
+   agreement_id_    IN VARCHAR2,
+   min_quantity_    IN NUMBER,
+   valid_from_      IN DATE,
+   catalog_no_      IN VARCHAR2,
+   discount_no_     IN NUMBER,
+   create_discount_ IN BOOLEAN) 
+IS
+   CURSOR Get_Discount_Lines IS
+   SELECT objid, objversion, discount_line_no  FROM AGREEMENT_PART_DISCOUNT
+   WHERE AGREEMENT_ID    = agreement_id_ AND
+         MIN_QUANTITY    = min_quantity_ AND
+         VALID_FROM_DATE = valid_from_ AND
+         CATALOG_NO      = catalog_no_
+         AND DISCOUNT_NO <> discount_no_
+         ORDER BY discount_line_no;
+         
+   CURSOR Get_Discount_Del_Lines IS
+   SELECT objid, objversion, discount_line_no  FROM AGREEMENT_PART_DISCOUNT
+   WHERE AGREEMENT_ID    = agreement_id_ AND
+         MIN_QUANTITY    = min_quantity_ AND
+         VALID_FROM_DATE = valid_from_ AND
+         CATALOG_NO      = catalog_no_
+         ORDER BY discount_line_no;      
+         
+   attr_              VARCHAR2(2000) ;
+   info_              VARCHAR2(2000) ;
+   count_             NUMBER := 1;
+   discount_line_no_  NUMBER;
+BEGIN
+   IF  create_discount_ THEN
+      discount_line_no_ := Agreement_Part_Discount_Api.Get_Discount_Line_No(agreement_id_,min_quantity_, valid_from_, catalog_no_, discount_no_);
+      FOR  rec_ IN Get_Discount_Lines LOOP
+         IF rec_.discount_line_no >= discount_line_no_ THEN
+            Client_SYS.Clear_Attr(attr_);
+            Client_SYS.Add_To_Attr('DISCOUNT_LINE_NO', rec_.discount_line_no + 1, attr_);
+            Agreement_Part_Discount_Api.Modify__(info_, rec_.objid, rec_.objversion, attr_, 'DO');
+
+         END IF;
+      END LOOP;
+   ELSE   
+      -- if deletion of records
+      FOR  rec_ IN Get_Discount_Del_Lines LOOP    
+         IF rec_.discount_line_no <> count_ THEN
+            Client_SYS.Clear_Attr(attr_);
+            Client_SYS.Add_To_Attr('DISCOUNT_LINE_NO', count_, attr_);
+            Agreement_Part_Discount_Api.Modify__(info_, rec_.objid, rec_.objversion, attr_, 'DO');
+
+         END IF;
+         count_ := count_ +1;
+      END LOOP;
+   END IF; 
+END Update_Discount_Line_No___;

@@ -1,0 +1,752 @@
+-----------------------------------------------------------------------------
+--  Module : MPCCOM
+--
+--  Purpose: File for upgrading Mpccom Versions 14.1.0-GET, 15.0.0-GET to IFS CLOUD
+--
+--  File   : GET_TO_CLOUD.UPG
+--
+--  IFS/Design Template Version 2.3
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  210910  Niralk  SC21R2-2676, Added Secton 2.3 and 3.3.
+--  210510  WaSalk  SC21R2-1131, Modified name, internal comments and sections relevant to GET_TO_CLOUD.UPG.
+--  210219  Asawlk  ICRPP-85, Stopped executing an empty statement when migrating data from nbm_tab TO statistical_code_tab.
+--  210217  WaSalk   SC2020R1-12569, Changed Database_SYS.Create_Or_Replace_Table to Database_SYS.Create_Table in section 1 and 2.
+--  201124  NiAslk  SC2020R1-11432, Modified file name to reflect new version name IFS Cloud 21.1.0.
+--  200825  MalLlk  GESPRING20-5423, Upgrade event_code and str_code column values in mpccom_accounting_tab when upgrading from  
+--  200825          14.1.0-GET or 15.0.0-GET versions. Free of charge implentataion is moved to core and will use standard event 
+--  200825          codes 'OESHIP' and 'OERETURN', and str codes 'M24' and 'M25'.
+--  191028  NWeelk  Created.
+-----------------------------------------------------------------------------
+
+SET SERVEROUTPUT ON
+
+DEFINE MODULE = 'MPCCOM'
+DEFINE GET9VERSION  = 14.1.0-GET
+DEFINE GET10VERSION  = 15.0.0-GET
+
+------------------------------------------------------------------------------------------
+
+-- Instructions for upg files:
+
+-- If possible, everything regarding one table should be placed in one section.
+-- If this is not possible, a proper comment about the reason should be added.
+
+-- Each section should be started with a "-" line and a empty line.
+-- The section should then start with a line like: "-- ***** Example_Tab Start *****"
+-- and end with a line like:                       "-- ***** Example_Tab End *****"
+-- The "start tag" (in this case "Example_Tab"), should be placed in "List of upgrade sections".
+-- Don't forget UPPER/lower case !
+
+-- Every part inside the section should start with a "PROMPT" line.
+
+-- If the Pl block has DML instructions (INSERT,UPDATE,DELETE etc) there should always be a "COMMIT;" line after the block.
+-- If the Pl block not has DML instructions, there should not be a "COMMIT;" line after the block.
+
+-- Remember ordinary coding standard rules !
+
+-- Don't drop any column in an upgrade file !
+
+-- Don't forget performance when updating large tabled !
+
+-- No unnecessary blank lines or comments !
+
+-- If possible, use pure SQL update
+-- If possible, try to put several updates together in one statement.
+
+-----------------------------------------------------------------------------------------
+
+-- LIST OF  SECTIONS 
+
+-- SECTION 1 - Handling Upgrade from GET9 to GET10 RTM
+--    List of upgrade sections - country_notc_tab
+--                               acc_event_posting_type_tab
+--                               order_delivery_term_tab
+
+-- SECTION 2 - Handling Upgrade from GET10 RTM to development base per each version  
+--     2.1 List of upgrade sections From GET10 RTM to GET10 UPD6
+--                               acc_event_posting_type_tab   
+--                               service_statistics_no
+--                               movement_type_tab
+--                               transport_doc_series_tab
+--                               transport_doc_num_series_tab
+--     2.2 List of upgrade sections From GET10 RTM to GET10 UPD11
+--     2.3 List of upgrade sections From GET10 UPD11 to GET10 UPD13
+
+-- SECTION 3 - IFS CLOUD related GET DB Changes
+--     3.1 List of upgrade sections 21R1- 
+--     3.2 List of upgrade sections 21R2-
+--     3.3 List of upgrade sections 22R1-
+
+-----------------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------------
+------------- SECTION1 : Handling Upgrade from GET9 to GET10 RTM Start Here -------------
+-----------------------------------------------------------------------------------------
+-- Content in GET10 RTM Cdb file is included in this section
+-----------------------------------------------------------------------------------------
+
+-- ***** COUNTRY_NOTC_TAB Start *****
+
+exec Database_SYS.Log_Detail_Time_Stamp('MPCCOM','GET_TO_CLOUD.upg','Timestamp_1');
+PROMPT Remove obsolete mapping 51-5 and modified 51-4 for IT
+DECLARE
+   stmt_       VARCHAR2(2000);
+BEGIN
+   IF (Database_SYS.Get_Component_Version('&MODULE') = '&GET9VERSION') THEN
+      -- Remove obsolete mapping 51-5 and modified 51-4 for IT.
+      -- CountryNotc.ins script inserts records of new mapping, but doesn't remove old ones. This script cleans up.
+      -- If you change mapping (ex. from 51-5 to 51-4) and re-run CountryNotc.ins,
+      -- there are new records and old ones in the table.
+      -- If you change description and re-run CountryNotc.ins, only old (incorrect) records are in table.
+      -- This is why this script needs to be run (and delete all modified records) before CountryNotc.ins execution.
+      stmt_ := 'DELETE FROM country_notc_tab
+                WHERE notc = ''51'' AND country_code = ''IT'' AND country_notc = ''4''
+                OR notc = ''51'' AND country_code = ''IT'' AND country_notc = ''5''';
+      EXECUTE IMMEDIATE stmt_;
+      COMMIT;
+   ELSE
+      dbms_output.put_line('Not executed since not upgrading from '||'&GET9VERSION'||' Version');
+   END IF;
+END;
+/
+
+-- ***** COUNTRY_NOTC_TAB End *****
+
+-----------------------------------------------------------------------------------------
+
+-- ***** ACC_EVENT_POSTING_TYPE_TAB Start *****
+exec Database_SYS.Log_Detail_Time_Stamp('MPCCOM','GET_TO_CLOUD.upg','Timestamp_2');
+PROMPT Adding postings to accounting events table
+DECLARE
+   PROCEDURE Insert_Row (
+     event_code_              IN VARCHAR2,
+     str_code_                IN VARCHAR2,
+     debit_credit_            IN VARCHAR2,
+     booking_                 IN NUMBER,
+     pre_accounting_flag_     IN VARCHAR2,
+     project_accounting_flag_ IN VARCHAR2,
+     rowversion_              IN DATE)
+   IS
+      stmt_       VARCHAR2(2000);
+   BEGIN
+      stmt_ := 'INSERT INTO
+                      ACC_EVENT_POSTING_TYPE_TAB
+                      (event_code,
+                        str_code,
+                        debit_credit,
+                        booking,
+                        pre_accounting_flag,
+                        project_accounting_flag,
+                        rowversion)
+                VALUES (:event_code_,
+                        :str_code_,
+                        :debit_credit_,
+                        :booking_,
+                        :pre_accounting_flag_,
+                        :project_accounting_flag_,
+                        :rowversion_)';
+      Execute IMMEDIATE stmt_ USING IN event_code_,
+                                    IN str_code_,
+                                    IN debit_credit_,
+                                    IN booking_,
+                                    IN pre_accounting_flag_,
+                                    IN project_accounting_flag_,
+                                    IN rowversion_;
+      COMMIT;
+   EXCEPTION
+     WHEN dup_val_on_index THEN
+       NULL;
+   END Insert_Row;
+
+BEGIN
+   IF (Database_SYS.Get_Component_Version('&MODULE') = '&GET9VERSION') THEN
+      -- BRTXFNIS
+      Insert_Row('BRTXFNIS', 'FN109', 'C', 1109, 'N', 'EXCLUDE PROJECT PRE POSTING', SYSDATE);
+      Insert_Row('BRTXFNIS', 'FN110', 'D', 1110, 'N', 'EXCLUDE PROJECT PRE POSTING', SYSDATE);
+      Insert_Row('BRTXFNIS', 'FN111', 'C', 1111, 'N', 'EXCLUDE PROJECT PRE POSTING', SYSDATE);
+      Insert_Row('BRTXFNIS', 'FN112', 'D', 1112, 'N', 'EXCLUDE PROJECT PRE POSTING', SYSDATE);
+      -- BRTXFNOS
+      Insert_Row('BRTXFNOS', 'FN109', 'C', 1109, 'N', 'EXCLUDE PROJECT PRE POSTING', SYSDATE);
+      Insert_Row('BRTXFNOS', 'FN110', 'D', 1110, 'N', 'EXCLUDE PROJECT PRE POSTING', SYSDATE);
+      Insert_Row('BRTXFNOS', 'FN111', 'C', 1111, 'N', 'EXCLUDE PROJECT PRE POSTING', SYSDATE);
+      Insert_Row('BRTXFNOS', 'FN112', 'D', 1112, 'N', 'EXCLUDE PROJECT PRE POSTING', SYSDATE);
+      -- BRTXFNOC
+      Insert_Row('BRTXFNOC', 'FN109', 'C', 1109, 'N', 'EXCLUDE PROJECT PRE POSTING', SYSDATE);
+      Insert_Row('BRTXFNOC', 'FN110', 'D', 1110, 'N', 'EXCLUDE PROJECT PRE POSTING', SYSDATE);
+      Insert_Row('BRTXFNOC', 'FN111', 'C', 1111, 'N', 'EXCLUDE PROJECT PRE POSTING', SYSDATE);
+      Insert_Row('BRTXFNOC', 'FN112', 'D', 1112, 'N', 'EXCLUDE PROJECT PRE POSTING', SYSDATE);
+      -- BRTXFNIC
+      Insert_Row('BRTXFNIC', 'FN109', 'C', 1109, 'N', 'EXCLUDE PROJECT PRE POSTING', SYSDATE);
+      Insert_Row('BRTXFNIC', 'FN110', 'D', 1110, 'N', 'EXCLUDE PROJECT PRE POSTING', SYSDATE);
+      Insert_Row('BRTXFNIC', 'FN111', 'C', 1111, 'N', 'EXCLUDE PROJECT PRE POSTING', SYSDATE);
+      Insert_Row('BRTXFNIC', 'FN112', 'D', 1112, 'N', 'EXCLUDE PROJECT PRE POSTING', SYSDATE);
+      -- BRTXFNOSUP
+      Insert_Row('BRTXFNOSUP', 'FN109', 'C', 1109, 'N', 'EXCLUDE PROJECT PRE POSTING', SYSDATE);
+      Insert_Row('BRTXFNOSUP', 'FN110', 'D', 1110, 'N', 'EXCLUDE PROJECT PRE POSTING', SYSDATE);
+      Insert_Row('BRTXFNOSUP', 'FN111', 'C', 1111, 'N', 'EXCLUDE PROJECT PRE POSTING', SYSDATE);
+      Insert_Row('BRTXFNOSUP', 'FN112', 'D', 1112, 'N', 'EXCLUDE PROJECT PRE POSTING', SYSDATE);
+      -- BRTXFNISUP
+      Insert_Row('BRTXFNISUP', 'FN109', 'C', 1109, 'N', 'EXCLUDE PROJECT PRE POSTING', SYSDATE);
+      Insert_Row('BRTXFNISUP', 'FN110', 'D', 1110, 'N', 'EXCLUDE PROJECT PRE POSTING', SYSDATE);
+      Insert_Row('BRTXFNISUP', 'FN111', 'C', 1111, 'N', 'EXCLUDE PROJECT PRE POSTING', SYSDATE);
+      Insert_Row('BRTXFNISUP', 'FN112', 'D', 1112, 'N', 'EXCLUDE PROJECT PRE POSTING', SYSDATE);
+      COMMIT;
+   ELSE
+      dbms_output.put_line('Not executed since not upgrading from '||'&GET9VERSION'||' Version');
+   END IF;   
+END;
+/
+-- ***** ACC_EVENT_POSTING_TYPE_TAB End *****
+
+-----------------------------------------------------------------------------------------
+
+-- ***** ORDER_DELIVERY_TERM_TAB Start *****
+exec Database_SYS.Log_Detail_Time_Stamp('MPCCOM','GET_TO_CLOUD.upg','Timestamp_3');
+PROMPT Make receiver_resp_for_freight nullable on order_delivery_term_tab
+DECLARE
+   table_name_        VARCHAR2(30) := 'ORDER_DELIVERY_TERM_TAB';
+   old_column_name_   VARCHAR2(30) := 'RECEIVER_RESP_FOR_FREIGHT';
+   columns_ Database_SYS.ColumnTabType ;
+BEGIN
+   IF (Database_SYS.Get_Component_Version('&MODULE') = '&GET9VERSION') THEN
+      IF Database_SYS.Column_Exist(table_name_, old_column_name_) THEN
+         Database_SYS.Reset_Column_Table(columns_);
+         Database_SYS.Set_Table_Column(columns_, old_column_name_, 'VARCHAR2(5)', 'Y');
+         Database_SYS.Alter_Table(table_name_, columns_);
+      END IF;
+   ELSE
+      dbms_output.put_line('Not executed since not upgrading from '||'&GET9VERSION'||' Version');
+   END IF;
+END;
+/
+
+exec Database_SYS.Log_Detail_Time_Stamp('MPCCOM','GET_TO_CLOUD.upg','Timestamp_4');
+PROMPT Make receiver_resp_for_freight obsolete on order_delivery_term_tab
+DECLARE
+   new_column_name_   VARCHAR2(30);
+   old_column_name_   VARCHAR2(30);
+   table_name_        VARCHAR2(30) := 'ORDER_DELIVERY_TERM_TAB';
+BEGIN
+   IF (Database_SYS.Get_Component_Version('&MODULE') = '&GET9VERSION') THEN
+      new_column_name_ := 'RECEIVER_RESP_FOR_FREIGHT_1410';
+      old_column_name_ := 'RECEIVER_RESP_FOR_FREIGHT';
+      IF NOT (Database_SYS.Column_Exist(table_name_, new_column_name_)) AND Database_SYS.Column_Exist(table_name_, old_column_name_) THEN
+         Database_SYS.Rename_Column(table_name_, new_column_name_, old_column_name_, TRUE);
+      END IF;
+   ELSE
+      dbms_output.put_line('Not executed since not upgrading from '||'&GET9VERSION'||' Version');
+   END IF;
+END;
+/
+-- ***** ORDER_DELIVERY_TERM_TAB End *****
+
+-----------------------------------------------------------------------------------------
+-----------------------------Upgrade Sections for Loc2Core starts here-------------------
+-----------------------------------------------------------------------------------------
+
+                                    
+-----------------------------------------------------------------------------------------
+------------- SECTION1 : Handling Upgrade from GET9 to GET10 RTM Ends Here --------------
+-----------------------------------------------------------------------------------------
+
+
+
+-----------------------------------------------------------------------------------------
+------------- SECTION2.1 : Handling Upgrade from GET10 RTM to GET10 UPD6 Starts Here ----
+------------- NOTE       : Support cdb files from GET10 RTM until UPD6 ------------------
+-----------------------------------------------------------------------------------------
+
+-- ***** ACC_EVENT_POSTING_TYPE_TAB Start *****
+
+exec Database_SYS.Log_Detail_Time_Stamp('MPCCOM','GET_TO_CLOUD.upg','Timestamp_5');
+PROMPT Adding postings to accounting events table
+DECLARE
+   PROCEDURE Insert_Row (
+     event_code_              IN VARCHAR2,
+     str_code_                IN VARCHAR2,
+     debit_credit_            IN VARCHAR2,
+     booking_                 IN NUMBER,
+     pre_accounting_flag_     IN VARCHAR2,
+     project_accounting_flag_ IN VARCHAR2,
+     rowversion_              IN DATE)
+   IS
+      stmt_       VARCHAR2(2000);
+   BEGIN
+      stmt_ := 'INSERT INTO 
+                       ACC_EVENT_POSTING_TYPE_TAB
+                       ( event_code,
+                         str_code,
+                         debit_credit,
+                         booking,
+                         pre_accounting_flag,
+                         project_accounting_flag,
+                         rowversion)
+                VALUES ( :event_code_,
+                         :str_code_,
+                         :debit_credit_,
+                         :booking_,
+                         :pre_accounting_flag_,
+                         :project_accounting_flag_,
+                         :rowversion_)';
+      Execute IMMEDIATE stmt_ USING IN event_code_,
+                                    IN str_code_,
+                                    IN debit_credit_,
+                                    IN booking_,
+                                    IN pre_accounting_flag_,
+                                    IN project_accounting_flag_,
+                                    IN rowversion_;
+   EXCEPTION
+     WHEN dup_val_on_index THEN 
+       NULL;
+   END Insert_Row;           
+BEGIN
+   IF ( Database_SYS.Get_Component_Version('&MODULE') IN ('&GET9VERSION', '&GET10VERSION')) THEN
+      -- BRTXSTR
+      Insert_Row('BRTXSTR','FN18','C',1018,'N','EXCLUDE PROJECT PRE POSTING',SYSDATE);
+      -- BRTXATR
+      Insert_Row('BRTXATR','FN6' ,'D',1006,'N','EXCLUDE PROJECT PRE POSTING',SYSDATE);
+      -- BRTXFNIS
+      Insert_Row('BRTXFNIS', 'FN113', 'C', 1113, 'N', 'EXCLUDE PROJECT PRE POSTING', SYSDATE);
+      Insert_Row('BRTXFNIS', 'FN114', 'C', 1114, 'N', 'EXCLUDE PROJECT PRE POSTING', SYSDATE);
+      -- BRT-RECINC
+      Insert_Row('BRT-RECINC', 'M1', 'C', 1, 'N', 'EXCLUDE PROJECT PRE POSTING', SYSDATE);
+      Insert_Row('BRT-RECINC', 'M3', 'D', 1, 'Y', 'EXCLUDE PROJECT PRE POSTING', SYSDATE);
+      -- BRTRECISSC
+      Insert_Row('BRTRECISSC', 'M3', 'C', 1, 'N', 'EXCLUDE PROJECT PRE POSTING', SYSDATE);
+      Insert_Row('BRTRECISSC', 'FN99', 'D', 1, 'Y', 'EXCLUDE PROJECT PRE POSTING', SYSDATE);
+      COMMIT;
+   ELSE
+      dbms_output.put_line('Not executed since not upgrading from '||'&GET9VERSION'||' Version or '||'&GET10VERSION'||' Version');
+   END IF;   
+END;      
+/
+-- ***** ACC_EVENT_POSTING_TYPE_TAB End *****
+
+-----------------------------------------------------------------------------------------
+
+--*************SERVICE_STATISTICS_NO_TAB Start***************
+
+-- gelr:service_statistics_no, begin
+exec Database_SYS.Log_Detail_Time_Stamp('MPCCOM','GET_TO_CLOUD.upg','Timestamp_6');
+PROMPT Add new table service_statistics_no_tab                      
+DECLARE
+   table_name_ VARCHAR2(30) := 'SERVICE_STATISTICS_NO_TAB';
+   columns_    Database_SYS.ColumnTabType;
+BEGIN
+   IF ( Database_SYS.Get_Component_Version('&MODULE') IN ('&GET9VERSION', '&GET10VERSION')) THEN
+      Database_SYS.Reset_Column_Table(columns_);
+      Database_SYS.Set_Table_Column(columns_, 'COMPANY',               'VARCHAR2(20)',   'N');
+      Database_SYS.Set_Table_Column(columns_, 'SERVICE_STATISTICS_NO', 'VARCHAR2(15)',   'N');
+      Database_SYS.Set_Table_Column(columns_, 'DESCRIPTION',           'VARCHAR2(2000)', 'N');
+      Database_SYS.Set_Table_Column(columns_, 'ROWVERSION',            'DATE',           'N');
+      Database_SYS.Set_Table_Column(columns_, 'ROWKEY',                'VARCHAR2(50)',   'N', 'sys_guid()');
+      Database_SYS.Set_Table_Column(columns_, 'ROWSTATE',              'VARCHAR2(20)',   'N');
+      Database_SYS.Create_Table(table_name_, columns_, '&IFSAPP_DATA', NULL, TRUE);
+
+      Database_SYS.Reset_Column_Table(columns_);
+      Database_SYS.Set_Table_Column(columns_, 'COMPANY');
+      Database_SYS.Set_Table_Column(columns_, 'SERVICE_STATISTICS_NO');
+      Database_SYS.Create_Constraint(table_name_, 'SERVICE_STATISTICS_NO_PK', columns_, 'P', '&IFSAPP_INDEX', NULL, TRUE, TRUE);
+
+      Database_SYS.Reset_Column_Table(columns_);
+      Database_SYS.Set_Table_Column(columns_, 'ROWKEY');
+      Database_SYS.Create_Constraint(table_name_, 'SERVICE_STATISTICS_NO_RK', columns_, 'U', '&IFSAPP_INDEX', NULL, TRUE, TRUE);
+   ELSE
+      dbms_output.put_line('Not executed since not upgrading from '||'&GET9VERSION'||' Version or '||'&GET10VERSION'||' Version');
+   END IF;
+END;
+/
+-- gelr:service_statistics_no, end
+
+--*************SERVICE_STATISTICS_NO_TAB End***************
+-----------------------------------------------------------------------------------------
+
+--*************MOVEMENT_TYPE_TAB Start***************
+-- gelr:pt_movement_types, begin
+exec Database_SYS.Log_Detail_Time_Stamp('MPCCOM','GET_TO_CLOUD.upg','Timestamp_7');
+PROMPT Creating table movement_type_tab
+DECLARE
+   table_name_ VARCHAR2(30) := 'MOVEMENT_TYPE_TAB';
+   columns_    Database_SYS.ColumnTabType;
+   column_     Database_SYS.ColRec;
+BEGIN
+   IF ( Database_SYS.Get_Component_Version('&MODULE') IN ('&GET9VERSION', '&GET10VERSION')) THEN
+      Database_SYS.Reset_Column_Table(columns_);
+      Database_SYS.Set_Table_Column(columns_, 'CONTRACT', 'VARCHAR2(5)', 'N');
+      Database_SYS.Set_Table_Column(columns_, 'MOVEMENT_TYPE', 'VARCHAR2(30)', 'N');
+      Database_SYS.Set_Table_Column(columns_, 'DESCRIPTION', 'VARCHAR2(2000)', 'N');
+      Database_SYS.Set_Table_Column(columns_, 'COMPANY', 'VARCHAR2(20)', 'N');
+      Database_SYS.Set_Table_Column(columns_, 'TRANSPORT_DOC_SERIES_ID', 'VARCHAR2(30)', 'N');
+      Database_SYS.Set_Table_Column(columns_, 'COMMUNICATE_TO_AT', 'VARCHAR2(20)', 'N', '''YES''');
+      Database_SYS.Set_Table_Column(columns_, 'REPORT_TEXT', 'VARCHAR2(2000)', 'Y');
+      Database_SYS.Set_Table_Column(columns_, 'ROWVERSION', 'DATE', 'N');
+      Database_SYS.Set_Table_Column(columns_, 'ROWKEY', 'VARCHAR2(50)', 'N', 'sys_guid()');
+      Database_SYS.Create_Table(table_name_, columns_, '&IFSAPP_DATA', NULL, TRUE);
+   ELSE
+      dbms_output.put_line('Not executed since not upgrading from '||'&GET9VERSION'||' Version or '||'&GET10VERSION'||' Version');
+   END IF;
+END;  
+/
+       
+exec Database_SYS.Log_Detail_Time_Stamp('MPCCOM','GET_TO_CLOUD.upg','Timestamp_8');
+PROMPT Adding PK constraint to movement_type_tab
+DECLARE
+   index_name_ VARCHAR2(30) := 'MOVEMENT_TYPE_PK';
+   table_name_ VARCHAR2(30) := 'MOVEMENT_TYPE_TAB';
+   columns_    Database_SYS.ColumnTabType;
+BEGIN
+   IF ( Database_SYS.Get_Component_Version('&MODULE') IN ('&GET9VERSION', '&GET10VERSION')) THEN
+      Database_SYS.Reset_Column_Table(columns_);
+      Database_SYS.Set_Table_Column(columns_, 'CONTRACT');
+      Database_SYS.Set_Table_Column(columns_, 'MOVEMENT_TYPE');
+      Database_SYS.Create_Constraint(table_name_, index_name_, columns_, 'P', '&IFSAPP_INDEX', NULL, TRUE, TRUE);
+   ELSE
+      dbms_output.put_line('Not executed since not upgrading from '||'&GET9VERSION'||' Version or '||'&GET10VERSION'||' Version');
+   END IF;
+END; 
+/
+
+exec Database_SYS.Log_Detail_Time_Stamp('MPCCOM','GET_TO_CLOUD.upg','Timestamp_9');
+PROMPT Adding RK constraint to movement_type_tab
+DECLARE
+   index_name_ VARCHAR2(30) := 'MOVEMENT_TYPE_RK';
+   table_name_ VARCHAR2(30) := 'MOVEMENT_TYPE_TAB';
+   columns_    Database_SYS.ColumnTabType;
+BEGIN
+   IF ( Database_SYS.Get_Component_Version('&MODULE') IN ('&GET9VERSION', '&GET10VERSION')) THEN
+      Database_SYS.Reset_Column_Table(columns_);
+      Database_SYS.Set_Table_Column(columns_, 'ROWKEY');
+      Database_SYS.Create_Constraint(table_name_, index_name_, columns_, 'U', '&IFSAPP_INDEX', NULL, TRUE, TRUE);
+   ELSE
+      dbms_output.put_line('Not executed since not upgrading from '||'&GET9VERSION'||' Version or '||'&GET10VERSION'||' Version');
+   END IF;
+END;
+/
+-- gelr:pt_movement_types, end
+--*************MOVEMENT_TYPE_TAB End******************* 
+-----------------------------------------------------------------------------------------
+
+--*************TRANSPORT_DOC_SERIES_TAB Start*************** 
+-- gelr:pt_movement_types, begin
+exec Database_SYS.Log_Detail_Time_Stamp('MPCCOM','GET_TO_CLOUD.upg','Timestamp_10');
+PROMPT Creating table transport_doc_series_tab            
+DECLARE
+   table_name_ VARCHAR2(30) := 'TRANSPORT_DOC_SERIES_TAB';
+   columns_    Database_SYS.ColumnTabType;
+   column_     Database_SYS.ColRec;
+BEGIN
+   IF ( Database_SYS.Get_Component_Version('&MODULE') IN ('&GET9VERSION', '&GET10VERSION')) THEN
+      Database_SYS.Reset_Column_Table(columns_);
+      Database_SYS.Set_Table_Column(columns_, 'COMPANY', 'VARCHAR2(20)', 'N');
+      Database_SYS.Set_Table_Column(columns_, 'SERIES_ID', 'VARCHAR2(30)', 'N');
+      Database_SYS.Set_Table_Column(columns_, 'DESCRIPTION', 'VARCHAR2(2000)', 'N');
+      Database_SYS.Set_Table_Column(columns_, 'AUTOMATIC_NUMBERING', 'VARCHAR2(20)', 'N', '''YES''');
+      Database_SYS.Set_Table_Column(columns_, 'REPORT_DESCRIPTION', 'VARCHAR2(2000)', 'Y');
+      Database_SYS.Set_Table_Column(columns_, 'ROWVERSION', 'DATE', 'N');
+      Database_SYS.Set_Table_Column(columns_, 'ROWKEY', 'VARCHAR2(50)', 'N', 'sys_guid()');
+      Database_SYS.Create_Table(table_name_, columns_, '&IFSAPP_DATA', NULL, TRUE);  
+   ELSE
+      dbms_output.put_line('Not executed since not upgrading from '||'&GET9VERSION'||' Version or '||'&GET10VERSION'||' Version');
+   END IF;
+END;
+/
+
+exec Database_SYS.Log_Detail_Time_Stamp('MPCCOM','GET_TO_CLOUD.upg','Timestamp_11');
+PROMPT Adding PK constraint to transport_doc_series_tab
+DECLARE
+   index_name_ VARCHAR2(30) := 'TRANSPORT_DOC_SERIES_PK';
+   table_name_ VARCHAR2(30) := 'TRANSPORT_DOC_SERIES_TAB';
+   columns_    Database_SYS.ColumnTabType;
+BEGIN
+   IF ( Database_SYS.Get_Component_Version('&MODULE') IN ('&GET9VERSION', '&GET10VERSION')) THEN
+      Database_SYS.Reset_Column_Table(columns_);
+      Database_SYS.Set_Table_Column(columns_, 'COMPANY');
+      Database_SYS.Set_Table_Column(columns_, 'SERIES_ID');
+      Database_SYS.Create_Constraint(table_name_, index_name_, columns_, 'P', '&IFSAPP_INDEX', NULL, TRUE, TRUE);
+   ELSE
+      dbms_output.put_line('Not executed since not upgrading from '||'&GET9VERSION'||' Version or '||'&GET10VERSION'||' Version');
+   END IF;
+END;
+/
+
+exec Database_SYS.Log_Detail_Time_Stamp('MPCCOM','GET_TO_CLOUD.upg','Timestamp_12');
+PROMPT Adding RK constraint to transport_doc_series_tab
+DECLARE
+   index_name_ VARCHAR2(30) := 'TRANSPORT_DOC_SERIES_RK';
+   table_name_ VARCHAR2(30) := 'TRANSPORT_DOC_SERIES_TAB';
+   columns_    Database_SYS.ColumnTabType;
+BEGIN
+   IF ( Database_SYS.Get_Component_Version('&MODULE') IN ('&GET9VERSION', '&GET10VERSION')) THEN
+      Database_SYS.Reset_Column_Table(columns_);
+      Database_SYS.Set_Table_Column(columns_, 'ROWKEY');
+      Database_SYS.Create_Constraint(table_name_, index_name_, columns_, 'U', '&IFSAPP_INDEX', NULL, TRUE, TRUE);
+   ELSE
+      dbms_output.put_line('Not executed since not upgrading from '||'&GET9VERSION'||' Version or '||'&GET10VERSION'||' Version');
+   END IF;
+END;  
+/
+-- gelr:pt_movement_types, end
+--*************TRANSPORT_DOC_SERIES_TAB End*************************   
+-----------------------------------------------------------------------------------------
+
+--*************TRANSPORT_DOC_NUM_SERIES_TAB Start*******************
+-- gelr:pt_movement_types, begin
+exec Database_SYS.Log_Detail_Time_Stamp('MPCCOM','GET_TO_CLOUD.upg','Timestamp_13');
+PROMPT Creating table transport_doc_num_series_tab
+DECLARE
+   table_name_ VARCHAR2(30) := 'TRANSPORT_DOC_NUM_SERIES_TAB';
+   columns_    Database_SYS.ColumnTabType;
+   column_     Database_SYS.ColRec;
+BEGIN
+   IF ( Database_SYS.Get_Component_Version('&MODULE') IN ('&GET9VERSION', '&GET10VERSION')) THEN
+      Database_SYS.Reset_Column_Table(columns_);
+      Database_SYS.Set_Table_Column(columns_, 'COMPANY', 'VARCHAR2(20)', 'N');
+      Database_SYS.Set_Table_Column(columns_, 'SERIES_ID', 'VARCHAR2(30)', 'N');
+      Database_SYS.Set_Table_Column(columns_, 'VALID_FROM', 'DATE', 'N');
+      Database_SYS.Set_Table_Column(columns_, 'START_VALUE', 'NUMBER', 'N');
+      Database_SYS.Set_Table_Column(columns_, 'END_VALUE', 'NUMBER', 'N');
+      Database_SYS.Set_Table_Column(columns_, 'NEXT_VALUE', 'NUMBER', 'N');
+      Database_SYS.Set_Table_Column(columns_, 'ROWVERSION', 'DATE', 'N');
+      Database_SYS.Set_Table_Column(columns_, 'ROWKEY', 'VARCHAR2(50)', 'N', 'sys_guid()');
+      Database_SYS.Create_Table(table_name_, columns_, '&IFSAPP_DATA', NULL, TRUE);      
+   ELSE
+      dbms_output.put_line('Not executed since not upgrading from '||'&GET9VERSION'||' Version or '||'&GET10VERSION'||' Version');
+   END IF;         
+END;
+/
+   
+exec Database_SYS.Log_Detail_Time_Stamp('MPCCOM','GET_TO_CLOUD.upg','Timestamp_14');
+ PROMPT Adding PK constraint to transport_doc_num_series_tab      
+DECLARE
+   index_name_ VARCHAR2(30) := 'TRANSPORT_DOC_NUM_SERIES_PK';
+   table_name_ VARCHAR2(30) := 'TRANSPORT_DOC_NUM_SERIES_TAB';
+   columns_    Database_SYS.ColumnTabType;
+BEGIN
+   IF ( Database_SYS.Get_Component_Version('&MODULE') IN ('&GET9VERSION', '&GET10VERSION')) THEN
+      Database_SYS.Reset_Column_Table(columns_);
+      Database_SYS.Set_Table_Column(columns_, 'COMPANY');
+      Database_SYS.Set_Table_Column(columns_, 'SERIES_ID');
+      Database_SYS.Set_Table_Column(columns_, 'VALID_FROM');
+      Database_SYS.Create_Constraint(table_name_, index_name_, columns_, 'P', '&IFSAPP_INDEX', NULL, TRUE, TRUE);
+   ELSE
+      dbms_output.put_line('Not executed since not upgrading from '||'&GET9VERSION'||' Version or '||'&GET10VERSION'||' Version');
+   END IF;
+END;
+/
+
+exec Database_SYS.Log_Detail_Time_Stamp('MPCCOM','GET_TO_CLOUD.upg','Timestamp_15');
+PROMPT Adding RK constraint to transport_doc_num_series_tab                
+DECLARE
+   index_name_ VARCHAR2(30) := 'TRANSPORT_DOC_NUM_SERIES_RK';
+   table_name_ VARCHAR2(30) := 'TRANSPORT_DOC_NUM_SERIES_TAB';
+   columns_    Database_SYS.ColumnTabType;
+BEGIN
+   IF ( Database_SYS.Get_Component_Version('&MODULE') IN ('&GET9VERSION', '&GET10VERSION')) THEN
+      Database_SYS.Reset_Column_Table(columns_);
+      Database_SYS.Set_Table_Column(columns_, 'ROWKEY');
+      Database_SYS.Create_Constraint(table_name_, index_name_, columns_, 'U', '&IFSAPP_INDEX', NULL, TRUE, TRUE);
+   ELSE
+      dbms_output.put_line('Not executed since not upgrading from '||'&GET9VERSION'||' Version or '||'&GET10VERSION'||' Version');
+   END IF;
+END;
+/      
+-- gelr:pt_movement_types, end
+--*************TRANSPORT_DOC_NUM_SERIES_TAB End***************   
+
+-----------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------------------------
+------------- SECTION2.1 : Handling Upgrade from GET10 RTM to GET10 UPD6 End Here -------
+-----------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------------------------
+------------- SECTION2.2 : Handling Upgrade from GET10 RTM to GET10 UPD11 Start Here ----
+------------- NOTE       : Support cdb files from GET10 UPD6 until UPD11 ----------------
+-----------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------------------------
+------------- SECTION2.2 : Handling Upgrade from GET10 UPD6 to GET10 UPD11 End Here -----
+-----------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------------------------
+------------- SECTION2.3 : Handling Upgrade from GET10 UPD11 to GET10 UPD13 Start Here ----
+------------- NOTE       : Support cdb files from GET10 UPD11 until UPD13----------------
+-----------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------------------------
+------------- SECTION2.3 : Handling Upgrade from GET10 UPD11 to GET10 UPD13 End Here -----
+-----------------------------------------------------------------------------------------
+--  
+-----------------------------------------------------------------------------------------
+------------- SECTION3.1 : Handling Upgrade from 21R1 related GET DB Changes Start Here -
+-----------------------------------------------------------------------------------------
+
+--*************STATISTICAL_CODE_TAB Start***************
+-- gelr: good_service_code_definition, begin
+exec Database_SYS.Log_Detail_Time_Stamp('MPCCOM','GET_TO_CLOUD.upg','Timestamp_16');
+PROMPT rename table service_statistics_no_tab
+DECLARE
+   new_table_name_   VARCHAR2(30):= 'STATISTICAL_CODE_TAB';
+   old_table_name_   VARCHAR2(30):= 'SERVICE_STATISTICS_NO_TAB';
+BEGIN
+   IF (Database_SYS.Get_Component_Version('&MODULE') IN ('&GET9VERSION', '&GET10VERSION')) THEN
+      IF NOT(Database_SYS.Table_Exist(new_table_name_))AND Database_SYS.Table_Exist(old_table_name_) THEN
+         Database_SYS.Rename_Table(old_table_name_, new_table_name_, FALSE, TRUE, TRUE, TRUE, TRUE);
+      END IF;
+   ELSE
+      dbms_output.put_line('Not executed since not upgrading from '||'&GET9VERSION'||' Version or '||'&GET10VERSION'||' Version');
+   END IF;
+END;
+/
+
+exec Database_SYS.Log_Detail_Time_Stamp('MPCCOM','GET_TO_CLOUD.upg','Timestamp_17');
+PROMPT rename service_statistics_no column in statistical_code_tab
+DECLARE
+   new_column_name_   VARCHAR2(30);
+   old_column_name_   VARCHAR2(30);
+   table_name_   VARCHAR2(30) := 'STATISTICAL_CODE_TAB';
+BEGIN
+   IF (Database_SYS.Get_Component_Version('&MODULE') IN ('&GET9VERSION', '&GET10VERSION')) THEN
+      new_column_name_ := 'STATISTICAL_CODE';
+      old_column_name_ := 'SERVICE_STATISTICS_NO';
+      IF NOT (Database_SYS.Column_Exist(table_name_, new_column_name_)) AND Database_SYS.Column_Exist(table_name_, old_column_name_) THEN
+         Database_SYS.Rename_Column(table_name_, new_column_name_, old_column_name_, TRUE);
+      END IF;
+   ELSE
+      dbms_output.put_line('Not executed since not upgrading from '||'&GET9VERSION'||' Version or '||'&GET10VERSION'||' Version');
+   END IF;
+END;
+/
+
+exec Database_SYS.Log_Detail_Time_Stamp('MPCCOM','GET_TO_CLOUD.upg','Timestamp_18');
+PROMPT Adding PK index to the table STATISTICAL_CODE_TAB
+DECLARE
+   index_name_ VARCHAR2(30) := 'STATISTICAL_CODE_PK';
+   table_name_ VARCHAR2(30) := 'STATISTICAL_CODE_TAB';
+   columns_    Database_SYS.ColumnTabType;
+BEGIN
+   IF (Database_SYS.Get_Component_Version('&MODULE') IN ('&GET9VERSION', '&GET10VERSION')) THEN
+      Database_SYS.Reset_Column_Table(columns_);
+      Database_SYS.Set_Table_Column(columns_, 'COMPANY');
+      Database_SYS.Set_Table_Column(columns_, 'STATISTICAL_CODE');
+      Database_SYS.Create_Constraint(table_name_, index_name_, columns_, 'P', '&IFSAPP_INDEX', NULL, TRUE, TRUE);
+   ELSE
+      dbms_output.put_line('Not executed since not upgrading from '||'&GET9VERSION'||' Version or '||'&GET10VERSION'||' Version');
+   END IF;
+END;
+/
+
+exec Database_SYS.Log_Detail_Time_Stamp('MPCCOM','GET_TO_CLOUD.upg','Timestamp_19');
+PROMPT Adding RK index to the table STATISTICAL_CODE_TAB
+DECLARE
+   index_name_ VARCHAR2(30) := 'STATISTICAL_CODE_RK';
+   table_name_ VARCHAR2(30) := 'STATISTICAL_CODE_TAB';
+   columns_    Database_SYS.ColumnTabType;
+BEGIN
+   IF (Database_SYS.Get_Component_Version('&MODULE') IN ('&GET9VERSION', '&GET10VERSION')) THEN
+      Database_SYS.Reset_Column_Table(columns_);
+      Database_SYS.Set_Table_Column(columns_, 'ROWKEY');
+      Database_SYS.Create_Constraint(table_name_, index_name_, columns_, 'U', '&IFSAPP_INDEX', NULL, TRUE, TRUE);
+   ELSE
+      dbms_output.put_line('Not executed since not upgrading from '||'&GET9VERSION'||' Version or '||'&GET10VERSION'||' Version');
+   END IF;  
+END;
+/
+-- gelr: good_service_code_definition, end
+
+-- gelr: good_service_code_definition, begin
+exec Database_SYS.Log_Detail_Time_Stamp('MPCCOM','GET_TO_CLOUD.upg','Timestamp_20');
+PROMPT Data migrating from nbm_tab TO statistical_code_tab
+DECLARE
+   table_name_ VARCHAR2(30) := 'statistical_code_tab';
+   stmt_       VARCHAR2(2000);
+BEGIN
+   IF (Database_SYS.Get_Component_Version('&MODULE') IN ('&GET9VERSION', '&GET10VERSION')) THEN
+      IF (Database_SYS.Table_Exist('NBM_TAB') AND Database_SYS.Column_Exist(table_name_, 'STATISTICAL_CODE') 
+          AND Database_SYS.Column_Exist(table_name_, 'DESCRIPTION')) THEN
+         stmt_ := 'INSERT INTO statistical_code_tab(company, statistical_code, description, ROWVERSION, ROWSTATE)
+                   SELECT c.company, n.nbm_id, n.description, SYSDATE, ''Active''
+                   FROM company_tab c, nbm_tab n
+                   WHERE c.localization_country = ''BR''
+                   AND NOT EXISTS ( SELECT 1
+                                    FROM statistical_code_tab s
+                                    WHERE s.statistical_code = n.nbm_id)';    
+      
+         EXECUTE IMMEDIATE stmt_;
+         COMMIT;
+      END IF;
+   ELSE
+      dbms_output.put_line('Not executed since not upgrading from '||'&GET9VERSION'||' Version or '||'&GET10VERSION'||' Version');
+   END IF;
+END;
+/
+-- gelr: good_service_code_definition, end
+
+--*************STATISTICAL_CODE_TAB End***************
+
+-- gelr:free_of_charge, begin
+--  ***** MPCCOM_ACCOUNTING_TAB Start *****
+exec Database_SYS.Log_Detail_Time_Stamp('MPCCOM','GET_TO_CLOUD.upg','Timestamp_21');
+PROMPT upgrade event_code and str_code column values in mpccom_accounting_tab
+DECLARE
+   stmt_       VARCHAR2(2000);
+BEGIN
+   IF (Database_SYS.Get_Component_Version('&MODULE') IN ('&GET9VERSION', '&GET10VERSION')) THEN
+      stmt_ := 'UPDATE mpccom_accounting_tab
+                   SET event_code = (
+                           CASE event_code
+                              WHEN ''OESHIP-FOC'' THEN ''OESHIP''
+                              WHEN ''OERET-FOC''  THEN ''OERETURN''
+                              ELSE event_code
+                           END ),
+                       str_code = (
+                           CASE str_code
+                              WHEN ''M285'' THEN ''M24''
+                              WHEN ''M286'' THEN ''M25''
+                              ELSE str_code
+                           END )
+                   WHERE event_code IN (''OESHIP-FOC'', ''OERET-FOC'')';
+      EXECUTE IMMEDIATE stmt_;
+      COMMIT;
+   ELSE
+      dbms_output.put_line('Not executed since not upgrading from '||'&GET9VERSION'||' Version or '||'&GET10VERSION'||' Version');
+   END IF;
+END;
+/
+-- ***** MPCCOM_ACCOUNTING_TAB End *****
+-- gelr:free_of_charge, end
+
+-----------------------------------------------------------------------------------------
+------------- SECTION3.1: Handling Upgrade from 21R1 related GET DB Changes End Here ----
+-----------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------------------------
+------------- SECTION3.2: Handling Upgrade from 21R2 related GET DB Changes Start Here --
+-----------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------------------------
+------------- SECTION3.2: Handling Upgrade from 21R2 related GET DB Changes End Here ----
+-----------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------------------------
+------------- SECTION3.3: Handling Upgrade from 22R1 related GET DB Changes Start Here --
+-----------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------------------------
+------------- SECTION3.3: Handling Upgrade from 22R1 related GET DB Changes End Here ----
+-----------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------------------------
+
+exec Database_SYS.Log_Detail_Time_Stamp('MPCCOM','GET_TO_CLOUD.upg','Timestamp_22');
+PROMPT Upgrade statements in file Mpccom GET_TO_CLOUD.upg end here
+-- Nothing is allowed to be placed below here
+
+UNDEFINE MODULE
+UNDEFINE GET9VERSION
+UNDEFINE GET10VERSION
+
+exec Database_SYS.Log_Detail_Time_Stamp('MPCCOM','GET_TO_CLOUD.upg','Done');
+
+

@@ -1,0 +1,757 @@
+------------------------------------------------------------------------------------------------------
+-- Date        Sign     History
+-- ----------  ------   ------------------------------------------------------------------------------
+-- 2021-07-13  MiKulk   SC21R2-1881, Removed Duplicate FreightPriceListNo, from input list of CustomerOrderLineAddressDialog
+-- 2019-09-10  JeLise   SCFALL19-73, Included ReplicateOrderChangesDialog and used it in validate command for QtyPerAssembly to handle replication.
+-- 2019-05-17  fgusse   SCUXXW4-20685, Added field documentText in PackStructureList
+-- 2018-12-02  HaPulk   SCUXXW4-9285, Converted from frmPackageStructure using MTG Version: 1.34
+------------------------------------------------------------------------------------------------------
+
+client PackageStructure;
+component ORDER;
+layer Core;
+projection PackageStructureHandling;
+include fragment NonRentalSalesPartLovSelector;
+include fragment SalesPartLovSelector;
+
+@DynamicComponentDependency PURCH
+include fragment PurchasePartSupplierLovSelector;
+include fragment SupplySiteReservationDialog;
+include fragment DocumentText;
+include fragment SalesInterimOrderCommands;
+include fragment SalesOrderLineCommonCommands;
+include fragment CustomerOrderLineAddressDialog;
+include fragment CustInfoContactLovPubSelector;
+include fragment CustAddressShipLovSelector;
+include fragment OrderDeliveryTermLovSelector;
+include fragment CustomerOrderLineStateBadge;
+include fragment ReplicateOrderChangesDialog;
+
+warningsenabled = ValidateCatalogNo, ValidateQuantity, UnreserveCustOrderLines, ProcessUnreserve;
+warningsenabled = Unpeg;
+
+-------------------------------- MAIN PAGES ---------------------------------
+page Form using CustomerOrderLineSet {
+   label = "Package Part Structure";
+
+   selector CustomerOrderLineMasterSelector;
+
+   group PackageStructureGroup;
+   list PackageStructureList(PackageStructureArray);
+}
+
+--------------------------------- COMMANDS ----------------------------------
+command BeforeSavePkgCommand for CustomerOrder {
+   variable AllowSendChangeRequestVar Boolean;
+   variable SendChangeRequestVar      Text;
+   variable ReplicateChangesVar       Text;
+   execute {
+      // Replication, start
+      if [not(OrderState in("Planned", "Invoiced", "Cancelled"))] {
+         if [(SupplyCodeDb = "PT" or SupplyCodeDb = "PD" or SupplyCodeDb = "IPT" or SupplyCodeDb = "IPD" or
+         SupplyCodeDb = "SO" or SupplyCodeDb = "DOP") and(QtyOnOrder > 0)] {
+            if [not(Objstate in("Delivered", "Invoiced", "Cancelled"))] {
+               if [RevisedQtyDue != original.RevisedQtyDue] {
+                  if [AllowSendChangeRequest = "TRUE"] {
+                     set AllowSendChangeRequestVar = true;
+                  }
+                  else {
+                     set AllowSendChangeRequestVar = false;
+                  }
+                  dialog ReplicateOrderChangesDialog(AllowSendChangeRequestVar, AllowSendChangeRequestVar) into(SendChangeRequestVar, ReplicateChangesVar) {
+                     when CANCEL {
+                        exit CANCEL;
+                     }
+                     when OK {
+                        set ReplicateChanges = ReplicateChangesVar;
+                        set ChangeRequest = SendChangeRequestVar;
+                        set ChangedAttribNotInPol = "FALSE";
+                     }
+                  }
+               }
+            }
+         }
+      }
+      // Replication, end
+   }
+}
+command CancelOrderLineCommand for CustomerOrderLine {
+   label = "Cancel Order Line";
+   mode = SingleRecord;
+   enabled = [(Objstate = "Released" or(Objstate = "Reserved" and PickListExist = 0))];
+
+   variable OrderLineSelectionVar Text;
+
+   bulkexecute {
+      stringify(records, "ORDER_NO=${OrderNo}^LINE_NO=${LineNo}^REL_NO=${RelNo}^LINE_ITEM_NO=${LineItemNo}^CUSTOMER_NO=${CustomerNo}^", JSON) into OrderLineSelectionVar;
+      assistant CancelCustomerOrder.CancelCustomerOrderAssistant(OrderLineSelectionVar, "CO", "COL", "Cancel Customer Order Line", "FALSE") {
+         when OK {
+            exit OK;
+         }
+      }
+   }
+}
+command CloseOrderLineCommand for CustomerOrderLine {
+   label = "Close Order Line";
+   mode = SingleRecord;
+   enabled = [CloseLineAllowed = 1];
+
+   variable OrderLineSelectionVar Text;
+
+   bulkexecute {
+      stringify(records, "ORDER_NO=${OrderNo}^LINE_NO=${LineNo}^REL_NO=${RelNo}^LINE_ITEM_NO=${LineItemNo}^", JSON) into OrderLineSelectionVar;
+      assistant CloseCustomerOrder.CloseCustomerOrderAssistant(OrderLineSelectionVar, "COL", "Close Order Line") {
+         when OK {
+            exit OK;
+         }
+      }
+   }
+}
+command ShopOrderInfoCommand for CustomerOrderLine {
+   label = "Shop Order Info";
+   mode = SingleRecord;
+   enabled = [SupplyCode = "ShopOrder"];
+
+   variable GetShopOrderVar Structure(GetShopOrderStructure);
+
+   execute {
+      call GetShopOrder(OrderNo, LineNo, RelNo, LineItemNo) into GetShopOrderVar;
+      navigate "page/ShopOrder/Form?$filter=OrderNo eq $[GetShopOrderVar.SoOrderNo] and ReleaseNo eq $[GetShopOrderVar.SoReleaseNo] and SequenceNo eq $[GetShopOrderVar.SoSequenceNo]";
+   }
+}
+command PurchaseInfoCommand for CustomerOrderLine {
+   label = "Purchase Info";
+   mode = SingleRecord;
+   enabled = [(((SupplyCode = "PurchOrderTrans") or(SupplyCode = "PurchOrderDir") or(SupplyCode = "IntPurchTrans") or(SupplyCode = "IntPurchDir")))];
+
+   variable GetPurchaseOrderVar Structure(PurchaseOrderStructure);
+
+   execute {
+      call GetPurchaseOrder(OrderNo, LineNo, RelNo, LineItemNo) into GetPurchaseOrderVar;
+      if [GetPurchaseOrderVar.PurchaseType = "PurchaseOrder"] {
+         navigate "page/PurchaseOrder/Form?$filter=OrderNo eq $[GetPurchaseOrderVar.PoOrderNo]";
+      }
+      else {
+         navigate "page/PurchaseRequisition/Form?$filter=RequisitionNo eq $[GetPurchaseOrderVar.PoOrderNo]";
+      }
+   }
+}
+
+command ReserveSerialNumbersCommand for CustomerOrderLine {
+   label = "Reserve Serial Numbers";
+   execute {
+      assistant SerialReservation.SerialReservationAssistant(OrderNo, LineNo, RelNo, LineItemNo, Contract, PartNo, RevisedQtyDue, "CUSTOMER ORDER") {
+         when OK {
+            exit;
+         }
+      }
+   }
+}
+
+command SupplySiteReservationsCommand for CustomerOrderLine {
+   label = "Supply Site Reservations";
+   mode = SingleRecord;
+   enabled = [SupplyCode in("IntPurchTrans", "IntPurchDir") and Objstate = "Released" and ReleasePlanningDb = "RELEASED" and SupplyChainReservation = 1];
+
+   variable ReservationsVar Text;
+   variable FormSourceVar Text;
+   variable SuccessVar Boolean;
+
+   execute {
+      set FormSourceVar = "ORDER";
+      dialog SupplySiteReservationDialog(OrderNo, LineNo, RelNo, LineItemNo, FormSourceVar) into(ReservationsVar) {
+         when OK {
+
+            if [ReservationsVar = "MANUAL"] {
+               if [FormSourceVar = "ORDER"] {
+                  navigate "page/ManualReservationsOnSupplySite/Form?$filter=OrderNo eq $[OrderNo] and LineNo eq $[LineNo] and RelNo eq $[RelNo] and LineItemNo eq $[LineItemNo]";
+               }
+               else {
+                  navigate "page/ManualReservationsOnSourcedSupplySite/Form?$filter=OrderNo eq $[OrderNo] and LineNo eq $[LineNo] and RelNo eq $[RelNo] and LineItemNo eq $[LineItemNo]";
+               }
+            }
+            else {
+               call ReserveAutomatic(OrderNo, LineNo, RelNo, LineItemNo, FormSourceVar, 0) into SuccessVar;
+               if [SuccessVar] {
+                  // Supply chain reservation has been made
+                  if [FormSourceVar = "ORDER"] {
+                     info("The Customer Order Line has been automatically reserved.");
+                  }
+                  else {
+                     info("The Sourced Line has been automatically reserved.");
+                  }
+               }
+               else {
+                  // Nothing has been reserved or error occured
+                  if [FormSourceVar = "ORDER"] {
+                     info("Nothing has been reserved automatically on the Customer Order Line.");
+                  }
+                  else {
+                     info("Nothing has been reserved automatically on the Sourced Line.");
+                  }
+               }
+            }
+         }
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+
+command OrderLineHistoryCommand for CustomerOrderLine {
+   label = "Order Line History";
+   mode = SelectedRecords;
+
+   enabled = [true];
+   bulkexecute {
+      bulknavigate "page/CustomerOrderLineHistory/Form?$filter=OrderNo eq $[OrderNo] and LineNo eq $[LineNo] and RelNo eq $[RelNo] and LineItemNo eq $[LineItemNo]";
+   }
+
+}
+command OrderLineAddressCommand for CustomerOrderLine {
+   label = "Order Line Address";
+
+   enabled = [true];
+
+   variable OrigCoLangCodeVar Text;
+
+   execute {
+      if [OriginatingCoLangCode = null] {
+         set OrigCoLangCodeVar = parent.LanguageCode;
+      }
+      else {
+         set OrigCoLangCodeVar = OriginatingCoLangCode;
+      }
+      dialog CustomerOrderLineAddressDialog(Company, OrderNo, LineNo, RelNo, LineItemNo, ShipAddrNo, DefaultAddrFlag, AddrFlag, ShipViaCode, ExtTransportCalendarId, FreightMapId, ZoneId, FreightPriceListNo, CustomerNo, DelTermsLocation, DeliveryLeadtime, PickingLeadtime, ForwardAgentId, ShipViaCode, DeliveryTerms, Contract, PartNo, SupplyCode, VendorNo, Contact, RouteId, SupplierShipViaTransit, CustCalendarId, ShipmentType, ShipmentCreation, RegionCode, DistrictCode, DockCode, SubDockCode, DeliverySequence, LocationNo, DeliverToCustomerNo, IntrastatExempt, SupplyCode, Objstate, OrigCoLangCodeVar, false, false) {
+         when OK {
+            exit OK;
+         }
+         when CANCEL {
+            exit CANCEL;
+         }
+      }
+   }
+}
+command ManualPeggingCommand for CustomerOrderLine {
+   label = "Manual Pegging";
+   mode = SelectedRecords;
+
+   enabled = [PartNo != null and Objstate != "Delivered" and Objstate != "Invoiced" and Objstate != "Cancelled" and SupplyCodeDb = "IO" and RelMtrlPlanning = true];
+   bulkexecute {
+      bulknavigate "page/ManualPeggingOfCustomerOrderLine/Form?$filter=OrderNo eq $[OrderNo] and LineNo eq $[LineNo] and RelNo eq $[RelNo] and LineItemNo eq $[LineItemNo]";
+   }
+
+}
+command DocumentTextCommand for CustomerOrderLine {
+   label = "Document Text";
+   mode = SingleRecord;
+   enabled = [NoteId != null];
+
+   variable LabelTextVar Text;
+
+   execute {
+      set LabelTextVar = "for Customer Order - ${OrderNo}, ${CatalogNo}" {
+         translatable = true;
+      }
+      assistant DocumentText(NoteId, LabelTextVar) {
+         when OK {
+            exit OK;
+         }
+      }
+   }
+}
+
+@DynamicComponentDependency CFGCHR
+command ConfigurationViewCommand for CustomerOrderLine {
+   label = "View";
+   mode = SingleRecord;
+   enabled = [CatalogNo != null and ConfigurationId != "*" and ConfigurationId != null];
+
+   variable UsageVar Text;
+
+   execute {
+      set UsageVar = "CustomerOrder";
+
+      navigate "assistant/PartConfigurationAssistant/EditConfiguration?$action=InitConfiguration{VarUsage:$[UsageVar],
+                                                                                                 VarMode:'View',
+                                                                                                 VarIdentity1:$[OrderNo],
+                                                                                                 VarIdentity2:$[LineNo],
+                                                                                                 VarIdentity3:$[RelNo],
+                                                                                                 VarIdentity4:$[LineItemNo]}";
+   }
+}
+
+@DynamicComponentDependency CFGCHR
+command ConfigurationEditCommand for CustomerOrderLine {
+   label = "Edit";
+   mode = SingleRecord;
+   enabled = [CatalogNo != null and Configurable and ConfigurationId != "*" and Objstate = "Released" and OrderState = "Planned"];
+
+   variable UsageVar Text;
+
+   execute {
+      set UsageVar = "CustomerOrder";
+      navigate "assistant/PartConfigurationAssistant/EditConfiguration?$action=InitConfiguration{  VarUsage:$[UsageVar],
+                                                                                                   VarMode:'Edit',
+                                                                                                   VarIdentity1:$[OrderNo],
+                                                                                                   VarIdentity2:$[LineNo],
+                                                                                                   VarIdentity3:$[RelNo],
+                                                                                                   VarIdentity4:$[LineItemNo]}";
+   }
+}
+
+@DynamicComponentDependency CFGCHR
+command ConfigurationEditPricingCommand for CustomerOrderLine {
+   label = "Edit Pricing";
+   mode = SingleRecord;
+   enabled = [ConfigurationId != "*" and ConfigurationId != null and Configurable and CatalogNo != null and
+   ((Source = "CUSTOMERORDER" and((Objstate = "Released" and(OrderState in("Blocked", "Released", "Reserved", "Picked", "PartiallyDelivered"))) or
+   (Objstate = "Reserved" and(OrderState in("Reserved", "Picked", "PartiallyDelivered"))) or
+   (Objstate = "Picked" and(OrderState in("Picked", "PartiallyDelivered"))) or
+   (Objstate = "PartiallyDelivered" and(OrderState in("PartiallyDelivered"))) or
+   (Objstate = "Delivered" and(OrderState in("Delivered", "PartiallyDelivered"))))) or
+   (Source = "PACKSTRUCTORDER" and Objstate = "Released" and OrderState = "Released"))];
+
+   variable UsageVar Text;
+
+   execute {
+      set UsageVar = "CustomerOrder";
+      navigate "assistant/PartConfigurationAssistant/EditConfiguration?$action=InitConfiguration{  VarUsage:$[UsageVar],
+                                                                                                   VarMode:'EditPrice',
+                                                                                                   VarIdentity1:$[OrderNo],
+                                                                                                   VarIdentity2:$[LineNo],
+                                                                                                   VarIdentity3:$[RelNo],
+                                                                                                   VarIdentity4:$[LineItemNo]}";
+   }
+
+}
+
+@DynamicComponentDependency CFGCHR
+command ConfigurationCreateCommand for CustomerOrderLine {
+   label = "Create";
+
+   enabled = [Configurable and(ConfigurationId = null or ConfigurationId = "*") and Objstate = "Released"];
+   mode = SingleRecord;
+   variable UsageVar Text;
+
+   execute {
+      set UsageVar = "CustomerOrder";
+      navigate "assistant/PartConfigurationAssistant/EditConfiguration?$action=InitConfiguration{  VarUsage:$[UsageVar],
+                                                                                                   VarMode:'Create',
+                                                                                                   VarIdentity1:$[OrderNo],
+                                                                                                   VarIdentity2:$[LineNo],
+                                                                                                   VarIdentity3:$[RelNo],
+                                                                                                   VarIdentity4:$[LineItemNo]}";
+   }
+}
+--------------------------------- SELECTORS ---------------------------------
+@Override
+selector CustomerOrderLineMasterSelector for CustomerOrderLineMaster {
+   label = "${OrderNo}";
+   static OrderNo;
+   static LineNo;
+   static RelNo;
+   static CatalogNo;
+
+   exclude LineItemNo;
+}
+
+---------------------------------- GROUPS -----------------------------------
+group PackageStructureGroup for CustomerOrderLineMaster {
+   label = "";
+
+   field PlannedDueDate {
+      visible = [false];
+   }
+   field CustomerOrderRef {
+      size = Small;
+   }
+   field LineNo {
+      size = Small;
+   }
+   field RelNo {
+      size = Small;
+   }
+   field ContractRef {
+      size = Small;
+   }
+   fieldset CustomerOrderLineStateFieldSet;
+   lov CatalogNoRef with ReferenceNonRentalSalesPartLovSelector {
+      preview = NonRentalSalesPartLovCard;
+      description = CatalogDesc;
+   }
+   field CustomerOrderRef.BackorderOption {
+      label = "Backorder Option";
+   }
+   field BuyQtyDue {
+      size = Small;
+   }
+   field QtyAssigned {
+      size = Small;
+   }
+   field QtyPicked {
+      size = Small;
+   }
+   field QtyShipped {
+      size = Small;
+   }
+   field AvailableQty {
+      size = Small;
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+list PackageStructureList for CustomerOrderLine {
+   label = "Component Parts";
+   orderby = LineItemNo;
+   editmode = SingleRowEdit;
+   multiselect = [true];
+   crudactions {
+      before command BeforeSavePkgCommand;
+      duplicate {
+         enabled = [false];
+      }
+   }
+
+   field LineItemNo {
+      size = Small;
+   }
+   lov CatalogNoRef with ReferenceSalesPartLovSelector {
+      validate command {
+         variable ValidateCatalogNoStructureVar Structure(ValidateCatalogNoStructure);
+
+         execute {
+            call ValidateCatalogNo(CatalogNo, OrderNo, BuyQtyDue, LineItemNo, ActivitySeq, PriceConvFactor) into ValidateCatalogNoStructureVar;
+
+            set CatalogNo = ValidateCatalogNoStructureVar.CatalogNo;
+            set CatalogDesc = ValidateCatalogNoStructureVar.CatalogDesc;
+            set CurrencyRate = ValidateCatalogNoStructureVar.CurrencyRate;
+            set ConvFactor = ValidateCatalogNoStructureVar.ConvFactor;
+            set InvertedConvFactor = ValidateCatalogNoStructureVar.InvertedConvFactor;
+            set BaseSaleUnitPrice = ValidateCatalogNoStructureVar.BaseSaleUnitPrice;
+            set BaseUnitPriceInclTax = ValidateCatalogNoStructureVar.BaseUnitPriceInclTax;
+            set Discount = ValidateCatalogNoStructureVar.Discount;
+            set Cost = ValidateCatalogNoStructureVar.Cost;
+            set PartNo = ValidateCatalogNoStructureVar.PartNo;
+            set SupplyCode = ValidateCatalogNoStructureVar.SupplyCode;
+            set CatalogType = ValidateCatalogNoStructureVar.CatalogType;
+            set VendorNo = ValidateCatalogNoStructureVar.VendorNo;
+            set ConsignmentStock = ValidateCatalogNoStructureVar.ConsignmentStock;
+            set CloseTolerance = ValidateCatalogNoStructureVar.CloseTolerance;
+            set CreateSmObjectOption = ValidateCatalogNoStructureVar.CreateSmObjectOptionDb;
+            set PurchasePartNo = ValidateCatalogNoStructureVar.PurchasePartNo;
+            set PartPrice = ValidateCatalogNoStructureVar.PartPrice;
+            set PriceSource = ValidateCatalogNoStructureVar.PriceSource;
+            set SalesUnitMeas = ValidateCatalogNoStructureVar.SalesUnitMeas;
+            set DopConnection = ValidateCatalogNoStructureVar.DopConnection;
+            set PriceQtyDue = ValidateCatalogNoStructureVar.PriceQtyDue;
+         }
+      }
+   }
+   field CatalogDesc;
+   field Configurable {
+      size = Small;
+   }
+   field ConfigurationId;
+
+   lov ConditionCodeRef with ReferenceConditionCodeSelector {
+      description = ConditionCodeRef.Description;
+   }
+   field InterimOrder;
+   field QtyPerAssembly {
+      validate command {
+         variable ValidateQuantityStructureVar Structure(ValidateQuantityStructure);
+         variable RowNew                       Boolean;
+         execute {
+            if [isNew] {
+               set RowNew = true;
+            }
+            else {
+               set RowNew = false;
+            }
+
+            call ValidateQuantity(RevisedQtyDue, QtyAssigned, QtyShipped, StateParent, parent.BuyQtyDue, QtyPerAssembly, parent.QtyDelivered, DesiredQty,
+            CatalogNo, OrderNo, LineNo, RelNo, LineItemNo, SupplyCode, PriceEffectivityDate, PriceConvFactor, RowNew) into ValidateQuantityStructureVar;
+
+            if [ValidateQuantityStructureVar.CheckQuantityChanged = true] {
+               alert("This order line has been ${Objstate}. The quantity can not be changed.");
+            }
+            else {
+               set BuyQtyDue = ValidateQuantityStructureVar.BuyQtyDue;
+               set DesiredQty = ValidateQuantityStructureVar.DesiredQty;
+               set PlannedDueDate = parent.PlannedDueDate;
+
+               set CurrencyRate = ValidateQuantityStructureVar.CurrencyRate;
+               set ConvFactor = ValidateQuantityStructureVar.ConvFactor;
+               set InvertedConvFactor = ValidateQuantityStructureVar.InvertedConvFactor;
+               set Discount = ValidateQuantityStructureVar.Discount;
+               set Cost = ValidateQuantityStructureVar.Cost;
+               set PartPrice = ValidateQuantityStructureVar.PartPrice;
+               set PriceSource = ValidateQuantityStructureVar.PriceSource;
+               set PriceListNo = ValidateQuantityStructureVar.PriceListNo;
+
+               if [ValidateQuantityStructureVar.CheckQuantityLessThanPicked = true] {
+                  alert("This quantity may not be less than the picked quantity.");
+               }
+               else {
+                  set RevisedQtyDue = ValidateQuantityStructureVar.RevisedQtyDue;
+                  set PriceQtyDue = ValidateQuantityStructureVar.PriceQtyDue;
+               }
+            }
+         }
+      }
+   }
+   field SalesUnitMeasRef;
+   field BuyQtyDue;
+   field AvailableQty;
+   field DesiredQty;
+   field QtyAssigned;
+   field QtyPicked;
+   field QtyShipped;
+   field SupplyCode {
+      when [true] use subset Subset13;
+      validate command {
+         variable ValidateSupplierStructureVar Structure(ValidateSupplierStructure);
+
+         execute {
+            if [SupplyCode in("PurchOrderTrans", "PurchOrderDir", "IntPurchTrans", "IntPurchDir")] {
+               call ValidateSupplier(SupplyCode, Contract, PurchasePartNo) into ValidateSupplierStructureVar;
+               set VendorNo = ValidateSupplierStructureVar.VendorNo;
+               set SupplySite = ValidateSupplierStructureVar.SupplySite;
+            }
+         }
+      }
+   }
+   @DynamicComponentDependency PURCH
+   field VendorNo {
+      contactwidget {
+         enabled = [VendorNo != null];
+         source = Supplier;
+      }
+      editable = [SupplyCode = "PurchOrderTrans" or SupplyCode = "PurchOrderDir" or SupplyCode = "IntPurchTrans" or SupplyCode = "IntPurchDir"];
+      lovswitch {
+         when [SupplyCode = "PurchOrderTrans" or SupplyCode = "PurchOrderDir"] {
+            lov VendorNoRef with ReferencePurchasePartSupplierLovSelector using GetVendorCategoryType("E");
+         }
+         when [SupplyCode = "IntPurchTrans" or SupplyCode = "IntPurchDir"] {
+            lov VendorNoRef with ReferencePurchasePartSupplierLovSelector using GetVendorCategoryType("I");
+         }
+      }
+      validate command {
+         variable SupplySiteReserveTypeVar Structure(SupplySiteReserveTypeStructure);
+         execute {
+            call GetSupplySiteReserveType(SupplySite, Contract) into SupplySiteReserveTypeVar;
+            set SupplySiteReserveType = SupplySiteReserveTypeVar.SupplySiteReserveType;
+         }
+      }
+   }
+   field SupplySite;
+   field SupplySiteReservedQty;
+   field SupplySiteReserveType;
+   fieldset CustomerOrderLineStateFieldSet;
+   field CustomerWarranty {
+      size = Small;
+   }
+   field CreateSmObjectOption {
+      enumerationtrue = "CreateSMObject";
+      enumerationfalse = "DoNotCreateSMObject";
+      size = Small;
+   }
+   field CalcCharPrice {
+      preserveprecision = [true];
+   }
+   field CharPrice {
+      preserveprecision = [true];
+   }
+   field PriceQtyDue;
+   field SaleUnitPrice {
+      editable = [parent.UsePriceInclTax = "TRUE"];
+      preserveprecision = [true];
+      validate command {
+         variable CalculatePricesStructureVar Structure(CalculatePricesStructure);
+
+         execute {
+            call CalculatePrices(SaleUnitPrice, UnitPriceInclTax, Contract, OrderNo, LineNo, RelNo) into CalculatePricesStructureVar;
+            set SaleUnitPrice = CalculatePricesStructureVar.SaleUnitPrice;
+            set UnitPriceInclTax = CalculatePricesStructureVar.UnitPriceInclTax;
+            set BaseSaleUnitPrice = CalculatePricesStructureVar.BaseSaleUnitPrice;
+            set BaseUnitPriceInclTax = CalculatePricesStructureVar.BaseUnitPriceInclTax;
+
+            set PriceSource = CalculatePricesStructureVar.PriceSource;
+         }
+      }
+   }
+   field UnitPriceInclTax {
+      editable = [parent.UsePriceInclTax = "FALSE"];
+      preserveprecision = [true];
+
+      validate command {
+         variable CalculatePricesStructureVar Structure(CalculatePricesStructure);
+
+         execute {
+            call CalculatePrices(SaleUnitPrice, UnitPriceInclTax, Contract, OrderNo, LineNo, RelNo) into CalculatePricesStructureVar;
+            set SaleUnitPrice = CalculatePricesStructureVar.SaleUnitPrice;
+            set UnitPriceInclTax = CalculatePricesStructureVar.UnitPriceInclTax;
+            set BaseSaleUnitPrice = CalculatePricesStructureVar.BaseSaleUnitPrice;
+            set BaseUnitPriceInclTax = CalculatePricesStructureVar.BaseUnitPriceInclTax;
+
+            set PriceSource = CalculatePricesStructureVar.PriceSource;
+         }
+      }
+   }
+   field DopConnection {
+      size = Small;
+      editable = [Objstate = "Cancelled"];
+   }
+   field CancelReasonRef {
+      size = Small;
+      editable = [Objstate = "Cancelled"];
+      validate command {
+         execute {
+            call GetReasonDescription(CancelReason) into CancellationReasonDescription;
+         }
+      }
+   }
+   field CancellationReasonDescription {
+      size = Large;
+   }
+   field RelMtrlPlanning {
+      size = Small;
+      validate command {
+         execute {
+            if [RelMtrlPlanning] {
+               confirm("If this check box is not selected, the customer order line will not be plannable.Are you sure you want to clear this check box?") {
+                  when OK {
+                     set RelMtrlPlanning = false;
+                     exit OK;
+                  }
+                  when CANCEL {
+                     set RelMtrlPlanning = true;
+                     exit CANCEL;
+                  }
+               }
+            }
+         }
+      }
+   }
+   @DynamicComponentDependency EXPCTR
+   field ExportLicenseStatusForFindAndConnect {
+      size = Small;
+   }
+   field DocumentText;
+   fieldranking LineItemNo, CatalogNoRef, QtyPerAssembly, BuyQtyDue, Objstate, SupplyCode;
+
+   commandgroup StatusL1CmdGroup {
+
+      commandgroup StatusCmdGroup {
+         label = "Status";
+
+         command CancelOrderLineCommand;
+         command CloseOrderLineCommand;
+      }
+   }
+   commandgroup LineDetailsL1CmdGroup {
+
+      commandgroup LineDetailsCmdGroup {
+         label = "Line Details";
+         command OrderLineAddressCommand;
+         command OrderLineHistoryCommand;
+         command InventoryPartAvailabilityPlanCommand {
+            enablefunction CheckEnableForInvPartAvailPlan(SupplySite, Contract, CatalogNo, VendorNo, PartNo, PurchasePartNo, DemandCode);
+         }
+      }
+   }
+   commandgroup ReservationsL1CmdGroup {
+
+      commandgroup ReservationsCmdGroup {
+         label = "Reservations";
+         command ManualReservationsCommand;
+         command ReserveSerialNumbersCommand {
+            enablefunction ReserveSerialNumbersEnable(SupplyCode, OrderState, PartNo);
+         }
+         command SupplySiteReservationsCommand;
+         command UnreserveCommand;
+      }
+   }
+   commandgroup PeggingL1CmdGroup {
+
+      commandgroup PeggingCmdGroup {
+         label = "Pegging";
+         command ManualPeggingCommand;
+         command UnpegCommand;
+      }
+   }
+   commandgroup SupplyObjectsL1CmdGroup {
+
+      commandgroup SupplyObjectsCmdGroup {
+         label = "Supply Objects";
+         command PurchaseInfoCommand
+            {
+            enablefunction ConnectedPoFound(OrderNo, LineNo, RelNo, LineItemNo);
+         }
+         command ShopOrderInfoCommand {
+            enablefunction ConnectedSoFound(OrderNo, LineNo, RelNo, LineItemNo);
+         }
+      }
+      command SupplyChainOrdersAnalysisCommand;
+   }
+
+   commandgroup ConfigurationL1CmdGroup {
+
+      commandgroup ConfigurationCmdGroup {
+         label = "Configuration";
+         @DynamicComponentDependency CFGCHR
+         command ConfigurationCreateCommand;
+         @DynamicComponentDependency CFGCHR
+         command ConfigurationViewCommand;
+         @DynamicComponentDependency CFGCHR
+         command ConfigurationEditCommand;
+         @DynamicComponentDependency CFGCHR
+         command ConfigurationEditPricingCommand;
+         command ConfigurationCopyFromCommand;
+         commandgroup InterimOrderCmdGroup {
+            label = "Interim Order";
+            @DynamicComponentDependency ORDSTR
+            command ConfigurationInterimOrderCreateCommand;
+            @DynamicComponentDependency ORDSTR
+            command ConfigurationInterimOrderViewEditCommand;
+            @DynamicComponentDependency ORDSTR
+            command ConfigurationInterimOrderRecalculateCostCommand;
+            @DynamicComponentDependency ORDSTR
+            command ConfigurationInterimOrderDeleteCommand;
+         }
+      }
+   }
+   command CustomerWarrantyCommand;
+   commandgroup SourcingL1CmdGroup {
+
+      commandgroup SourcingCmdGroup {
+         label = "Sourcing";
+         command SourcingSourceOrderLinesManuallyCommand;
+         command SourcingReleaseSourceLineCommand {
+            enablefunction SourcingReleaseSourceLineEnable(SupplyCode, OrderState, OrderNo, LineNo, RelNo, LineItemNo, RevisedQtyDue);
+
+         }
+         command SourcingSourceOrderLinesAutomaticallCommand;
+         command SourcingViewAutomaticSourcingCandidaCommand {
+            enablefunction CheckSourceExists(OrderNo, LineNo, RelNo, LineItemNo);
+         }
+      }
+   }
+
+   @DynamicComponentDependency EXPCTR
+   command FindandConnectExportLicenseCommand {
+      enablefunction FindAndConnectExptEnable(OrderNo, LineNo, RelNo, LineItemNo, PartNo, CatalogNo);
+   }
+   command DocumentTextCommand;
+}
+
+--------------------------------- FIELDSETS ---------------------------------
+@Override
+fieldset CustomerOrderLineStateFieldSet {
+   badge Objstate {
+      size = Small;
+      editable = [false];
+   }
+}

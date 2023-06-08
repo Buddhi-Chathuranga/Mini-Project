@@ -1,0 +1,431 @@
+--  Date        Sign    History
+--  ----------  ------  ---------------------------------------------------------
+--  2022-06-29  Aabalk  SCDEV-9419, Removed CheckSourceRefType function and added GetSourceRefType function to return SourceRefType and pass it to MoveHandlingUnitDialog
+--  2022-06-29          to display QA and Arrival locations when returning handling units from shipment inventory.
+--  2022-05-09  AvWilk  SCDEV-9414, Disabled Return command for different combination with Purchase Receipt Return,Included IsPurchReceiptReturn as a parameter
+--  2022-05-09          to MoveHandlingUnitDialog when Return and when move set as 'false',calling CheckSourceRefType method to check the selected SourceRefType.
+--  2022-01-05  PamPlk  SC21R2-7012, Disabled Scrap and Move commands for Purchase Receipt Return.
+--  2021-03-11  SBalLK  SC2020R1-12873, Added dynamic dependency for navigator entries.
+--  2020-05-21  Aabalk  SC2020R1-1686, Included WarehouseId as a parameter to MoveHandlingUnitDialog. Modified enable logic for
+--  2020-05-21          Move command so that Contract, SenderType and SenderId should match in the selected records to be enabled.
+--  2019-12-16  Aabalk  SCSPRING20-721, Added sender and receiver type, name and ID to HandlingUnitsList.
+--  2019-01-03  SBalLK  SCUXXW4-12132, Added list in list functionality.
+--  2018-12-08  SBalLK  SCUXXW4-4719, Converted from frmHandleShipInvHU using MTG Version: 1.34
+-----------------------------------------------------------------------------
+client HandlingUnitsInShipmentInventory;
+component SHPMNT;
+layer Core;
+projection HandlingUnitsInShipmentInventoryHandling;
+
+include fragment HandlingUnitsSearchContext;
+include fragment ScrapHandlingUnitDialog;
+include fragment MoveHandlingUnitDialog;
+include fragment ShipmentReceiverSelector;
+include fragment ShipmentSenderSelector;
+
+warningsenabled = ScrapCommand;
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+navigator {
+   @DynamicComponentDependency ORDER
+   entry PickingHandlingUnitsinShipmentInventoryNavEntry parent OrderNavigator.ShippingPicking at index 100 {
+      label = "Handling Units in Shipment Inventory";
+      page List;
+   }
+   entry HandlingUnitsinShipmentInventoryNavEntry parent ShpmntNavigator.OutboundShipmentShipmentInventory at index 200 {
+      label = "Handling Units in Shipment Inventory";
+      page List;
+   }
+}
+
+searchcontext HandlingUnitPageSearchContext for HandlingUnitPageSearchContextStructure {
+   label = "";
+   field HandlingUnitIdList;
+   field ShipmentIdList;
+   field ShipmentLineNoList;
+}
+
+-------------------------------- MAIN PAGES ---------------------------------
+page List using HandlingUnitSet {
+   label = "Handling Units in Shipment Inventory";
+   searchcontext HandlingUnitPageSearchContext {
+      defaults = GetHandlingUnitPageSearchContextDefaults();
+   }
+
+   list HandlingUnitsList using GetValidShipmentHandlingUnits(searchcontext.HandlingUnitsSearchContext.ShowHuLevel,
+   searchcontext.HandlingUnitPageSearchContext.HandlingUnitIdList,
+   searchcontext.HandlingUnitPageSearchContext.ShipmentIdList,
+   searchcontext.HandlingUnitPageSearchContext.ShipmentLineNoList)
+      {
+      searchcontext HandlingUnitsSearchContext {
+         defaults = GetHandlingUnitsSearchContextDefaults();
+      }
+   }
+   list HandlingUnitSourceInShipmentInventoryList(PartInShipmentInventoryArray) bind HandlingUnitsList {
+      display = Nested;
+   }
+}
+
+-------------------------------- ASSISTANTS ---------------------------------
+
+--------------------------------- COMMANDS ----------------------------------
+command ReturnCommand for HandlingUnit {
+   label = "Return";
+   mode = SelectedRecords;
+   variable SourceVar {
+      type = Text;
+   }
+   variable ActionTypeVar {
+      type = Text;
+   }
+   variable HandlingUnitWithContractVar {
+      type = HandlingUnitsInContract;
+   }
+   variable SelectionVar {
+      type = LongText;
+   }
+   variable SelectedSourceRefType Text;
+
+   enabled = [not((count(*, SourceRefType = "PurchReceiptReturn") > 0 and count(*, SourceRefType != "PurchReceiptReturn") > 0) or count(Contract) > 1)];
+   bulkexecute {
+      set SourceVar = "SHIPMENT";
+      set ActionTypeVar = "RETURN";
+      call GetInfoForHandlingUnits(Selection) into HandlingUnitWithContractVar;
+      stringify(records, "SOURCE_REF_TYPE_DB=${SourceRefTypeDb}^", JSON) into SelectionVar;
+      call GetSourceRefType(SelectionVar) into SelectedSourceRefType;
+      dialog MoveHandlingUnitDialog(HandlingUnitWithContractVar.HandlingUnitList, HandlingUnitWithContractVar.Contract, SourceVar, ActionTypeVar,
+      HandlingUnitWithContractVar.WarehouseId, SelectedSourceRefType) {
+         when OK {
+            refresh;
+         }
+      }
+   }
+}
+
+command ScrapCommand for HandlingUnit {
+   label = "Scrap";
+   mode = SelectedRecords;
+   variable SourceVar {
+      type = Text;
+   }
+   variable ScrapCodeVar {
+      type = Text;
+   }
+   variable ScrapNoteVar {
+      type = Text;
+   }
+   variable PrintServiceabiliyTagVar {
+      type = Boolean;
+   }
+   enabled = [count(*) > 0 and SourceRefType != "PurchReceiptReturn"];
+
+   bulkexecute {
+      set SourceVar = "SHIPMENT";
+      dialog ScrapHUDialog(SourceVar) into(ScrapCodeVar, ScrapNoteVar, PrintServiceabiliyTagVar) {
+         when OK {
+            call ScrapHandlingUnitInShipmentInventory(Selection, ScrapCodeVar, ScrapNoteVar);
+         }
+      }
+   }
+}
+
+command MoveCommand for HandlingUnit {
+   label = "Move";
+   mode = SelectedRecords;
+   variable SourceVar {
+      type = Text;
+   }
+   variable ActionTypeVar {
+      type = Text;
+   }
+   variable HandlingUnitWithContractVar {
+      type = HandlingUnitsInContract;
+   }
+
+   enabled = [count(Contract) = 1 and count(SenderType) = 1 and count(SenderId) = 1 and SourceRefType != "PurchReceiptReturn"];
+   bulkexecute {
+      set SourceVar = "SHIPMENT";
+      set ActionTypeVar = "MOVE";
+      call GetInfoForHandlingUnits(Selection) into HandlingUnitWithContractVar;
+      dialog MoveHandlingUnitDialog(HandlingUnitWithContractVar.HandlingUnitList, HandlingUnitWithContractVar.Contract, SourceVar, ActionTypeVar,
+      HandlingUnitWithContractVar.WarehouseId, null) {
+         when OK {
+            exit OK;
+         }
+      }
+   }
+}
+
+--------------------------------- SELECTORS ---------------------------------
+
+---------------------------------- GROUPS -----------------------------------
+
+----------------------------------- LISTS -----------------------------------
+list HandlingUnitsList for HandlingUnit {
+   label = "";
+   orderby = StructureLevel;
+
+   lov HandlingUnitIdRef with ReferenceHandlingUnitLovSelector;
+   field ParentHandlingUnitId;
+   field SourceRef1 {
+      size = Small;
+   }
+   field SourceRef2 {
+      size = Small;
+   }
+   field SourceRef3 {
+      size = Small;
+   }
+   field SourceRef4 {
+      size = Small;
+   }
+   field SourceRefType {
+      size = Small;
+   }
+   field ShipmentId;
+   field ShipmentLineNo;
+   field Contract {
+      size = Small;
+   }
+   field PartNo {
+      size = Small;
+      columnvisible = [false];
+   }
+   field PartDescription {
+      size = Small;
+      columnvisible = [false];
+   }
+   field SourcePartNo {
+      size = Small;
+      columnvisible = [false];
+   }
+   field ConfigurationId {
+      size = Small;
+      columnvisible = [false];
+   }
+   field QtyPicked {
+      columnvisible = [false];
+   }
+   field UnitMeas {
+      size = Small;
+      columnvisible = [false];
+   }
+   field SenderType;
+   field SenderIdRef;
+   field SenderName;
+   field ReceiverType;
+   field ReceiverIdRef;
+   field ReceiverName;
+   field LocationNo {
+      size = Small;
+   }
+   field StructureLevel {
+      size = Small;
+   }
+   field HandlingUnitTypeId {
+      size = Small;
+   }
+   field HandlingUnitTypeDescription {
+      size = Small;
+   }
+   field HandlingUnitCategoryId {
+      size = Small;
+   }
+   field HandlingUnitCategoryDesc {
+      size = Small;
+   }
+   field AccessoryExistDb {
+      size = Small;
+      // truelabel = "<Define text to show when field is checked or 'True' will be shown>";
+      // falselabel = "<Define text to show when field is checked or 'False' will be shown>";
+   }
+   field Composition {
+      size = Small;
+   }
+   field Sscc {
+      size = Small;
+   }
+   field AltHandlingUnitLabelId {
+      size = Small;
+   }
+   field WarehouseId {
+      size = Small;
+   }
+   field BayId {
+      size = Small;
+   }
+   field RowId {
+      size = Small;
+   }
+   field TierId {
+      size = Small;
+   }
+   field BinId {
+      size = Small;
+   }
+   field LotBatchNo {
+      size = Small;
+      columnvisible = [false];
+   }
+   field SerialNo {
+      size = Small;
+      columnvisible = [false];
+   }
+   field ConditionCode {
+      size = Small;
+      columnvisible = [false];
+   }
+   field PartOwnership {
+      size = Small;
+      columnvisible = [false];
+   }
+   field Owner {
+      size = Small;
+      columnvisible = [false];
+   }
+   field EngChgLevel {
+      size = Small;
+      columnvisible = [false];
+   }
+   field WaivDevRejNo {
+      size = Small;
+      columnvisible = [false];
+   }
+   field AvailabilityControlId {
+      size = Small;
+      columnvisible = [false];
+   }
+   field PickListNo {
+      size = Small;
+      columnvisible = [false];
+   }
+   field ActivitySeq {
+      columnvisible = [false];
+   }
+   field SecondLevelParentHuId {
+      columnvisible = [false];
+   }
+   field SecondLevelSscc {
+      size = Small;
+      columnvisible = [false];
+   }
+   field SecondLevelAltHuLabelId {
+      size = Small;
+      columnvisible = [false];
+   }
+   field TopParentHandlingUnitId;
+   field TopParentHuTypeDesc {
+      size = Small;
+   }
+   field TopParentHuTypeId {
+      size = Small;
+   }
+   field TopParentSscc {
+      size = Small;
+   }
+   field TopParentAltHuLabelId {
+      size = Small;
+   }
+
+   fieldranking HandlingUnitId, ParentHandlingUnitId, SourceRef1, SourceRef2, SourceRef3, SourceRef4, SourceRefType, ShipmentId, ShipmentLineNo, Contract, PartNo, PartDescription;
+
+   command ReturnCommand;
+   command ScrapCommand;
+   command MoveCommand;
+}
+
+list HandlingUnitSourceInShipmentInventoryList for HandlingUnitSourceInShipmentInventory {
+   label = "";
+   field SourceRef1 {
+      size = Small;
+   }
+   field SourceRef2 {
+      size = Small;
+   }
+   field SourceRef3 {
+      size = Small;
+   }
+   field SourceRef4 {
+      size = Small;
+   }
+   field SourceRefType {
+      size = Small;
+   }
+   field ShipmentId;
+   field Contract {
+      size = Small;
+   }
+   field PartNo {
+      size = Small;
+   }
+   field SourcePartNo {
+      size = Small;
+   }
+   field ConfigurationId {
+      size = Small;
+   }
+   field QtyPicked {
+      size = Small;
+   }
+   field InventoryPartRef.UnitMeas {
+      size = Small;
+      label = "U/M";
+   }
+   field LocationNo {
+      size = Small;
+   }
+   lov HandlingUnitIdRef with ReferenceHandlingUnitLovSelector;
+   field HandlingUnitTypeId {
+      size = Small;
+   }
+   field HandlingUnitTypeDesc {
+      size = Small;
+   }
+   field HandlingUnitCategoryId {
+      size = Small;
+   }
+   field HandlingUnitCategoryDesc {
+      size = Small;
+   }
+   field Sscc {
+      size = Small;
+   }
+   field AltHandlingUnitLabelId {
+      size = Small;
+   }
+   field LotBatchNo {
+      size = Small;
+   }
+   field SerialNo {
+      size = Small;
+   }
+   field WaivDevRejNo {
+      size = Small;
+   }
+   field PickListNo {
+      size = Small;
+   }
+   field ActivitySeq;
+
+   fieldranking SourceRef1, SourceRef2, SourceRef3, SourceRef4, SourceRefType, ShipmentId, Contract, PartNo, SourcePartNo, ConfigurationId;
+}
+
+----------------------------------- CARDS -----------------------------------
+
+---------------------------------- DIALOGS ----------------------------------
+
+---------------------------------- CHARTS -----------------------------------
+
+--------------------------------- CALENDARS ---------------------------------
+
+---------------------------------- SHEETS -----------------------------------
+
+----------------------------- STATE INDICATORS ------------------------------
+
+----------------------------------- TREES -----------------------------------
+
+---------------------------------- PLUGINS ----------------------------------
+
+------------------------------- IMAGE VIEWERS -------------------------------
+
+--------------------------------- CHECKLIST ---------------------------------

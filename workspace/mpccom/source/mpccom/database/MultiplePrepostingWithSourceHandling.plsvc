@@ -1,0 +1,386 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: MultiplePrepostingWithSourceHandling
+--  Component:    MPCCOM
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  211124  Cpeilk  SC21R2-6128, Replaced CRUD_Create___ with CRUD_Upload___ and moved the logic to handle clob value for selection.
+--  210326  NaLrlk  PR21R2-189, Modified CRUD_Create___() to compare null postings correctly.
+--  210217  SBalLK  Bug 157865 (SCZ-13339), Modified CRUD_Create___() method by replacing ' ' with empty string to highlight mandatory fields.
+--  200208  NiEdlk  SCXTEND-3091, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+@Override
+-- CRUD_Upload___
+--   The middle tier does a CRUD_Create and executes a CRUD_Upload for clob attribute(record_selection) support.
+--   Therefore lines creation should be handled in CRUD_Upload.
+PROCEDURE CRUD_Upload___ (
+   objkey_                  IN VARCHAR2,
+   selection##              IN     CLOB,
+   pre_accounting_virtual## IN VARCHAR2)
+IS   
+   pre_accounting_rec_ Pre_Accounting_API.Public_Rec;
+   newrec_             Pre_Accounting_Virtual_Rec;
+   current_selection_  VARCHAR2(32000);
+   lines_              json_array_t;
+   account_no_         VARCHAR2(10);
+   codeno_b_           VARCHAR2(10);
+   codeno_c_           VARCHAR2(10);
+   codeno_d_           VARCHAR2(10);
+   codeno_e_           VARCHAR2(10);
+   codeno_f_           VARCHAR2(10);
+   codeno_g_           VARCHAR2(10);
+   codeno_h_           VARCHAR2(10);
+   codeno_i_           VARCHAR2(10);
+   codeno_j_           VARCHAR2(10);
+   activity_seq_       VARCHAR2(100);
+   posting_rec_        Pre_Posting_Virtual_Rec;
+   mixed_value_        VARCHAR2(3) := '...';
+   empty_string_       VARCHAR2(1) := '';
+   internal_project_  BOOLEAN;
+   external_project_  BOOLEAN;
+   project_code_part_  VARCHAR2(1);
+   newrec_key_         Pre_Accounting_Virtual_Key;
+   selection_          CLOB;
+BEGIN
+   super(objkey_, selection##, pre_accounting_virtual##);
+   newrec_key_.objkey   := objkey_; 
+   newrec_ := Get_Record___(newrec_key_);
+   
+   newrec_.same_contract := 'TRUE';
+   newrec_.same_account_no := 'TRUE';
+   newrec_.same_code_b := 'TRUE';
+   newrec_.same_code_c := 'TRUE';
+   newrec_.same_code_d := 'TRUE';
+   newrec_.same_code_e := 'TRUE';
+   newrec_.same_code_f := 'TRUE';
+   newrec_.same_code_g := 'TRUE';
+   newrec_.same_code_h := 'TRUE';
+   newrec_.same_code_i := 'TRUE';
+   newrec_.same_code_j := 'TRUE';
+   newrec_.same_activity_seq := 'TRUE';
+   newrec_.multiple_records := FALSE;  
+   newrec_.read_only := FALSE;
+   
+   selection_ := selection##;
+   lines_     := json_array_t.parse(selection_);
+   FOR i_ IN 0 .. lines_.get_size - 1 LOOP 
+      current_selection_ := lines_.get_string(i_);
+      newrec_.pre_accounting_id := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PRE_ACCOUNTING_ID');
+      pre_accounting_rec_ := Pre_Accounting_API.Get(newrec_.pre_accounting_id);    
+      
+      IF i_ = 0 THEN
+         newrec_.contract := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT'), empty_string_);
+         newrec_.company := Site_API.Get_Company(newrec_.contract);
+         project_code_part_ := Pre_Accounting_API.Get_Project_Code_Part(newrec_.company);
+         
+         $IF (Component_Purch_SYS.INSTALLED) $THEN
+         IF newrec_.pre_posting_source = 'PURCHASE ORDER' THEN
+            newrec_.total_amount_dist := Purchase_Order_API.Get_Cost_Dist_Amount(Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO'));
+         ELSIF newrec_.pre_posting_source = 'PURCHASE ORDER LINE' THEN
+            newrec_.total_amount_dist := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'TOTAL_AMOUNT_DIST'));
+         ELSIF newrec_.pre_posting_source IS NULL THEN
+            newrec_.total_amount_dist := Purchase_Requisition_API.Get_Cost_Dist_Amount(Client_SYS.Get_Key_Reference_Value(current_selection_, 'REQUISITION_NO'));
+         END IF;
+         $ELSE
+            newrec_.total_amount_dist := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'TOTAL_AMOUNT_DIST'));
+         $END
+         
+         account_no_ := pre_accounting_rec_.account_no;
+         codeno_b_ := pre_accounting_rec_.codeno_b;
+         codeno_c_ := pre_accounting_rec_.codeno_c;
+         codeno_d_ := pre_accounting_rec_.codeno_d;
+         codeno_e_ := pre_accounting_rec_.codeno_e;
+         codeno_f_ := pre_accounting_rec_.codeno_f;
+         codeno_g_ := pre_accounting_rec_.codeno_g;
+         codeno_h_ := pre_accounting_rec_.codeno_h;
+         codeno_i_ := pre_accounting_rec_.codeno_i;
+         codeno_j_ := pre_accounting_rec_.codeno_j;
+         activity_seq_ := TO_CHAR(pre_accounting_rec_.activity_seq);
+         
+         Get_Distributed_Pre_Posting_Data___(newrec_);
+      END IF;
+      
+      IF newrec_.same_contract = 'TRUE' AND newrec_.contract != NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT'), empty_string_) THEN
+         newrec_.same_contract := 'FALSE';
+         newrec_.contract := User_Allowed_Site_API.Get_Default_Site;
+         newrec_.company := Site_API.Get_Company(newrec_.contract);  
+         project_code_part_ := Pre_Accounting_API.Get_Project_Code_Part(newrec_.company);
+      END IF; 
+              
+      IF newrec_.same_account_no = 'TRUE' AND Validate_SYS.Is_Different(account_no_, pre_accounting_rec_.account_no) THEN
+         newrec_.same_account_no := 'FALSE';
+      END IF;
+      IF newrec_.same_code_b = 'TRUE' AND Validate_SYS.Is_Different(codeno_b_, pre_accounting_rec_.codeno_b) THEN
+         newrec_.same_code_b := 'FALSE';
+      END IF;
+      IF newrec_.same_code_c = 'TRUE' AND Validate_SYS.Is_Different(codeno_c_, pre_accounting_rec_.codeno_c) THEN
+         newrec_.same_code_c := 'FALSE';
+      END IF;
+      IF newrec_.same_code_d = 'TRUE' AND Validate_SYS.Is_Different(codeno_d_, pre_accounting_rec_.codeno_d) THEN
+         newrec_.same_code_d := 'FALSE';
+      END IF;
+      IF newrec_.same_code_e = 'TRUE' AND Validate_SYS.Is_Different(codeno_e_, pre_accounting_rec_.codeno_e) THEN
+         newrec_.same_code_e := 'FALSE';
+      END IF;
+      IF newrec_.same_code_f = 'TRUE' AND Validate_SYS.Is_Different(codeno_f_, pre_accounting_rec_.codeno_f) THEN
+         newrec_.same_code_f := 'FALSE';
+      END IF;
+      IF newrec_.same_code_g = 'TRUE' AND Validate_SYS.Is_Different(codeno_g_, pre_accounting_rec_.codeno_g) THEN
+         newrec_.same_code_g := 'FALSE';
+      END IF;
+      IF newrec_.same_code_h = 'TRUE' AND Validate_SYS.Is_Different(codeno_h_, pre_accounting_rec_.codeno_h) THEN
+         newrec_.same_code_h := 'FALSE';
+      END IF;
+      IF newrec_.same_code_i = 'TRUE' AND Validate_SYS.Is_Different(codeno_i_, pre_accounting_rec_.codeno_i) THEN
+         newrec_.same_code_i := 'FALSE';
+      END IF;
+      IF newrec_.same_code_j = 'TRUE' AND Validate_SYS.Is_Different(codeno_j_, pre_accounting_rec_.codeno_j) THEN
+         newrec_.same_code_j := 'FALSE';
+      END IF;
+      IF newrec_.same_activity_seq = 'TRUE' AND Validate_SYS.Is_Different(activity_seq_, TO_CHAR(pre_accounting_rec_.activity_seq)) THEN
+         newrec_.same_activity_seq := 'FALSE';
+      END IF;    
+      
+      IF project_code_part_ IS NOT NULL THEN 
+         Get_Project_Origin___(project_code_part_, pre_accounting_rec_, external_project_, internal_project_);
+      END IF;
+      
+      IF NOT newrec_.multiple_records AND i_ > 0 THEN 
+         newrec_.multiple_records := TRUE;
+      END IF;
+      
+      IF NOT newrec_.read_only THEN 
+         IF newrec_.pre_posting_source = 'PURCH CHANGE ORDER LINE' THEN
+            IF Client_SYS.Get_Key_Reference_Value(current_selection_, 'STATUS') != 'New' OR Client_SYS.Get_Key_Reference_Value(current_selection_, 'POCO_STATUS') != 'Planned'  THEN
+               newrec_.read_only := TRUE;
+            END IF;
+         ELSIF newrec_.pre_posting_source IN ('PURCHASE ORDER LINE', 'PURCHASE ORDER') THEN
+            newrec_.read_only := CASE Client_SYS.Get_Key_Reference_Value(current_selection_, 'STATUS') WHEN 'Closed' THEN TRUE ELSE FALSE END;
+         ELSIF newrec_.pre_posting_source IN ('CUSTOMER ORDER LINE') THEN
+            newrec_.read_only := CASE Client_SYS.Get_Key_Reference_Value(current_selection_, 'STATUS') WHEN 'Invoiced' THEN TRUE ELSE FALSE END;
+         ELSIF newrec_.pre_posting_source IS NULL THEN 
+            newrec_.read_only := CASE Client_SYS.Get_Key_Reference_Value(current_selection_, 'STATUS') WHEN 'Closed' THEN TRUE WHEN 'PO Created' THEN TRUE WHEN 'Change Order Created' THEN TRUE ELSE FALSE END;
+         END IF;
+      END IF;
+      
+      -- Check if Pre Accounting record exist, if not enable in posting control but value exist we show as read only.
+      Get_Enabled_Codeparts___(pre_accounting_rec_, newrec_);   
+      -- Create new or modify existing Pre_Accounting record with company. Company was added for Aurena to have that in the projection and use for references.
+      Set_Company_And_Total_Amount___(pre_accounting_rec_, newrec_);
+   END LOOP;
+   
+   newrec_.voucher_date := NVL(newrec_.voucher_date, Site_API.Get_Site_Date(newrec_.contract));
+   
+   -- Check Allowed Codeparts regular pre-posting
+   Get_Pre_Posting_Data___(newrec_);
+   -- Decide if Project connected, and make project code part readonly.  
+   Get_Project_Connection___(newrec_, project_code_part_, external_project_, internal_project_, newrec_.pre_posting_source);   
+   -- Fetch Codepart Labels
+   Get_Codepart_Labels___(newrec_);
+   CRUD_Update___(newrec_, newrec_);
+   
+   posting_rec_.account_no := CASE newrec_.same_account_no WHEN 'TRUE' THEN account_no_ ELSE mixed_value_ END;
+   posting_rec_.codeno_b := CASE newrec_.same_code_b WHEN 'TRUE' THEN codeno_b_ ELSE mixed_value_ END;
+   posting_rec_.codeno_c := CASE newrec_.same_code_c WHEN 'TRUE' THEN codeno_c_ ELSE mixed_value_ END;
+   posting_rec_.codeno_d := CASE newrec_.same_code_d WHEN 'TRUE' THEN codeno_d_ ELSE mixed_value_ END;
+   posting_rec_.codeno_e := CASE newrec_.same_code_e WHEN 'TRUE' THEN codeno_e_ ELSE mixed_value_ END;
+   posting_rec_.codeno_f := CASE newrec_.same_code_f WHEN 'TRUE' THEN codeno_f_ ELSE mixed_value_ END;
+   posting_rec_.codeno_g := CASE newrec_.same_code_g WHEN 'TRUE' THEN codeno_g_ ELSE mixed_value_ END;
+   posting_rec_.codeno_h := CASE newrec_.same_code_h WHEN 'TRUE' THEN codeno_h_ ELSE mixed_value_ END;
+   posting_rec_.codeno_i := CASE newrec_.same_code_i WHEN 'TRUE' THEN codeno_i_ ELSE mixed_value_ END;
+   posting_rec_.codeno_j := CASE newrec_.same_code_j WHEN 'TRUE' THEN codeno_j_ ELSE mixed_value_ END;
+   posting_rec_.activity_seq := CASE newrec_.same_activity_seq WHEN 'TRUE' THEN activity_seq_ ELSE mixed_value_ END;
+   posting_rec_.objkey := sys_guid();
+   posting_rec_.parent_objkey := newrec_.objkey;
+   posting_rec_.company_ref := newrec_.company;
+   CRUD_Create___(posting_rec_);
+END CRUD_Upload___;
+
+
+@Override
+PROCEDURE CRUD_Update___(
+   old_ IN Pre_Posting_Virtual_Rec,
+   new_ IN Pre_Posting_Virtual_Rec )
+IS
+   parent_rec_          Pre_Accounting_Virtual_Rec;
+   parent_key_          Pre_Accounting_Virtual_Key;
+   lines_               json_array_t;
+   info_                VARCHAR2(32000);
+   objid_               VARCHAR2(20);
+   objversion_          VARCHAR2(20);
+   attr_                VARCHAR2(32000);
+   pre_accounting_id_   NUMBER;
+   contract_            VARCHAR2(5);
+   
+   CURSOR get_objid_objversion IS
+      SELECT objid, objversion
+      FROM pre_accounting
+      WHERE pre_accounting_id = pre_accounting_id_;
+   $IF (Component_Purch_SYS.INSTALLED) $THEN    
+   CURSOR get_po_line_contract IS
+      SELECT contract
+      FROM PURCHASE_ORDER_LINE_TAB
+      WHERE pre_accounting_id = pre_accounting_id_;
+   CURSOR get_po_contract IS
+      SELECT contract
+      FROM PURCHASE_ORDER_TAB
+      WHERE pre_accounting_id = pre_accounting_id_;     
+   $END
+   $IF (Component_Order_SYS.INSTALLED) $THEN    
+   CURSOR get_co_line_contract IS
+   SELECT contract
+   FROM CUSTOMER_ORDER_LINE_TAB
+   WHERE pre_accounting_id = pre_accounting_id_;     
+   $END
+BEGIN
+   super(old_, new_);
+   
+   parent_key_.objkey := old_.parent_objkey;
+   parent_rec_ := Get_Record___(parent_key_);
+   lines_ := json_array_t.parse(parent_rec_.selection);
+   
+   FOR i_ IN 0 .. lines_.get_size - 1 LOOP        
+      Client_SYS.Clear_Attr(attr_);
+      pre_accounting_id_ := Client_SYS.Get_Key_Reference_Value(lines_.get_string(i_), 'PRE_ACCOUNTING_ID');
+      IF parent_rec_.same_contract = 'TRUE' THEN 
+         Client_SYS.Add_To_Attr('CONTRACT', parent_rec_.contract, attr_);
+      ELSE
+         $IF (Component_Purch_SYS.INSTALLED) $THEN
+         IF parent_rec_.pre_posting_source = 'PURCHASE ORDER LINE' THEN
+            OPEN get_po_line_contract;
+            FETCH get_po_line_contract INTO contract_;
+            CLOSE get_po_line_contract;
+         ELSIF parent_rec_.pre_posting_source = 'PURCHASE ORDER' THEN
+            OPEN get_po_contract;
+            FETCH get_po_contract INTO contract_;
+            CLOSE get_po_contract;
+         END IF;
+         $ELSIF (Component_Order_SYS.INSTALLED) $THEN
+            OPEN get_co_line_contract;
+            FETCH get_co_line_contract INTO contract_;
+            CLOSE get_co_line_contract;
+         $ELSE
+            contract_ := parent_rec_.contract;
+         $END
+         Client_SYS.Add_To_Attr('CONTRACT', contract_, attr_);
+      END IF;
+      IF Validate_SYS.Is_Changed(old_.account_no, new_.account_no) THEN
+         Client_SYS.Add_To_Attr('ACCOUNT_NO', new_.account_no, attr_);
+      END IF;
+      IF Validate_SYS.Is_Changed(old_.codeno_b, new_.codeno_b) THEN
+         Client_SYS.Add_To_Attr('CODENO_B', new_.codeno_b, attr_);
+      END IF;
+      IF Validate_SYS.Is_Changed(old_.codeno_c, new_.codeno_c) THEN
+         Client_SYS.Add_To_Attr('CODENO_C', new_.codeno_c, attr_);
+      END IF;
+      IF Validate_SYS.Is_Changed(old_.codeno_d, new_.codeno_d) THEN
+         Client_SYS.Add_To_Attr('CODENO_D', new_.codeno_d, attr_);
+      END IF;
+      IF Validate_SYS.Is_Changed(old_.codeno_e, new_.codeno_e) THEN
+         Client_SYS.Add_To_Attr('CODENO_E', new_.codeno_e, attr_);
+      END IF;
+      IF Validate_SYS.Is_Changed(old_.codeno_f, new_.codeno_f) THEN
+         Client_SYS.Add_To_Attr('CODENO_F', new_.codeno_f, attr_);
+      END IF;
+      IF Validate_SYS.Is_Changed(old_.codeno_g, new_.codeno_g) THEN
+         Client_SYS.Add_To_Attr('CODENO_G', new_.codeno_g, attr_);
+      END IF;
+      IF Validate_SYS.Is_Changed(old_.codeno_h, new_.codeno_h) THEN
+         Client_SYS.Add_To_Attr('CODENO_H', new_.codeno_h, attr_);
+      END IF;
+      IF Validate_SYS.Is_Changed(old_.codeno_i, new_.codeno_i) THEN
+         Client_SYS.Add_To_Attr('CODENO_I', new_.codeno_i, attr_);
+      END IF;
+      IF Validate_SYS.Is_Changed(old_.codeno_j, new_.codeno_j) THEN
+         Client_SYS.Add_To_Attr('CODENO_J', new_.codeno_j, attr_);
+      END IF;
+      IF Validate_SYS.Is_Changed(old_.company, new_.company) THEN
+         Client_SYS.Add_To_Attr('COMPANY', new_.company, attr_);
+      END IF;
+      IF Validate_SYS.Is_Changed(old_.pre_posting_source, new_.pre_posting_source) THEN
+         Client_SYS.Add_To_Attr('PRE_POSTING_SOURCE', new_.pre_posting_source, attr_);
+      END IF;
+      IF Validate_SYS.Is_Changed(old_.voucher_date, new_.voucher_date) THEN
+         Client_SYS.Add_To_Attr('VOUCHER_DATE', new_.voucher_date, attr_);
+      END IF;
+      
+      OPEN get_objid_objversion;
+      FETCH get_objid_objversion INTO objid_, objversion_;
+      CLOSE get_objid_objversion;
+      
+      Pre_Accounting_API.Modify__(info_, objid_, objversion_, attr_, 'DO');
+   END LOOP;
+END CRUD_Update___;
+
+
+PROCEDURE Get_Project_Connection___ (
+   rec_                     IN OUT Pre_Accounting_Virtual_Rec,
+   project_code_part_       IN VARCHAR2,
+   external_projects_exist_ IN BOOLEAN,
+   internal_projects_exist_ IN BOOLEAN,
+   pre_posting_source_      IN VARCHAR2)
+IS 
+   allowed_ VARCHAR2(10) := 'ALLOWED';
+BEGIN
+   rec_.project_connected := external_projects_exist_;
+   IF (pre_posting_source_ IS NULL OR pre_posting_source_ != 'CUSTOMER ORDER LINE') AND NOT (internal_projects_exist_ AND NOT external_projects_exist_) THEN 
+      allowed_ := 'READONLY';
+   END IF;
+   IF (project_code_part_ = 'B') THEN
+      rec_.allowed_codeno_b := allowed_;
+   ELSIF (project_code_part_ = 'C') THEN
+      rec_.allowed_codeno_c := allowed_;
+   ELSIF (project_code_part_ = 'D') THEN
+      rec_.allowed_codeno_d := allowed_;
+   ELSIF (project_code_part_ = 'E') THEN
+      rec_.allowed_codeno_e := allowed_;
+   ELSIF (project_code_part_ = 'F') THEN
+      rec_.allowed_codeno_f := allowed_;
+   ELSIF (project_code_part_ = 'G') THEN
+      rec_.allowed_codeno_g := allowed_;
+   ELSIF (project_code_part_ = 'H') THEN
+      rec_.allowed_codeno_h := allowed_;
+   ELSIF (project_code_part_ = 'I') THEN
+      rec_.allowed_codeno_i := allowed_;
+   ELSIF (project_code_part_ = 'J') THEN
+      rec_.allowed_codeno_j := allowed_;
+   END IF;
+END Get_Project_Connection___;  
+
+
+PROCEDURE Get_Project_Origin___ (
+   project_code_part_  IN VARCHAR2,
+   pre_accounting_rec_ IN Pre_Accounting_API.Public_Rec,
+   external_project_   IN OUT BOOLEAN,
+   internal_project_   IN OUT BOOLEAN)
+IS 
+   project_no_ VARCHAR2(10);
+BEGIN
+   project_no_ :=
+      CASE project_code_part_
+         WHEN 'A' THEN pre_accounting_rec_.account_no 
+         WHEN 'B' THEN pre_accounting_rec_.codeno_b
+         WHEN 'C' THEN pre_accounting_rec_.codeno_c   
+         WHEN 'D' THEN pre_accounting_rec_.codeno_d   
+         WHEN 'E' THEN pre_accounting_rec_.codeno_e  
+         WHEN 'F' THEN pre_accounting_rec_.codeno_f 
+         WHEN 'G' THEN pre_accounting_rec_.codeno_g   
+         WHEN 'H' THEN pre_accounting_rec_.codeno_h   
+         WHEN 'I' THEN pre_accounting_rec_.codeno_i   
+         WHEN 'J' THEN pre_accounting_rec_.codeno_j
+      END;
+      Trace_SYS.Message('>N '||project_no_ || ' - ' ||pre_accounting_rec_.company);
+   IF project_no_ IS NOT NULL THEN 
+      IF Pre_Accounting_API.External_Project(project_no_, pre_accounting_rec_.company) THEN 
+         external_project_ := TRUE;
+      ELSE
+         internal_project_ := TRUE;
+      END IF;
+   END IF;
+END Get_Project_Origin___;  

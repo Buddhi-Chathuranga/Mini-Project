@@ -1,0 +1,160 @@
+-----------------------------------------------------------------------------
+--
+--  Purpose:  Do not alter anything defined in this file. This file cannot be customized. No single patches can be merged. Only the complete file as delivered by R&D can be deployed.
+--
+--  Date    Sign  History
+--  ------  ----  -----------------------------------------------------------
+--  130102  MADR  Corrected format of error messages and added validation of view in Validate_Custom_License (Bug#107299)
+--  130614  UDLE  Added new IFS users (Bug#110006)
+--  130806  MADR  New definition of view FND_ROLE_CONTENT (Bug#111786)
+--  140314  JEHUSE Split protected views and methods from logical Unit
+--  150205  MADRSE TEJSE-410: Validate CTU license should be done in same transaction
+--  160926  MABOSE TEINST-498 Views in apv file
+-----------------------------------------------------------------------------
+
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------
+-------------------- LICENSE PROTECTED VIEWS. ALTERING THE VIEWS IN THE DATABASE WILL LEAD TO INVALID LICENSE --------------------------------------------
+----------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+--
+-- Lists granted objects per FND role
+--
+CREATE OR REPLACE VIEW fnd_role_content (ROLE, object_type, OBJECT) AS
+SELECT b.grantee, 'ROLE', b.granted_role FROM fnd_role_role b WHERE grantee_type = 'ROLE'
+UNION
+SELECT ROLE, 'PRES_OBJECT', po_id FROM pres_object_grant
+WHERE po_id LIKE 'cpg%'           -- custom pages
+OR po_id LIKE 'tbw%'           -- table windows
+OR po_id LIKE 'frm%'           -- detail windows
+UNION
+SELECT ROLE, 'PROJECTION', projection FROM fnd_projection_grant
+;
+
+
+--
+-- Hash key computed on role content
+--
+CREATE OR REPLACE VIEW fnd_role_hash (ROLE, role_hash) AS
+SELECT ROLE, sum(ora_hash(object_type || '^' || OBJECT))
+FROM fnd_role_content
+GROUP BY ROLE;
+
+
+--
+-- Assigns role scope ('LIMITED', 'ADDITIONAL', 'FULL', 'TECHNICAL') to every FND role
+--
+CREATE OR REPLACE VIEW fnd_role_scope (ROLE, role_scope) AS
+SELECT ROLE, decode(ROLE, 'FND_RUNTIME', 'TECHNICAL', 'FND_WEBRUNTIME' , 'TECHNICAL' , 'FND_WEBENDUSER_MAIN', 'TECHNICAL',
+	   'FND_WEBENDUSER_B2B', 'TECHNICAL', 'AURENA_NATIVE_RUNTIME', 'TECHNICAL',
+       decode(limited_task_user, 'TRUE', 'LIMITED',
+       decode(additional_task_user, 'TRUE', 'ADDITIONAL', 'FULL')))
+FROM fnd_role;
+
+
+--
+-- Lists non-IFS users. An IFS user never consumes any license.
+--
+CREATE OR REPLACE VIEW fnd_licensed_user AS
+SELECT identity, active
+FROM fnd_user
+WHERE identity NOT IN ( SELECT IDENTITY 
+                        FROM fnd_user 
+                        WHERE user_type_db IN('SERVICE_USER','SYSTEM_USER'));
+
+
+--
+-- Union of all LIMITED (LTU) and ADDITIONAL (ATU) roles with one row representing all FULL roles
+--
+CREATE OR REPLACE VIEW fnd_licensed_role (ROLE, role_scope) AS
+SELECT ROLE, role_scope
+FROM fnd_role_scope R
+WHERE R.role_scope IN ('LIMITED', 'ADDITIONAL')
+UNION
+SELECT '*', 'FULL' FROM dual;
+
+
+--
+-- Lists FND users consuming FULL license
+--
+CREATE OR REPLACE VIEW fnd_full_user (identity) AS
+SELECT U.identity
+FROM fnd_licensed_user U
+WHERE U.active = 'TRUE'
+AND EXISTS (SELECT NULL
+   FROM fnd_role_scope        S,
+                   fnd_user_role_runtime T
+   WHERE T.identity = U.identity
+   AND T.role = S.role
+   AND S.role_scope = 'FULL');
+
+
+--
+-- Lists granted licensed roles (LIMITED, ADDITIONAL or FULL) per FND user
+--
+CREATE OR REPLACE VIEW fnd_licensed_role_user (ROLE, role_scope, identity) AS
+SELECT L.role, L.role_scope, U.identity
+FROM fnd_licensed_role L,
+       fnd_licensed_user U
+WHERE U.active = 'TRUE'
+AND EXISTS (SELECT NULL FROM fnd_user_role_runtime T
+   WHERE T.identity = U.identity
+   AND (L.role_scope = 'LIMITED' AND T.role = L.role AND NOT EXISTS (SELECT NULL
+      FROM fnd_role_scope        SS,
+           fnd_user_role_runtime TT
+      WHERE TT.identity = U.identity
+      AND TT.role = SS.role
+	  AND SS.role NOT IN('FND_WEBENDUSER_MAIN', 'FND_WEBENDUSER_B2B', 'FND_BOTENDUSER', 'AURENA_NATIVE_RUNTIME')
+      AND SS.role_scope = 'FULL')
+   OR
+   L.role_scope = 'FULL' AND EXISTS (SELECT NULL
+      FROM fnd_role_scope R
+      WHERE R.role = T.role
+      AND R.role_scope = 'FULL')
+   OR
+   L.role_scope = 'ADDITIONAL' AND T.role  = L.role));
+
+
+--
+-- Number of granted users per licensed (LIMITED, ADDITIONAL or FULL) role
+--
+CREATE OR REPLACE VIEW fnd_licensed_role_usage (ROLE, role_scope, user_count) AS
+SELECT ROLE, role_scope, count(*)
+FROM fnd_licensed_role_user
+GROUP BY ROLE, role_scope;
+
+
+--
+-- Granted role per active or inactive FND user (inner join)
+--
+CREATE OR REPLACE VIEW fnd_active_user_role AS
+SELECT U.identity, U.active, R.role
+FROM fnd_user_role     R,
+       fnd_licensed_user U
+WHERE U.identity = R.identity;
+
+
+--
+-- Granted role per active or inactive FND user (outer join)
+--
+CREATE OR REPLACE VIEW fnd_all_user_role AS
+SELECT U.identity, U.active, R.role
+FROM fnd_user_role     R,
+       fnd_licensed_user U
+WHERE U.identity = R.identity(+);
+
+
+COMMENT ON TABLE fnd_role_content        IS 'MODULE=IGNORE^';
+COMMENT ON TABLE fnd_role_hash           IS 'MODULE=IGNORE^';
+COMMENT ON TABLE fnd_role_scope          IS 'MODULE=IGNORE^';
+COMMENT ON TABLE fnd_licensed_user       IS 'MODULE=IGNORE^';
+COMMENT ON TABLE fnd_licensed_role       IS 'MODULE=IGNORE^';
+COMMENT ON TABLE fnd_full_user           IS 'MODULE=IGNORE^';
+COMMENT ON TABLE fnd_licensed_role_user  IS 'MODULE=IGNORE^';
+COMMENT ON TABLE fnd_licensed_role_usage IS 'MODULE=IGNORE^';
+COMMENT ON TABLE fnd_active_user_role    IS 'MODULE=IGNORE^';
+COMMENT ON TABLE fnd_all_user_role       IS 'MODULE=IGNORE^';
+
+
+

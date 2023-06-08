@@ -1,0 +1,447 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: SerialObjectsHandling
+--  Component:    EQUIP
+--
+--  IFS Developer Studio Template Version 3.0
+--
+-----------------------------------------------------------------------------
+-- Date        Sign      History
+-- ----------  ------   -----------------------------------------------------
+-- 2018-08-28  SSILLK   SAUXXW4-1303, created
+-- 2018-09-03  CLEKLK   SAUXXW4-1278,Created Get_Object_Image and Set_Location_Structure.
+-- 2018-10-24  LoPrlk   SAUXXW4-10420, Overwritten the method CRUD_Create___.
+-- 2018-10-30  TAJALK   SAUXXW4-10715, Added logic
+-- 2019-03-27  LoPrlk   SAUXXW4-13052, Provided functionality to remove LOV switches from client files.
+-- 2019-03-30  SHEPLK   SAUXXW4-14599, Added Set Structure 'Non Operational' and Set Structure 'Operational' commands
+-- 2020-07-27  DEEKLK   AMXTEND-691, Overriden CRUD_Default_Copy___().
+-- 2021-06-25  SHAGLK   AM21R2-1493, Added new function Get_Belongs_To_Object.
+-- 2021-07-20  SHAGLK   AM21R2-1493, Removed function Get_Belongs_To_Object.
+-- 2021-10-04  JIHALK   AMZEAX-697, Added GetItemClassId Function.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+---------------------------- GENERATED FROM APF --------------------------
+
+@Override
+PROCEDURE CRUD_Default___ (
+   rec_ IN OUT Equipment_Serial_Rec )
+IS
+   object_no_           VARCHAR2(20);
+   object_view_name_    VARCHAR2(30);
+   hide_object_         VARCHAR2(20);
+   cc_part_name_        VARCHAR2(20);
+   cc_view_name_        VARCHAR2(30);
+   hide_cost_center_    VARCHAR2(10);
+   company_             VARCHAR2(20);
+BEGIN
+   super(rec_);
+   Equipment_Object_API.Get_Code_Part_For_Objct_Values(rec_.contract, object_no_, object_view_name_, hide_object_);
+   Equipment_Object_API.Get_Code_Part_Cost_Center_Val(rec_.contract, cc_part_name_, cc_view_name_, hide_cost_center_);
+   company_ := Site_API.Get_Company(rec_.contract);
+   rec_.Fetch_Cost_Center := cc_part_name_;
+   rec_.cost_center_code_part := Accounting_Code_Parts_API.Get_Code_Part_For_Logical(company_, 'CostCenter');
+   rec_.Hide_Cost_Center := hide_cost_center_;
+   rec_.Fetch_Object_No := object_no_;
+   rec_.object_code_part := Accounting_Code_Parts_API.Get_Code_Part_For_Logical(company_, 'Object');
+   rec_.Hide_Object_No := hide_object_;
+END CRUD_Default___;
+
+
+--------------------------------------------------------------------------
+-- Code under the method bellow should be moved to entity plsql file    --
+-- after corresponding warning is removed from IEE client.              --
+--------------------------------------------------------------------------
+@IgnoreUnitTest MethodOverride
+@Override
+PROCEDURE CRUD_Create___ (
+   etag_   IN OUT VARCHAR2,
+   key_    IN OUT Equipment_Serial_Key,
+   attr_   IN OUT VARCHAR2,
+   info_      OUT VARCHAR2,
+   action_ IN     VARCHAR2 )
+IS
+   part_no_       VARCHAR2(25);
+   serial_track_  VARCHAR2(20);
+BEGIN
+   Equipment_Object_Util_API.Add_Parent_Seq_To_Attr(attr_);
+   
+   part_no_       := Client_SYS.Get_Item_Value('PART_NO', attr_);
+   serial_track_  := PART_CATALOG_API.Get_Rcpt_Issue_Serial_Track_Db(part_no_);
+   
+   super(etag_, key_, attr_, info_, action_);
+   
+   IF serial_track_ != 'TRUE' THEN
+      Client_SYS.Add_Warning(lu_name_, 'NOSERIALTR: Part no :P1 is not serial tracked "At Receipt and Issue". It will not be possible to move the serial object to the inventory.', part_no_);
+   END IF;
+   
+   Client_SYS.Merge_Info(info_);
+   info_ := Client_SYS.Get_All_Info;
+END CRUD_Create___;
+
+@IgnoreUnitTest MethodOverride
+@Override
+PROCEDURE CRUD_Create___ (
+   etag_ IN OUT VARCHAR2,
+   key_  IN OUT Equipment_Object_Spare_Key,
+   attr_ IN OUT VARCHAR2,
+   info_    OUT VARCHAR2,
+   action_ IN VARCHAR2 )
+IS
+   contract_         Equipment_Object_Tab.contract%TYPE;
+   equip_obj_seq_    Equipment_Object_Tab.equipment_object_seq%TYPE;
+BEGIN
+   equip_obj_seq_ :=Client_SYS.Get_Item_Value('EQUIPMENT_OBJECT_SEQ',attr_ );
+   contract_ := Equipment_Object_API.Get_Contract(equip_obj_seq_);
+   Client_SYS.Add_To_Attr('CONTRACT', contract_, attr_);  
+   super(etag_, key_, attr_, info_, action_);
+END CRUD_Create___;
+
+@Override
+PROCEDURE CRUD_Update___ (
+   etag_   IN OUT VARCHAR2,
+   key_    IN OUT Equipment_Serial_Key,
+   attr_   IN OUT VARCHAR2,
+   info_   OUT VARCHAR2,
+   action_ IN  VARCHAR2 )
+IS
+   ls_mch_code_  VARCHAR2(100);
+   part_no_  VARCHAR2(25);
+   serial_no_  VARCHAR2(50);
+   sup_mch_code_   VARCHAR2(100);
+BEGIN
+   Equipment_Object_Util_API.Add_Parent_Seq_To_Attr(attr_);
+   
+   --This logic can be move to Check_Update___ procedure in server side using uxx/ iee identifiying variable.
+   sup_mch_code_ := Client_SYS.Get_Item_Value('SUP_MCH_CODE', attr_);
+   ls_mch_code_ := EQUIPMENT_SERIAL_API.Get_Sup_Mch_Code(key_.equipment_object_seq);
+   IF ls_mch_code_ IS NOT  NULL AND sup_mch_code_ IS NOT NULL THEN 
+      part_no_ := Client_SYS.Get_Item_Value('PART_NO', attr_);
+      serial_no_ := Client_SYS.Get_Item_Value('SERIAL_NO', attr_);
+      IF (PART_SERIAL_CATALOG_API.Is_In_Repair_Workshop(part_no_,serial_no_) = 'TRUE' )THEN
+          Error_SYS.Appl_General(lu_name_, 'PARENTINREP: Object with a current position "In Repair Workshop" is not allowed to change the superior object.');
+      END IF ;
+  END IF ;
+   super(etag_, key_, attr_, info_, action_);
+   --Add post-processing code here
+END CRUD_Update___;
+
+
+FUNCTION Get_Contract_Description___ (
+  contract_ IN VARCHAR2) RETURN VARCHAR2
+IS
+BEGIN
+   RETURN Site_API.Get_Description(contract_);
+END Get_Contract_Description___;
+
+--FUNCTION Get_Serial_Tracked___ (part_no_   IN VARCHAR2)RETURN VARCHAR2
+--IS
+--BEGIN
+--   RETURN PART_CATALOG_API.Get_Rcpt_Issue_Serial_Track_Db(part_no_);
+--END Get_Serial_Tracked___;
+
+FUNCTION Get_Manufacturer_Description___(
+   manufacturer_no_ IN VARCHAR2 ) RETURN VARCHAR2
+IS  
+BEGIN
+      RETURN Equipment_Manufacturer_API.Get_Description(manufacturer_no_);
+END Get_Manufacturer_Description___;
+
+
+-- Operational State/Condition support for structure
+PROCEDURE Set_Structure_In_Operation___ (
+   key_ IN Equipment_Serial_Key,
+   info$_    OUT VARCHAR2 )   
+IS
+BEGIN
+   Equipment_Serial_API.Set_Structure_In_Operation(Equipment_Object_API.Get_Contract(key_.equipment_object_seq), Equipment_Object_API.Get_Mch_Code(key_.equipment_object_seq));
+   IF In_Operative_Warning___(key_.equipment_object_seq) = 'TRUE' THEN
+      Client_SYS.Add_Info(lu_name_, 'SEROBJSTR: Some objects of the structure :P1 were not changed due to their operational condition.', Equipment_Object_API.Get_Mch_Code(key_.equipment_object_seq));
+      info$_ := Client_SYS.Get_All_Info(32000);
+   END IF;
+END Set_Structure_In_Operation___;
+
+PROCEDURE Set_Structure_Out_Of_Operation___ (
+   key_ IN Equipment_Serial_Key)   
+IS
+BEGIN
+  Equipment_Serial_API.Set_Structure_Out_Of_Operation(key_.equipment_object_seq);
+END Set_Structure_Out_Of_Operation___;
+
+PROCEDURE Set_Structure_Scrapped___ (
+   key_ IN Equipment_Serial_Key )   
+IS
+BEGIN
+   Equipment_Serial_API.Set_Structure_Scrapped(Equipment_Object_API.Get_Contract(key_.equipment_object_seq), Equipment_Object_API.Get_Mch_Code(key_.equipment_object_seq));
+END Set_Structure_Scrapped___;
+
+PROCEDURE Set_Structure_Operational___ (
+   key_ IN Equipment_Serial_Key )   
+IS
+BEGIN
+   Equipment_Serial_API.Set_Structure_Operational(Equipment_Object_API.Get_Contract(key_.equipment_object_seq), Equipment_Object_API.Get_Mch_Code(key_.equipment_object_seq));
+END Set_Structure_Operational___;
+
+PROCEDURE Set_Structure_Non_Operational___ (
+   key_ IN Equipment_Serial_Key )   
+IS
+BEGIN
+   Equipment_Serial_API.Set_Structure_Non_Operational(Equipment_Object_API.Get_Contract(key_.equipment_object_seq), Equipment_Object_API.Get_Mch_Code(key_.equipment_object_seq));
+END Set_Structure_Non_Operational___;
+
+-- Operational State/Condition Changes
+
+PROCEDURE Set_In_Operation___ (
+   key_ IN Equipment_Serial_Key )   
+IS
+BEGIN
+   Equipment_Serial_API.Set_In_Operation(Equipment_Object_API.Get_Contract(key_.equipment_object_seq), Equipment_Object_API.Get_Mch_Code(key_.equipment_object_seq));
+END Set_In_Operation___;
+PROCEDURE Set_Out_Of_Operation___ (
+   key_ IN Equipment_Serial_Key )   
+IS
+BEGIN
+   Equipment_Serial_API.Set_Out_Of_Operation(Equipment_Object_API.Get_Contract(key_.equipment_object_seq), Equipment_Object_API.Get_Mch_Code(key_.equipment_object_seq));
+END Set_Out_Of_Operation___;
+
+PROCEDURE Set_Scrapped___ (
+   key_ IN Equipment_Serial_Key )   
+IS
+BEGIN
+   Equipment_Serial_API.Set_Scrapped(Equipment_Object_API.Get_Contract(key_.equipment_object_seq), Equipment_Object_API.Get_Mch_Code(key_.equipment_object_seq));
+END Set_Scrapped___;
+
+PROCEDURE Set_In_Operative___ (
+   key_ IN Equipment_Serial_Key )   
+IS
+BEGIN
+     Equipment_Serial_API.Set_Operational(Equipment_Object_API.Get_Contract(key_.equipment_object_seq), Equipment_Object_API.Get_Mch_Code(key_.equipment_object_seq));
+END Set_In_Operative___;
+
+PROCEDURE Set_Non_Operative___ (
+   key_ IN Equipment_Serial_Key )   
+IS
+BEGIN
+  Equipment_Serial_API.Set_Non_Operational(Equipment_Object_API.Get_Contract(key_.equipment_object_seq), Equipment_Object_API.Get_Mch_Code(key_.equipment_object_seq));
+END Set_Non_Operative___;
+
+
+
+FUNCTION Validate_Sup_Mch_Code___ (
+   sup_contract_ IN VARCHAR2,
+   sup_mch_code_ IN VARCHAR2 ) RETURN Validate_Sup_Mch_Code_Return_Rec
+IS
+  ret_   Validate_Sup_Mch_Code_Return_Rec;
+BEGIN
+       ret_.cost_center  := Equipment_Object_API.Get_Cost_Center(sup_contract_,sup_mch_code_);
+       ret_.mch_loc      := Equipment_Object_API.Get_Mch_Loc(sup_contract_,sup_mch_code_);
+       ret_.mch_pos      := Equipment_Object_API.Get_Mch_Pos(sup_contract_,sup_mch_code_);
+       ret_.object_no    := Equipment_Object_API.Get_Object_No(sup_contract_,sup_mch_code_);
+       ret_.location_id  := Equipment_Object_API.Get_Location_Id(sup_contract_,sup_mch_code_);
+    RETURN ret_;
+END Validate_Sup_Mch_Code___;
+
+
+FUNCTION Get_Exist_Warning___ (
+   contract_ IN VARCHAR2,
+   mch_code_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+BEGIN
+   RETURN Equipment_Object_API.Exist_Warning(contract_, mch_code_);
+END Get_Exist_Warning___;
+
+
+FUNCTION In_Facility_Or_Repair_Workshop___(
+   part_no_   IN VARCHAR2,
+   serial_no_ IN VARCHAR2 ) RETURN BOOLEAN
+IS
+   
+BEGIN
+   IF Equipment_Serial_API.Infacility_Or_Workshop (part_no_ , serial_no_)= 'TRUE' THEN 
+      RETURN   TRUE;
+   ELSE 
+      RETURN FALSE ;
+      END IF ;
+   END  In_Facility_Or_Repair_Workshop___;
+   
+   
+
+FUNCTION Get_Mch_Description___(
+   part_no_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   
+BEGIN
+   RETURN Part_Catalog_API.Get_Description(part_no_);
+END Get_Mch_Description___;
+
+
+FUNCTION Get_Company___(
+   contract_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   
+BEGIN
+   RETURN Site_API.Get_Company(contract_);
+END Get_Company___;
+
+FUNCTION Get_Mch_Type___(
+   type_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   
+BEGIN
+  RETURN  TYPE_DESIGNATION_API.Get_Mch_Type( type_);
+END Get_Mch_Type___;
+
+FUNCTION Get_Type_Designation_Values___(
+   type_ IN VARCHAR2 ) RETURN Type_Des_Values_Rec
+IS
+   rec_ Type_Des_Values_Rec;
+BEGIN
+   rec_.mch_type := TYPE_DESIGNATION_API.Get_Mch_Type(type_);
+   rec_.item_class := EQUIPMENT_OBJ_TYPE_API.Get_Item_Class_Id(rec_.mch_type);
+   RETURN rec_;
+END Get_Type_Designation_Values___;
+
+
+FUNCTION Get_Logical_Code_Part_Values___(
+   contract_ IN VARCHAR2 ) RETURN Logical_Code_Part_Values_Rec
+IS
+   rec_ Logical_Code_Part_Values_Rec;
+   object_no_           VARCHAR2(20);
+   object_view_name_    VARCHAR2(30);
+   hide_object_         VARCHAR2(20);
+   cc_part_name_        VARCHAR2(20);
+   cc_view_name_        VARCHAR2(30);
+   hide_cost_center_    VARCHAR2(10);
+   company_             VARCHAR2(20);
+BEGIN
+   Equipment_Object_API.Get_Code_Part_For_Objct_Values(contract_, object_no_, object_view_name_, hide_object_);
+   Equipment_Object_API.Get_Code_Part_Cost_Center_Val(contract_, cc_part_name_, cc_view_name_, hide_cost_center_);
+   company_ := Site_API.Get_Company(contract_);
+   rec_.fetch_cost_center := cc_part_name_;
+   rec_.cost_center_code_part := Accounting_Code_Parts_API.Get_Code_Part_For_Logical(company_, 'CostCenter');
+   rec_.hide_cost_center := hide_cost_center_;
+   rec_.fetch_object_no := object_no_;
+   rec_.object_code_part := Accounting_Code_Parts_API.Get_Code_Part_For_Logical(company_, 'Object');
+   rec_.hide_object_no := Equipment_Object_Api.Get_Code_Part_View(contract_, 'Object');
+   RETURN rec_;
+END Get_Logical_Code_Part_Values___;
+
+FUNCTION Get_Old_Data___(
+   contract_ IN VARCHAR2,
+   mch_code_ IN VARCHAR2) RETURN Get_Old_Info_Rec
+IS
+   rec_ Get_Old_Info_Rec;
+BEGIN
+   rec_.mch_type := Equipment_Serial_API.Get_Cost_Center(contract_, mch_code_);
+   rec_.type := Equipment_Serial_API.Get_Type(contract_, mch_code_);
+   rec_.cost_center := Equipment_Serial_API.Get_Accounting_Code_Part_B(contract_, mch_code_);
+   rec_.sup_mch_code := Equipment_Serial_API.Get_Sup_Mch_Code(contract_, mch_code_);
+   RETURN rec_;
+END Get_Old_Data___;
+
+FUNCTION Get_Object_Image___(
+   contract_ IN VARCHAR2,
+   mch_code_  IN VARCHAR2 ) RETURN BLOB
+IS 
+BEGIN
+   RETURN Media_Library_API.Get_Default_Media(Media_Library_Api.Get_Library_Id_From_Ref('EquipmentObject', contract_, mch_code_));
+END Get_Object_Image___;
+
+PROCEDURE Set_Location_Structure___ (
+   key_ IN Equipment_Serial_Key,
+   location_id_ IN VARCHAR2)   
+IS
+BEGIN
+   Equipment_Object_API.Set_Location_Structure(Equipment_Object_API.Get_Contract(key_.equipment_object_seq), Equipment_Object_API.Get_Mch_Code(key_.equipment_object_seq), location_id_);
+END Set_Location_Structure___;
+
+PROCEDURE Reset_Location_Structure___ (
+   key_ IN Equipment_Serial_Key)   
+IS
+BEGIN
+   Equipment_Object_API.Reset_Location_Structure(Equipment_Object_API.Get_Contract(key_.equipment_object_seq), Equipment_Object_API.Get_Mch_Code(key_.equipment_object_seq));
+END Reset_Location_Structure___;
+
+FUNCTION Has_Mch_Type_Tech_Spec___(
+   mch_type_ IN VARCHAR2 ) RETURN VARCHAR2
+IS   
+BEGIN
+   RETURN EQUIPMENT_OBJ_TYPE_Api.Has_Technical_Spec_No(mch_type_);
+END Has_Mch_Type_Tech_Spec___;
+
+
+FUNCTION Get_Is_Serial_Tr___(
+   part_no_ IN VARCHAR2 )  RETURN VARCHAR2
+IS
+   
+BEGIN
+     RETURN PART_CATALOG_API.Get_Rcpt_Issue_Serial_Track_Db(part_no_);
+END Get_Is_Serial_Tr___;
+
+
+FUNCTION In_Operative_Warning___(
+   contract_ IN VARCHAR2,
+   mch_code_ IN VARCHAR2 )  RETURN VARCHAR2
+IS
+   
+BEGIN
+   RETURN Equipment_Object_API.Exist_Warning(contract_, mch_code_);
+END In_Operative_Warning___;
+
+FUNCTION In_Operative_Warning___(
+   equipment_object_seq_ IN NUMBER)  RETURN VARCHAR2
+IS
+BEGIN
+   RETURN In_Operative_Warning___(Equipment_Object_API.Get_Contract(equipment_object_seq_), Equipment_Object_API.Get_Mch_Code(equipment_object_seq_));
+END In_Operative_Warning___;
+
+PROCEDURE Spread_Safe_Access_Code___ (
+   key_ IN Equipment_Serial_Key )   
+IS
+   info_msg_   VARCHAR2(32000);
+BEGIN
+   Equipment_Object_API.Spread_Safe_Access_code(Equipment_Object_API.Get_Contract(key_.equipment_object_seq), Equipment_Object_API.Get_Mch_Code(key_.equipment_object_seq));
+   Equipment_Object_API.Get_Resched_Req_Warning(info_msg_, Equipment_Object_API.Get_Contract(key_.equipment_object_seq), Equipment_Object_API.Get_Mch_Code(key_.equipment_object_seq), 'SAFEACCESS');
+END Spread_Safe_Access_Code___;
+
+@Override
+PROCEDURE CRUD_Default_Copy___ (
+   rec_ IN OUT Equipment_Serial_Rec )
+IS
+BEGIN
+   rec_.sup_mch_code_saved    := NULL;
+   rec_.func_object_seq_saved := NULL;
+   super(rec_);
+END CRUD_Default_Copy___;
+
+FUNCTION Get_Item_Class_Id___ (
+   mch_code_ IN VARCHAR2,
+   contract_ IN VARCHAR2,
+   mch_type_ IN VARCHAR2) RETURN VARCHAR2
+IS
+   old_mch_type_   VARCHAR2(32000);
+   old_item_class_ VARCHAR2(32000);
+   new_item_class_ VARCHAR2(32000);
+   
+BEGIN
+	old_mch_type_     := Equipment_Object_API.Get_Mch_Type(contract_, mch_code_);
+   old_item_class_   := Equipment_Object_API.Get_Item_Class_Id(contract_, mch_code_);
+   new_item_class_   := Equipment_Obj_Type_API.Get_Item_Class_Id(old_mch_type_);
+   
+   IF((new_item_class_ = old_item_class_) OR (new_item_class_ IS NULL AND old_item_class_ IS NULL))THEN
+      new_item_class_ := Equipment_Obj_Type_API.Get_Item_Class_Id(mch_type_);
+   ELSE 
+      new_item_class_ := old_item_class_;
+   END IF;
+ 
+  RETURN new_item_class_;
+  
+END Get_Item_Class_Id___;
+
+@IgnoreUnitTest TrivialFunction
+FUNCTION Get_Def_Contract___ RETURN VARCHAR2
+IS
+BEGIN
+	RETURN User_Default_API.Get_Contract;
+END Get_Def_Contract___;

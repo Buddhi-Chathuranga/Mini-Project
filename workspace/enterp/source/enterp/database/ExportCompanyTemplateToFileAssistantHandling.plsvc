@@ -1,0 +1,153 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: ExportCompanyTemplateToFileAssistantHandling
+--  Component:    ENTERP
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+-----------------------------------------------------------------------------
+
+layer Core;
+
+
+FUNCTION Generate_Template_Files___ (
+   key_ IN Export_Company_Template_Virtual_Key ) RETURN VARCHAR2
+IS
+   master_rec_             Export_Company_Template_Virtual_Rec;
+   templ_file_rec_         Export_Company_Template_Files_Rec;
+   empty_templ_file_rec_   Export_Company_Template_Files_Rec;
+   
+   template_file_list_     Create_Company_API.CompanyTemplateExpList;
+   component_list_         VARCHAR2(4000);
+   language_list_          VARCHAR2(4000);
+   found_                  BOOLEAN := FALSE;
+BEGIN   
+   master_rec_ := Get_Record___(key_);
+   FOR i_ IN Get_Active_Component_Array___(key_) LOOP
+      IF (component_list_ IS NULL) THEN
+         component_list_ := i_.component;
+      ELSE
+         component_list_ := component_list_ ||',' || i_.component;
+      END IF;      
+   END LOOP;     
+   FOR i_ IN Get_Export_Company_Lang_Array___(key_) LOOP
+      IF (language_list_ IS NULL) THEN
+         language_list_ := i_.language_code;
+      ELSE
+         language_list_ := language_list_ ||'^' || i_.language_code;
+      END IF;      
+   END LOOP;          
+   template_file_list_ := Create_Company_API.Generate_Template_Files__(master_rec_.template_id, 
+                                                                       component_list_, 
+                                                                       CASE language_list_ WHEN NULL THEN 'FALSE' ELSE 'TRUE' END, 
+                                                                       CASE master_rec_.template_per_file WHEN TRUE THEN 'TRUE' ELSE 'FALSE' END, 
+                                                                       language_list_);    
+   FOR i_ IN 1..template_file_list_.count LOOP
+      found_ := TRUE;      
+      templ_file_rec_ := empty_templ_file_rec_;
+      templ_file_rec_.objkey := sys_guid();
+      templ_file_rec_.parent_objkey := master_rec_.objkey;
+      templ_file_rec_.template_id := master_rec_.template_id;
+      templ_file_rec_.component := template_file_list_(i_).component;
+      templ_file_rec_.file_name := template_file_list_(i_).file_name;
+      templ_file_rec_.file_content := template_file_list_(i_).file_content;
+      templ_file_rec_.template_file := template_file_list_(i_).output_file;
+      CRUD_Create___(templ_file_rec_);
+   END LOOP;
+   IF (found_) THEN
+      RETURN master_rec_.objkey;
+   ELSE
+      RETURN NULL;
+   END IF;   
+END Generate_Template_Files___;
+
+
+PROCEDURE Generate_Summary___ (
+   key_ IN Export_Company_Template_Virtual_Key ) 
+IS
+   master_rec_          Export_Company_Template_Virtual_Rec;
+   new_master_rec_      Export_Company_Template_Virtual_Rec;
+   component_rec_       Active_Template_Comp_Virtual_Rec;
+   empty_component_rec_ Active_Template_Comp_Virtual_Rec;
+   language_rec_        Export_Company_Lang_Rec;
+   empty_language_rec_  Export_Company_Lang_Rec;            
+   array_               json_array_t;
+   comp_list_generated_ BOOLEAN := FALSE;
+   lang_list_generated_ BOOLEAN := FALSE;
+BEGIN
+   master_rec_ := Get_Record___(key_);
+   new_master_rec_ := master_rec_;
+   new_master_rec_.component_list_generated := comp_list_generated_;
+   new_master_rec_.language_list_generated := lang_list_generated_;
+   -- Remove old component values before inserting
+   FOR i_ IN Get_Active_Component_Array___(key_) LOOP
+      component_rec_.objkey := i_.objkey;
+      CRUD_Delete___(component_rec_);
+   END LOOP;   
+   IF (master_rec_.component_list IS NOT NULL) THEN      
+      array_ := json_array_t.parse(master_rec_.component_list);        
+      FOR indx IN 0..array_.get_size - 1 LOOP
+         component_rec_ := empty_component_rec_;
+         component_rec_.component := Client_SYS.Get_Key_Reference_Value(array_.get_String(indx), 'COMPONENT');
+         component_rec_.objkey := sys_guid();
+         component_rec_.parent_objkey := master_rec_.objkey;
+         component_rec_.template_id := master_rec_.template_id;         
+         CRUD_Create___(component_rec_);
+      END LOOP;     
+      comp_list_generated_ := TRUE;
+   END IF;
+   -- Remove old langauge values before inserting
+   FOR i_ IN Get_Export_Company_Lang_Array___(key_) LOOP
+      language_rec_.objkey := i_.objkey;
+      CRUD_Delete___(language_rec_);
+   END LOOP;   
+   IF (master_rec_.export_languages AND master_rec_.language_list IS NOT NULL) THEN
+      array_ := json_array_t.parse(master_rec_.language_list);  
+      FOR indx IN 0..array_.get_size - 1 LOOP
+         language_rec_ := empty_language_rec_;
+         language_rec_.language_code := Client_SYS.Get_Key_Reference_Value(array_.get_String(indx), 'LANGUAGE_CODE');      
+         language_rec_.objkey := sys_guid();
+         language_rec_.parent_objkey := master_rec_.objkey;
+         language_rec_.template_id := master_rec_.template_id;         
+         CRUD_Create___(language_rec_);
+      END LOOP;        
+      lang_list_generated_ := TRUE;
+   END IF;
+   new_master_rec_.component_list_generated := comp_list_generated_;
+   new_master_rec_.language_list_generated := lang_list_generated_;   
+   CRUD_Update___(master_rec_, new_master_rec_);
+END Generate_Summary___;
+
+
+@Override
+PROCEDURE CRUD_Default___ (
+   rec_ IN OUT Export_Company_Template_Virtual_Rec )
+IS   
+BEGIN   
+   super(rec_);   
+   Create_Company_Tem_API.Get_Default_Template__(rec_.template_id);   
+END CRUD_Default___;
+
+
+@Override
+PROCEDURE CRUD_Update___ (
+   old_ IN Export_Company_Template_Virtual_Rec,
+   new_ IN Export_Company_Template_Virtual_Rec )
+IS
+   master_key_          Export_Company_Template_Virtual_Key;
+   language_rec_        Export_Company_Lang_Rec;   
+BEGIN
+   master_key_.objkey := old_.objkey;
+   super(old_, new_);
+   IF (NOT old_.export_languages AND new_.export_languages) THEN
+      FOR i_ IN Get_Export_Company_Lang_Array___(master_key_) LOOP
+         language_rec_.objkey := i_.objkey;
+         CRUD_Delete___(language_rec_);
+      END LOOP;       
+      NULL;
+   END IF;
+END CRUD_Update___;
+
+

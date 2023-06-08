@@ -1,0 +1,386 @@
+--------------------------------------------------------------------------------------
+-- Date        Sign     History
+-- ----------  ------   --------------------------------------------------------------
+-- 2021-12-10  NiDalk   Bug 161670(SC21R2-6164), Made TaxInfoList visible always.
+-- 2021-07-01  ApWilk   SC2020R1-13070, Added a validate command to the field InvoiceText to prevent replacing the modified value from the original value.
+-- 2021-04-30  Skanlk   Bug 158631(SCZ-14565), Modified TaxLinesVirtual by Calling to Get_Tax_Percentage method instead of calling to UpdateTaxInfo to retrieve the tax percentage
+-- 2021-04-30           and moved the UpdateTaxAndAmounts calling part from TaxLinesVirtual into AfterCrud to enable the done button in the Create Advance Invoice window.
+-- 2020-10-22  RaVdlk   SC2020R1-10512, Reverted the earlier correction and introduced 'Create and Print Invoice' command
+--                      instead of the PrintInvoice toggle which resets it's value from Client profile after every refresh
+-- 2020-10-13  RaVdlk   SC2020R1-10512, Passed the parameter PrintInvoice to PopulateTableAndUpdateAmounts method
+-- 2020-03-19  DhAplk   SCXTEND-4027, Replaced CreateAdvancePaymentInvoiceSet name to entity name as CreateAdvancePaymentInvoiceVirtual.
+-- 2019-08-17  MalLlk   SCUXXW4-22978, Supporting to move fragment CreateAdvancePaymentInvoiceAssistant to a seperate projection
+-- 2019-08-17           and renamed the projection ManageAdvancePaymentInvoiceAssistant to CreateAdvancePaymentInvoice.
+-- 2018-09-05  JeLise   SCUXXW4-8302, Converted from dlgCreateAdvancePaymentInvoice using MTG Version: 1.27
+--------------------------------------------------------------------------------------
+
+client CreateAdvancePaymentInvoice;
+component ORDER;
+layer Core;
+
+--------------------------------- FRAGMENTS ---------------------------------
+include fragment TaxCalcStructureActiveSelector;
+include fragment TaxCodeRestrictedSelector;
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+warningsenabled = CheckTaxCombination, ControlCreateInvoice, PopulateTableAndUpdateAmounts;
+
+-------------------------------- ASSISTANTS ---------------------------------
+assistant CreateAdvancePaymentInvoiceAssistant using CreateAdvancePaymentInvoiceSet {
+   label = "Create Advance Payment Invoice for ${OrderNo}";
+   input(OrderNo);
+   init command {
+      variable DefaultStructureVar {
+         type = Structure(DefaultStructure);
+      }
+      execute {
+         call FetchDefaults(OrderNo) into DefaultStructureVar;
+         set InvoicingCustomer = DefaultStructureVar.InvoicingCustomer;
+         set InvoiceCustomerName = DefaultStructureVar.InvoiceCustomerName;
+         set CustomerNo = DefaultStructureVar.CustomerNo;
+         set CustomerName = DefaultStructureVar.CustomerName;
+         set WantedDeliveryDate = DefaultStructureVar.WantedDeliveryDate;
+         set CurrencyCode = DefaultStructureVar.CurrencyCode;
+         set PayTermBaseDate = DefaultStructureVar.PayTermBaseDate;
+         set PayTermId = DefaultStructureVar.PayTermId;
+         set PayTermDescription = DefaultStructureVar.PayTermDescription;
+         set Company = DefaultStructureVar.Company;
+         set Contract = DefaultStructureVar.Contract;
+         set TotalSalesCharge = DefaultStructureVar.TotalSalesCharge;
+         set TotalSalesChargeGross = DefaultStructureVar.TotalSalesChargeGross;
+         set OrderSalesChargeTax = DefaultStructureVar.OrderSalesChargeTax;
+         set BaseForAdvInvoice = DefaultStructureVar.BaseForAdvInvoice;
+         set BaseForAdvInvoiceDb = DefaultStructureVar.BaseForAdvInvoiceDb;
+         set DefTaxCode = DefaultStructureVar.DefTaxCode;
+         set OrderIncoicedGross = DefaultStructureVar.OrderIncoicedGross;
+         set ShipAddrNo = DefaultStructureVar.ShipAddrNo;
+         set SupplyCountryDb = DefaultStructureVar.SupplyCountryDb;
+         set TotalAdvance = DefaultStructureVar.TotalAdvance;
+         set TotalAdvGross = DefaultStructureVar.TotalAdvGross;
+         set SiteDate = DefaultStructureVar.SiteDate;
+         set InvoicedNetAmount = DefaultStructureVar.InvoicedNetAmount;
+         set InvoicedGrossAmount = DefaultStructureVar.InvoicedGrossAmount;
+         set TaxLiabilityTypeDb = DefaultStructureVar.TaxLiabilityTypeDb;
+         set InvoiceText = DefaultStructureVar.InvoiceText;
+         set DueDate = DefaultStructureVar.DueDate;
+         set OrderAmount = DefaultStructureVar.OrderAmount;
+         set MaxAllowedAmtAdvInv = DefaultStructureVar.MaxAllowedAmtAdvInv;
+         set MaxAmtAdvInvPercentage = DefaultStructureVar.MaxAmtAdvInvPercentage;
+         set ApplyTax = DefaultStructureVar.ApplyTax;
+         set CurrencyRounding = DefaultStructureVar.CurrencyRounding;
+         set OrderTotalNet = DefaultStructureVar.OrderTotalNet;
+         set OrderTotalNetCharge = DefaultStructureVar.OrderTotalNetCharge;
+         set OrderTotalGross = DefaultStructureVar.OrderTotalGross;
+         set OrderTotalGrossCharge = DefaultStructureVar.OrderTotalGrossCharge;
+         set TotalAdvanceNet = DefaultStructureVar.TotalAdvanceNet;
+         set TotalAdvanceGross = DefaultStructureVar.TotalAdvanceGross;
+         set BaseForAdvInvoiceGross = DefaultStructureVar.BaseForAdvInvoiceGross;
+         set TaxEdited = false;
+         set TaxStructureEdited = false;
+         call CheckTaxCombination(BaseForAdvInvoiceDb, Company, OrderNo, TaxLiabilityTypeDb);
+      }
+   }
+   singlestep {
+      label = "Order Info";
+      group CreateAdvancePaymentInvoiceGroup;
+      group GeneralGroup;
+      group AdvanceInvoiceGroup;
+      group TaxInfoGroup;
+      list TaxInfoList(TaxLinesArray);
+      group PaymentInfoGroup;
+   }
+   command CreateInvoice;
+   command CreateAndPrintInvoice;
+   command Cancel;
+}
+
+command CreateInvoice for CreateAdvancePaymentInvoiceVirtual {
+   label = "Create Invoice";
+   enabled = [(((InvoiceNetPercentage <= 100 and InvoiceNetPercentage > 0) and(BaseForAdvInvoiceDb = "NET AMOUNT" or BaseForAdvInvoiceDb = "NET AMOUNT WITH CHARGES"))
+   or((InvoiceGrossPercentage <= 100 and InvoiceGrossPercentage > 0) and(BaseForAdvInvoiceDb = "GROSS AMOUNT" or BaseForAdvInvoiceDb = "GROSS AMOUNT WITH CHARGES")))
+   and OrderAmount > 0 and OrderAmount >= TotalInvoiceAmount];
+   execute {
+      call ControlCreateInvoice(BaseForAdvInvoiceDb, AdvanceInvoiceGrossAmount, TotalAdvanceGross, AdvanceInvoiceAmount, InvoicedGrossAmount, OrderAmount, OrderNo);
+      call CreateInvoice(Objkey) {
+         when FAIL {
+            if [not(error.Message = null)] {
+               error("${error.Message}");
+            }
+            exit CANCEL;
+         }
+      }
+   }
+}
+
+command CreateAndPrintInvoice for CreateAdvancePaymentInvoiceVirtual {
+   label = "Create and Print Invoice";
+   enabled = [(((InvoiceNetPercentage <= 100 and InvoiceNetPercentage > 0) and(BaseForAdvInvoiceDb = "NET AMOUNT" or BaseForAdvInvoiceDb = "NET AMOUNT WITH CHARGES"))
+   or((InvoiceGrossPercentage <= 100 and InvoiceGrossPercentage > 0) and(BaseForAdvInvoiceDb = "GROSS AMOUNT" or BaseForAdvInvoiceDb = "GROSS AMOUNT WITH CHARGES")))
+   and OrderAmount > 0 and OrderAmount >= TotalInvoiceAmount];
+   execute {
+      call ControlCreateInvoice(BaseForAdvInvoiceDb, AdvanceInvoiceGrossAmount, TotalAdvanceGross, AdvanceInvoiceAmount, InvoicedGrossAmount, OrderAmount, OrderNo);
+      call CreateAndPrintInvoice(Objkey) {
+         when FAIL {
+            if [not(error.Message = null)] {
+               error("${error.Message}");
+            }
+            exit CANCEL;
+         }
+      }
+   }
+
+}
+
+command Cancel for CreateAdvancePaymentInvoiceVirtual {
+   label = "Cancel";
+   execute {
+   }
+}
+
+// When removing a tax line the invoice amounts and percentage needs to be updated
+command AfterCrud for TaxLinesVirtual {
+   execute {
+      set TaxEdited = true;
+      set TaxStructureEdited = false;
+      if [DeleteCount > 0] {
+         call PopulateTableAndUpdateAmounts(parent.Objkey, true, false, parent.AdvanceInvoiceAmount, parent.InvoiceNetPercentage, parent.AdvanceInvoiceGrossAmount, parent.InvoiceGrossPercentage, parent.TaxCalcStructureId, parent.ApplyTax);
+      }
+      else {
+         call UpdateTaxAndAmounts(parent.Objkey, TaxEdited, TaxStructureEdited);
+      }
+   }
+}
+
+---------------------------------- GROUPS -----------------------------------
+group CreateAdvancePaymentInvoiceGroup for CreateAdvancePaymentInvoiceVirtual {
+   label = "Customer Order";
+   lov OrderNoRef with CreateAdvancePaymentInvoiceVirtualSelector {
+      preview = OrderInfoCard;
+      editable = [false];
+   }
+   field InvoicingCustomer {
+      size = Small;
+      editable = [false];
+      contactwidget {
+         enabled = [true];
+         source = Customer;
+         key = InvoicingCustomer;
+      }
+   }
+   field InvoiceCustomerName {
+      label = "Invoicing Customer Name";
+      editable = [false];
+   }
+   field CurrencyCode {
+      label = "Currency";
+      size = Small;
+      editable = [false];
+   }
+   field WantedDeliveryDate {
+      type = Date;
+      editable = [false];
+   }
+}
+
+group GeneralGroup for CreateAdvancePaymentInvoiceVirtual {
+   label = "Order Amount";
+   field OrderAmount {
+      editable = [false];
+   }
+   field BaseForAdvInvoice {
+      editable = [false];
+   }
+   field MaxAllowedAmtAdvInv {
+      label = "Adv Inv Max Allowed Amt";
+      editable = [false];
+   }
+   field MaxAmtAdvInvPercentage {
+      label = "Adv Inv Max Allowed Amt (%)";
+      size = Small;
+      editable = [false];
+      validate command {
+         variable GrossVar {
+            type = Boolean;
+         }
+         execute {
+            call CheckGrossBaseInv(BaseForAdvInvoiceDb) into GrossVar;
+            if [GrossVar] {
+               call CalculateInvoiceGrossAmount(InvoiceGrossPercentage, OrderAmount, CurrencyRounding) into AdvanceInvoiceGrossAmount;
+            }
+            else {
+               call CalculateInvoiceAmount(InvoiceNetPercentage, OrderAmount, CurrencyRounding) into AdvanceInvoiceAmount;
+            }
+            call PopulateTableAndUpdateAmounts(Objkey, TaxEdited, TaxStructureEdited, AdvanceInvoiceAmount, InvoiceNetPercentage, AdvanceInvoiceGrossAmount, InvoiceGrossPercentage, TaxCalcStructureId, ApplyTax);
+         }
+      }
+   }
+}
+
+group AdvanceInvoiceGroup for CreateAdvancePaymentInvoiceVirtual {
+   label = "Advance Invoice";
+   field AdvanceInvoiceAmount {
+      label = "Invoice Net Amount";
+      editable = [BaseForAdvInvoiceGross = false];
+      validate command {
+         execute {
+            call CalcAdvInvoicePercentage(BaseForAdvInvoiceDb, OrderAmount, AdvanceInvoiceAmount, OrderTotalNet, OrderTotalNetCharge) into InvoiceNetPercentage;
+            call PopulateTableAndUpdateAmounts(Objkey, TaxEdited, TaxStructureEdited, AdvanceInvoiceAmount, InvoiceNetPercentage, AdvanceInvoiceGrossAmount, InvoiceGrossPercentage, TaxCalcStructureId, ApplyTax);
+         }
+      }
+   }
+   field InvoiceNetPercentage {
+      label = "Invoice Net %";
+      size = Small;
+      editable = [BaseForAdvInvoiceGross = false];
+      validate command {
+         execute {
+            call CalculateInvoiceAmount(InvoiceNetPercentage, OrderAmount, CurrencyRounding) into AdvanceInvoiceAmount;
+            call PopulateTableAndUpdateAmounts(Objkey, TaxEdited, TaxStructureEdited, AdvanceInvoiceAmount, InvoiceNetPercentage, AdvanceInvoiceGrossAmount, InvoiceGrossPercentage, TaxCalcStructureId, ApplyTax);
+         }
+      }
+   }
+   field AdvanceInvoiceGrossAmount {
+      label = "Invoice Gross Amount";
+      editable = [BaseForAdvInvoiceGross = true];
+      validate command {
+         execute {
+            call CalcAdvInvGrossPercentage(BaseForAdvInvoiceDb, OrderAmount, AdvanceInvoiceGrossAmount, OrderTotalGross, OrderTotalGrossCharge) into InvoiceGrossPercentage;
+            call PopulateTableAndUpdateAmounts(Objkey, TaxEdited, TaxStructureEdited, AdvanceInvoiceAmount, InvoiceNetPercentage, AdvanceInvoiceGrossAmount, InvoiceGrossPercentage, TaxCalcStructureId, ApplyTax);
+         }
+      }
+   }
+   field InvoiceGrossPercentage {
+      label = "Invoice Gross %";
+      size = Small;
+      editable = [BaseForAdvInvoiceGross = true];
+      validate command {
+         execute {
+            call CalculateInvoiceGrossAmount(InvoiceGrossPercentage, OrderAmount, CurrencyRounding) into AdvanceInvoiceGrossAmount;
+            call PopulateTableAndUpdateAmounts(Objkey, TaxEdited, TaxStructureEdited, AdvanceInvoiceAmount, InvoiceNetPercentage, AdvanceInvoiceGrossAmount, InvoiceGrossPercentage, TaxCalcStructureId, ApplyTax);
+         }
+      }
+   }
+   field InvoiceText {
+      size = Large;
+      multiline = true;
+      validate command {
+         execute {
+            if[InvoiceText != original.InvoiceText] {
+               call UpdateInvoiceText(Objkey, InvoiceText);
+            }
+         }
+      }
+   }
+}
+
+group TaxInfoGroup for CreateAdvancePaymentInvoiceVirtual {
+   label = "Tax Setup";
+   field ApplyTax {
+      size = Small;
+      editable = [true];
+      required = [true];
+      validate command {
+         execute {
+            set TaxEdited = false;
+            set TaxCalcStructureId = null;
+            call PopulateTableAndUpdateAmounts(Objkey, TaxEdited, TaxStructureEdited, AdvanceInvoiceAmount, InvoiceNetPercentage, AdvanceInvoiceGrossAmount, InvoiceGrossPercentage, TaxCalcStructureId, ApplyTax);
+         }
+      }
+   }
+   lov TaxCalcStructureRef with ReferenceTaxCalcStructureActiveSelector {
+      description = TaxCalcStructureRef.Description;
+      visible = [BaseForAdvInvoiceGross = false and ApplyTax = true];
+      validate command {
+         execute {
+            set TaxStructureEdited = true;
+            set TaxEdited = true;
+            call PopulateTableAndUpdateAmounts(Objkey, TaxEdited, TaxStructureEdited, AdvanceInvoiceAmount, InvoiceNetPercentage, AdvanceInvoiceGrossAmount, InvoiceGrossPercentage, TaxCalcStructureId, ApplyTax);
+         }
+      }
+   }
+}
+
+list TaxInfoList for TaxLinesVirtual {
+   label = "Tax Codes";
+   editmode = MultiRowEdit;
+   crudactions {
+      new {
+         enabled = [parent.TaxCalcStructureId = null];
+      }
+      delete {
+         enabled = [parent.TaxCalcStructureId = null];
+      }
+      after command AfterCrud;
+   }
+   field TaxBaseAmount {
+      label = "Tax Base Amount/Curr";
+      columnvisible = [parent.TaxCalcStructureId != null];
+      editable = [false];
+   }
+   lov TaxCodeRef with ReferenceTaxCodeRestrictedSelector using ValidTaxCodes(parent.Company, parent.ApplyTax, parent.SiteDate) {
+      size = Small;
+      validate command {
+         execute {
+            if [TaxCode != null] {
+               call Get_Tax_Percentage(parent.Company, TaxCode) into TaxPercentage;
+               set TaxCurrAmount = null;
+            }
+         }
+      }
+   }
+   field TaxPercentage {
+      editable = [false];
+   }
+   field TaxCurrAmount {
+      label = "Tax Amount/Curr";
+      editable = [false];
+   }
+}
+
+group PaymentInfoGroup for CreateAdvancePaymentInvoiceVirtual {
+   label = "Payment";
+   field PayTermBaseDate {
+      label = "Payment Term Base Date";
+      validate command {
+         execute {
+            if [PayTermBaseDate != null or PayTermId != null] {
+               call GetDueDate(Company, CustomerNo, PayTermId, PayTermBaseDate, Objkey) into DueDate;
+            }
+            else {
+               set DueDate = null;
+            }
+         }
+      }
+   }
+   lov PayTermIdRef with ReferencePaymentTermSelector {
+      description = PayTermIdRef.Description;
+      validate command {
+         execute {
+            if [PayTermId != null] {
+               call GetDueDate(Company, CustomerNo, PayTermId, PayTermBaseDate, Objkey) into DueDate;
+            }
+            else {
+               set DueDate = null;
+            }
+         }
+      }
+   }
+   field DueDate;
+}
+
+----------------------------------- CARDS -----------------------------------
+card OrderInfoCard for CreateAdvancePaymentInvoiceVirtual {
+   label = "- ${OrderNo}";
+   field CustomerNo;
+   field CustomerName;
+   field OrderTotalNet;
+   field OrderTotalGross;
+   field OrderTotalNetCharge {
+      label = "Ord Total Net incl Charge";
+   }
+   field OrderTotalGrossCharge {
+      label = "Ord Total Gross incl Charge";
+   }
+   field TotalAdvanceNet;
+   field TotalAdvanceGross;
+}

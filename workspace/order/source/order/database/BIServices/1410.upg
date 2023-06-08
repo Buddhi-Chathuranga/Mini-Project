@@ -1,0 +1,1631 @@
+------------------------------------------------------------------------------------------
+--
+--  Filename      : 1410.upg
+--
+--  Module        : ORDER
+--
+--  Purpose       : File for upgrade BI Services
+--
+--  Date    Sign    History
+--  ------  ------  ----------------------------------------------------------------------
+--  210225  MalLlk  SC2020R1-12700, Modified Materialized View creation to support Oracle Edition-Based Redefinition.
+--  150529  IsSalk  KES-510, Modified CUSTOMER_ORDER_DELIVERY_MV to filter out cancelled CO delivery lines.
+--  150226  UdGnlk  PRSC-6162, Correctly fetched part_no value for dim_configuration_spec_id in RETURN_MATERIAL_LINE_MV.
+--  150225  MalLlk  PRSC-6162, Correctly fetched values for dim_configuration_spec_id and dim_delivery_type_id in RETURN_MATERIAL_LINE_MV.
+--  150219  UdGnlk  PRSC-6162, Modifying return_material_reason to check nullable in materialized view RETURN_MATERIAL_LINE_MV.
+--  150216  UdGnlk  PRSC-6064, Modified RETURN_MATERIAL_CHARGE_MV dim_sales_charge_type_id to concatenate contract and charge type.
+--  150215  UdGnlk  PRSC-5761, Added measure items price curr and price incl tax curr.
+--  141212  PeSulk  Added new light item Rental to CUSTOMER_ORDER_LINE_MV, CUSTOMER_ORDER_DELIVERY_MV and RETURN_MATERIAL_LINE_MV.
+--  141103  ShKolk  Added price_incl_tax to Sales_Part_MV.
+--  141020  UdGnlk  PRSC-3762, Added new dimension view WIN_LOSE_REASON_MV for CRM BI services.
+--  141017  UdGnlk  PRSC-126, Added new dimension view COMPETITOR_MV for CRM BI services.
+--  140812  ShKolk  Added incl_tax columns as measure items to Customer_Order_Charge_MV, Customer_Order_Line_MV, Return_Material_Charge_MV, Return_Material_Line_MV.
+--  131009  MalLlk  Bug 112941, Modified CUSTOMER_ORDER_LINE_MV to modify the way it fetched values for
+--  131009          count_early_order_line, count_late_order_line and count_on_time_order_line columns.
+--  130916  MalLlk  Bug 111242, Modified SALES_PART_MV to add column catalog_group_description and Modified CUSTOMER_ORDER_LINE_MV
+--  130916          to add column profit. Modified CUSTOMER_ORDER_LINE_MV, CUSTOMER_ORDER_CHARGE_MV, CUSTOMER_ORDER_DELIVERY_MV,
+--  130916          RETURN_MATERIAL_CHARGE_MV and RETURN_MATERIAL_LINE_MV to add objid as unique identifier and dim_rpd_period_id.
+--  130916          Added dim_project_id and dim_activity_id and two indexes for those columns in CUSTOMER_ORDER_CHARGE_MV,
+--  130916          RETURN_MATERIAL_LINE_MV and RETURN_MATERIAL_CHARGE_MV.
+--  130610  MalLlk  Bug 110487, Modified RETURN_MATERIAL_LINE_MV to concatanate values of part_no and configuration_id
+--  130610          for the column dim_configuration_spec_id.
+--  130606  MalLlk  Bug 110486, Modified CUSTOMER_ORDER_LINE_MV to ignore Cancelled order lines for column count_order_line.
+------------------------------------------------------------------------------------------
+
+SET SERVEROUTPUT ON
+
+exec Database_SYS.Log_Detail_Time_Stamp('ORDER','1410.upg','Timestamp_1');
+PROMPT 1410.upg
+
+------------------------------------------------------------------------------------------
+
+-- Upgrade sections: Customer_Order_Line_MV
+-- Upgrade sections: Customer_Order_Delivery_MV
+-- Upgrade sections: Return_Material_Line_MV
+-- Upgrade sections: Return_Material_Charge_MV
+-- Upgrade sections: Customer_Order_Charge_MV
+-- Upgrade sections: Sales_Part_MV
+
+------------------------------------------------------------------------------------------
+
+-- ***** Customer_Order_Line_MV - Start *****
+
+DEFINE TAB    = CUSTOMER_ORDER_LINE_TAB
+DEFINE TAB_CO = CUSTOMER_ORDER_TAB
+DEFINE MV     = CUSTOMER_ORDER_LINE_MV
+
+exec Database_SYS.Log_Detail_Time_Stamp('ORDER','1410.upg','Timestamp_2');
+PROMPT Create Materialized View &MV
+DECLARE
+   stmt_            VARCHAR2(32000);
+BEGIN
+   Database_SYS.Remove_All_Cons_And_Idx('&MV', TRUE);
+   Database_SYS.Remove_Materialized_View('&MV', TRUE);
+
+   stmt_ :=
+   'CREATE MATERIALIZED VIEW &MV
+    TABLESPACE &IFSAPP_DATA
+    BUILD DEFERRED
+    USING NO INDEX
+    REFRESH COMPLETE ON DEMAND
+    EVALUATE USING CURRENT EDITION
+    AS
+    SELECT
+       -- original keys --
+       col.order_no                                                                                                      order_no_key,
+       col.line_no                                                                                                       line_no_key,
+       col.rel_no                                                                                                        rel_no_key,
+       col.line_item_no                                                                                                  line_item_no_key,
+       -- measure items --
+       col.buy_qty_due                                                                                                   buy_qty_due,
+       col.qty_assigned                                                                                                  qty_assigned,
+       col.qty_picked                                                                                                    qty_picked,
+       col.qty_short                                                                                                     qty_short,
+       col.qty_shipped                                                                                                   qty_shipped,
+       col.qty_shipdiff                                                                                                  qty_shipdiff,
+       col.qty_returned                                                                                                  qty_returned,
+       col.qty_invoiced                                                                                                  qty_invoiced,
+       col.revised_qty_due                                                                                               qty_inventory,
+       ABS(col.buy_qty_due - col.qty_shipped)                                                                            inv_qty_incomplete,
+       col.base_sale_unit_price                                                                                          base_sale_unit_price,
+       col.base_unit_price_incl_tax                                                                                      base_unit_price_incl_tax,
+       Customer_Order_Line_API.Get_Base_Sale_Price_Total(col.order_no, col.line_no, col.rel_no, col.line_item_no)        net_amount_base,
+       Customer_Order_Line_API.Get_Base_Price_Incl_Tax_Total(col.order_no, col.line_no, col.rel_no, col.line_item_no)    gross_amount_base,
+       Customer_Order_Line_API.Get_Sale_Price_Total(col.order_no, col.line_no, col.rel_no, col.line_item_no)             net_amount_curr,
+       Customer_Order_Line_API.Get_Sale_Price_Incl_Tax_Total(col.order_no, col.line_no, col.rel_no, col.line_item_no)    gross_amount_curr,
+       col.buy_qty_due * col.price_conv_factor * col.base_sale_unit_price                                                net_amount_before_disc_base,
+       col.buy_qty_due * col.price_conv_factor * col.base_unit_price_incl_tax                                            gross_amount_before_disc_base,
+       col.buy_qty_due * col.price_conv_factor * col.sale_unit_price                                                     net_amount_before_disc_curr,
+       col.buy_qty_due * col.price_conv_factor * col.unit_price_incl_tax                                                 gross_amount_before_disc_curr,
+       DECODE(use_price_incl_tax, ''FALSE'',
+              col.buy_qty_due * col.price_conv_factor * col.base_sale_unit_price
+                  - Customer_Order_Line_API.Get_Base_Price_Incl_Tax_Total(col.order_no, col.line_no, col.rel_no, col.line_item_no),
+              col.buy_qty_due * col.price_conv_factor * col.base_unit_price_incl_tax
+                  - Customer_Order_Line_API.Get_Base_Sale_Price_Total(col.order_no, col.line_no, col.rel_no, col.line_item_no))   discount_amount_base,
+       DECODE(use_price_incl_tax, ''FALSE'',
+              col.buy_qty_due * col.price_conv_factor * col.sale_unit_price
+                  - Customer_Order_Line_API.Get_Sale_Price_Incl_Tax_Total(col.order_no, col.line_no, col.rel_no, col.line_item_no),
+              col.buy_qty_due * col.price_conv_factor * col.unit_price_incl_tax
+                  - Customer_Order_Line_API.Get_Sale_Price_Total(col.order_no, col.line_no, col.rel_no, col.line_item_no))        discount_amount_curr,
+       col.cost                                                                                                          cost,
+       col.revised_qty_due * col.cost                                                                                    total_cost,
+       Customer_Order_Line_API.Get_Total_Discount_Percentage(col.order_no, col.line_no, col.rel_no, col.line_item_no)    total_order_line_discount,
+       DECODE(SIGN(col.planned_ship_date - col.real_ship_date),1,(col.planned_ship_date - col.real_ship_date),0)         ship_days_early,
+       DECODE(SIGN(col.planned_ship_date - col.real_ship_date),-1,(col.real_ship_date - col.planned_ship_date),0)        ship_days_late,
+       ABS(col.planned_ship_date - col.real_ship_date)                                                                   ship_days_off_time,
+       DECODE(col.rowstate, ''Cancelled'', 0, 1)                                                                         count_order_line,
+       DECODE(col.rowstate, ''Cancelled'', 0, DECODE(SIGN(col.planned_ship_date - col.real_ship_date), 1, 1, 0))         count_early_order_line,
+       DECODE(col.rowstate, ''Cancelled'', 0, DECODE(SIGN(col.planned_ship_date - col.real_ship_date), -1, 1, 0))        count_late_order_line,
+       DECODE(col.rowstate, ''Cancelled'', 0, DECODE(ABS(col.planned_ship_date - col.real_ship_date), 0, 1 ,0))          count_on_time_order_line,
+       DECODE(col.rowstate, ''Cancelled'' ,0, DECODE(ABS(col.buy_qty_due - col.qty_shipped), 0, 0, 1))                   count_incomplete_order_line,
+       NVL2(col.real_ship_date,1,0)                                                                                      count_delivered_order_line,
+       DECODE(NVL2(col.real_ship_date,1,0),1,
+            DECODE(col.rowstate,''PartiallyDelivered'',0,DECODE(col.rowstate,''Invoiced'',0,1)),0)                       count_delivered_not_invoiced,
+       DECODE(NVL2(col.real_ship_date,1,0),1,
+            DECODE(LEAST(col.real_ship_date + col.delivery_leadtime, col.wanted_delivery_date),col.real_ship_date + col.delivery_leadtime,1,0),0)
+                                                                                                                         count_delivered_as_requested,
+       DECODE(NVL2(col.real_ship_date,1,0),1,
+            DECODE(LEAST(col.real_ship_date + col.delivery_leadtime, col.promised_delivery_date),col.real_ship_date + col.delivery_leadtime,1,0),0)
+                                                                                                                         count_delivered_as_promised,
+       DECODE(NVL2(col.real_ship_date,1,0),1,
+            DECODE(LEAST(col.real_ship_date + col.delivery_leadtime, col.planned_delivery_date),col.real_ship_date + col.delivery_leadtime,1,0),0)
+                                                                                                                         count_delivered_as_planned,
+       DECODE(col.rowstate,''Cancelled'',0,
+            DECODE(ABS(col.buy_qty_due - col.qty_shipped) + ABS(col.planned_ship_date - col.real_ship_date),0,1,0))      count_perfect_order_line,
+       DECODE(col.rowstate,''Cancelled'',0,
+            (Customer_Order_Line_API.Get_Base_Sale_Price_Total(col.order_no, col.line_no, col.rel_no, col.line_item_no) - col.revised_qty_due * col.cost))
+                                                                                                                         profit,
+       col.sale_unit_price                                                                                               sale_unit_price,
+       col.unit_price_incl_tax                                                                                           unit_price_incl_tax,
+       -- light items --
+       col.order_no                                                                                                      order_no,
+       col.line_no                                                                                                       line_no,
+       col.rel_no                                                                                                        rel_no,
+       col.line_item_no                                                                                                  line_item_no,
+       col.rowstate                                                                                                      state,
+       col.blocked_for_invoicing                                                                                         blocked_for_invoicing,
+       col.supply_code                                                                                                   supply_code,
+       col.conv_factor                                                                                                   conv_factor,
+       col.price_source                                                                                                  price_source,
+       col.price_source_id                                                                                               price_source_id,
+       col.sales_unit_meas                                                                                               sales_unit_meas,
+       col.price_conv_factor                                                                                             price_conv_factor,
+       col.inverted_conv_factor                                                                                          inverted_conv_factor,
+       col.currency_rate                                                                                                 currency_rate,
+       col.vat                                                                                                           pay_tax,
+       col.tax_code                                                                                                      fee_code,
+       Statutory_Fee_API.Get_Description(Site_API.Get_Company(col.contract), col.tax_code)                               fee_code_desc,
+       col.customer_part_no                                                                                              customer_part_no,
+       col.demand_code                                                                                                   demand_code,
+       col.discount                                                                                                      discount,
+       col.order_discount                                                                                                order_discount,
+       col.additional_discount                                                                                           additional_discount,
+       col.route_id                                                                                                      route_id,
+       col.price_list_no                                                                                                 price_list_no,
+       col.date_entered                                                                                                  date_entered_time,
+       col.planned_delivery_date                                                                                         planned_delivery_date_time,
+       Inventory_Part_API.Get_Unit_Meas(col.contract, col.part_no)                                                       inventory_uom,
+       col.rental                                                                                                        rental,
+       -- dimension identifiers --
+       Site_API.Get_Company(col.contract)                                                                                dim_company_id,
+       col.contract                                                                                                      dim_site_id,
+       col.customer_no                                                                                                   dim_customer_id,
+       NVL(col.vendor_no, ''#'')                                                                                         dim_supplier_id,
+       col.contract||''^''||NVL(col.catalog_no,''#'')                                                                    dim_sales_part_id,
+       col.contract||''^''||NVL(col.part_no,''#'')                                                                       dim_inventory_part_id,
+       NVL(co.order_id,''#'')                                                                                            dim_cust_order_type_id,
+       NVL(col.cancel_reason,''#'')                                                                                      dim_order_cancel_reason_id,
+       NVL(col.ship_via_code,''#'')                                                                                      dim_mpccom_ship_via_id,
+       NVL(col.delivery_terms, ''#'')                                                                                    dim_order_delivery_term_id,
+       NVL(col.district_code, ''#'')                                                                                     dim_sales_district_id,
+       NVL(co.market_code, ''#'')                                                                                        dim_sales_market_id,
+       NVL(co.salesman_code, ''#'')                                                                                      dim_sales_person_id,
+       NVL(col.region_code, ''#'')                                                                                       dim_sales_region_id,
+       NVL(col.project_id, ''#'')                                                                                        dim_project_id,
+       NVL(col.activity_seq, 0)                                                                                          dim_activity_id,
+       Site_API.Get_Company(col.contract)||''^''||NVL(co.currency_code,''#'')                                            dim_currency_code_id,
+       TRUNC(col.date_entered)                                                                                           dim_col_created_date_id,
+       TRUNC(col.wanted_delivery_date)                                                                                   dim_col_wanted_del_date_id,
+       TRUNC(col.planned_delivery_date)                                                                                  dim_col_planned_del_date_id,
+       TRUNC(col.promised_delivery_date)                                                                                 dim_col_promised_del_date_id,
+       TRUNC(col.planned_ship_date)                                                                                      dim_col_planned_ship_date_id,
+       TRUNC(col.price_effectivity_date)                                                                                 dim_col_price_eff_date_id,
+       TRUNC(col.planned_due_date)                                                                                       dim_col_planned_due_date_id,
+       TRUNC(col.first_actual_ship_date)                                                                                 dim_col_first_act_ship_date_id,
+       TRUNC(col.real_ship_date)                                                                                         dim_col_last_act_ship_date_id,
+       TRUNC(col.real_ship_date + col.delivery_leadtime)                                                                 dim_col_actual_del_date_id,
+       Site_API.Get_Company(col.contract)||''^''||TO_CHAR(TRUNC(NVL(col.real_ship_date, col.date_entered)),''YYYY-MM-DD'')
+                                                                                                                         dim_rpd_company_period_id,
+       TRUNC(NVL(col.real_ship_date, col.date_entered))                                                                  dim_rpd_period_id,
+       -- joiners --
+       Site_API.Get_Company(col.contract)                                                                                company,
+       col.contract                                                                                                      site,
+       col.customer_no                                                                                                   customer,
+       col.vendor_no                                                                                                     supplier,
+       col.catalog_no                                                                                                    sales_part,
+       col.part_no                                                                                                       inventory_part,
+       co.order_id                                                                                                       cust_order_type,
+       col.cancel_reason                                                                                                 order_cancel_reason,
+       col.ship_via_code                                                                                                 mpccom_ship_via,
+       col.delivery_terms                                                                                                order_delivery_term,
+       col.district_code                                                                                                 sales_district,
+       co.market_code                                                                                                    sales_market,
+       co.salesman_code                                                                                                  sales_person,
+       col.region_code                                                                                                   sales_region,
+       col.project_id                                                                                                    project,
+       col.activity_seq                                                                                                  activity,
+       co.currency_code                                                                                                  currency_code,
+       TRUNC(col.date_entered)                                                                                           created_date,
+       TRUNC(col.wanted_delivery_date)                                                                                   wanted_delivery_date,
+       TRUNC(col.planned_delivery_date)                                                                                  planned_delivery_date,
+       TRUNC(col.promised_delivery_date)                                                                                 promised_delivery_date,
+       TRUNC(col.planned_ship_date)                                                                                      planned_ship_date,
+       TRUNC(col.price_effectivity_date)                                                                                 price_effectivity_date,
+       TRUNC(col.planned_due_date)                                                                                       planned_due_date,
+       TRUNC(col.first_actual_ship_date)                                                                                 first_actual_ship_date,
+       TRUNC(col.real_ship_date)                                                                                         last_actual_ship_date,
+       TRUNC(col.real_ship_date + col.delivery_leadtime)                                                                 actual_delivery_date,
+       TRUNC(NVL(col.real_ship_date, col.date_entered))                                                                  reporting_date,
+       -- unique key
+       col.order_no || ''^'' || col.line_no || ''^'' || col.rel_no || ''^'' || TO_CHAR(col.line_item_no)                 objid
+    FROM &TAB col, &TAB_CO co
+    WHERE col.order_no = co.order_no';
+
+   execute IMMEDIATE stmt_;
+END;
+/
+
+exec Database_SYS.Log_Detail_Time_Stamp('ORDER','1410.upg','Timestamp_3');
+PROMPT Create constraint and index(s) on Materialized View &MV
+DECLARE
+   columns_         Database_SYS.ColumnTabType;
+   table_name_      VARCHAR2(30) := '&MV';
+   index_name_      VARCHAR2(30);
+   constraint_name_ VARCHAR2(30);
+BEGIN
+   constraint_name_ := table_name_ || '_PK';
+   Database_SYS.Set_Table_Column (columns_ , 'order_no_key');
+   Database_SYS.Set_Table_Column (columns_ , 'line_no_key');
+   Database_SYS.Set_Table_Column (columns_ , 'rel_no_key');
+   Database_SYS.Set_Table_Column (columns_ , 'line_item_no_key');
+   Database_Sys.Create_Constraint( table_name_,
+                                   constraint_name_,
+                                   columns_,
+                                   'P',
+                                   '&IFSAPP_INDEX',
+                                   NULL,
+                                   TRUE,
+                                   TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX1';
+   Database_SYS.Set_Table_Column (columns_ , 'dim_site_id');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX2';
+   Database_SYS.Set_Table_Column (columns_ , 'dim_customer_id');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX3';
+   Database_SYS.Set_Table_Column (columns_ , 'dim_supplier_id');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX4';
+   Database_SYS.Set_Table_Column (columns_ , 'dim_inventory_part_id');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX5';
+   Database_SYS.Set_Table_Column (columns_ , 'dim_order_cancel_reason_id');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX6';
+   Database_SYS.Set_Table_Column (columns_ , 'dim_mpccom_ship_via_id');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX7';
+   Database_SYS.Set_Table_Column (columns_ , 'dim_order_delivery_term_id');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+
+   index_name_ := table_name_ || '_IX8';
+   Database_SYS.Set_Table_Column (columns_ , 'dim_project_id');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX9';
+   Database_SYS.Set_Table_Column (columns_ , 'dim_activity_id');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+END;
+/
+
+UNDEFINE TAB
+UNDEFINE TAB_CO
+UNDEFINE MV
+
+-- ***** Customer_Order_Line_MV - End *****
+
+-----------------------------------------------------------------------------------------
+
+-- ***** Customer_Order_Delivery_MV - Start *****
+
+DEFINE TAB     = CUSTOMER_ORDER_DELIVERY_TAB
+DEFINE TAB_COL = CUSTOMER_ORDER_LINE_TAB
+DEFINE MV      = CUSTOMER_ORDER_DELIVERY_MV
+
+exec Database_SYS.Log_Detail_Time_Stamp('ORDER','1410.upg','Timestamp_4');
+PROMPT Create Materialized View &MV
+DECLARE
+   stmt_                    VARCHAR2(32000);
+BEGIN
+   Database_SYS.Remove_All_Cons_And_Idx('&MV', TRUE);
+   Database_SYS.Remove_Materialized_View('&MV', TRUE);
+
+   stmt_ :=
+   'CREATE MATERIALIZED VIEW &MV
+    TABLESPACE &IFSAPP_DATA
+    BUILD DEFERRED
+    USING NO INDEX
+    REFRESH COMPLETE ON DEMAND
+    EVALUATE USING CURRENT EDITION
+    AS
+    SELECT
+       -- original keys
+       cod.deliv_no                                                                       deliv_no_key,
+       -- measure items
+       cod.qty_shipped                                                                    qty_shipped,
+       cod.catch_qty_shipped                                                              catch_qty_shipped,
+       cod.qty_confirmed_arrived                                                          qty_confirmed_arrived,
+       cod.confirmed_sbi_qty                                                              qty_confirmed_sbi,
+       cod.qty_invoiced                                                                   qty_invoiced,
+       cod.qty_to_invoice                                                                 qty_to_invoice,
+       1                                                                                  count_delivery_line,
+       -- light items
+       cod.deliv_no                                                                       deliv_no,
+       cod.order_no                                                                       order_no,
+       cod.line_no                                                                        line_no,
+       cod.rel_no                                                                         rel_no,
+       cod.line_item_no                                                                   line_item_no,
+       cod.shipment_id                                                                    shipment_id,
+       cod.ship_addr_no                                                                   ship_addr_no,
+       col.del_terms_location                                                             del_terms_location,
+       cod.airway_bill_no                                                                 airway_bill_no,
+       cod.component_invoice_flag                                                         component_invoice_flag,
+       delivery_note_ref                                                                  delivery_note_ref,
+       col.rental                                                                         rental,
+       -- dimension identifiers
+       Site_API.Get_Company(col.contract)                                                 dim_company_id,
+       col.contract                                                                       dim_site_id,
+       NVL(col.ship_via_code,''#'')                                                       dim_mpccom_ship_via_id,
+       col.delivery_terms                                                                 dim_order_delivery_term_id,
+       NVL(DECODE(cod.shipment_id, NULL, col.forward_agent_id,
+                  Shipment_API.Get_Forward_Agent_Id(cod.shipment_id)),''#'')              dim_forwarder_id,
+       NVL(cod.delnote_no,''#'')                                                          dim_cust_order_deliv_note_id,
+       NVL(cod.load_id,0)                                                                 dim_cust_order_load_list_id,
+       TRUNC(cod.date_delivered)                                                          dim_cod_date_delivered_id,
+       NVL(TRUNC(cod.date_confirmed),
+           TO_DATE(''1900-01-01'',''YYYY-MM-DD'',''NLS_CALENDAR=Gregorian''))             dim_cod_date_confirmed_id,
+       Site_API.Get_Company(col.contract)||''^''||TO_CHAR(TRUNC(NVL(cod.date_delivered,col.date_entered)),''YYYY-MM-DD'')
+                                                                                          dim_rpd_company_period_id,
+       TRUNC(NVL(cod.date_delivered,col.date_entered))                                    dim_rpd_period_id,
+       -- joiners
+       Site_API.Get_Company(col.contract)                                                 company,
+       col.contract                                                                       site,
+       col.ship_via_code                                                                  mpccom_ship_via,
+       col.delivery_terms                                                                 order_delivery_term,
+       DECODE(cod.shipment_id, NULL, col.forward_agent_id,
+              Shipment_API.Get_Forward_Agent_Id(cod.shipment_id))                         forwarder,
+       cod.delnote_no                                                                     cust_order_deliv_note,
+       cod.load_id                                                                        cust_order_load_list,
+       TRUNC(cod.date_delivered)                                                          cod_date_delivered,
+       TRUNC(cod.date_confirmed)                                                          cod_date_confirmed,
+       TRUNC(NVL(cod.date_delivered,col.date_entered))                                    reporting_date,
+       -- unique key
+       TO_CHAR(cod.deliv_no) || ''^'' || cod.order_no || ''^'' || cod.line_no || ''^'' || cod.rel_no || ''^'' || TO_CHAR(cod.line_item_no)
+                                                                                          objid
+    FROM &TAB cod, &TAB_COL col
+    WHERE col.order_no     = cod.order_no
+    AND   col.line_no      = cod.line_no
+    AND   col.rel_no       = cod.rel_no
+    AND   col.line_item_no = cod.line_item_no
+    AND   cod.cancelled_delivery = ''FALSE''';
+
+   EXECUTE IMMEDIATE stmt_;
+END;
+/
+
+exec Database_SYS.Log_Detail_Time_Stamp('ORDER','1410.upg','Timestamp_5');
+PROMPT Create constraints and index(s) on Materialized View &MV
+DECLARE
+   columns_                 Database_SYS.ColumnTabType;
+   table_name_              VARCHAR2(30) := '&MV';
+   index_name_              VARCHAR2(30);
+   constraint_name_         VARCHAR2(30);
+BEGIN
+   constraint_name_ := table_name_ || '_PK';
+   Database_SYS.Set_Table_Column (columns_, 'DELIV_NO_KEY');
+   Database_Sys.Create_Constraint( table_name_,
+                                   constraint_name_,
+                                   columns_,
+                                   'P',
+                                   '&IFSAPP_INDEX',
+                                   NULL,
+                                   TRUE,
+                                   TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX1';
+   Database_SYS.Set_Table_Column (columns_, 'DIM_COMPANY_ID');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX2';
+   Database_SYS.Set_Table_Column (columns_, 'DIM_SITE_ID');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX3';
+   Database_SYS.Set_Table_Column (columns_, 'DIM_MPCCOM_SHIP_VIA_ID');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX4';
+   Database_SYS.Set_Table_Column (columns_, 'DIM_ORDER_DELIVERY_TERM_ID');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX5';
+   Database_SYS.Set_Table_Column (columns_, 'DIM_FORWARDER_ID');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+END;
+/
+
+UNDEFINE TAB
+UNDEFINE TAB_COL
+UNDEFINE MV
+
+-- ***** Customer_Order_Delivery_MV - End *****
+
+-----------------------------------------------------------------------------------------
+
+-- ***** Return_Material_Line_MV - Start *****
+
+DEFINE TAB     = RETURN_MATERIAL_LINE_TAB
+DEFINE TAB_RMA = RETURN_MATERIAL_TAB
+DEFINE MV      = RETURN_MATERIAL_LINE_MV
+
+exec Database_SYS.Log_Detail_Time_Stamp('ORDER','1410.upg','Timestamp_6');
+PROMPT Create Materialized View &MV
+DECLARE
+   stmt_                    VARCHAR2(32000);
+BEGIN
+   Database_SYS.Remove_All_Cons_And_Idx('&MV', TRUE);
+   Database_SYS.Remove_Materialized_View('&MV', TRUE);
+
+   stmt_ :=
+   'CREATE MATERIALIZED VIEW &MV
+    TABLESPACE &IFSAPP_DATA
+    BUILD DEFERRED
+    USING NO INDEX
+    REFRESH COMPLETE ON DEMAND
+    EVALUATE USING CURRENT EDITION
+    AS
+    SELECT
+       -- original keys
+       l.rma_no                                                                     rma_no_key,
+       l.rma_line_no                                                                rma_line_no_key,
+       -- measure items
+       l.qty_received                                                               qty_received,
+       l.qty_received_inv_uom                                                       inv_qty_received,
+       l.qty_to_return                                                              qty_to_return,
+       l.qty_to_return_inv_uom                                                      inv_qty_to_return,
+       l.qty_scrapped                                                               inv_qty_scrapped,
+       l.qty_returned_inv                                                           inv_qty_returned,
+       l.conv_factor                                                                conv_factor,
+       l.inverted_conv_factor                                                       inverted_conv_factor,
+       ROUND(l.sale_unit_price,
+             Currency_Code_API.Get_Currency_Rounding(l.company, Company_Finance_API.Get_Currency_Code(l.company)))   sale_unit_price,
+       ROUND(l.unit_price_incl_tax,
+             Currency_Code_API.Get_Currency_Rounding(l.company, Company_Finance_API.Get_Currency_Code(l.company)))   unit_price_incl_tax,
+       ROUND(l.base_sale_unit_price,
+             Currency_Code_API.Get_Currency_Rounding(l.company, Company_Finance_API.Get_Currency_Code(l.company)))   base_sale_unit_price,
+       ROUND(l.base_unit_price_incl_tax,
+             Currency_Code_API.Get_Currency_Rounding(l.company, Company_Finance_API.Get_Currency_Code(l.company)))   base_unit_price_incl_tax,
+       ROUND(Return_Material_Line_API.Get_Line_Total_Base_Price(l.rma_no,l.rma_line_no),
+             Currency_Code_API.Get_Currency_Rounding(l.company, Company_Finance_API.Get_Currency_Code(l.company)))   net_amount_base,
+       ROUND(Return_Material_Line_API.Get_Total_Base_Price_Incl_Tax(l.rma_no,l.rma_line_no),
+             Currency_Code_API.Get_Currency_Rounding(l.company, Company_Finance_API.Get_Currency_Code(l.company)))   gross_amount_base,
+       ROUND(Return_Material_Line_API.Get_Line_Total_Price(l.rma_no,l.rma_line_no),
+             Currency_Code_API.Get_Currency_Rounding(l.company, Company_Finance_API.Get_Currency_Code(l.company)))   net_amount_curr,
+       ROUND(Return_Material_Line_API.Get_Line_Total_Price_Incl_Tax(l.rma_no,l.rma_line_no),
+             Currency_Code_API.Get_Currency_Rounding(l.company, Company_Finance_API.Get_Currency_Code(l.company)))   gross_amount_curr,
+       l.currency_rate                                                              currency_rate,
+       DECODE(l.rowstate,''Denied'',0,1)                                            count_order_line,
+       DECODE(SIGN(l.qty_returned_inv),1,1,0)                                       count_returns_to_inventory,
+       DECODE(SIGN(l.qty_scrapped),1,1,0)                                           count_returns_to_scrap,
+       -- light items
+       l.rma_no                                                                     rma_no,
+       l.rma_line_no                                                                rma_line_no,
+       l.rowstate                                                                   state,
+       l.inspection_info                                                            inspection_info,
+       l.credit_invoice_no                                                          credit_invoice_no,
+       l.credit_invoice_item_id                                                     credit_invoice_item_id,
+       l.debit_invoice_no                                                           debit_invoice_no,
+       l.debit_invoice_item_id                                                      debit_invoice_item_id,
+       l.order_no                                                                   order_no,
+       l.line_no                                                                    line_no,
+       l.rel_no                                                                     rel_no,
+       l.line_item_no                                                               line_item_no,
+       l.purchase_order_no                                                          purchase_order_no,
+       l.replacement_order_no                                                       replacement_order_no,
+       l.replacement_line_no                                                        replacement_line_no,
+       l.replacement_line_item_no                                                   replacement_line_item_no,
+       l.replacement_rel_no                                                         replacement_rel_no,
+       h.cust_ref                                                                   cust_ref,
+       l.rental                                                                     rental,
+       -- dimension identifiers
+       l.company                                                                    dim_company_id,
+       h.contract                                                                   dim_site_id,
+       h.customer_no                                                                dim_customer_id,
+       l.contract||''^''||l.catalog_no                                              dim_sales_part_id,
+       NVL(l.condition_code,''#'')                                                  dim_condition_code_id,
+       l.company||''^''||h.currency_code                                            dim_currency_code_id,
+       NVL(l.return_reason_code, ''#'')                                             dim_return_material_reason_id,
+       DECODE(l.part_no, NULL, ''#^#'',
+                               l.part_no||''^''||DECODE(l.configuration_id, ''*'', ''#'', l.configuration_id))
+                                                                                    dim_configuration_spec_id,
+       l.company||''^''||NVL(l.delivery_type,''#'')                                 dim_delivery_type_id,
+       NVL(h.return_approver_id,''#'')                                              dim_return_approver_id,
+       NVL(l.credit_approver_id,''#'')                                              dim_credit_approver_id,
+       TRUNC(h.date_requested)                                                      dim_rm_date_requested_id,
+       NVL(TRUNC(l.date_returned),
+           TO_DATE(''1900-01-01'',''YYYY-MM-DD'',''NLS_CALENDAR=Gregorian''))       dim_rml_date_returned_id,
+       NVL(Customer_Order_Line_API.Get_Project_Id(l.order_no, l.line_no, l.rel_no, l.line_item_no),''#'')
+                                                                                    dim_project_id,
+       NVL(Customer_Order_Line_API.Get_Activity_Seq(l.order_no, l.line_no, l.rel_no, l.line_item_no),0)
+                                                                                    dim_activity_id,
+       l.company||''^''||TO_CHAR(TRUNC(NVL(l.date_returned,h.date_requested)),''YYYY-MM-DD'')
+                                                                                    dim_rpd_company_period_id,
+       TRUNC(NVL(l.date_returned,h.date_requested))                                 dim_rpd_period_id,
+       -- joiners
+       l.company                                                                    company,
+       h.contract                                                                   site,
+       h.customer_no                                                                customer,
+       l.catalog_no                                                                 sales_part,
+       l.condition_code                                                             condition_code,
+       h.currency_code                                                              currency_code,
+       l.return_reason_code                                                         return_material_reason,
+       l.configuration_id                                                           configuration_spec,
+       l.delivery_type                                                              delivery_type,
+       h.return_approver_id                                                         return_approver,
+       l.credit_approver_id                                                         credit_approver,
+       TRUNC(h.date_requested)                                                      rm_date_requested,
+       TRUNC(l.date_returned)                                                       rml_date_returned,
+       Customer_Order_Line_API.Get_Project_Id(l.order_no, l.line_no, l.rel_no, l.line_item_no)
+                                                                                    project,
+       Customer_Order_Line_API.Get_Activity_Seq(l.order_no, l.line_no, l.rel_no, l.line_item_no)
+                                                                                    activity,
+       TRUNC(NVL(l.date_returned,h.date_requested))                                 reporting_date,
+       -- unique key
+       TO_CHAR(l.rma_no) || ''^'' || TO_CHAR(l.rma_line_no)                         objid
+    FROM &TAB_RMA h, &TAB l
+    WHERE h.rma_no = l.rma_no';
+
+   EXECUTE IMMEDIATE stmt_;
+END;
+/
+
+exec Database_SYS.Log_Detail_Time_Stamp('ORDER','1410.upg','Timestamp_7');
+PROMPT Create constraints and index(s) on Materialized View &MV
+DECLARE
+   columns_                 Database_SYS.ColumnTabType;
+   table_name_              VARCHAR2(30) := '&MV';
+   index_name_              VARCHAR2(30);
+   constraint_name_         VARCHAR2(30);
+BEGIN
+   constraint_name_ := table_name_ || '_PK';
+   Database_SYS.Set_Table_Column (columns_, 'RMA_NO_KEY');
+   Database_SYS.Set_Table_Column (columns_, 'RMA_LINE_NO_KEY');
+   Database_Sys.Create_Constraint( table_name_,
+                                   constraint_name_,
+                                   columns_,
+                                   'P',
+                                   '&IFSAPP_INDEX',
+                                   NULL,
+                                   TRUE,
+                                   TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX1';
+   Database_SYS.Set_Table_Column (columns_, 'DIM_COMPANY_ID');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX2';
+   Database_SYS.Set_Table_Column (columns_, 'DIM_SITE_ID');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX3';
+   Database_SYS.Set_Table_Column (columns_, 'DIM_CUSTOMER_ID');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX4';
+   Database_SYS.Set_Table_Column (columns_, 'DIM_SALES_PART_ID');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX5';
+   Database_SYS.Set_Table_Column (columns_, 'DIM_CONDITION_CODE_ID');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX6';
+   Database_SYS.Set_Table_Column (columns_, 'DIM_CURRENCY_CODE_ID');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX7';
+   Database_SYS.Set_Table_Column (columns_, 'DIM_RETURN_MATERIAL_REASON_ID');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX8';
+   Database_SYS.Set_Table_Column (columns_, 'DIM_CONFIGURATION_SPEC_ID');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX9';
+   Database_SYS.Set_Table_Column (columns_, 'DIM_DELIVERY_TYPE_ID');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX10';
+   Database_SYS.Set_Table_Column (columns_, 'DIM_RETURN_APPROVER_ID');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX11';
+   Database_SYS.Set_Table_Column (columns_, 'DIM_CREDIT_APPROVER_ID');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX12';
+   Database_SYS.Set_Table_Column (columns_ , 'DIM_PROJECT_ID');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX13';
+   Database_SYS.Set_Table_Column (columns_ , 'DIM_ACTIVITY_ID');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+END;
+/
+
+UNDEFINE TAB
+UNDEFINE TAB_RMA
+UNDEFINE MV
+
+-- ***** Return_Material_Line_MV - End *****
+
+-----------------------------------------------------------------------------------------
+
+-- ***** Return_Material_Charge_MV - Start *****
+
+DEFINE TAB     = RETURN_MATERIAL_CHARGE_TAB
+DEFINE TAB_RMA = RETURN_MATERIAL_TAB
+DEFINE MV      = RETURN_MATERIAL_CHARGE_MV
+
+exec Database_SYS.Log_Detail_Time_Stamp('ORDER','1410.upg','Timestamp_8');
+PROMPT Create Materialized View &MV
+DECLARE
+   stmt_                    VARCHAR2(32000);
+BEGIN
+   Database_SYS.Remove_All_Cons_And_Idx('&MV', TRUE);
+   Database_SYS.Remove_Materialized_View('&MV', TRUE);
+
+   stmt_ :=
+   'CREATE MATERIALIZED VIEW &MV
+    TABLESPACE &IFSAPP_DATA
+    BUILD DEFERRED
+    USING NO INDEX
+    REFRESH COMPLETE ON DEMAND
+    EVALUATE USING CURRENT EDITION
+    AS
+    SELECT
+       -- original keys
+       c.rma_no                                                                                        rma_no_key,
+       c.rma_charge_no                                                                                 rma_charge_no_key,
+       -- measure items
+       c.base_charge_amount                                                                            charge_amount_base,
+       c.base_charge_amt_incl_tax                                                                      charge_amount_incl_tax_base,
+       c.charge_amount                                                                                 charge_amount_curr,
+       c.charge_amount_incl_tax                                                                        charge_amount_incl_tax_curr,
+       c.charge                                                                                        charge,
+       c.charged_qty                                                                                   charged_qty,
+       c.credited_qty                                                                                  credited_qty,
+       c.base_charge_percent_basis                                                                     base_charge_percent_basis,
+       c.charge_percent_basis                                                                          charge_percent_basis,
+       c.charge_cost                                                                                   charge_cost,
+       c.charge_cost_percent                                                                           charge_cost_percent,
+       Return_Material_Charge_API.Get_Total_Charged_Amount(c.rma_no,c.rma_charge_no)                   net_amount_curr,
+       Return_Material_Charge_API.Get_Total_Charged_Amt_Incl_Tax(c.rma_no,c.rma_charge_no)             gross_amount_curr,
+       Return_Material_Charge_API.Get_Total_Base_Charged_Amount(c.rma_no,c.rma_charge_no)              net_amount_base,
+       Return_Material_Charge_API.Get_Tot_Charged_Amt_Incl_Tax(c.rma_no,c.rma_charge_no)               gross_amount_base,
+       DECODE(c.rowstate,''Denied'',0,1)                                                               count_charge_line,
+       DECODE(c.rowstate,''Credited'',1,0)                                                             count_credited_charge_line,
+       DECODE(c.rowstate,''Denied'',1,0)                                                               count_denied_charge_line,
+       DECODE(c.rowstate,''Planned'',1,0)                                                              count_planned_charge_line,
+       DECODE(c.rowstate,''Released'',1,0)                                                             count_released_charge_line,
+       -- light items
+       c.rma_no                                                                                        rma_no,
+       c.rma_charge_no                                                                                 rma_charge_no,
+       c.rma_line_no                                                                                   rma_line_no,
+       c.order_no                                                                                      order_no,
+       c.sequence_no                                                                                   sequence_no,
+       c.rowstate                                                                                      state,
+       c.credit_invoice_no                                                                             credit_invoice_no,
+       c.credit_invoice_item_id                                                                        credit_invoice_item_id,
+       r.cust_ref                                                                                      cust_ref,
+       r.customer_no_credit                                                                            customer_no_credit,
+       c.sales_unit_meas                                                                               sales_unit_meas,
+       -- dimension identifiers
+       c.company                                                                                       dim_company_id,
+       c.contract                                                                                      dim_site_id,
+       r.customer_no                                                                                   dim_customer_id,
+       NVL(c.delivery_type,''#'')                                                                      dim_delivery_type_id,
+       NVL(r.return_approver_id,''#'')                                                                 dim_return_approver_id,
+       NVL(c.credit_approver_id,''#'')                                                                 dim_credit_approver_id,
+       c.contract || ''^'' || c.charge_type                                                            dim_sales_charge_type_id,
+       Sales_Charge_Type_API.Get_Charge_Group(c.contract,c.charge_type)                                dim_sales_charge_group_id,
+       c.company||''^''||r.currency_code                                                               dim_currency_code_id,
+       TRUNC(c.date_entered)                                                                           dim_rmc_date_entered_id,
+       NVL(TRUNC(NVL(Return_Material_Line_API.Get_Date_Returned(c.rma_no,c.rma_line_no),c.date_entered)),
+           TO_DATE(''1900-01-01'',''YYYY-MM-DD'',''NLS_CALENDAR=Gregorian''))                          dim_rml_date_returned_id,
+       NVL(Customer_Order_Charge_API.Get_Co_Line_Project_Id(c.order_no,c.sequence_no),''#'')           dim_project_id,
+       NVL(Customer_Order_Charge_API.Get_Co_Line_Activity_Seq(c.order_no,c.sequence_no),0)             dim_activity_id,
+       c.company||''^''||TO_CHAR(TRUNC(NVL(Return_Material_Line_API.Get_Date_Returned(c.rma_no,c.rma_line_no),c.date_entered)),''YYYY-MM-DD'')
+                                                                                                       dim_rpd_company_period_id,
+       TRUNC(NVL(Return_Material_Line_API.Get_Date_Returned(c.rma_no,c.rma_line_no),c.date_entered))   dim_rpd_period_id,
+       -- joiners
+       c.company                                                                                       company,
+       c.contract                                                                                      site,
+       r.customer_no                                                                                   customer,
+       c.delivery_type                                                                                 delivery_type,
+       r.return_approver_id                                                                            return_approver,
+       c.credit_approver_id                                                                            credit_approver,
+       c.charge_type                                                                                   sales_charge_type,
+       Sales_Charge_Type_API.Get_Charge_Group(c.contract,c.charge_type)                                sales_charge_group,
+       r.currency_code                                                                                 currency_code,
+       TRUNC(c.date_entered)                                                                           rmc_date_entered,
+       TRUNC(NVL(Return_Material_Line_API.Get_Date_Returned(c.rma_no,c.rma_line_no),c.date_entered))   rml_date_returned,
+       Customer_Order_Charge_API.Get_Co_Line_Project_Id(c.order_no,c.sequence_no)                      project,
+       Customer_Order_Charge_API.Get_Co_Line_Activity_Seq(c.order_no,c.sequence_no)                    activity,
+       TRUNC(NVL(Return_Material_Line_API.Get_Date_Returned(c.rma_no,c.rma_line_no),c.date_entered))   reporting_date,
+       -- unique key
+       TO_CHAR(c.rma_no) || ''^'' || TO_CHAR(c.rma_charge_no)                                          objid
+    FROM &TAB c, &TAB_RMA r
+    WHERE c.rma_no = r.rma_no';
+
+   EXECUTE IMMEDIATE stmt_;
+END;
+/
+
+exec Database_SYS.Log_Detail_Time_Stamp('ORDER','1410.upg','Timestamp_9');
+PROMPT Create constraints and index(s) on Materialized View &MV
+DECLARE
+   columns_                 Database_SYS.ColumnTabType;
+   table_name_              VARCHAR2(30) := '&MV';
+   index_name_              VARCHAR2(30);
+   constraint_name_         VARCHAR2(30);
+BEGIN
+   constraint_name_ := table_name_ || '_PK';
+   Database_SYS.Set_Table_Column (columns_, 'RMA_NO_KEY');
+   Database_SYS.Set_Table_Column (columns_, 'RMA_CHARGE_NO_KEY');
+   Database_Sys.Create_Constraint( table_name_,
+                                   constraint_name_,
+                                   columns_,
+                                   'P',
+                                   '&IFSAPP_INDEX',
+                                   NULL,
+                                   TRUE,
+                                   TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX1';
+   Database_SYS.Set_Table_Column (columns_, 'DIM_COMPANY_ID');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX2';
+   Database_SYS.Set_Table_Column (columns_, 'DIM_SITE_ID');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX3';
+   Database_SYS.Set_Table_Column (columns_, 'DIM_CUSTOMER_ID');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX4';
+   Database_SYS.Set_Table_Column (columns_, 'DIM_SALES_CHARGE_TYPE_ID');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX5';
+   Database_SYS.Set_Table_Column (columns_, 'DIM_SALES_CHARGE_GROUP_ID');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX6';
+   Database_SYS.Set_Table_Column (columns_ , 'DIM_PROJECT_ID');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX7';
+   Database_SYS.Set_Table_Column (columns_ , 'DIM_ACTIVITY_ID');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+END;
+/
+
+UNDEFINE TAB
+UNDEFINE TAB_RMA
+UNDEFINE MV
+
+-- ***** Return_Material_Charge_MV - End *****
+
+-----------------------------------------------------------------------------------------
+
+-- ***** Sales_Part_MV - Start *****
+
+DEFINE TAB      = SALES_PART_TAB
+DEFINE TAB_SITE = SITE_TAB
+DEFINE MV       = SALES_PART_MV
+
+exec Database_SYS.Log_Detail_Time_Stamp('ORDER','1410.upg','Timestamp_10');
+PROMPT Create Materialized View &MV
+DECLARE
+   stmt_            VARCHAR2(32000);
+BEGIN
+   Database_SYS.Remove_All_Cons_And_Idx('&MV', TRUE);
+   Database_SYS.Remove_Materialized_View('&MV', TRUE);
+
+   stmt_ :=
+   'CREATE MATERIALIZED VIEW &MV
+    TABLESPACE &IFSAPP_DATA
+    BUILD DEFERRED
+    USING NO INDEX
+    REFRESH COMPLETE ON DEMAND
+    EVALUATE USING CURRENT EDITION
+    AS
+    SELECT a.contract||''^''||a.catalog_no                                          id,
+           a.contract                                                               contract,
+           a.catalog_no                                                             code,
+           a.catalog_desc                                                           catalog_desc,
+           a.catalog_type                                                           catalog_type,
+           a.price_unit_meas                                                        price_unit_meas,
+           a.sales_unit_meas                                                        sales_unit_meas,
+           a.conv_factor                                                            conv_factor,
+           a.price_conv_factor                                                      price_conv_factor,
+           a.inverted_conv_factor                                                   inverted_conv_factor,
+           a.sales_price_group_id                                                   sales_price_group_id,
+           a.catalog_group                                                          catalog_group,
+           Sales_Group_API.Get_Description(a.catalog_group)                         catalog_group_description,
+           a.activeind                                                              active,
+           a.close_tolerance                                                        close_tolerance,
+           a.delivery_type                                                          delivery_type,
+           a.list_price                                                             price,
+           a.list_price_incl_tax                                                    price_incl_tax,
+           a.taxable                                                                taxable,
+           Company_Finance_API.Get_Currency_Code(Site_API.Get_Company(a.contract))  currency_code
+    FROM &TAB a
+    WHERE a.catalog_no != ''#''
+    UNION ALL
+    SELECT b.contract||''^''||''#''                                                 id,
+           b.contract                                                               contract,
+           NULL                                                                     code,
+           NULL                                                                     catalog_desc,
+           NULL                                                                     catalog_type,
+           NULL                                                                     price_unit_meas,
+           NULL                                                                     sales_unit_meas,
+           0                                                                        conv_factor,
+           0                                                                        price_conv_factor,
+           0                                                                        inverted_conv_factor,
+           NULL                                                                     sales_price_group_id,
+           NULL                                                                     catalog_group,
+           NULL                                                                     catalog_group_description,
+           NULL                                                                     active,
+           0                                                                        close_tolerance,
+           NULL                                                                     delivery_type,
+           0                                                                        price,
+           0                                                                        price_incl_tax,
+           NULL                                                                     taxable,
+           NULL                                                                     currency_code
+    FROM &TAB_SITE b
+    UNION ALL
+    SELECT ''#''||''^''||''#''                                                      id,
+           NULL                                                                     contract,
+           NULL                                                                     code,
+           NULL                                                                     catalog_desc,
+           NULL                                                                     catalog_type,
+           NULL                                                                     price_unit_meas,
+           NULL                                                                     sales_unit_meas,
+           0                                                                        conv_factor,
+           0                                                                        price_conv_factor,
+           0                                                                        inverted_conv_factor,
+           NULL                                                                     sales_price_group_id,
+           NULL                                                                     catalog_group,
+           NULL                                                                     catalog_group_description,
+           NULL                                                                     active,
+           0                                                                        close_tolerance,
+           NULL                                                                     delivery_type,
+           0                                                                        price,
+           0                                                                        price_incl_tax,
+           NULL                                                                     taxable,
+           NULL                                                                     currency_code
+     FROM BI_DUAL_TAB';
+
+   execute IMMEDIATE stmt_;
+END;
+/
+
+exec Database_SYS.Log_Detail_Time_Stamp('ORDER','1410.upg','Timestamp_11');
+PROMPT Create constraint and index(s) on Materialized View &MV
+DECLARE
+   columns_         Database_SYS.ColumnTabType;
+   table_name_      VARCHAR2(30) := '&MV';
+   constraint_name_ VARCHAR2(30);
+   index_name_      VARCHAR2(30);
+BEGIN
+   constraint_name_ := table_name_ || '_PK';
+   Database_SYS.Set_Table_Column (columns_ , 'ID');
+   Database_Sys.Create_Constraint(table_name_,
+                                  constraint_name_,
+                                  columns_,
+                                  'P',
+                                  '&IFSAPP_INDEX',
+                                  NULL,
+                                  TRUE,
+                                  TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_UX1';
+   Database_SYS.Set_Table_Column (columns_ , 'CONTRACT');
+   Database_SYS.Set_Table_Column (columns_ , 'CODE');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'U',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+END;
+/
+
+UNDEFINE TAB
+UNDEFINE TAB_SITE
+UNDEFINE MV
+
+-- ***** Sales_Part_MV - End *****
+
+-----------------------------------------------------------------------------------------
+
+-- ***** Customer_Order_Charge_MV - Start *****
+
+DEFINE TAB     = CUSTOMER_ORDER_CHARGE_TAB
+DEFINE TAB_CO  = CUSTOMER_ORDER_TAB
+DEFINE MV      = CUSTOMER_ORDER_CHARGE_MV
+
+exec Database_SYS.Log_Detail_Time_Stamp('ORDER','1410.upg','Timestamp_12');
+PROMPT Create Materialized View &MV
+DECLARE
+   stmt_                    VARCHAR2(32000);
+BEGIN
+   Database_SYS.Remove_All_Cons_And_Idx('&MV', TRUE);
+   Database_SYS.Remove_Materialized_View('&MV', TRUE);
+
+   stmt_ :=
+   'CREATE MATERIALIZED VIEW &MV
+    TABLESPACE &IFSAPP_DATA
+    BUILD DEFERRED
+    USING NO INDEX
+    REFRESH COMPLETE ON DEMAND
+    EVALUATE USING CURRENT EDITION
+    AS
+    SELECT
+       -- original key columns
+       coc.order_no                                                           order_no_key,
+       coc.sequence_no                                                        sequence_no_key,
+       -- measure items
+       coc.charge                                                             charge,
+       coc.base_charge_amount * coc.charged_qty                               net_charge_amount_base,
+       coc.base_charge_amt_incl_tax * coc.charged_qty                         gross_charge_amount_base,
+       coc.charge_amount * coc.charged_qty                                    net_charge_amount_curr,
+       coc.charge_amount_incl_tax * coc.charged_qty                           gross_charge_amount_curr,
+       coc.charge_cost                                                        charge_cost,
+       coc.charge_cost_percent                                                charge_cost_percent,
+       coc.base_charge_amount                                                 charge_price_base,
+       coc.base_charge_amt_incl_tax                                           charge_price_incl_tax_base,
+       coc.charge_amount                                                      charge_price_curr,
+       coc.charge_amount_incl_tax                                             charge_price_incl_tax_curr,
+       coc.charged_qty                                                        qty_charged,
+       coc.invoiced_qty                                                       qty_invoiced,
+       coc.qty_returned                                                       qty_returned,
+       Customer_Order_Line_API.Get_Buy_Qty_Due(coc.order_no, coc.line_no, coc.rel_no, coc.line_item_no)
+                                                                              buy_qty_due,
+       Customer_Order_Line_API.Get_Revised_Qty_Due(coc.order_no, coc.line_no, coc.rel_no, coc.line_item_no)
+                                                                              qty_inventory,
+       DECODE(co.rowstate,''Cancelled'',0,DECODE(coc.charged_qty,0,0,1))      count_charge_line,
+       DECODE(co.rowstate,''Cancelled'',0,DECODE(coc.charged_qty,0,0,DECODE(coc.qty_returned,0,0,1)))
+                                                                              count_charge_line_returns,
+       Customer_Order_Charge_API.Get_Total_Base_Charged_Amount(coc.order_no, coc.sequence_no)
+                                                                              total_charge_amount_base,
+       Customer_Order_Charge_API.Get_Tot_Base_Chg_Amt_Incl_Tax(coc.order_no, coc.sequence_no)
+                                                                              total_charge_amt_incl_tax_base,
+       Customer_Order_Charge_API.Get_Total_Charged_Amount(coc.order_no, coc.sequence_no)
+                                                                              total_charge_amount_curr,
+       Customer_Order_Charge_API.Get_Total_Charged_Amt_Incl_Tax(coc.order_no, coc.sequence_no)
+                                                                              total_charge_amt_incl_tax_curr,
+       coc.charge_percent_basis                                               charge_percent_basis,
+       coc.base_charge_percent_basis                                          base_charge_percent_basis,
+       -- light items
+       coc.order_no                                                           order_no,
+       coc.sequence_no                                                        sequence_no,
+       coc.line_no                                                            line_no,
+       coc.rel_no                                                             rel_no,
+       coc.line_item_no                                                       line_item_no,
+       coc.currency_rate                                                      currency_rate,
+       coc.date_entered                                                       date_entered,
+       coc.charge_price_list_no                                               charge_price_list_no,
+       co.rowstate                                                            state,
+       coc.unit_charge                                                        unit_charge,
+       -- dimension identifiers
+       coc.company                                                            dim_company_id,
+       coc.contract                                                           dim_site_id,
+       coc.contract ||''^''|| NVL(coc.charge_type,''#'')                      dim_sales_charge_type_id,
+       NVL(Sales_Charge_Type_Api.Get_Charge_Group(coc.contract, coc.charge_type),''#'')
+                                                                              dim_sales_charge_group_id,
+       NVL(co.currency_code,''#'')                                            dim_currency_code_id,
+       NVL(co.customer_no,''#'')                                              dim_customer_id,
+       NVL(co.order_id,''#'')                                                 dim_customer_order_type_id,
+       NVL(coc.campaign_id,0)                                                 dim_campaign_id,
+       DECODE(coc.campaign_id,NULL,0,coc.campaign_id) ||''^''|| DECODE(coc.deal_id,NULL,0,coc.deal_id)
+                                                                              dim_sales_promotion_deal_id,
+       coc.company || ''^'' || NVL(coc.delivery_type, ''#'')                  dim_delivery_type_id,
+       NVL(coc.sales_unit_meas,''#'')                                         dim_iso_unit_id,
+       NVL(co.market_code,''#'')                                              dim_sales_market_id,
+       NVL(co.salesman_code,''#'')                                            dim_sales_person_id,
+       NVL(Customer_Order_Line_Api.Get_District_Code(coc.order_no, coc.line_no, coc.rel_no, coc.line_item_no),''#'')
+                                                                              dim_sales_district_id,
+       NVL(Customer_Order_Line_Api.Get_Region_Code(coc.order_no, coc.line_no, coc.rel_no, coc.line_item_no),''#'')
+                                                                              dim_sales_region_id,
+       coc.contract||''^''||NVL(Customer_Order_Line_Api.Get_Catalog_No(coc.order_no, coc.line_no, coc.rel_no, coc.line_item_no),''#'')
+                                                                              dim_sales_part_id,
+       NVL(Customer_Order_Line_API.Get_Project_Id(coc.order_no, coc.line_no, coc.rel_no, coc.line_item_no),''#'')
+                                                                              dim_project_id,
+       NVL(Customer_Order_Line_API.Get_Activity_Seq(coc.order_no, coc.line_no, coc.rel_no, coc.line_item_no),0)
+                                                                              dim_activity_id,
+       coc.company||''^''||TO_CHAR(TRUNC(coc.date_entered),''YYYY-MM-DD'')
+                                                                              dim_rpd_company_period_id,
+       TRUNC(coc.date_entered)                                                dim_rpd_period_id,
+       -- joiners
+       coc.company                                                            company,
+       coc.contract                                                           site,
+       coc.charge_type                                                        sales_charge_type,
+       Sales_Charge_Type_Api.Get_Charge_Group(coc.contract,coc.charge_type)   sales_charge_group,
+       co.currency_code                                                       currency_code,
+       co.customer_no                                                         customer,
+       co.order_id                                                            customer_order_type,
+       coc.campaign_id                                                        campaign,
+       coc.deal_id                                                            sales_promotion_deal,
+       coc.delivery_type                                                      delivery_type,
+       coc.sales_unit_meas                                                    sales_unit_meas,
+       co.market_code                                                         sales_market,
+       co.salesman_code                                                       sales_person,
+       Customer_Order_Line_Api.Get_District_Code(coc.order_no, coc.line_no, coc.rel_no, coc.line_item_no)
+                                                                              sales_district,
+       Customer_Order_Line_Api.Get_Region_Code(coc.order_no, coc.line_no, coc.rel_no, coc.line_item_no)
+                                                                              sales_region,
+       Customer_Order_Line_Api.Get_Catalog_No(coc.order_no, coc.line_no, coc.rel_no, coc.line_item_no)
+                                                                              sales_part,
+       Customer_Order_Line_API.Get_Project_Id(coc.order_no, coc.line_no, coc.rel_no, coc.line_item_no)
+                                                                              project,
+       Customer_Order_Line_API.Get_Activity_Seq(coc.order_no, coc.line_no, coc.rel_no, coc.line_item_no)
+                                                                              activity,
+       TRUNC(coc.date_entered)                                                reporting_date,
+       -- unique key
+       coc.order_no || ''^'' || TO_CHAR(coc.sequence_no)                      objid
+    FROM CUSTOMER_ORDER_CHARGE_TAB coc, CUSTOMER_ORDER_TAB co
+    WHERE coc.order_no = co.order_no';
+
+   EXECUTE IMMEDIATE stmt_;
+END;
+/
+
+exec Database_SYS.Log_Detail_Time_Stamp('ORDER','1410.upg','Timestamp_13');
+PROMPT Create constraints and index(s) on Materialized View &MV
+DECLARE
+   columns_                 Database_SYS.ColumnTabType;
+   table_name_              VARCHAR2(30) := '&MV';
+   index_name_              VARCHAR2(30);
+   constraint_name_         VARCHAR2(30);
+BEGIN
+   constraint_name_ := table_name_ || '_PK';
+   Database_SYS.Set_Table_Column (columns_, 'order_no_key');
+   Database_SYS.Set_Table_Column (columns_, 'sequence_no_key');
+   Database_Sys.Create_Constraint( table_name_,
+                                   constraint_name_,
+                                   columns_,
+                                   'P',
+                                   '&IFSAPP_INDEX',
+                                   NULL,
+                                   TRUE,
+                                   TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX1';
+   Database_SYS.Set_Table_Column (columns_, 'dim_company_id');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX2';
+   Database_SYS.Set_Table_Column (columns_, 'dim_site_id');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX3';
+   Database_SYS.Set_Table_Column (columns_, 'dim_sales_charge_type_id');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX4';
+   Database_SYS.Set_Table_Column (columns_, 'dim_customer_id');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX5';
+   Database_SYS.Set_Table_Column (columns_, 'dim_sales_part_id');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX6';
+   Database_SYS.Set_Table_Column (columns_ , 'dim_project_id');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX7';
+   Database_SYS.Set_Table_Column (columns_ , 'dim_activity_id');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+END;
+/
+
+UNDEFINE TAB
+UNDEFINE TAB_COL
+UNDEFINE MV
+
+-- ***** Customer_Order_Charge_MV - End *****
+
+-----------------------------------------------------------------------------------------
+
+-- ***** COMPETITOR_MV - Start *****
+
+DEFINE MV         = COMPETITOR_MV
+DEFINE TAB1       = COMPETITOR_TAB
+
+exec Database_SYS.Log_Detail_Time_Stamp('ORDER','1410.upg','Timestamp_14');
+PROMPT Create Materialized View &MV
+DECLARE
+   stmt_            VARCHAR2(32000);
+   columns_         Database_SYS.ColumnTabType;
+   table_name_      VARCHAR2(30) := '&MV';
+   index_name_      VARCHAR2(30);
+   constraint_name_ VARCHAR2(30);
+BEGIN
+   dbms_output.put_line('Primary key cascade drop ON &MV');
+   Database_SYS.Remove_All_Cons_And_Idx('&MV', TRUE);
+
+   dbms_output.put_line('Drop Materialized View &MV');
+   Database_SYS.Remove_Materialized_View('&MV', TRUE);
+
+   dbms_output.put_line('Create Materialized View &MV');
+   stmt_ :=
+      'CREATE MATERIALIZED VIEW &MV
+       TABLESPACE &IFSAPP_DATA
+       BUILD DEFERRED
+       USING NO INDEX
+       REFRESH COMPLETE ON DEMAND
+       EVALUATE USING CURRENT EDITION
+       AS
+       SELECT competitor_id   id,
+              competitor_id   code,
+              competitor_name competitor_name
+       FROM   &TAB1
+       UNION ALL
+       SELECT ''#''           id,
+              NULL            code,
+              NULL            competitor_name
+       FROM BI_DUAL_TAB
+       ';
+   EXECUTE IMMEDIATE stmt_;
+END;
+/
+
+exec Database_SYS.Log_Detail_Time_Stamp('ORDER','1410.upg','Timestamp_15');
+PROMPT Create constraints and index(s) on Materialized View &MV
+DECLARE
+   columns_         Database_SYS.ColumnTabType;
+   table_name_      VARCHAR2(30) := '&MV';
+   index_name_      VARCHAR2(30);
+   constraint_name_ VARCHAR2(30);
+BEGIN
+   constraint_name_ := table_name_ || '_PK';
+   Database_SYS.Set_Table_Column (columns_ , 'ID');
+   Database_Sys.Create_Constraint(table_name_,
+                                  constraint_name_,
+                                  columns_,
+                                  'P',
+                                  '&IFSAPP_INDEX',
+                                  NULL,
+                                  TRUE,
+                                  TRUE);
+
+   Database_SYS.Reset_Column_Table(columns_);
+
+END;
+/
+
+UNDEFINE MV
+UNDEFINE TAB1
+
+-- ***** COMPETITOR_MV - End *****
+
+-----------------------------------------------------------------------------------------
+
+-- ***** WIN_LOSE_REASON_MV - Start *****
+
+DEFINE MV         = WIN_LOSE_REASON_MV
+DEFINE TAB1       = LOSE_WIN_REASON_TAB
+
+exec Database_SYS.Log_Detail_Time_Stamp('ORDER','1410.upg','Timestamp_16');
+PROMPT Create Materialized View &MV
+DECLARE
+   stmt_            VARCHAR2(32000);
+   columns_         Database_SYS.ColumnTabType;
+   table_name_      VARCHAR2(30) := '&MV';
+   index_name_      VARCHAR2(30);
+   constraint_name_ VARCHAR2(30);
+BEGIN
+   dbms_output.put_line('Primary key cascade drop ON &MV');
+   Database_SYS.Remove_All_Cons_And_Idx('&MV', TRUE);
+
+   dbms_output.put_line('Drop Materialized View &MV');
+   Database_SYS.Remove_Materialized_View('&MV', TRUE);
+
+   dbms_output.put_line('Create Materialized View &MV');
+   stmt_ :=
+      'CREATE MATERIALIZED VIEW &MV
+       TABLESPACE &IFSAPP_DATA
+       BUILD DEFERRED
+       USING NO INDEX
+       REFRESH COMPLETE ON DEMAND
+       EVALUATE USING CURRENT EDITION
+       AS
+       SELECT reason_id          id,
+              reason_id          code,
+              reason_description reason_description,
+              lose_win           lose_win
+       FROM   &TAB1
+       UNION ALL
+       SELECT ''#''              id,
+              NULL               code,
+              NULL               reason_description,
+              NULL               lose_win
+       FROM BI_DUAL_TAB
+       ';
+   EXECUTE IMMEDIATE stmt_;
+END;
+/
+
+exec Database_SYS.Log_Detail_Time_Stamp('ORDER','1410.upg','Timestamp_17');
+PROMPT Create constraints and index(s) on Materialized View &MV
+DECLARE
+   columns_         Database_SYS.ColumnTabType;
+   table_name_      VARCHAR2(30) := '&MV';
+   index_name_      VARCHAR2(30);
+   constraint_name_ VARCHAR2(30);
+BEGIN
+   constraint_name_ := table_name_ || '_PK';
+   Database_SYS.Set_Table_Column (columns_ , 'ID');
+   Database_Sys.Create_Constraint(table_name_,
+                                  constraint_name_,
+                                  columns_,
+                                  'P',
+                                  '&IFSAPP_INDEX',
+                                  NULL,
+                                  TRUE,
+                                  TRUE);
+
+   Database_SYS.Reset_Column_Table(columns_);
+
+END;
+/
+
+UNDEFINE MV
+UNDEFINE TAB1
+
+-- ***** WIN_LOSE_REASON_MV - End *****
+
+-----------------------------------------------------------------------------------------
+exec Database_SYS.Log_Detail_Time_Stamp('ORDER','1410.upg','Timestamp_18');
+PROMPT Upgrade statements in file ORDER 1410.upg end here
+-- Nothing is allowed to be placed below here
+-----------------------------------------------------------------------------------------
+
+
+
+exec Database_SYS.Log_Detail_Time_Stamp('ORDER','1410.upg','Done');
+
+

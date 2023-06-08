@@ -1,0 +1,276 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     PickHandlingUnitByChoiceAssistant
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  201109  ErRalk  SC2020R1-11001, Modified Handling_Unit_Source_Reference_Info___ and removed methods Handling_Unit_Order_Reference_Info___,
+--  201109          and Handling_Unit_Shop_Order_Reference_Info___.
+--  190531  SBalLK  SCUXXW4-21989, Resolved.
+--  190402  KHVESE  SCUXXW4-5664, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_              IN Pick_Handling_Unit_By_Choice_Virtual_Rec )
+IS 
+   new_rec_          Pick_Handling_Unit_By_Choice_Virtual_Rec;
+   hu_rec_           Handling_Unit_API.Public_Rec;
+   source_info_rec_  Handling_Unit_Source_Info_Structure_Rec; 
+BEGIN
+   new_rec_ := rec_;
+
+   new_rec_.order_supply_demand_type   := Order_Supply_Demand_Type_API.Decode(rec_.order_supply_demand_type);
+   hu_rec_                             := Handling_Unit_API.Get(rec_.Handling_Unit_Id);
+   new_rec_.contract                   := hu_rec_.contract;
+   new_rec_.location_no                := hu_rec_.location_no;
+   new_rec_.sscc                       := hu_rec_.Sscc;
+   new_rec_.alt_handling_unit_label_id := hu_rec_.alt_handling_unit_label_id;
+   new_rec_.handling_unit_type_id      := hu_rec_.handling_unit_type_id;
+   new_rec_.handling_unit_type_desc    := Handling_Unit_Type_API.Get_Description(hu_rec_.handling_unit_type_id);
+   new_rec_.handling_unit_category_id  := Handling_Unit_Type_API.Get_Handling_Unit_Category_Id(hu_rec_.handling_unit_type_id);
+   new_rec_.handling_unit_category_desc    := Handling_Unit_Category_API.Get_Description(new_rec_.handling_unit_category_id);
+   new_rec_.part_no                    := Handling_Unit_API.Get_Part_No(rec_.handling_unit_id);
+   new_rec_.part_desc                  := Inventory_Part_API.Get_Description(new_rec_.contract, new_rec_.part_no);
+
+   source_info_rec_ := Handling_Unit_Source_Reference_Info___(new_rec_.pick_list_no, new_rec_.contract, new_rec_.location_no, new_rec_.handling_unit_id, new_rec_.component);
+   
+   new_rec_.source_ref1                := source_info_rec_.source_ref1;
+   new_rec_.source_ref2                := source_info_rec_.source_ref2;
+   new_rec_.source_ref3                := source_info_rec_.source_ref3;
+   new_rec_.source_ref4                := source_info_rec_.source_ref4;
+   new_rec_.shipment_id                := source_info_rec_.shipment_id;
+   new_rec_.pick_list_type             := source_info_rec_.pick_list_type;
+   new_rec_.qty_to_pick                := source_info_rec_.qty_to_pick;
+   
+   IF (new_rec_.component = 'SHPMNT')THEN
+      new_rec_.sender_type             := source_info_rec_.sender_type;
+      new_rec_.sender_id               := source_info_rec_.sender_id;
+   ELSE 
+      $IF Component_Discom_SYS.INSTALLED $THEN
+      new_rec_.sender_type             := Sender_Receiver_Type_API.DB_SITE;
+      $END
+      new_rec_.sender_id               := new_rec_.contract;
+   END IF;
+   Super(new_rec_);
+END  CRUD_Create___;  
+
+
+FUNCTION Handling_Unit_Source_Reference_Info___(
+   pick_list_no_       IN VARCHAR2,
+   contract_           IN VARCHAR2,
+   location_no_        IN VARCHAR2,
+	handling_unit_id_   IN NUMBER,
+   component_          IN VARCHAR2)  RETURN Handling_Unit_Source_Info_Structure_Rec
+IS
+   source_info_rec_   Handling_Unit_Source_Info_Structure_Rec; 
+BEGIN      
+   IF component_ = 'ORDER' THEN
+      $IF Component_Order_SYS.INSTALLED $THEN
+         source_info_rec_.pick_list_type  := 'CUST_ORDER_PICK_LIST';
+         Pick_Customer_Order_API.Get_HU_Order_Reference_Info(source_info_rec_.source_ref1,
+                                                             source_info_rec_.source_ref2,
+                                                             source_info_rec_.source_ref3,
+                                                             source_info_rec_.source_ref4,
+                                                             source_info_rec_.shipment_id,
+                                                             pick_list_no_,
+                                                             handling_unit_id_);
+         source_info_rec_.qty_to_pick  := Handling_Unit_API.Get_Qty_Reserved(handling_unit_id_) - Pick_Shipment_API.Get_Qty_Picked_HU(handling_unit_id_, contract_, location_no_, pick_list_no_);                                                    
+      $ELSE 
+         Error_SYS.Component_Not_Exist('ORDER');
+      $END                                           
+   ELSIF component_ = 'MANUF' THEN 
+      source_info_rec_.qty_to_pick     := Handling_Unit_API.Get_Qty_Reserved(handling_unit_id_);
+      $IF Component_Shpord_SYS.INSTALLED $THEN
+         Shop_Material_Pick_Util_API.Get_HU_Shpord_Reference_Info(source_info_rec_.source_ref1,
+                                                                  source_info_rec_.source_ref2,
+                                                                  source_info_rec_.source_ref3,
+                                                                  source_info_rec_.source_ref4,
+                                                                  pick_list_no_,
+                                                                  handling_unit_id_);                                                                  
+      $ELSE 
+          Error_SYS.Component_Not_Exist('SHPORD');
+      $END   
+   ELSIF component_ = 'SHPMNT' THEN
+      $IF Component_Shpmnt_SYS.INSTALLED $THEN
+         source_info_rec_.pick_list_type  := 'INVENTORY_PICK_LIST';
+         Pick_Shipment_API.Get_HU_Shipment_Reference_Info(source_info_rec_.source_ref1,
+                                                          source_info_rec_.source_ref2,
+                                                          source_info_rec_.source_ref3,
+                                                          source_info_rec_.source_ref4,
+                                                          source_info_rec_.shipment_id,
+                                                          source_info_rec_.sender_id,
+                                                          source_info_rec_.sender_type,
+                                                          source_info_rec_.qty_to_pick,
+                                                          pick_list_no_,
+                                                          contract_,
+                                                          location_no_,
+                                                          handling_unit_id_);         
+      $ELSE 
+          Error_SYS.Component_Not_Exist('SHPMNT');
+      $END   
+   END IF;
+
+   RETURN source_info_rec_;
+END Handling_Unit_Source_Reference_Info___;
+
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_        IN Handling_Unit_Virtual_Rec )
+IS
+   dummy_      NUMBER;
+   header_key_ Pick_Handling_Unit_By_Choice_Virtual_Key;
+   header_rec_ Pick_Handling_Unit_By_Choice_Virtual_Rec;
+   
+   CURSOR check_exist IS
+   SELECT 1 FROM ${PROJECTION}_Handling_Unit_VIRTUAL_VRT 
+   WHERE parent_objkey = rec_.parent_objkey
+   AND   location_no = rec_.location_no
+   AND   handling_unit_id = rec_.handling_unit_id;
+BEGIN
+   header_key_.Objkey := rec_.parent_objkey;
+   header_rec_ := Get_Record___(header_key_);
+   IF header_rec_.part_no != rec_.part_no THEN 
+      Error_SYS.Record_General(lu_name_, 'PARTNOTMATCHED: Handling unit :P1 doesnt correspond to the order line details.', rec_.handling_unit_id);
+   END IF;
+   
+   OPEN check_exist;
+   FETCH check_exist INTO dummy_;
+   IF check_exist%FOUND THEN
+      Error_SYS.Record_General(lu_name_, 'DUPLICATERECORDS: Duplicate records with same information exist, please remove duplicate(s).');
+   END IF;
+   CLOSE check_exist;
+   Super(rec_);
+END CRUD_Create___;
+
+
+FUNCTION Handling_Unit_Key_Validation___ (
+   contract_                     IN VARCHAR2,
+	handling_unit_id_             IN NUMBER,
+	sscc_                         IN VARCHAR2,
+   alt_handling_unit_label_id_   IN VARCHAR2) RETURN Handling_Unit_Validation_Structure_Rec
+IS
+   handling_unit_structure_rec_  Handling_Unit_Validation_Structure_Rec;
+BEGIN
+   handling_unit_structure_rec_.handling_unit_id := handling_unit_id_;
+   IF handling_unit_id_ IS NULL AND sscc_ IS NOT NULL THEN 
+      handling_unit_structure_rec_.handling_unit_id := Handling_Unit_API.Get_Handling_Unit_From_Sscc(sscc_);
+   ELSIF handling_unit_id_ IS NULL AND alt_handling_unit_label_id_ IS NOT NULL THEN 
+      handling_unit_structure_rec_.handling_unit_id := Handling_Unit_API.Get_Handling_Unit_From_Alt_Id(alt_handling_unit_label_id_);
+   END IF;
+
+   IF handling_unit_structure_rec_.handling_unit_id IS NOT NULL THEN 
+      handling_unit_structure_rec_.sscc                        := Handling_Unit_API.Get_Sscc(handling_unit_structure_rec_.handling_unit_id);
+      handling_unit_structure_rec_.alt_handling_unit_label_id  := Handling_Unit_API.Get_Alt_Handling_Unit_Label_Id(handling_unit_structure_rec_.handling_unit_id);
+      handling_unit_structure_rec_.handling_unit_type_id       := Handling_Unit_API.Get_Handling_Unit_Type_Id(handling_unit_structure_rec_.handling_unit_id);
+      handling_unit_structure_rec_.handling_unit_type_desc     := Handling_Unit_Type_API.Get_Description(handling_unit_structure_rec_.handling_unit_type_id);
+      handling_unit_structure_rec_.handling_unit_category_id   := Handling_Unit_Type_API.Get_Handling_Unit_Category_Id(handling_unit_structure_rec_.handling_unit_id);
+      handling_unit_structure_rec_.handling_unit_category_desc     := Handling_Unit_Category_API.Get_Description(handling_unit_structure_rec_.handling_unit_category_id);
+      handling_unit_structure_rec_.location_no                 := Handling_Unit_API.Get_Location_No(handling_unit_structure_rec_.handling_unit_id);
+      handling_unit_structure_rec_.location_desc               := Inventory_Location_API.Get_Location_Name(contract_, handling_unit_structure_rec_.location_no);
+      handling_unit_structure_rec_.part_no                     := Handling_Unit_API.Get_Part_No(handling_unit_structure_rec_.handling_unit_id);
+      handling_unit_structure_rec_.configuration_id            := Handling_Unit_API.Get_Configuration_Id(handling_unit_structure_rec_.handling_unit_id);
+      handling_unit_structure_rec_.activity_seq                := Handling_Unit_API.Get_Activity_Seq(handling_unit_structure_rec_.handling_unit_id);
+      handling_unit_structure_rec_.lot_batch_no                := Handling_Unit_API.Get_Lot_Batch_No(handling_unit_structure_rec_.handling_unit_id);
+      handling_unit_structure_rec_.serial_no                   := Handling_Unit_API.Get_Serial_No(handling_unit_structure_rec_.handling_unit_id);
+      handling_unit_structure_rec_.eng_chg_level               := Handling_Unit_API.Get_Eng_Chg_Level(handling_unit_structure_rec_.handling_unit_id);
+      handling_unit_structure_rec_.waiv_dev_rej_no             := Handling_Unit_API.Get_Waiv_Dev_Rej_No(handling_unit_structure_rec_.handling_unit_id);
+      handling_unit_structure_rec_.qty_onhand                  := Handling_Unit_API.Get_Qty_Onhand(handling_unit_structure_rec_.handling_unit_id);
+      handling_unit_structure_rec_.qty_reserved                := Handling_Unit_API.Get_Qty_Reserved(handling_unit_structure_rec_.handling_unit_id);
+   END IF;
+
+   RETURN handling_unit_structure_rec_;
+END Handling_Unit_Key_Validation___;
+
+
+FUNCTION Handling_Unit_Lov___ (
+	header_objkey_             IN VARCHAR2 ) RETURN Objid_Arr
+IS
+   header_key_                Pick_Handling_Unit_By_Choice_Virtual_Key;
+   header_rec_                Pick_Handling_Unit_By_Choice_Virtual_Rec;
+   base_collection_           Objid_Arr:= Objid_Arr(); 
+   stmt_                      VARCHAR2(32000);
+BEGIN
+   header_key_.Objkey := header_objkey_;
+   header_rec_ := Get_Record___(header_key_);
+
+   stmt_ := 'SELECT OBJID FROM handling_unit_lov7 
+             WHERE   contract = :contract
+             AND     part_no  = :part_no   
+             AND     (Inventory_Picking_Manager_API.Pick_Hu_By_Choice_Allowed(:pick_list_no,
+                                                                              :order_supply_demand_type_db,
+                                                                              :handling_unit_id,
+                                                                               CONTRACT,
+                                                                               HANDLING_UNIT_ID) = ''TRUE'')
+             AND ((:Component IN (''ORDER'', ''SHPMNT'') AND LOCATION_TYPE_DB = ''PICKING'') OR
+                  (:Component = ''MANUF'' AND LOCATION_TYPE_DB IN (''PICKING'', ''F'')) OR
+                  (:Component NOT IN (''ORDER'', ''MANUF'', ''SHPMNT'')))';
+
+   Log_SYS.Fnd_Trace_(Log_SYS.debug_, '------ stmt__-----' || stmt_);
+
+   @ApproveDynamicStatement(2019-03-20, khvese)
+   EXECUTE IMMEDIATE stmt_ BULK COLLECT INTO base_collection_ USING 
+                           IN header_rec_.contract,
+                           IN header_rec_.part_no,
+                           IN header_rec_.pick_list_no,
+                           IN Order_Supply_Demand_Type_API.Encode(header_rec_.order_supply_demand_type),
+                           IN header_rec_.handling_unit_id,
+                           IN header_rec_.component,
+                           IN header_rec_.component,
+                           IN header_rec_.component;
+
+   RETURN base_collection_;   
+END Handling_Unit_Lov___;
+
+
+FUNCTION Pick_Hu_By_Choice_Uses_Ship_Inv___ (
+	pick_list_no_        IN VARCHAR2) RETURN BOOLEAN
+IS
+   use_shipment_inv_    BOOLEAN := FALSE;
+BEGIN 
+   $IF Component_Shpmnt_SYS.INSTALLED $THEN
+      use_shipment_inv_ := Handle_Ship_Invent_Utility_API.Uses_Shipment_Inventory(pick_list_no_) = 1;
+   $END
+   RETURN use_shipment_inv_;
+END Pick_Hu_By_Choice_Uses_Ship_Inv___;
+
+
+PROCEDURE Pick_Hu_By_Choice___ (
+	objkey_                 IN VARCHAR2,
+	ship_inv_location_no_   IN VARCHAR2)
+IS
+   header_key_             Pick_Handling_Unit_By_Choice_Virtual_Key;
+   header_rec_             Pick_Handling_Unit_By_Choice_Virtual_Rec;
+   clob_message_           CLOB;
+
+   CURSOR Get_Handling_Units IS
+   SELECT handling_unit_id FROM ${PROJECTION}_HANDLING_UNIT_VIRTUAL_VRT 
+   WHERE parent_objkey = objkey_;
+BEGIN 
+   
+   header_key_.Objkey := objkey_;
+   header_rec_ := Get_Record___(header_key_);
+   -- Security
+   User_Allowed_Site_API.Is_Authorized(header_rec_.contract); 
+   
+   clob_message_ := Message_SYS.Construct_Clob_Message('PICKHUBYCHOICE');
+   FOR line_rec_ IN Get_Handling_Units LOOP
+      -- Security
+      Handling_Unit_Extended_Initial_Check___(line_rec_.handling_unit_id);
+      Message_SYS.Add_Attribute(clob_message_, 'HANDLING_UNIT_ID', line_rec_.handling_unit_id);      
+   END LOOP;   
+   
+   Inventory_Picking_Manager_API.Pick_Hu_By_Choice(clob_message_,
+                                                   header_rec_.contract,
+                                                   header_rec_.handling_unit_id,
+                                                   header_rec_.pick_list_no,
+                                                   ship_inv_location_no_,
+                                                   Order_Supply_Demand_Type_API.Encode(header_rec_.order_supply_demand_type));
+
+END Pick_Hu_By_Choice___;

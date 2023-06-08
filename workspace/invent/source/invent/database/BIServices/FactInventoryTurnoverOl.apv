@@ -1,0 +1,120 @@
+------------------------------------------------------------------
+-- Component:  INVENT                           
+-- File     :  FactInventoryTurnoverOl.apv
+-- Purpose  :  Creates ON LINE fact view INVENTORY_TURNOVER_OL
+-- Note     :  Supposed to support ON LINE based star schemas.
+--             Contains single columns to be used for true/natural join
+------------------------------------------------------------------
+--  Date    Sign   History
+--  ------  ----   -----------------------------------------------
+--  170202  MeAblk  STRBI-1467, Modified attribute source columns stat_year_no, stat_period_no, count_adjust, count_issues, count_receipts to avoid number precisions.
+--  150703  AyAmlk  BOULDER-1950, Replicate the changes correspond to the IdColumnName
+--  150703          property in the model.
+--  150619  AyAmlk  BOULDER-1931, Modified the view by removing the method calls 
+--  150619          and joining with the SITE_PUBLIC to improve performance.
+--  150409  AyAmlk  BOULDER-1032, Added  mvt_created_dt into the view.
+--  140117  MalLlk  Bug 114756, Modified column dim_inventory_part_id to add contract as well.
+--  130916  MalLlk  Bug 111242, Added columns objid and dim_rpd_period_id.
+--  120913  Erlise  Corrected statement for issued_abnormal_value.
+--  120523  Erlise  Created.
+-------------------------------------------------------------------
+
+DEFINE FACT          = FACT_INVENTORY_TURNOVER
+DEFINE VIEW          = FACT_INVENTORY_TURNOVER_OL
+DEFINE VIEW_OPT_OL   = ""
+DEFINE VIEW_ALT_OL   = ""
+DEFINE TAB           = INVENTORY_PART_PERIOD_HIST_TAB                           
+DEFINE MODULE        = INVENT
+DEFINE LU            = FctInventoryTurnover
+
+------------------------------------------------------------------- 
+PROMPT ********* Component &MODULE definition begins ***********
+             
+
+PROMPT Create fact view &VIEW
+CREATE OR REPLACE VIEW &VIEW AS
+SELECT i.part_no||'^'||i.contract||'^'||i.configuration_id||'^'||TO_CHAR(i.stat_year_no)||'^'||TO_CHAR(i.stat_period_no) objid,
+       i.part_no                                                                                                         part_no_key,
+       i.contract                                                                                                        contract_key,
+       i.configuration_id                                                                                                configuration_id_key,
+       i.stat_year_no                                                                                                    stat_year_no_key,
+       i.stat_period_no                                                                                                  stat_period_no_key,
+       CAST (i.beg_balance AS NUMBER)                                                                                    beg_inventory_balance,
+       CAST (i.count_adjust AS NUMBER)                                                                                   count_adjust,
+       CAST (i.count_issues AS NUMBER)                                                                                   count_issues,
+       CAST (i.count_abnormal_issues AS NUMBER)                                                                          count_abnormal_issues,
+       CAST (i.count_issues + i.count_abnormal_issues AS NUMBER)                                                         count_issues_with_abnormal,
+       CAST (i.count_receipts AS NUMBER)                                                                                 count_receipts,
+       CAST (i.mtd_adjust AS NUMBER)                                                                                     adjusted_qty,
+       CAST (i.mtd_issues AS NUMBER)                                                                                     issued_qty,
+       CAST (i.mtd_abnormal_issues AS NUMBER)                                                                            issued_abnormal_qty,
+       CAST (i.mtd_issues + mtd_abnormal_issues AS NUMBER)                                                               issued_with_abnormal_qty,
+       CAST (i.mtd_receipts AS NUMBER)                                                                                   received_qty,
+       CAST (i.qty_onhand AS NUMBER)                                                                                     qty_onhand,
+       CAST (i.qty_onhand * Inventory_Value_Part_Api.Get_Unit_Cost__(i.contract,
+                                                               i.stat_year_no,
+                                                               i.stat_period_no,
+                                                               i.part_no,
+                                                               i.configuration_id,
+      '*', '*', '*') AS NUMBER)                                                                                          inventory_value,
+       CAST ((i.mtd_issues) * Inventory_Value_Part_Api.Get_Unit_Cost__(i.contract,
+                                                                 i.stat_year_no,
+                                                                 i.stat_period_no,
+                                                                 i.part_no,
+                                                                 i.configuration_id,
+      '*', '*', '*') AS NUMBER)                                                                                          issued_value,
+       CAST ((i.mtd_abnormal_issues) * Inventory_Value_Part_Api.Get_Unit_Cost__(i.contract,
+                                                                          i.stat_year_no,
+                                                                          i.stat_period_no,
+                                                                          i.part_no,
+                                                                          i.configuration_id,
+      '*', '*', '*') AS NUMBER)                                                                                          issued_abnormal_value,
+       CAST (i.mtd_issues/DECODE(i.qty_onhand,0,1,i.qty_onhand) AS NUMBER)                                               turnover_rate,
+       CAST ((i.mtd_issues + i.mtd_abnormal_issues)/DECODE(i.qty_onhand,0,1,i.qty_onhand) AS NUMBER)                     turnover_rate_with_abnormal,
+       i.configuration_id                                                                                                configuration_id,
+       s.company                                                                                                         dim_company_id,
+       i.contract                                                                                                        dim_site_id,
+       i.contract || '^' || i.part_no                                                                                    dim_inventory_part_id,
+       TRUNC(i.create_date)                                                                                              dim_it_date_created_id,
+       i.second_commodity                                                                                                dim_second_commodity_id,
+       i.stat_year_no || '^' || i.stat_period_no                                                                         dim_statistic_period_id,
+       s.company || '^' || TO_CHAR(TRUNC(i.create_date), 'YYYY-MM-DD')                                                   dim_rpd_company_period_id,
+       TRUNC(i.create_date)                                                                                              dim_rpd_period_id,
+       s.company                                                                                                         company,
+       i.contract                                                                                                        site,
+       i.part_no                                                                                                         inventory_part,
+       i.second_commodity                                                                                                second_commodity,
+       i.stat_year_no                                                                                                    stat_year_no,
+       i.stat_period_no                                                                                                  stat_period_no,
+       TRUNC(i.create_date)                                                                                              it_date_created,
+       TRUNC(i.create_date)                                                                                              reporting_date,
+       SYSDATE                                                                                                           mvt_created_dt
+FROM &TAB i, site_public s
+WHERE Bi_Utility_API.Bi_Access_Granted = 'TRUE'
+AND i.contract = s.contract
+   AND ( ('TRUE' = (SELECT Xlr_Fact_Full_Access_API.Has_Full_Fact_Access('FACT_INVENTORY_TURNOVER') FROM DUAL))
+          OR
+         (EXISTS (SELECT 1 FROM user_allowed_site_pub
+                  WHERE site = i.contract))
+       )
+WITH READ ONLY
+; 
+COMMENT ON TABLE &VIEW
+   IS 'LU=&LU^PROMPT=Inventory Turnover^MODULE=&MODULE^';
+
+PROMPT ********* Component &MODULE, definition ends ***********
+
+-------------------------------------------------------------------
+UNDEFINE FACT 
+UNDEFINE VIEW
+UNDEFINE VIEW_OPT_OL
+UNDEFINE VIEW_ALT_OL
+UNDEFINE TAB
+UNDEFINE MODULE
+UNDEFINE LU    
+-------------------------------------------------------------------
+
+                       
+
+
+

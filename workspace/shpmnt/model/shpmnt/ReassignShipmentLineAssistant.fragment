@@ -1,0 +1,1243 @@
+-------------------------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  --------------------------------------------------------------------------------
+-- 2022-05-09  RoJalk  SCDEV-9142, Disabled Release Reservations option for purchase receipt - shipment order.
+-- 2022-01-05  PamPlk  SC21R2-7038, Hid ReleaseReservations for Purchase Receipt Return.
+-- 2020-09-08  ErRalk  SC2020R1-1420, Removed Sender and Receiver Concatenation.
+-- 2020-02-25  Aabalk  SCXTEND-1924, Changed calling of RefreshAvailableSourceLine action to only when Shipment is in the Preliminary state.
+-- 2019-11-18  Aabalk  SCSPRING20-279, Added sender info to ShipmentHeaderInformationGroup.
+-- 2019-08-29  fandse  SCUXXW4-24108, Added label Activity Description
+-- 2019-08-23  ErRalk  SCUXXW4-24022, Removed ReleaseReservations field size.
+-- 2019-08-23  ErRalk  SCUXXW4-24023, Changed 'Configuration Id' label name into 'Configuration ID'.
+-- 2019-08-22  ErRalk  SCUXXW4-23992, Added RefreshAvailableSourceLine action to refresh Shipment window, Available Line tab when the destination of Reassign Shipment Line is 'Release from Shipment'.
+-- 2019-05-24  fgusse  SCUXXW4-21039: Added ID for all labels for Warehouse/Bay/Row/Tier/Bin
+-- 2019-05-03  fandse  SCUXXW4-4759: Correction of label for computedfield RequiredComponentQty
+-- 2019-04-23  fandse  SCUXXW4-4759: To make it clearer for user, some quantity fields will be NULL when the same component is repeated,
+--                                   added the total required quantity for component, message that reassign was successful.
+--                                   When more than one reservation for component, reservations must be included manually.
+--                                   When Include All of the total quantity is selected then all components are included.
+-- 2019-04-15  fandse  SCUXXW4-4759: Implementation of reassign of Package Part
+-- 2019-03-13  fandse  SCUXXW4-4759: Implementation of frmReassignShipConnectedQty and tbwSingleReassignShipConQty
+-------------------------------------------------------------------------------------------------------
+
+fragment ReassignShipmentLineAssistant;
+component SHPMNT;
+layer Core;
+description "Use this assistant to reassign the shipment line quantity from one shipment to another shipment or back to the source object e.g. customer order.";
+
+include fragment ShipmentToReassinLovSelector;
+include fragment ShipmentSenderSelector;
+include fragment ShipmentReceiverSelector;
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+warningsenabled = PerformReassign;
+-------------------------------- ASSISTANTS ---------------------------------
+assistant ReassignShipmentLineAssistant using ReassignShipmentLineVirtualSet {
+   label = "Reassign Shipment Line";
+
+   savemode = OnLostFocus;
+
+   input(ShipmentId, ShipmentLineNo);
+
+
+   steps {
+      step {
+         label = "Specify Shipment/Quantity";
+         group ShipmentLineInformationGroup;
+         group ShipmentHeaderInformationGroup {
+            collapsed = [true];
+         }
+         group PlannedDatesGroup {
+            collapsed = [true];
+         }
+         group TotalQuantityGroup {
+            visible = [NotReservedQty > 0 and ReservedQtyAvailableToReassign > 0];
+         }
+         group NotReservedQuantityGroup {
+            visible = [NotReservedQty > 0];
+         }
+         group ReservedQuantityGroup {
+            visible = [ReservedQtyAvailableToReassign > 0];
+         }
+         group SpecifyShipmentGroup;
+         next command {
+            enabled = [not(ReassignShipmentMethod = "AddToExistingShipment" and DestinationShipmentId = null)];
+         }
+      }
+      step {
+         label = "Specify/View Quantity Details";
+         visible = [ReservedQtyAvailableToReassign > 0 or(SourceRefTypeDb = "CUSTOMER_ORDER" and SourceRef4 = "-1")];
+         group TotalQuantityGroup {
+            visible = [NotReservedQty > 0 and ReservedQtyAvailableToReassign > 0];
+         }
+         group NotReservedQuantityGroup {
+            visible = [NotReservedQty > 0];
+         }
+         group ReservedQuantityGroup {
+            visible = [ReservedQtyAvailableToReassign > 0];
+         }
+         list ShipmentReservationList(ReservationsToReassignArray) {
+            visible = [ReservedQtyAvailableToReassign > 0 and not(SourceRefTypeDb = "CUSTOMER_ORDER" and SourceRef4 = "-1")];
+         }
+         @DynamicComponentDependency ORDER
+         list ShipmentComponentList(ComponentsToReassignArray) {
+            visible = [SourceRefTypeDb = "CUSTOMER_ORDER" and SourceRef4 = "-1"];
+         }
+      }
+      final step {
+      }
+      cancelled step {
+      }
+   }
+   finish command {
+      label = "Reassign";
+      enabled = [not(ReassignShipmentMethod = "AddToExistingShipment" and DestinationShipmentId = null) and TotalQtyToReassign > 0];
+      execute {
+         call PerformReassign() {
+            when FAIL {
+               if [not(error.Message = null)] {
+                  error("${error.Message}");
+               }
+               exit CANCEL;
+            }
+            when SUCCESS {
+               info("Reassign is successfully done.");
+               if [ReassignShipmentMethod = "ReleaseFromShipment" and ShipmentState = "Preliminary"] {
+                  call RefreshAvailableSourceLine();
+               }
+               exit OK;
+            }
+         }
+      }
+   }
+   cancel command {
+      visible = [true];
+      enabled = [true];
+   }
+}
+
+--------------------------------- COMMANDS ----------------------------------
+
+--------------------------------- SELECTORS ---------------------------------
+
+---------------------------------- GROUPS -----------------------------------
+group ShipmentHeaderInformationGroup for ReassignShipmentLineVirtual {
+   label = "Shipment Information";
+   field Contract {
+      size = Small;
+   }
+   field ShipmentType {
+      size = Small;
+   }
+   field SenderType {
+      size = Small;
+   }
+   lov SenderIdRef with ReferenceShipmentSenderSelector;
+   field SenderName;
+   field ReceiverType {
+      size = Small;
+   }
+   lov ReceiverIdRef with ReferenceShipmentReceiverSelector {
+      contactwidget {
+         enabled = [ReceiverId != null];
+         source = Customer;
+      }
+   }
+   field ReceiverName;
+   badge ShipmentState {
+      label = "Shipment Status";
+      size = Small;
+      style = TextOnly;
+      emphasis Progress1 = [ShipmentState = "Preliminary"];
+      emphasis Progress8 = [ShipmentState = "Completed"];
+      emphasis Progress12 = [ShipmentState = "Closed"];
+      emphasis StateCancelled = [ShipmentState = "Cancelled"];
+   }
+}
+group ShipmentLineInformationGroup for ReassignShipmentLineVirtual {
+   label = "Shipment Line Information";
+   field ShipmentId {
+      size = Small;
+   }
+   field ShipmentLineNo {
+      size = Small;
+   }
+   field SourceRefType {
+      size = Small;
+   }
+   field SourceRef1 {
+      size = Small;
+   }
+   field SourceRef2 {
+      size = Small;
+   }
+   field SourceRef3 {
+      size = Small;
+   }
+   field SourceRef4 {
+      size = Small;
+   }
+   field SourcePartNo;
+   field SourcePartDescription;
+   measure ConnectedSourceQty(SourceUnitMeas) {
+      size = Small;
+   }
+   measure InventoryQty(RevisedQtyDueUom) {
+      size = Small;
+   }
+}
+
+group PlannedDatesGroup for ReassignShipmentLineVirtual {
+   label = "Planned Dates";
+   field PlannedDeliveryDate;
+   field PlannedShipDate;
+   field LinePlannedDelDate;
+   field LinePlannedShipDate;
+   field LinePlannedDueDate;
+}
+
+group TotalQuantityGroup for ReassignShipmentLineVirtual {
+   label = "Total Quantity";
+   measure TotalQtyAvailableToReassign(RevisedQtyDueUom) {
+      label = "Available to Reassign";
+   }
+   measure TotalQtyToReassign(RevisedQtyDueUom) {
+      label = "To Reassign";
+      editable = [false];
+   }
+   field IncludeAllQty {
+      label = "Include All";
+   }
+}
+
+group NotReservedQuantityGroup for ReassignShipmentLineVirtual {
+   label = "Not Reserved Quantity";
+   measure NotReservedQty(RevisedQtyDueUom) {
+      label = "Available to Reassign";
+   }
+   measure NotReservedQtyToReassign(RevisedQtyDueUom) {
+      label = "To Reassign";
+   }
+   field IncludeAllNotReservedQty {
+      label = "Include All";
+   }
+}
+
+group ReservedQuantityGroup for ReassignShipmentLineVirtual {
+   label = "Reserved Quantity";
+   measure ReservedQtyAvailableToReassign(RevisedQtyDueUom) {
+      label = "Available to Reassign";
+   }
+   measure ReservedQtyToReassign(RevisedQtyDueUom) {
+      label = "To Reassign";
+   }
+   field IncludeAllReservedQty {
+      label = "Include All";
+   }
+}
+
+group SpecifyShipmentGroup for ReassignShipmentLineVirtual {
+   label = "Specify Shipment";
+   radiogroup ReassignShipmentMethod;
+   lov DestinationShipmentIdRef with ReferenceShipmentToReassinLovSelector using GetDestinationShipmentIdLovUserWhere(ShipmentId) {
+      visible = [ReassignShipmentMethod = "AddToExistingShipment"];
+      required = [ReassignShipmentMethod = "AddToExistingShipment"];
+   }
+   field ReleaseReservations {
+      visible = [ReservedQtyNotPicked > 0 and(SourceRefTypeDb != "PURCH_RECEIPT_RETURN") and not(SourceRefTypeDb = "SHIPMENT_ORDER" and SourceDemandCode = "PurchaseReceipt")];
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+list ShipmentReservationList for ReassignShipmentLineReservationsVirtual {
+   label = "Reservations";
+   editmode = SingleCellEdit;
+   crudactions {
+      edit {
+         enabled = [parent.ReservedQtyToReassign > 0];
+      }
+      new {
+         enabled = [false];
+      }
+      delete {
+         enabled = [false];
+      }
+      duplicate {
+         enabled = [false];
+      }
+   }
+   field IncludeAll;
+   field QtyToReassign;
+   field QtyAvailableToReassign;
+   field QtyPicked;
+   field CatchQtyToReassign {
+      editable = [QtyToReassign > 0 and CatchQty > 0];
+      columnvisible = [parent.SumCatchQty > 0];
+      required = [QtyToReassign > 0 and CatchQty > 0];
+   }
+   field CatchQty {
+      columnvisible = [parent.SumCatchQty > 0];
+   }
+   field CatchUom {
+      columnvisible = [parent.SumCatchQty > 0];
+   }
+   field PickListNo;
+   field ConditionCode;
+   field ConfigurationId;
+   field LocationNo;
+   field HandlingUnitId;
+   field HandlingUnitTypeId {
+      columnvisible = [parent.SumHandlingUnitId > 0];
+   }
+   field HandlingUnitTypeDescription {
+      columnvisible = [parent.SumHandlingUnitId > 0];
+   }
+   field Sscc {
+      columnvisible = [parent.SumHandlingUnitId > 0];
+   }
+   field AltHandlingUnitLabelId {
+      columnvisible = [parent.SumHandlingUnitId > 0];
+   }
+   field Warehouse;
+   field BayNo;
+   field RowNo;
+   field TierNo;
+   field BinNo;
+   field LotBatchNo;
+   field SerialNo;
+   field EngChgLevel;
+   field WaivDevRejNo;
+   field AvailabilityControlId;
+   field AvailabilityControlDescription;
+   field ExpirationDate;
+   field ReceiptDate;
+   field PartOwnership;
+   field Owner;
+   @DynamicComponentDependency PROJ
+   field ProjectId {
+      columnvisible = [parent.SumActivitySeq > 0];
+   }
+   @DynamicComponentDependency PROJ
+   field ProjectName {
+      columnvisible = [parent.SumActivitySeq > 0];
+   }
+   @DynamicComponentDependency PROJ
+   field SubProjectId {
+      columnvisible = [parent.SumActivitySeq > 0];
+   }
+   @DynamicComponentDependency PROJ
+   field SubProjectDescription {
+      columnvisible = [parent.SumActivitySeq > 0];
+   }
+   @DynamicComponentDependency PROJ
+   field ActivityId {
+      columnvisible = [parent.SumActivitySeq > 0];
+   }
+   @DynamicComponentDependency PROJ
+   field ActivityDescription {
+      columnvisible = [parent.SumActivitySeq > 0];
+      label = "Activity Description";
+   }
+   field ActivitySeq;
+   field TopParentHandlingUnitId {
+      columnvisible = [parent.SumHandlingUnitId > 0];
+   }
+   field TopParentHandlingUnitTypeId {
+      columnvisible = [parent.SumHandlingUnitId > 0];
+   }
+   field TopParentHandlingUnitTypeDescription {
+      columnvisible = [parent.SumHandlingUnitId > 0];
+   }
+   field TopParentSscc {
+      columnvisible = [parent.SumHandlingUnitId > 0];
+   }
+   field TopParentAltHandlingUnitLabelId {
+      columnvisible = [parent.SumHandlingUnitId > 0];
+   }
+   summary = QtyToReassign;
+}
+
+@DynamicComponentDependency ORDER
+list ShipmentComponentList for ReassignShipmentLineComponentsVirtual {
+   label = "Components";
+   editmode = SingleCellEdit;
+   orderby = SourceRef4OrderBy, CustomerOrderReservation, ConnectedSourceQty;
+   crudactions {
+      edit {
+         enabled = [parent.TotalQtyToReassign > 0];
+      }
+      new {
+         enabled = [false];
+      }
+      delete {
+         enabled = [false];
+      }
+      duplicate {
+         enabled = [false];
+      }
+   }
+   field ShipmentLineNo {
+      columnvisible = [false];
+   }
+   field SourceRef4 {
+      size = Small;
+   }
+   field SourcePartNo;
+   field SourcePartDescription;
+   field QtyPerAssembly;
+   field ConnectedSourceQty {
+      columnvisible = [false];
+   }
+   computedfield RequiredComponentQty {
+      label = "Required Component Qty to Reassign";
+      value = "#{(QtyPerAssembly > 0) ? parent.TotalQtyToReassign * QtyPerAssembly *  ConvFactor / InvertedConvFactor : null}";
+      type = Number;
+      size = Small;
+   }
+   field SourceUnitMeas {
+      size = Small;
+   }
+   field IncludeAll;
+   field QtyToReassign;
+   field NotReservedQty;
+   field QtyAssigned {
+      columnvisible = [parent.NumberOfReservations > 0];
+   }
+   field QtyPicked {
+      columnvisible = [parent.NumberOfReservations > 0];
+   }
+   field InventoryUom {
+      size = Small;
+   }
+   field PickListNo {
+      columnvisible = [parent.NumberOfReservations > 0];
+   }
+   field CatchQty {
+      columnvisible = [parent.SumCatchQty > 0];
+   }
+   field CatchUom {
+      columnvisible = [parent.SumCatchQty > 0];
+      size = Small;
+   }
+   field LocationNo {
+      columnvisible = [parent.NumberOfReservations > 0];
+   }
+   field HandlingUnitId {
+      columnvisible = [parent.NumberOfReservations > 0];
+   }
+   field HandlingUnitTypeId {
+      columnvisible = [parent.SumHandlingUnitId > 0];
+   }
+   field HandlingUnitTypeDescription {
+      columnvisible = [parent.SumHandlingUnitId > 0];
+   }
+   field Sscc {
+      columnvisible = [parent.SumHandlingUnitId > 0];
+   }
+   field AltHandlingUnitLabelId {
+      columnvisible = [parent.SumHandlingUnitId > 0];
+   }
+   field Warehouse {
+      columnvisible = [parent.NumberOfReservations > 0];
+   }
+   field BayNo {
+      columnvisible = [parent.NumberOfReservations > 0];
+   }
+   field RowNo {
+      columnvisible = [parent.NumberOfReservations > 0];
+   }
+   field TierNo {
+      columnvisible = [parent.NumberOfReservations > 0];
+   }
+   field BinNo {
+      columnvisible = [parent.NumberOfReservations > 0];
+   }
+   field LotBatchNo {
+      columnvisible = [parent.NumberOfReservations > 0];
+   }
+   field SerialNo {
+      columnvisible = [parent.NumberOfReservations > 0];
+   }
+   field EngChgLevel {
+      columnvisible = [parent.NumberOfReservations > 0];
+   }
+   field WaivDevRejNo {
+      columnvisible = [parent.NumberOfReservations > 0];
+   }
+   field ConditionCode;
+   field ConfigurationId {
+      columnvisible = [parent.NumberOfReservations > 0];
+   }
+   field AvailabilityControlId {
+      columnvisible = [parent.NumberOfReservations > 0];
+   }
+   field AvailabilityControlDescription {
+      columnvisible = [parent.NumberOfReservations > 0];
+   }
+   field ExpirationDate {
+      columnvisible = [parent.NumberOfReservations > 0];
+   }
+   field ReceiptDate {
+      columnvisible = [parent.NumberOfReservations > 0];
+   }
+   field PartOwnership;
+   field Owner;
+   @DynamicComponentDependency PROJ
+   field ProjectId {
+      columnvisible = [parent.SumActivitySeq > 0];
+   }
+   @DynamicComponentDependency PROJ
+   field ProjectName {
+      columnvisible = [parent.SumActivitySeq > 0];
+   }
+   @DynamicComponentDependency PROJ
+   field SubProjectId {
+      columnvisible = [parent.SumActivitySeq > 0];
+   }
+   @DynamicComponentDependency PROJ
+   field SubProjectDescription {
+      columnvisible = [parent.SumActivitySeq > 0];
+   }
+   @DynamicComponentDependency PROJ
+   field ActivityId {
+      columnvisible = [parent.SumActivitySeq > 0];
+   }
+   @DynamicComponentDependency PROJ
+   field ActivityDescription {
+      columnvisible = [parent.SumActivitySeq > 0];
+      label = "Activity Description";
+   }
+   field ActivitySeq {
+      columnvisible = [parent.NumberOfReservations > 0];
+   }
+   field TopParentHandlingUnitId {
+      columnvisible = [parent.SumHandlingUnitId > 0];
+   }
+   field TopParentHandlingUnitTypeId {
+      columnvisible = [parent.SumHandlingUnitId > 0];
+   }
+   field TopParentHandlingUnitTypeDescription {
+      columnvisible = [parent.SumHandlingUnitId > 0];
+   }
+   field TopParentSscc {
+      columnvisible = [parent.SumHandlingUnitId > 0];
+   }
+   field TopParentAltHandlingUnitLabelId {
+      columnvisible = [parent.SumHandlingUnitId > 0];
+   }
+   field CustomerOrderReservation {
+      label = "Reservation";
+      columnvisible = [parent.NumberOfReservations > 0];
+   }
+}
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+
+----------------------------- MAIN ENTRY POINTS -----------------------------
+entityset ReassignShipmentLineVirtualSet for ReassignShipmentLineVirtual;
+
+
+------------------------------ ENTITY DETAILS -------------------------------
+
+------------------------------- ENUMERATIONS --------------------------------
+enumeration ReassignShipmentMethod {
+   enumerationtype = Custom;
+   value = "RELEASE_FROM_SHIPMENT" {
+      identifier = "ReleaseFromShipment";
+      label = "Release from Shipment";
+   }
+   value = "ADD_TO_EXIST_SHIPMENT" {
+      identifier = "AddToExistingShipment";
+      label = "Shipment";
+   }
+   value = "CREATE_NEW_SHIPMENT" {
+      identifier = "CreateNewShipment";
+      label = "New Shipment";
+   }
+}
+
+
+---------------------------------- QUERIES ----------------------------------
+
+---------------------------------- ACTIONS ----------------------------------
+action RefreshAvailableSourceLine {
+   initialcheck none;
+   ludependencies = SourceLineShipment;
+}
+
+--------------------------------- FUNCTIONS ---------------------------------
+function GetDestinationShipmentIdLovUserWhere List < Entity(ShipmentToReassinLov) > {
+   parameter SourceShipmentId Number;
+}
+
+-------------------------------- STRUCTURES ---------------------------------
+
+--------------------------------- VIRTUALS ----------------------------------
+virtual ReassignShipmentLineVirtual {
+   ludependencies = ReassignShipmentLineReservationsVirtual;
+   attribute ShipmentId Number {
+      label = "Shipment ID";
+      editable = [false];
+      required = [true];
+   }
+   attribute ShipmentLineNo Number {
+      label = "Line No";
+      editable = [false];
+      required = [true];
+   }
+   attribute Contract Text {
+      label = "Site";
+      editable = [false];
+      required = [true];
+   }
+   attribute ShipmentType Text {
+      label = "Shipment Type";
+      editable = [false];
+      required = [true];
+   }
+   attribute ShipmentState Text {
+      label = "Shipment Status";
+      editable = [false];
+   }
+   attribute ShipmentRowstate Text {
+      label = "Shipment Status";
+      editable = [false];
+   }
+   attribute SenderType Text {
+      editable = [false];
+      required = [true];
+   }
+   attribute SenderId Text {
+      label = "Sender ID";
+      editable = [false];
+      required = [true];
+   }
+   attribute SenderName Text {
+      label = "Sender Description";
+      editable = [false];
+   }
+   attribute ReceiverType Text {
+      label = "Receiver Type";
+      editable = [false];
+      required = [true];
+   }
+   attribute ReceiverId Text {
+      label = "Receiver ID";
+      editable = [false];
+      required = [true];
+   }
+   attribute ReceiverName Text {
+      label = "Receiver Description ";
+      editable = [false];
+   }
+   attribute SourceRefType Text {
+      label = "Source Ref Type";
+      editable = [false];
+   }
+   attribute SourceRefTypeDb Text {
+      label = "Source Ref Type Db";
+      editable = [false];
+   }
+   attribute SourceRef1 Text {
+      label = "Source Ref 1";
+      editable = [false];
+   }
+   attribute SourceRef2 Text {
+      label = "Source Ref 2";
+      editable = [false];
+   }
+   attribute SourceRef3 Text {
+      label = "Source Ref 3";
+      editable = [false];
+   }
+   attribute SourceRef4 Text {
+      label = "Source Ref 4";
+      editable = [false];
+   }
+   attribute SourcePartNo Text {
+      label = "Source Part No";
+      editable = [false];
+   }
+   attribute InventoryPartNo Text {
+      label = "Inventory Part No";
+      editable = [false];
+   }
+   attribute SourcePartDescription Text {
+      label = "Source Part Description";
+      editable = [false];
+   }
+   attribute PlannedDeliveryDate Timestamp {
+      label = "Shipment Planned Delivery Date";
+      editable = [false];
+   }
+   attribute PlannedShipDate Timestamp {
+      label = "Shipment Planned Ship Date";
+      editable = [false];
+   }
+   attribute LinePlannedDelDate Timestamp {
+      label = "Source Planned Delivery Date";
+      editable = [false];
+   }
+   attribute LinePlannedShipDate Timestamp {
+      label = "Source Planned Ship Date";
+      editable = [false];
+   }
+   attribute LinePlannedDueDate Date {
+      label = "Source Planned Due Date";
+      editable = [false];
+   }
+   attribute ConnectedSourceQty Number {
+      label = "Connected Source Qty";
+      editable = [false];
+   }
+   attribute SourceUnitMeas Text {
+      label = "Source Unit Meas";
+      editable = [false];
+   }
+   attribute InventoryQty Number {
+      editable = [false];
+   }
+   attribute RevisedQtyDueUom Text {
+      label = "Revised Qty Due UoM";
+      editable = [false];
+   }
+   attribute NotReservedQty Number {
+      label = "Not Reserved Quantity Available To Reassign";
+      editable = [false];
+   }
+   attribute NotReservedQtyToReassign Number {
+      label = "Not Reserved Quantity to Reassign";
+      editable = [true];
+   }
+   attribute IncludeAllNotReservedQty Boolean("TRUE", "FALSE") {
+      label = "Include All Not Reserved Quantity";
+      editable = [true];
+      required = [true];
+   }
+   attribute ReservedQtyAvailableToReassign Number {
+      label = "Reserved Quantity Available to Reassign";
+      editable = [false];
+   }
+   attribute ReservedQtyToReassign Number {
+      label = "Reserved Quantity to Reassign";
+   }
+   attribute IncludeAllReservedQty Boolean("TRUE", "FALSE") {
+      label = "Include All Reserved Quantity";
+      editable = [true];
+      required = [true];
+   }
+   attribute TotalQtyAvailableToReassign Number {
+      label = "Total Quantity Available to Reassign";
+      editable = [false];
+   }
+   attribute TotalQtyToReassign Number {
+      label = "Total Quantity to Reassign";
+      editable = [true];
+   }
+   attribute IncludeAllQty Boolean("TRUE", "FALSE") {
+      label = "Include All Quantity";
+      editable = [true];
+      required = [true];
+   }
+   attribute ReassignShipmentMethod Enumeration(ReassignShipmentMethod) {
+      label = "";
+      editable = [true];
+      required = [true];
+   }
+   attribute DestinationShipmentId Number {
+      label = "Shipment ID";
+   }
+   attribute ReleaseReservations Boolean("TRUE", "FALSE") {
+      label = "Release Reservations Not Picked";
+      required = [true];
+   }
+   attribute NumberOfReservations Number {
+      label = "Number of Reservations";
+      editable = [false];
+   }
+   attribute ReservedQtyNotPicked Number {
+      label = "Number of Reservations";
+      editable = [false];
+   }
+   attribute SumCatchQty Number {
+      label = "Sum Catch Qty";
+      editable = [false];
+   }
+   attribute SumHandlingUnitId Number {
+      label = "Sum Reserved Handling Units";
+      editable = [false];
+   }
+   attribute SumActivitySeq Number {
+      label = "Sum Activity Sequence";
+      editable = [false];
+   }
+   attribute SourceDemandCode Enumeration(OrderSupplyType) {
+      label = "Source Demand Code";
+      editable = [false];
+   }
+   reference DestinationShipmentIdRef(DestinationShipmentId) to ShipmentToReassinLov(ShipmentId) {
+      label = "Shipment ID";
+   }
+   reference SenderIdRef(SenderId) to ShipmentSender(SenderId) {
+      label = "Sender ID";
+   }
+   reference ReceiverIdRef(ReceiverId) to ShipmentReceiver(ReceiverId) {
+      label = "Receiver ID";
+   }
+
+   array ReservationsToReassignArray() to ReassignShipmentLineReservationsVirtual();
+
+   @DynamicComponentDependency ORDER
+   array ComponentsToReassignArray() to ReassignShipmentLineComponentsVirtual();
+
+   action PerformReassign {
+      ludependencies = ShipmentLine;
+      supportwarnings = [true];
+   }
+}
+
+virtual ReassignShipmentLineReservationsVirtual {
+   ludependencies = ReassignShipmentLineVirtual;
+   attribute QtyToReassign Number {
+      label = "Qty to Reassign";
+      editable = [true];
+   }
+   attribute QtyAvailableToReassign Number {
+      label = "Reserved Qty";
+      editable = [false];
+   }
+   attribute IncludeAll Boolean("TRUE", "FALSE") {
+      label = "Include All";
+      editable = [true];
+      required = [true];
+   }
+   attribute QtyPicked Number {
+      label = "Picked Qty";
+      editable = [false];
+   }
+   attribute CatchQtyToReassign Number {
+      label = "Catch Qty to Reassign";
+      editable = [true];
+   }
+   attribute CatchQty Number {
+      label = "Catch Qty";
+      editable = [false];
+   }
+   attribute CatchUom Text {
+      label = "Catch UoM";
+      editable = [false];
+   }
+   attribute PickListNo Text {
+      label = "Pick List No";
+      editable = [false];
+   }
+   attribute ConditionCode Text {
+      label = "Condition Code";
+      editable = [false];
+   }
+   attribute ConfigurationId Text {
+      label = "Configuration ID";
+      editable = [false];
+   }
+   attribute LocationNo Text {
+      label = "Location No";
+      editable = [false];
+      format = uppercase;
+   }
+   attribute HandlingUnitId Number {
+      label = "Handling Unit ID";
+      editable = [false];
+   }
+   attribute HandlingUnitTypeId Text {
+      label = "Handling Unit Type ID";
+      editable = [false];
+   }
+   attribute HandlingUnitTypeDescription Text {
+      label = "Type Description";
+      editable = [false];
+   }
+   attribute Sscc Text {
+      label = "SSCC";
+      editable = [false];
+   }
+   attribute AltHandlingUnitLabelId Text {
+      label = "Alt Handling Unit Label ID";
+      editable = [false];
+   }
+   attribute Warehouse Text {
+      label = "Warehouse ID";
+      editable = [false];
+   }
+   attribute BayNo Text {
+      label = "Bay ID";
+      editable = [false];
+   }
+   attribute RowNo Text {
+      label = "Row ID";
+      editable = [false];
+   }
+   attribute TierNo Text {
+      label = "Tier ID";
+      editable = [false];
+   }
+   attribute BinNo Text {
+      label = "Bin ID";
+      editable = [false];
+   }
+   attribute LotBatchNo Text {
+      label = "Lot Batch No";
+      editable = [false];
+      format = uppercase;
+   }
+   attribute SerialNo Text {
+      label = "Serial No";
+      editable = [false];
+      format = uppercase;
+   }
+   attribute EngChgLevel Text {
+      label = "Revision No";
+      editable = [false];
+      format = uppercase;
+   }
+   attribute WaivDevRejNo Text {
+      label = "W/D/R No";
+      editable = [false];
+      format = uppercase;
+   }
+   attribute AvailabilityControlId Text {
+      label = "Availability Control ID";
+      editable = [false];
+      format = uppercase;
+   }
+   attribute AvailabilityControlDescription Text {
+      label = "Availability Control Description";
+      editable = [false];
+   }
+   attribute ExpirationDate Date {
+      label = "Expires";
+      editable = [false];
+   }
+   attribute ReceiptDate Timestamp {
+      label = "Receipt Date";
+      editable = [false];
+   }
+   attribute PartOwnership Enumeration(PartOwnership) {
+      label = "Ownership";
+      editable = [false];
+   }
+   attribute Owner Text {
+      label = "Owner";
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ProjectId Text {
+      label = "Project ID";
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ProjectName Text {
+      label = "Project Name";
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute SubProjectId Text {
+      label = "Sub Project ID";
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute SubProjectDescription Text {
+      label = "Sub Project Description";
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ActivityId Text {
+      label = "Activity ID";
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ActivityDescription Text {
+      label = "Activity ID";
+      editable = [false];
+   }
+   attribute ActivitySeq Number {
+      label = "Activity Sequence";
+      editable = [false];
+   }
+   attribute TopParentHandlingUnitId Number {
+      label = "Top Parent Handling Unit ID";
+      editable = [false];
+   }
+   attribute TopParentHandlingUnitTypeId Text {
+      label = "Top Parent Handling Unit Type ID";
+      editable = [false];
+   }
+   attribute TopParentHandlingUnitTypeDescription Text {
+      label = "Top Parent Handling Unit Type Description";
+      editable = [false];
+   }
+   attribute TopParentSscc Text {
+      label = "Top Parent SSCC";
+      editable = [false];
+   }
+   attribute TopParentAltHandlingUnitLabelId Text {
+      label = "Top Parent Alt Handling Unit Label ID";
+      editable = [false];
+   }
+}
+
+@DynamicComponentDependency ORDER
+virtual ReassignShipmentLineComponentsVirtual {
+   ludependencies = ReassignShipmentLineVirtual;
+   attribute ShipmentLineNo Number {
+      label = "Line No";
+      editable = [false];
+      required = [true];
+   }
+   attribute SourceRef4 Text {
+      label = "Source Ref 4";
+      editable = [false];
+   }
+   attribute SourceRef4OrderBy Text {
+      editable = [false];
+   }
+   attribute SourcePartNo Text {
+      label = "Source Part No";
+      editable = [false];
+   }
+   attribute SourcePartDescription Text {
+      label = "Source Part Description";
+      editable = [false];
+   }
+   attribute ConnectedSourceQty Number {
+      label = "Connected Source Qty";
+      editable = [false];
+   }
+   attribute QtyPerAssembly Number {
+      label = "Qty/Assembly";
+      editable = [false];
+   }
+   attribute QtyPerAssemblyInternal Number {
+      label = "Qty/Assembly";
+      editable = [false];
+   }
+   attribute SourceUnitMeas Text {
+      label = "Sales UoM";
+      editable = [false];
+   }
+   attribute NotReservedQty Number {
+      label = "Not Reserved Qty";
+      editable = [false];
+   }
+   attribute QtyAssigned Number {
+      label = "Reserved Qty";
+      editable = [false];
+   }
+   attribute QtyPicked Number {
+      label = "Picked Qty";
+      editable = [false];
+   }
+   attribute IncludeAll Boolean("TRUE", "FALSE") {
+      label = "Include All";
+      editable = [true];
+      required = [true];
+   }
+   attribute QtyToReassign Number {
+      label = "Qty to Reassign";
+      editable = [true];
+   }
+   attribute InventoryUom Text {
+      label = "Inventory UoM";
+      editable = [false];
+   }
+   attribute CatchQtyToReassign Number {
+      label = "Catch Qty to Reassign";
+      editable = [true];
+   }
+   attribute CatchQty Number {
+      label = "Catch Qty";
+      editable = [false];
+   }
+   attribute CatchUom Text {
+      label = "Catch UoM";
+      editable = [false];
+   }
+   attribute PickListNo Text {
+      label = "Pick List No";
+      editable = [false];
+   }
+   attribute ConditionCode Text {
+      label = "Condition Code";
+      editable = [false];
+   }
+   attribute ConfigurationId Text {
+      label = "Configuration ID";
+      editable = [false];
+   }
+   attribute LocationNo Text {
+      label = "Location No";
+      editable = [false];
+      format = uppercase;
+   }
+   attribute HandlingUnitId Number {
+      label = "Handling Unit ID";
+      editable = [false];
+   }
+   attribute HandlingUnitTypeId Text {
+      label = "Handling Unit Type ID";
+      editable = [false];
+   }
+   attribute HandlingUnitTypeDescription Text {
+      label = "Type Description";
+      editable = [false];
+   }
+   attribute Sscc Text {
+      label = "SSCC";
+      editable = [false];
+   }
+   attribute AltHandlingUnitLabelId Text {
+      label = "Alt Handling Unit Label ID";
+      editable = [false];
+   }
+   attribute Warehouse Text {
+      label = "Warehouse";
+      editable = [false];
+   }
+   attribute BayNo Text {
+      label = "Bay";
+      editable = [false];
+   }
+   attribute RowNo Text {
+      label = "Row";
+      editable = [false];
+   }
+   attribute TierNo Text {
+      label = "Tier";
+      editable = [false];
+   }
+   attribute BinNo Text {
+      label = "Bin";
+      editable = [false];
+   }
+   attribute LotBatchNo Text {
+      label = "Lot Batch No";
+      editable = [false];
+      format = uppercase;
+   }
+   attribute SerialNo Text {
+      label = "Serial No";
+      editable = [false];
+      format = uppercase;
+   }
+   attribute EngChgLevel Text {
+      label = "Revision No";
+      editable = [false];
+      format = uppercase;
+   }
+   attribute WaivDevRejNo Text {
+      label = "W/D/R No";
+      editable = [false];
+      format = uppercase;
+   }
+   attribute ExpirationDate Date {
+      label = "Expires";
+      editable = [false];
+   }
+   attribute ReceiptDate Timestamp {
+      label = "Receipt Date";
+      editable = [false];
+   }
+   attribute PartOwnership Enumeration(PartOwnership) {
+      label = "Part Ownership";
+      editable = [false];
+   }
+   attribute Owner Text {
+      label = "Owner";
+      editable = [false];
+   }
+   attribute ActivitySeq Number {
+      label = "Activity Sequence";
+      editable = [false];
+   }
+   attribute CustomerOrderReservation Boolean("TRUE", "FALSE") {
+      label = "Customer Order Reservation";
+      editable = [false];
+   }
+   attribute InventoryPartNo Text {
+      label = "Inventory Part No";
+      editable = [false];
+   }
+   attribute InvertedConvFactor Number {
+      label = "Inverted Conversion Factor";
+      editable = [false];
+   }
+   attribute ConvFactor Number {
+      label = "Conversion Factor";
+      editable = [false];
+   }
+   attribute AvailabilityControlId Text {
+      label = "Availability Control ID";
+      editable = [false];
+   }
+   attribute AvailabilityControlDescription Text {
+      label = "Availability Control Description";
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ProjectId Text {
+      label = "Project ID";
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ProjectName Text {
+      label = "Project Name";
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute SubProjectId Text {
+      label = "Sub Project ID";
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute SubProjectDescription Text {
+      label = "Sub Project Description";
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ActivityId Text {
+      label = "Activity ID";
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ActivityDescription Text {
+      label = "Activity ID";
+      editable = [false];
+   }
+   attribute TopParentHandlingUnitId Number {
+      label = "Top Parent Handling Unit ID";
+      editable = [false];
+   }
+   attribute TopParentHandlingUnitTypeId Text {
+      label = "Top Parent Handling Unit Type ID";
+      editable = [false];
+   }
+   attribute TopParentHandlingUnitTypeDescription Text {
+      label = "Top Parent Handling Unit Type Description";
+      editable = [false];
+   }
+   attribute TopParentSscc Text {
+      label = "Top Parent SSCC";
+      editable = [false];
+   }
+   attribute TopParentAltHandlingUnitLabelId Text {
+      label = "Top Parent Alt Handling Unit Label ID";
+      editable = [false];
+   }
+}
+
+--------------------------------- SUMMARIES ---------------------------------
+
+-------------------------------- SINGLETONS ---------------------------------
+
+--------------------------------- CHECKLIST ---------------------------------
+
+

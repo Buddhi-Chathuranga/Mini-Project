@@ -1,0 +1,373 @@
+---------------------------------------------------------------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  ----------------------------------------------------------------------------------------------------------------------
+-- 20210629    MaEelk  SC21R2-1075, Added GetDeliveryTypeDescription to fetch the Description when changing the Delivery Type
+-- 20210608    MaEelk  SC21R2-1075, Added DeliveryType to the assistant CreatePrePayBasedInvoiceAssistant
+-- 20190314    IzShlk  SCUXXW4-8317, Created
+---------------------------------------------------------------------------------------------------------------------------------------------
+
+fragment CreatePrepaymentBasedInvoiceAssistant;
+component ORDER;
+layer Core;
+description "Use this API to Create Prepayment Based Invoices from Connected Payments";
+
+include fragment PrepayTaxCodeLovSelector;
+-- gelr:delivery_types_in_pbi, begin
+include fragment PrepayDeliveryTypeLovSelector;
+-- gelr:delivery_types_in_pbi, begin
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+assistant CreatePrePayBasedInvoiceAssistant using CustomerOrderVirtualSet {
+   label = "Create Prepayment Based Invoice";
+   savemode = OnLostFocus;
+   input(OrderNo, InvoiceCustomer, DueDate, LedgerItemSeriesId, LedgerItemId, PaidAmount, CurrencyCode, Contract, Company, LedgerItemVersion, ProposedPrepaymentPercentage);
+   output(Objkey);
+   init command {
+      execute {
+         set OrderNo = OrderNo;
+         set CustomerNo = InvoiceCustomer;
+         set PaymentDate = DueDate;
+         set Prepayment = LedgerItemSeriesId;
+         set LedgerItemId = LedgerItemId;
+         set PrepayTobeInvoiced = PaidAmount;
+         set CurrencyCode = CurrencyCode;
+         set Contract = Contract;
+         set Company = Company;
+         set LedgerItemVersion = LedgerItemVersion;
+         set PrepaymentPercentage = ProposedPrepaymentPercentage;
+      }
+   }
+   singlestep {
+      group CreatePrePayBasedInvoiceGroup;
+      list TaxDistributionList(TaxDistributionVirtualArray);
+   }
+   command Ok;
+   command CreatePrintCommand;
+   command Cancel;
+}
+
+--------------------------------- COMMANDS ----------------------------------
+command Ok for CustomerOrderVirtual {
+   label = "Create";
+   enabled = [PrepayTobeInvoiced > 0 and LineTotalGrossAmount = PrepayTobeInvoiced];
+   execute {
+      call CreatePrepaymentInvoice("CREATE", Objkey, OrderNo, LedgerItemId, Prepayment, LedgerItemVersion);
+   }
+}
+
+command CreatePrintCommand for CustomerOrderVirtual {
+   label = "Create, Print and Off-set";
+   enabled = [PrepayTobeInvoiced > 0 and LineTotalGrossAmount = PrepayTobeInvoiced];
+   execute {
+      call CreatePrepaymentInvoice("OFFSET", Objkey, OrderNo, LedgerItemId, Prepayment, LedgerItemVersion);
+   }
+}
+
+command LineTotalGrossAmountCommand for TaxDistributionVirtual {
+   execute {
+      call UpdateLineTotalGrossAmount(parent.Objkey, parent.PrepayTobeInvoiced);
+   }
+}
+
+group CreatePrePayBasedInvoiceGroup for CustomerOrderVirtual {
+   label = "";
+   field OrderNo {
+      size = Small;
+   }
+   lov CustomerRef with ReferenceCustOrdCust2Selector {
+      contactwidget {
+         enabled = [CustomerNo != null];
+         source = Customer;
+      }
+      description = CustomerRef.Name;
+
+   }
+   field PaymentDate {
+      size = Small;
+   }
+   field Prepayment {
+      size = Small;
+   }
+   field LedgerItemId {
+      size = Small;
+   }
+   currency PrepayTobeInvoiced(CurrencyCode);
+}
+
+list TaxDistributionList for TaxDistributionVirtual {
+   label = "Invoice Lines";
+   editmode = SingleCellEdit;
+
+   crudactions {
+      new {
+         enabled = [false];
+      }
+
+      after command LineTotalGrossAmountCommand;
+   }
+
+   field Pos;
+   field InvoiceText;
+   lov TaxCodeRef with ReferencePrepayTaxCodeLovSelector using TaxCodeFilter(parent.Company, parent.OrderNo) {
+      validate command {
+         variable TaxCodeInfoVar {
+            type = TaxInfoStructure;
+         }
+
+         execute {
+            call ValidateTaxCode(parent.Company, parent.OrderNo, TaxCode, parent.PrepaymentPercentage, parent.UsePriceInclTaxDb, OrderTaxCode, GrossAmount,
+            OrderGrossAmount, OrderTaxAmount, parent.CurrencyRounding) into TaxCodeInfoVar;
+
+            if [TaxCodeInfoVar.TaxCodeExistFlag = "FALSE"] {
+               error("The tax code ${TaxCode} does not exist in the customer order ${parent.OrderNo}");
+               exit;
+            }
+
+            set TaxPercentage = TaxCodeInfoVar.TaxPercentage;
+            set NetAmount = TaxCodeInfoVar.NetAmount;
+            set TaxAmount = TaxCodeInfoVar.TaxAmount;
+         }
+      }
+   }
+   field TaxPercentage;
+   -- gelr:delivery_types_in_pbi, begin
+   lov DeliveryTypeRef with ReferencePrepayDeliveryTypeLovSelector using DeliveryTypeFilter(parent.Company, parent.OrderNo) {
+      label = "Delivery Type";
+      description = DeliveryTypeDescription;
+      validate command {
+         execute {
+            call GetDeliveryTypeDescription(parent.Company, DeliveryType) into DeliveryTypeDescription;
+         }
+      }
+   }
+   -- gelr:delivery_types_in_pbi, end
+   field NetAmount;
+   field TaxAmount;
+   field GrossAmount {
+      validate command {
+         variable LineAmountsInfoVar {
+            type = LineAmountsStructure;
+         }
+         execute {
+            call CalculateLineAmounts(parent.PrepaymentPercentage, parent.UsePriceInclTaxDb, TaxCode, OrderTaxCode, GrossAmount,
+            OrderGrossAmount, OrderTaxAmount, TaxPercentage, parent.CurrencyRounding) into LineAmountsInfoVar;
+
+            set NetAmount = LineAmountsInfoVar.NetAmount;
+            set TaxAmount = LineAmountsInfoVar.TaxAmount;
+         }
+      }
+   }
+}
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+----------------------------- MAIN ENTRY POINTS -----------------------------
+entityset CustomerOrderVirtualSet for CustomerOrderVirtual;
+
+virtual CustomerOrderVirtual {
+   crud = Create, Read;
+
+   attribute OrderNo Text {
+      label = "Order No";
+      editable = [false];
+      format = uppercase;
+   }
+   attribute CustomerNo Text {
+      label = "Customer";
+      editable = [false];
+      format = uppercase;
+   }
+   attribute Contract Text {
+      format = uppercase;
+   }
+   attribute Company Text;
+   attribute PaymentDate Date {
+      editable = [false];
+   }
+   attribute Prepayment Text {
+      label = "Series ID";
+      editable = [false];
+   }
+   attribute LedgerItemId Text {
+      label = "Ledger Item ID";
+      editable = [false];
+   }
+   attribute LedgerItemVersion Number;
+   attribute PrepayTobeInvoiced Number {
+      label = "Prepayment to be Invoiced";
+      format = ifscurrency;
+      editable = [false];
+   }
+   attribute CurrencyCode Text {
+      format = uppercase;
+   }
+   attribute UsePriceInclTaxDb Text {
+      label = "Use Price Incl Tax";
+   }
+   attribute CurrencyRounding Number;
+   attribute PrepaymentPercentage Number {
+      label = "Required Prepay Percentage";
+   }
+   attribute LineTotalGrossAmount Number;
+
+   reference ContractRef(Contract) to Site(Contract);
+   reference CustomerRef(CustomerNo) to CustOrdCust2(CustomerNo) {
+      label = "Customer";
+   }
+   array TaxDistributionVirtualArray() to TaxDistributionVirtual();
+}
+
+virtual TaxDistributionVirtual {
+   crud = Create, Read, Update, Delete;
+
+   attribute Company Text {
+      editable = [false];
+   }
+   attribute Pos Number {
+      editable = [false];
+   }
+   attribute InvoiceText Text {
+      editable = [true];
+      insertable = [true];
+      maxlength = 2000;
+   }
+   attribute TaxCode Text {
+      editable = [true];
+      insertable = [true];
+      required = [true];
+      maxlength = 100;
+   }
+   attribute TaxPercentage Number {
+      label = "Tax (%)";
+      editable = [false];
+      insertable = [false];
+      maxlength = 100;
+   }
+   -- gelr:delivery_types_in_pbi, begin
+   attribute DeliveryType Text {
+      editable = [true];
+      insertable = [true];
+      maxlength = 20;
+   }
+   attribute DeliveryTypeDescription Text {
+      editable = [false];
+      insertable = [false];
+      maxlength = 200;
+   }
+   -- gelr:delivery_types_in_pbi, end
+   attribute NetAmount Number {
+      label = "Net Amount/Curr";
+      format = ifscurrency;
+      editable = [false];
+      insertable = [false];
+   }
+   attribute TaxAmount Number {
+      label = "Tax Amount/Curr";
+      format = ifscurrency;
+      editable = [false];
+      insertable = [false];
+   }
+   attribute GrossAmount Number {
+      label = "Gross Amount/Curr";
+      format = ifscurrency;
+      editable = [true];
+      insertable = [true];
+      required = [true];
+   }
+   attribute OrderTaxCode Text {
+      editable = [false];
+   }
+   attribute OrderTaxAmount Number {
+      format = ifscurrency;
+      editable = [false];
+   }
+   attribute OrderGrossAmount Number {
+      format = ifscurrency;
+      editable = [false];
+   }
+   reference TaxCodeRef(TaxCode) to PrepayTaxCodeLov(FeeCode) {
+      label = "Tax Code";
+   }
+   -- gelr:delivery_types_in_pbi, begin
+   reference DeliveryTypeRef(Company, DeliveryType) to PrepayDeliveryTypeLov(Company, DeliveryType);
+   -- gelr:delivery_types_in_pbi, end
+}
+
+--------------------------------- FUNCTIONS ---------------------------------
+
+function ValidateTaxCode Structure(TaxInfoStructure) {
+   parameter Company Text;
+   parameter OrderNo Text;
+   parameter TaxCode Text;
+   parameter PrepaymentPercentage Number;
+   parameter UsePriceInclTaxDb Text;
+   parameter OrderTaxCode Text;
+   parameter GrossAmount Number;
+   parameter OrderGrossAmount Number;
+   parameter OrderTaxAmount Number;
+   parameter CurrRounding Number;
+}
+
+function CalculateLineAmounts Structure(LineAmountsStructure) {
+   parameter Percentage Number;
+   parameter UsePriceInclTaxDb Text;
+   parameter TaxCode Text;
+   parameter OrderTaxCode Text;
+   parameter GrossAmount Number;
+   parameter OrderGrossAmount Number;
+   parameter OrderTaxAmount Number;
+   parameter TaxPercentage Number;
+   parameter CurrRounding Number;
+}
+
+function TaxCodeFilter List < Entity(PrepayTaxCodeLov) > {
+   parameter Company Text;
+   parameter OrderNo Text;
+
+   where = "COMPANY = :Company and ORDER_NO = :OrderNo";
+}
+
+-- gelr:delivery_types_in_pbi, begin
+function DeliveryTypeFilter List < Entity(PrepayDeliveryTypeLov) > {
+   parameter Company Text;
+   parameter OrderNo Text;
+
+   where = "COMPANY = :Company and ORDER_NO = :OrderNo";
+}
+
+function GetDeliveryTypeDescription Text {
+   parameter Company Text;
+   parameter DeliveryType Text;
+
+}
+-- gelr:delivery_types_in_pbi, begin
+---------------------------------- ACTIONS ----------------------------------
+action CreatePrepaymentInvoice {
+   initialcheck CreatePrepaymentInvoiceInitialCheck(OrderNo);
+   ludependencies = OnAccountLedgerItem, CustomerOrderInvHead, CustomerOrder;
+   parameter PrintOption Text;
+   parameter ObjKey Text;
+   parameter OrderNo Text;
+   parameter LedgerItemId Text;
+   parameter Prepayment Text;
+   parameter LedgerItemVersion Number;
+}
+
+action UpdateLineTotalGrossAmount {
+   initialcheck none;
+   ludependencies = CustomerOrderVirtual;
+   parameter ObjKey Text;
+   parameter PrepayTobeInvoiced Number;
+}
+-------------------------------- STRUCTURES ---------------------------------
+structure LineAmountsStructure {
+   attribute NetAmount Number;
+   attribute TaxAmount Number;
+}
+
+structure TaxInfoStructure {
+   attribute TaxCodeExistFlag Text;
+   attribute TaxPercentage Number;
+   attribute NetAmount Number;
+   attribute TaxAmount Number;
+}
+

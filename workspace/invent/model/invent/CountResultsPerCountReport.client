@@ -1,0 +1,304 @@
+-----------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  ------------------------------------------------------
+-- 2021-10-29  DigPlk  SC21R2-2883, Replaced the functionality of IdentifySerialsInLocAssistant with IdentifySerialsInLocRepeatAssistant.
+-- 2019-07-24  ChFolk  SCUXXW4-22798, Included fragment ProjectDetailsFieldSet.
+-- 2019-07-10  ChFolk  SCUXXW4-22798, Modified Project information by using get methods instead of reference to increase performance.
+-- 2019-07-10  JaThlk  SCUXXW4-23055, Removed multiple calls for better performance.
+-- 2019-04-25  DaZase  SCUXXW4-19621, Removed parameter from GetReportResultKey call since its now bounded.
+-- 2018-06-27  DaZase  SCUXXW4-5924, Converted from frmApproveCountReport using MTG Version: 1.21
+-----------------------------------------------------------------------------
+client CountResultsPerCountReport;
+component INVENT;
+layer Core;
+projection CountResultsPerCountReportHandling;
+include fragment InventoryPartLocationSelector;
+include fragment SiteUivSelector;
+include fragment ProjectDetailsFieldSet;
+// Everything needed for the IdentifySerialsInLocationAssistant
+include fragment IdentifySerialsInLocationAssistant;
+include fragment TemporaryPartTrackingSerialSelector;
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+navigator {
+   entry ApproveCountReportNavEntry parent InventNavigator.WarehouseManagementCounting at index 700 {
+      label = "Count Result per Count Report";
+      page Form;
+   }
+}
+
+-------------------------------- MAIN PAGES ---------------------------------
+page Form using CountingReports {
+   label = "Count Result per Count Report";
+   startupmode = search;
+   selector CountingReportSelector;
+   group ApproveCountReportGroup;
+   list CountingResultList(CountingResultArray);
+
+   commandgroup CommandGroupCmdGroup {
+
+      command PrintControlReportCommand;
+      command ApproveAllRejectedLinesCommand;
+      command CancelAllRejectedLinesCommand;
+   }
+}
+
+-------------------------------- ASSISTANTS ---------------------------------
+
+--------------------------------- COMMANDS ----------------------------------
+command PrintControlReportCommand for CountingReport {
+   label = "Print Control Report";
+   enabled = [true];
+   mode = SingleRecord;
+   variable ResultKey {
+      type = Number;
+   }
+   execute {
+      call GetReportResultKey() into ResultKey;
+      if [ResultKey != null] {
+         printdialog ResultKey;
+      }
+   }
+}
+
+command ApproveAllRejectedLinesCommand for CountingReport {
+   label = "Approve All Rejected Lines";
+   enabled = [not component.CountingResultList.IsDirty and InvListNo != null];
+   execute {
+      call CompleteReport(InvListNo);
+      refresh;
+   }
+}
+
+command CancelAllRejectedLinesCommand for CountingReport {
+   label = "Cancel All Rejected Lines";
+   enabled = [not component.CountingResultList.IsDirty and InvListNo != null];
+   execute {
+      call CancelReport(InvListNo);
+      refresh;
+   }
+}
+
+command ApproveCommand for CountingResult {
+   label = "Approve";
+   enabled = [Objstate = "Rejected"];
+   mode = SelectedRecords;
+   bulkexecute {
+      // Calling command in base client file
+      bulkcall Complete();
+   }
+}
+
+command CancelCommand for CountingResult {
+   label = "Cancel";
+   enabled = [Objstate = "Rejected"];
+   mode = SelectedRecords;
+   bulkexecute {
+      // Calling command in base client file
+      bulkcall Cancel();
+   }
+}
+
+command BeforeSaveChecks for CountingResult {
+   variable SessionSelection Text;
+   execute {
+      if [(SerialTrackingatReceiptandIssue = "TRUE" and InventorySerialTracking != "SERIAL TRACKING") and
+      QtyCounted != QtyOnhand and QtyCounted != null and SerialNo = "*"] {
+         set SessionIdNum = PartTrackingSessionId;
+         set QtyNum = "#{QtyCounted - QtyOnhand}";
+         // NumberABS
+         if [QtyNum < 0] {
+            set QtyNum = "#{QtyNum * (-1)}";
+         }
+         // Input for assistant (Contract, PartNo, ConfigurationId, LocationNo, LotBatchNo, EngChgLevel, WaivDevRejNo, ActivitySeq, HandlingUnitId, QtyIssue, CatchQtyIssue, AssistantTitle, AssistantContext, SessionId)
+         call GetSessionIdSelection(Contract, PartNo, ConfigurationId, LocationNo, LotBatchNo, EngChgLevel, WaivDevRejNo, ActivitySeq, HandlingUnitId, QtyNum, NULL, NULL, NULL, SessionIdNum) into IdentifySerialsRecStructure;
+         assistant IdentifySerialsInLocRepeatAssistant(IdentifySerialsRecStructure.RemainingSelection, IdentifySerialsRecStructure.Total, null, null) into(SessionSelection) {
+            when OK {
+               if [PartTrackingSessionId = null] {
+                  set PartTrackingSessionId = IdentifySerialsRecStructure.SessionId;
+               }
+            }
+            when CANCEL {
+               exit CANCEL;
+            }
+         }
+      }
+   }
+}
+
+
+--------------------------------- SELECTORS ---------------------------------
+@Override
+selector CountingReportSelector for CountingReport {
+   label = "${InvListNo}";
+   static InvListNo;
+}
+
+---------------------------------- GROUPS -----------------------------------
+group ApproveCountReportGroup for CountingReport {
+   label = "";
+   field InvListNo;
+   lov ContractRef with ReferenceSiteUivSelector {
+      size = Small;
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+list CountingResultList for CountingResult {
+   label = "";
+   crudactions {
+      before command BeforeSaveChecks;
+   }
+
+   field SeqRef {
+      size = Small;
+   }
+   lov InventoryPartRef with ReferenceInventoryPartSelector {
+      label = "Part No";
+      description = InventoryPartRef.DescriptionInUse;
+   }
+   field PartDescription {
+      columnvisible = [false];
+   }
+   field ConfigurationId {
+      size = Small;
+      label = "Configuration ID";
+   }
+   field LocationNo {
+      size = Small;
+   }
+   field HandlingUnitId {
+      size = Small;
+   }
+   field HandlingUnitRef.HandlingUnitTypeId {
+      label = "Handling Unit Type ID";
+   }
+   field TypeDescription;
+   field HandlingUnitRef.Sscc {
+      label = "SSCC";
+   }
+   field HandlingUnitRef.AltHandlingUnitLabelId {
+      label = "Alt Handling Unit Label ID";
+   }
+   field QtyCounted {
+      validate command {
+         execute {
+            set QtyDifference = "#{QtyCounted - QtyOnhand}";
+            call GetDifference(Contract, QtyCounted, QtyOnhand, InventoryValue) into DiffAmountAndPercentageStructure;
+            set DiffAmount = DiffAmountAndPercentageStructure.DiffAmount;
+            set DiffPercentage = DiffAmountAndPercentageStructure.DiffPercentage;
+            // This is just an ugly workaround so I can use RcptIssuePartTrackingDb/InvSerialTrackingDb without having them visible in the client for the checks in BeforeSaveChecks
+            set WorkaroundStr = SerialTrackingatReceiptandIssue;
+            set WorkaroundStr = InventorySerialTracking;
+            set WorkaroundNum = ActivitySeq;
+         }
+      }
+   }
+   field InventoryUoMRef {
+      size = Small;
+   }
+   field QtyOnhand;
+   field QtyDifference;
+   field DiffAmount;
+   field CountDiffAmount;
+   field DiffPercentage;
+   field CountDiffPercentage;
+   field CatchQtyCounted {
+      validate command {
+         execute {
+            set CatchQtyDifference = "#{CatchQtyCounted - CatchQtyOnhand}";
+         }
+      }
+   }
+   field CatchQtyOnhand;
+   field CatchUoM {
+      size = Small;
+   }
+   field CatchQtyDifference;
+   field LotBatchNo {
+      size = Small;
+   }
+   field SerialNo {
+      size = Small;
+   }
+   field ConditionCode {
+      size = Small;
+   }
+   field ConditionCodeDescription {
+      size = Small;
+   }
+   lov WaivDevRejNoRef with ReferenceInventoryPartLocationSelector {
+      size = Small;
+   }
+   field InventoryPartInStockRef.AvailabilityControlId {
+      size = Small;
+      label = "Availability Control ID";
+   }
+   field AvailabilityControlDescription {
+      size = Small;
+   }
+   field EngChgLevel {
+      size = Small;
+   }
+   field InventoryValue;
+   field CountDate;
+   field CountUserId {
+      size = Small;
+      label = "Count User ID";
+      contactwidget {
+         enabled = [true];
+         source = Person;
+      }
+   }
+   field Objstate {
+      size = Small;
+      label = "Status";
+   }
+   fieldset ProjectDetailsFieldSet;
+   @DynamicComponentDependency PROJ
+   field ActivitySeqRef {
+      size = Small;
+      label = "Activity Sequence";
+   }
+   field TopParentHandlingUnitID;
+   field TopParentHandlingUnitTypeID {
+      size = Small;
+   }
+   field TopParentHandlingUnitTypeDesc {
+      size = Small;
+   }
+   field TopParentSSCC;
+   field TopParentAltHandlingUnitLabelID;
+   field NoteText {
+      multiline = true;
+   }
+   field PartTrackingSessionId {
+      columnvisible = [false];
+      columnexclude = [true];
+   }
+   fieldranking PartNo, LocationNo, QtyCounted, CatchQtyCounted;
+   commandgroup CommandGroupCmdGroup {
+
+      command ApproveCommand;
+      command CancelCommand;
+   }
+}
+
+----------------------------------- CARDS -----------------------------------
+
+---------------------------------- DIALOGS ----------------------------------
+
+---------------------------------- CHARTS -----------------------------------
+
+--------------------------------- CALENDARS ---------------------------------
+
+---------------------------------- SHEETS -----------------------------------
+
+----------------------------- STATE INDICATORS ------------------------------
+
+----------------------------------- TREES -----------------------------------
+
+---------------------------------- PLUGINS ----------------------------------
+
+------------------------------- IMAGE VIEWERS -------------------------------
+

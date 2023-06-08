@@ -1,0 +1,217 @@
+-------------------------------------------------------------------------------------------------
+-- Date        Sign     History
+-- ----------  ------   -------------------------------------------------------------------------
+-- 2021-04-15  Jowise   MF21R2-1404, Added DueTimeForDelivery to handle Same Day Planning
+-- 2021-03-11  SBalLK   SC2020R1-12873, Added dynamic dependency for navigator entries.
+-- 2020-07-07  KiSalk   Bug 154703(SCZ-10619), Changed orderby in list RouteScheduleList to RouteDayDbForSorting from RouteDay.
+-- 2020-03-05  PamPlk   SCXTEND-3720, Enabled Duplicate for the page Form and RouteScheduleList, RouteScheduleExceptionsList lists.
+-- 2018-11-22  Fgusse   SCUXXW4-9247, Converted from frmDeliveryRoute using MTG Version: 1.33
+-------------------------------------------------------------------------------------------------
+
+client DeliveryRoute;
+component DISCOM;
+layer Core;
+projection DeliveryRouteHandling;
+
+include fragment UserAllowedSiteLovSelector;
+include fragment DelivRouteShipTimeLovSelector;
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+navigator {
+   entry DeliveryRouteNavEntry parent MpccomNavigator.ApplicationBaseSetupGeneralData at index 200 {
+      label = "Delivery Route";
+      page Form home DeliveryRoute;
+   }
+
+   @DynamicComponentDependency ORDER
+   entry RoutePlanningDeliveryRouteNavEntry parent OrderNavigator.TransportationAdministrationRoutePlanning at index 100 {
+      label = "Delivery Route";
+      page Form home DeliveryRoute;
+   }
+}
+-------------------------------- MAIN PAGES ---------------------------------
+page Form using DeliveryRouteSet {
+   label = "Delivery Route";
+   startupmode = search;
+   crudactions {
+      duplicate {
+         enabled = [true];
+      }
+   }
+   selector DeliveryRouteSelector;
+   group DeliveryRouteGroup;
+   list RouteScheduleList(RouteScheduleArray) {
+      label = "Route Schedule";
+   }
+   list RouteScheduleExceptionsList(RouteScheduleExceptionsArray) {
+      label = "Route Schedule Exceptions";
+   }
+
+   commandgroup CommandGroupCmdGroup {
+
+      command TranslationCommand;
+   }
+}
+
+--------------------------------- COMMANDS ----------------------------------
+command BeforeDeliveryRouteScheduleCrudCommand for DeliveryRouteSchedule {
+   variable SelectedRecordsVar Text;
+   variable IsAllSelected Boolean;
+   bulkexecute {
+      if [DeleteCount > 0] {
+         stringify(records, "ROUTE_DAY=${RouteDay}^SHIP_TIME=${ShipTime}^", JSON) into SelectedRecordsVar;
+         call IsAllRouteSchedulesSelected(parent.RouteId, SelectedRecordsVar) into IsAllSelected;
+         if [IsAllSelected] {
+            inquire("There is no more Delivery days, do you want to delete the Delivery Route?") {
+               when NO {
+                  exit CANCEL;
+               }
+            }
+         }
+      }
+   }
+}
+command AfterDeliveryRouteScheduleCrudCommand for DeliveryRouteSchedule {
+   variable CheckExistResultVar Boolean;
+   bulkexecute {
+      if [DeleteCount > 0] {
+         call GetDelivRouteSchedExist(parent.RouteId) into CheckExistResultVar;
+         if [not CheckExistResultVar] {
+            call DeleteDeliveryRoute(parent.RouteId);
+         }
+      }
+   }
+}
+command TranslationCommand for DeliveryRoute {
+   label = "Translation";
+   enabled = [true];
+   mode = Global;
+   execute {
+      navigate "page/BasicDataTranslation/Form?$filter=Module eq 'DISCOM' and Lu eq 'DeliveryRoute'";
+   }
+}
+@DynamicComponentDependency ORDER
+command CustomerOrderLinesCommand for DeliveryRouteException {
+   label = "Customer Order Lines";
+   enabled = [ExceptionDateTime != null and ExceptionType = "Cancel" and RouteExpDateOnShipDate = "TRUE"];
+   execute {
+      navigate "page/CustomerOrderLines/List?$filter=Contract eq $[Contract] and RouteId eq $[RouteId] and PlannedShipDate eq $[ExceptionDateTime]";
+   }
+}
+@DynamicComponentDependency PURCH
+command PurchaseOrderLinesCommand for DeliveryRouteException {
+   label = "Purchase Order Lines";
+   enabled = [ExceptionDateTime != null and ExceptionType = "Cancel" and RouteExpDateOnArrivalDate = "TRUE"];
+   execute {
+      navigate "page/PurchaseOrderLines/List?$filter=Contract eq $[Contract] and RouteId eq $[RouteId] and PlannedArrivalDate eq $[ExceptionDateTime]";
+   }
+}
+
+--------------------------------- SELECTORS ---------------------------------
+@Override
+selector DeliveryRouteSelector for DeliveryRoute {
+   label = "${RouteId} - ${Description}";
+   static RouteId;
+   static Description;
+}
+
+---------------------------------- GROUPS -----------------------------------
+group DeliveryRouteGroup for DeliveryRoute {
+   label = "";
+   field RouteId {
+      size = Small;
+   }
+   field Description;
+   field ForwardAgentIdRef {
+      size = Small;
+   }
+   field ForwarderInfoRef.Name {
+      label = "Name";
+      required = [false];
+   }
+   field CheckOnLineLevelDb {
+      size = Small;
+   }
+}
+----------------------------------- LISTS -----------------------------------
+
+list RouteScheduleList for DeliveryRouteSchedule {
+   orderby = RouteDayDbForSorting, ShipTime;
+   crudactions {
+      before command BeforeDeliveryRouteScheduleCrudCommand;
+      after command AfterDeliveryRouteScheduleCrudCommand;
+      duplicate {
+         enabled = [true];
+      }
+   }
+
+   field RouteDay;
+   field ShipTime;
+   field OrderStopDays;
+   field OrderStopTime;
+   field ReceiptTimeForArrival;
+   field DueTimeForDelivery;
+
+   fieldranking RouteDay, ShipTime, OrderStopDays, OrderStopTime, DueTimeForDelivery, ReceiptTimeForArrival;
+}
+
+list RouteScheduleExceptionsList for DeliveryRouteException {
+   orderby = Contract, ExceptionDate, ShipTime;
+   crudactions {
+      duplicate {
+         enabled = [true];
+      }
+   }
+
+   lov ContractRef with ReferenceUserAllowedSiteLovSelector {
+      size = Small;
+   }
+   field ExceptionDate {
+      validate command {
+         execute {
+            call GetWeekDay(ExceptionDate) into WeekDay;
+         }
+      }
+   }
+   field WeekDay;
+   field ExceptionType;
+   field ShipTime {
+      size = Small;
+//   Commented the lov selection for time field due to FW limitaion
+//      lovswitch {
+//         when [ExceptionType = "Cancel" and ExceptionDate != null and Contract != null] {
+//            lov ShipTimeRef with ReferenceDelivRouteShipTimeLovSelector using GetDelivRouteShipTime(RouteId, WeekDay);
+//         }
+//      }
+      validate command {
+         variable RouteDetailsVar {
+            type = Structure(DeliveryRouteDetailsStructure);
+         }
+         execute {
+            call GetDeliveryRouteDetails(RouteId, WeekDay, ShipTime) into RouteDetailsVar;
+            set OrderStopDays = RouteDetailsVar.OrderStopDays;
+            set OrderStopTime = RouteDetailsVar.OrderStopTime;
+         }
+      }
+   }
+   field OrderStopDays {
+      label = "Number of Days Before Route Day";
+   }
+   field OrderStopTime {
+      label = "Stop Time for Order Placement";
+   }
+   field ReceiptTimeForArrival;
+   field DueTimeForDelivery;
+
+
+   fieldranking ContractRef, ExceptionDate, ExceptionType, RoouteRef, DueTimeForDelivery, ReceiptTimeForArrival;
+
+   commandgroup CommandGroupCmdGroup {
+
+      @DynamicComponentDependency ORDER
+      command CustomerOrderLinesCommand;
+      @DynamicComponentDependency PURCH
+      command PurchaseOrderLinesCommand;
+   }
+}
+

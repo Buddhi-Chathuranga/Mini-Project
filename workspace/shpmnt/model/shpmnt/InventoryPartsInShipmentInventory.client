@@ -1,0 +1,376 @@
+-------------------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  --------------------------------------------------------------------------
+-- 2022-06-30  Aabalk  SCDEV-10967, Modified ScrapPart command enable condition to restrict scrapping parts connected to a shipment order line with demand code purchase receipt.
+-- 2022-03-30  Avwilk  SCDEV-8601, Added new command - ReturnParts and included ReturnPartsFromShipmentInventoryAssistant and renamed command label of ReturnParts,ScrapParts,MoveParts.
+-- 2022-01-05  PamPlk  SC21R2-7012, Disabled Scrap and Move commands for Purchase Receipt Return.
+-- 2021-03-11  SBalLK  SC2020R1-12873, Added dynamic dependency for navigator entries.
+-- 2021-03-03  ErRalk  SC2020R1-12389, Modified ScrapParts command by adding stringify call to fix issue in multiple record selection.
+-- 2021-02-17  RoJalk  SC2020R1-11806, Removed the usages of ActivitySeqRef.
+-- 2019-11-27  Aabalk  SCSPRING20-720, Added sender Id, name and type to HandleShipInventoryList.
+-- 2019-10-31  chlelk  SCXTEND-1321, The startupmode was set to "Search"
+-- 2019-06-17  SBalLK  SCUXXW4-14160, Modified CreateAndPrintPreShipDeliv() to disable the RMB when there are CO lines connected with load list.
+-- 2019-03-12  Kubalk  SCUXXW4-17355, Dependency annotations added.
+-- 2018-11-14  KHVESE  SCUXXW4-4769, Created Dialog ScrapPartsInShipmentInventoryDialog, Gorups ScrappingCauseGroup, QtyToScrapGroup and Command ScrapParts
+-- 2018-04-16  KHVESE  SCUXXW4-4829, Converted from tbwHandleShipInv using MTG Version: 1.15
+-------------------------------------------------------------------------------------------------
+
+client InventoryPartsInShipmentInventory;
+component SHPMNT;
+layer Core;
+projection InventoryPartsInShipmentInventoryHandling;
+
+include fragment ShipmentReceiverSelector;
+include fragment ShipmentSenderSelector;
+include fragment ReturnPartsFromShipmentInventoryAssistant;
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+
+navigator {
+   entry OutboundShipmentInventoryPartsInShipmentInventoryNavEntry parent ShpmntNavigator.OutboundShipmentShipmentInventory at index 1 {
+      label = "Inventory Parts in Shipment Inventory";
+      page List;
+   }
+
+   @DynamicComponentDependency ORDER
+   entry ShippingInventoryPartsInShipmentInventory parent OrderNavigator.ShippingPicking at index 1 {
+      label = "Inventory Parts in Shipment Inventory";
+      page List;
+   }
+}
+
+-------------------------------- MAIN PAGES ---------------------------------
+
+page List using InventoryPartsInShipmentInventories {
+   label = "Inventory Parts in Shipment Inventory";
+   startupmode = search;
+   list HandleShipInventoryList;
+}
+
+--------------------------------- COMMANDS ----------------------------------
+
+command ReturnPart for InventoryPartsInShipmentInventory {
+   label = "Return Part";
+   enabled = [true];
+   mode = SelectedRecords;
+   bulkexecute {
+      bulknavigate "page/ReturnPartsFromShipmentInventory/Form?$filter=SourceRef1 eq $[SourceRef1] and SourceRef2Db eq $[SourceRef2Db] and SourceRef3Db eq $[SourceRef3Db] and SourceRef4Db eq $[SourceRef4Db] and SourceRefType eq IfsApp.ReturnPartsFromShipmentInventory.LogisticsSourceRefType'${SourceRefType}' and ShipmentId eq $[ShipmentId] and PartNo eq $[PartNo] and PickListNo eq $[PickListNo] and Contract eq $[Contract] and LotBatchNo eq $[LotBatchNo] and SerialNo eq $[SerialNo] and HandlingUnitId eq $[HandlingUnitId] and  LocationNo eq $[LocationNo] and EngChgLevel eq $[EngChgLevel] and WaivDevRejNo eq $[WaivDevRejNo] and ConfigurationId eq $[ConfigurationId] and ActivitySeq eq $[ActivitySeq]";
+   }
+}
+
+command ReturnParts for InventoryPartsInShipmentInventory {
+   label = "Return Parts";
+   enabled = [true];
+   mode = SelectedRecords;
+   variable SelectionVar Text;
+   bulkexecute {
+      stringify(records, "SOURCE_REF1=${SourceRef1}^SOURCE_REF2=${SourceRef2}^SOURCE_REF3=${SourceRef3}^SOURCE_REF4=${SourceRef4}^SOURCE_REF_TYPE_DB=${SourceRefTypeDb}^SHIPMENT_ID=${ShipmentId}^
+      PART_NO=${PartNo}^PICK_LIST_NO=${PickListNo}^CONTRACT=${Contract}^LOT_BATCH_NO=${LotBatchNo}^SERIAL_NO=${SerialNo}^HANDLING_UNIT_ID=${HandlingUnitId}^LOCATION_NO=${LocationNo}^ENG_CHG_LEVEL=${EngChgLevel}^
+      WAIV_DEV_REJ_NO=${WaivDevRejNo}^CONFIGURATION_ID=${ConfigurationId}^ACTIVITY_SEQ=${ActivitySeq}^;", JSON) into SelectionVar;
+
+      assistant ReturnMultipleShipmentInventoryAssistant(SelectionVar) into(ShipmentLineListVar) {
+         when OK {
+            exit CANCEL;
+         }
+      }
+   }
+}
+
+command ScrapPart for InventoryPartsInShipmentInventory {
+   label = "Scrap Part";
+   enabled = [not(SourceRefType = "PurchReceiptReturn" or(SourceRefType = "ShipmentOrder" and DemandCode = "PurchaseReceipt"))];
+   mode = SelectedRecords;
+   variable QtyToScrap {
+      type = Number;
+   }
+   variable CatchQtyToScrap {
+      type = Number;
+   }
+   variable QuantityAndUomStrucVar {
+      type = Structure(QuantityAndUomStruc);
+   }
+   variable CheckPrintPreShipDelNoteVar {
+      type = Boolean;
+   }
+   variable PrintPreShipDelNoteVar {
+      type = Text;
+   }
+   variable VarKeyrefs;
+   bulkexecute {
+      stringify(records, keyref, JSON) into VarKeyrefs;
+      call GetQuantityAndUom(VarKeyrefs) into QuantityAndUomStrucVar;
+      dialog ScrapPartsInShipmentInventoryDialog(QuantityAndUomStrucVar.QtyPicked, QuantityAndUomStrucVar.CatchQtyPicked, QuantityAndUomStrucVar.InvUom, QuantityAndUomStrucVar.CatchUom, QuantityAndUomStrucVar.DelnoteNoExists) into(QtyToScrapVar, CatchQtyToScrapVar, RejectCodeVar, RejectMessageVar, CheckPrintPreShipDelNoteVar) {
+         when OK {
+            set PrintPreShipDelNoteVar = "FALSE";
+            if [CheckPrintPreShipDelNoteVar] {
+               set PrintPreShipDelNoteVar = "TRUE";
+            }
+            bulkcall ScrapPartInShipmentInventory(SourceRef1, SourceRef2, SourceRef3, SourceRef4, SourceRefType, Contract, PartNo, LocationNo,
+            LotBatchNo, SerialNo, EngChgLevel, WaivDevRejNo, PickListNo, ActivitySeq, HandlingUnitId, QtyPicked, CatchQtyPicked, QtyToScrapVar,
+            CatchQtyToScrapVar, RejectCodeVar, RejectMessageVar, ShipmentId, DelnoteNo, PrintPreShipDelNoteVar) {
+               continueonerror = [true];
+               when FAIL {
+                  alert("${error.Message} ");
+               }
+            }
+         }
+      }
+   }
+}
+
+
+command MovePart for InventoryPartsInShipmentInventory {
+   label = "Move Part";
+   enabled = [SourceRefType != "PurchReceiptReturn"];
+   mode = SelectedRecords;
+   bulkexecute {
+      bulknavigate "page/MovePartsBetweenShipmentInventories/Form?$filter=SourceRef1 eq $[SourceRef1] and SourceRef2Db eq $[SourceRef2Db] and SourceRef3Db eq $[SourceRef3Db] and SourceRef4Db eq $[SourceRef4Db] and SourceRefType eq IfsApp.MovePartsBetweenShipmentInventories.LogisticsSourceRefType'${SourceRefType}' and ShipmentId eq $[ShipmentId] and PartNo eq $[PartNo] and PickListNo eq $[PickListNo] and Contract eq $[Contract] and LotBatchNo eq $[LotBatchNo] and SerialNo eq $[SerialNo] and HandlingUnitId eq $[HandlingUnitId] and  LocationNo eq $[LocationNo] and EngChgLevel eq $[EngChgLevel] and WaivDevRejNo eq $[WaivDevRejNo] and ConfigurationId eq $[ConfigurationId] and ActivitySeq eq $[ActivitySeq]";
+   }
+}
+
+command CreateAndPrintPreShipDeliv for InventoryPartsInShipmentInventory {
+   label = "Create and Print Pre-Ship Delivery Note";
+   enabled = [DelnoteNo = null and SourceRefType = "CustomerOrder" and ShipmentConnected = false and LoadListConnected = false];
+   execute {
+      call CreateOrdPreShipDelNote(SourceRef1, LocationNo);
+   }
+}
+--------------------------------- SELECTORS ---------------------------------
+
+@Override
+selector ReferenceShipmentSelector for Shipment {
+   label = "";
+   static ShipmentId;
+   static ReceiverType;
+   static ReceiverId;
+   static SourceRefType {
+      visible = [false];
+   }
+   static Contract;
+   badge Objstate;
+}
+
+@Override
+selector ReferenceScrappingCauseSelector for ScrappingCause {
+   label = "";
+   static RejectReason {
+      label = "Scrapping Cause";
+   }
+   static RejectMessage {
+      label = "Scrapping Cause Description";
+   }
+   badge Objstate {
+      label = "Validity";
+   }
+}
+
+---------------------------------- GROUPS -----------------------------------
+
+group ScrappingCauseGroup for ScrapPartsInShipmentInventoryStructure {
+   label = "";
+   lov RejectCodeRef with ReferenceScrappingCauseSelector {
+      description = RejectCodeRef.RejectMessage;
+      validate command {
+         execute {
+            set RejectMessage = RejectCodeRef.RejectMessage;
+         }
+      }
+   }
+   field DelnoteNoExists {
+      visible = [false];
+   }
+   field PrintPreShipDelNote {
+      visible = [DelnoteNoExists = "TRUE"];
+   }
+}
+
+group QtyToScrapGroup for ScrapPartsInShipmentInventoryStructure {
+   label = "Quantities to Scrap";
+   visible = [QtyPicked != null];
+   field QtyToScrap {
+      validate command {
+         execute {
+            if [QtyToScrap <= 0] {
+               alert(" The quantity to scrap must be greater than zero.");
+            }
+            if [QtyToScrap > QtyPicked] {
+               alert("The quantity to scrap can not be greater than the picked quantity.");
+            }
+            if [QtyToScrap = QtyPicked] {
+               set CatchQtyToScrap = CatchQtyPicked;
+            }
+         }
+      }
+   }
+   field QtyPicked {
+      editable = [false];
+   }
+   field InvUom {
+      editable = [false];
+   }
+   field CatchQtyToScrap {
+      visible = [CatchQtyPicked != null];
+      validate command {
+         execute {
+            if [CatchQtyToScrap <= 0] {
+               alert(" The catch quantity to scrap must be greater than zero.");
+            }
+            if [CatchQtyToScrap > CatchQtyPicked and QtyToScrap = QtyPicked] {
+               alert("The catch quantity to scrap can not be greater than the picked catch quantity.");
+            }
+         }
+      }
+   }
+   field CatchQtyPicked {
+      visible = [CatchQtyPicked != null];
+      editable = [false];
+   }
+   field CatchUom {
+      visible = [CatchQtyPicked != null];
+      editable = [false];
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+
+list HandleShipInventoryList for InventoryPartsInShipmentInventory {
+   field SourceRef1;
+   field SourceRef2;
+   field SourceRef3;
+   field SourceRef4;
+   field SourceRefType;
+   field ShipmentIdRef;
+   field ShipmentLineNo;
+   field Contract {
+      format = uppercase;
+   }
+   field PartNo {
+      format = uppercase;
+   }
+   field PartDescription;
+   field SourcePartNo;
+   field SourcePartDescription;
+   field ConfigurationId;
+   field QtyPicked;
+   field CatchQtyPicked {
+      columnvisible = [false];
+   }
+   field QtyShipped;
+   field UnitMeas;
+   field SenderType;
+   field SenderIdRef;
+   field SenderName;
+   field ReceiverType;
+   field ReceiverIdRef;
+   field ReceiverName;
+   field LocationNo;
+   field HandlingUnitId;
+   field HandlingUnitTypeId;
+   field HandlingUnitTypeDesc;
+   field HandlingUnitCategoryId;
+   field HandlingUnitCategoryDesc;
+   field Sscc;
+   field AltHandlingUnitLabelId;
+   field Warehouse;
+   field BayNo;
+   field RowNo;
+   field TierNo;
+   field BinNo;
+   field LotBatchNo;
+   field SerialNo;
+   field ConditionCode;
+   field ConditionCodeDescription;
+   field PartOwnership;
+   field Owner;
+   field OwnerName;
+   field EngChgLevel;
+   field WaivDevRejNo;
+   field AvailabilityControlId;
+   field Description;
+   field PickListNo;
+   @DynamicComponentDependency PROJ
+   field ProgramID;
+   @DynamicComponentDependency PROJ
+   field ProgramDescription;
+   @DynamicComponentDependency PROJ
+   field ProjectId {
+      format = uppercase;
+   }
+   @DynamicComponentDependency PROJ
+   field ProjectName;
+   @DynamicComponentDependency PROJ
+   field SubProjectId {
+      label = "Sub Project ID";
+   }
+   @DynamicComponentDependency PROJ
+   field SubProjectDescription;
+   @DynamicComponentDependency PROJ
+   field ActivityDescription {
+      label = "Activity Description";
+   }
+   @DynamicComponentDependency PROJ
+   field ActivitySeqRef;
+   field TopParentHandlingUnitId;
+   field TopParentHandlingUnitTypeId;
+   field TopParentHandlingUnitTypeDescription;
+   field TopParentSSCC;
+   field TopParentAltHandlingUnitLabelId;
+   field DelnoteNo {
+      format = uppercase;
+   }
+   field PreShipDeliveryNoteStatus;
+   @DynamicComponentDependency PROJ
+   field ActivityNo {
+      label = "Activity ID";
+   }
+   commandgroup InventoryPartInShipmentCmdGroup {
+
+      command ReturnPart;
+      command MovePart;
+   }
+   command ScrapPart;
+   commandgroup CreateAndPringCmdGroup {
+
+      command CreateAndPrintPreShipDeliv;
+   }
+   command ReturnParts;
+}
+
+@Override
+list ScrappingCauseLovList for ScrappingCause {
+   label = "";
+   static RejectReason {
+      label = "Scrapping Cause";
+   }
+   static RejectMessage {
+      label = "Scrapping Cause Description";
+   }
+   badge Objstate {
+      label = "Validity";
+   }
+}
+
+---------------------------------- DIALOGS ----------------------------------
+
+dialog ScrapPartsInShipmentInventoryDialog for ScrapPartsInShipmentInventoryStructure {
+   label = "Scrap Parts in Shipment Inventory";
+   input(QtyPicked, CatchQtyPicked, InvUom, CatchUom, DelnoteNoExists);
+   output(QtyToScrap, CatchQtyToScrap, RejectCode, RejectMessage, PrintPreShipDelNote);
+   markdowntext {
+      visible = [QtyPicked = null];
+      text = "The whole Quantity Picked on selected lines will be scrapped.";
+      emphasis StateChanged = [true];
+   }
+   group ScrappingCauseGroup;
+   group QtyToScrapGroup;
+   commandgroup ButtonCmdGroup {
+
+      command Ok {
+         enabled = [RejectCode != null and(QtyPicked = null or QtyToScrap != null) and(CatchQtyPicked = null or CatchQtyToScrap != null)];
+         execute {
+            exit OK;
+         }
+      }
+   }
+   command Cancel;
+}

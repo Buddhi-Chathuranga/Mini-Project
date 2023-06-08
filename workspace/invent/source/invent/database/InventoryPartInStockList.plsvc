@@ -1,0 +1,800 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     InventoryPartInStockList
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  211028  SeJalk  SC21R2-5234, Modified Get_Navigator_Params___ and Get_Connected_Objids_List___ to set selection type to CLOB.
+--  190716  JaThlk  SCUXXW4-23055, Removed multiple calls for better performance.
+--  190527  ChFolk  SCUXXW4-21153, Added function Get_Connected_Objids_List___ which returns string concatenated objid list.
+--  190527  ChFolk  SCUXXW4-21153, Removed function Generate_Where_Clause___
+--  190524  ChFolk  SCUXXW4-21153, Modified Get_Connected_Objids_For_Inv_Part___ to change the return value of objid_list_.
+--  181218  ChFolk  SCUXXW4-7102, Moved from InventoryPartInStockHandling.plsvc as the content was moved to the fragment.
+--  181214  fandse  SCUXXW4-7102  Added support for pre-posting (PrePostingWithoutSourceAssitant) when transfering from/to company rental asset.
+--  181025  ChFolk  SCUXXW4-7102, Removed Validate_Different_Site_And_Location___ as it is supported from client.
+--  181024  ChFolk  SCUXXW4-7102, Added methods Check_Allowed_Code_Parts___, Transfer_Rental_Asset___, Check_Define_Cost_Structure___ and Create_Selection___.  
+--  181023  ChFolk  SCUXXW4-7102, Added methods Perform_Putaway___, Validate_Selected_Contact___ and Validate_Selection___.
+--  181017  ChFolk  SCUXXW4-5876, Added function Validate_Company___.
+--  181015  ChFolk  SCUXXW4-5896, Added method Generate_Where_Clause___.
+--  181009  ChFolk  SCUXXW4-5881, Added method Validate_Activity_State___.
+--  180912  ChFolk  SCUXXW$-5346, Added method Validate_Different_Site_And_Location___.
+--  180822  ChFolk  SCUXXW4-5006, Added methods Get_From_Availability_Control_Id___, Get_To_Availability_Control_Description___ and 
+--  180822          Modify_Availability_Control___ to support Change Availability Control Id functionality.
+--  180821  Chfolk  SCUXXW4-7102, Added new method Get_Serviceability_Report_Result_Key___.
+--  180817  milise  SCUXXW4-7102, Started to convert tbwOverviewInvPartInStock using MTG Version: 1.23
+-----------------------------------------------------------------------------
+
+layer Core;
+FUNCTION Get_Catch_Unit_Enabled___(
+   contract_ IN VARCHAR2,
+   part_no_  IN VARCHAR2 ) RETURN VARCHAR2
+IS   
+BEGIN
+   RETURN Inventory_Part_API.Get_Enabled_Catch_Unit_Meas(contract_, part_no_);
+END Get_Catch_Unit_Enabled___;
+
+FUNCTION Get_Report_Result_Key___ (
+   part_no_      IN VARCHAR2,
+   contract_     IN VARCHAR2,
+   serial_no_    IN VARCHAR2,
+   lot_batch_no_ IN VARCHAR2,
+   qty_scrapped_ IN NUMBER ) RETURN NUMBER
+IS
+   parameter_attr_    VARCHAR2(32000);
+   report_attr_       VARCHAR2(1000);  
+   result_key_        NUMBER; 
+   end_user_          VARCHAR2(200) := Fnd_Session_API.Get_Fnd_User; 
+
+BEGIN
+   Client_SYS.Clear_attr(parameter_attr_);
+   Client_SYS.Add_To_Attr('PART_NO', part_no_, parameter_attr_);
+   Client_SYS.Add_To_Attr('CONTRACT', contract_, parameter_attr_);
+   Client_SYS.Add_To_Attr('SERIAL_NO', serial_no_, parameter_attr_);   
+   IF (lot_batch_no_ != '*') THEN
+      Client_SYS.Add_To_Attr('LOT_BATCH_NO', lot_batch_no_, parameter_attr_);
+   END IF;
+   Client_SYS.Add_To_Attr('QUANTITY', qty_scrapped_, parameter_attr_);   
+   Client_SYS.Add_To_Attr('STATUS', 'SCRAPPED', parameter_attr_);   
+   Client_SYS.Clear_Attr(report_attr_);
+   Client_SYS.Add_To_Attr('REPORT_ID', 'SERVICEABILITY_TAG_REP', report_attr_);
+   User_Allowed_Site_API.Is_Authorized(contract_); 
+
+   result_key_ := Report_Format_API.Create_New_Report(report_attr_, parameter_attr_, end_user_);
+
+   RETURN result_key_;
+END Get_Report_Result_Key___;
+
+
+PROCEDURE Perform_Putaway_On_Inv_Part___ (
+   selection_ IN  VARCHAR2,
+   info$_     OUT VARCHAR2 ) 
+IS
+   key_list_                 VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_        VARCHAR2(32000);
+   inv_part_in_stock_keys_   Inventory_Part_In_Stock_key;
+   next_session_id_          NUMBER;
+   info_                     VARCHAR2(2000);
+   concat_info_              VARCHAR2(2000);
+BEGIN
+   next_session_id_ := Inventory_Event_Manager_API.Get_Next_Inventory_Event_Id;
+   WHILE (INSTR(key_list_, ';') > 0) LOOP
+      current_selection_ := substr(key_list_, 0, INSTR(key_list_, ';'));
+      inv_part_in_stock_keys_.contract := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT');
+      inv_part_in_stock_keys_.configuration_id := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONFIGURATION_ID');
+      inv_part_in_stock_keys_.location_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOCATION_NO');
+      inv_part_in_stock_keys_.part_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PART_NO');
+      inv_part_in_stock_keys_.serial_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SERIAL_NO');
+      inv_part_in_stock_keys_.lot_batch_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOT_BATCH_NO');
+      inv_part_in_stock_keys_.eng_chg_level := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ENG_CHG_LEVEL');
+      inv_part_in_stock_keys_.waiv_dev_rej_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'WAIV_DEV_REJ_NO');
+      inv_part_in_stock_keys_.activity_seq := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'ACTIVITY_SEQ'));
+      inv_part_in_stock_keys_.handling_unit_id := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'HANDLING_UNIT_ID'));
+      -- security check
+      Inventory_Part_In_Stock_Uiv_Initial_Check___(inv_part_in_stock_keys_.contract,
+                                                   inv_part_in_stock_keys_.part_no,
+                                                   inv_part_in_stock_keys_.configuration_id,
+                                                   inv_part_in_stock_keys_.location_no,
+                                                   inv_part_in_stock_keys_.lot_batch_no,
+                                                   inv_part_in_stock_keys_.serial_no,
+                                                   inv_part_in_stock_keys_.eng_chg_level,
+                                                   inv_part_in_stock_keys_.waiv_dev_rej_no,
+                                                   inv_part_in_stock_keys_.activity_seq,
+                                                   inv_part_in_stock_keys_.handling_unit_id);
+      
+      Inventory_Event_Manager_API.Set_Session_Id(next_session_id_);
+      Inventory_Part_In_Stock_API.Putaway(info_,
+                                          inv_part_in_stock_keys_.contract,
+                                          inv_part_in_stock_keys_.part_no,
+                                          inv_part_in_stock_keys_.configuration_id,
+                                          inv_part_in_stock_keys_.location_no,
+                                          inv_part_in_stock_keys_.lot_batch_no,
+                                          inv_part_in_stock_keys_.serial_no,
+                                          inv_part_in_stock_keys_.eng_chg_level,
+                                          inv_part_in_stock_keys_.waiv_dev_rej_no,
+                                          inv_part_in_stock_keys_.activity_seq,
+                                          inv_part_in_stock_keys_.handling_unit_id); 
+      key_list_ := SUBSTR(key_list_, (INSTR(key_list_, ';') + 1));
+      concat_info_ := concat_info_ || info_;
+   END LOOP;
+   Inventory_Event_Manager_API.Finish(next_session_id_);
+   info$_ := concat_info_;
+END Perform_Putaway_On_Inv_Part___;
+
+FUNCTION Validate_Selected_Contact_On_Inv_Part___ (
+   contract_list_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   common_contract_     VARCHAR2(5);   
+   local_contract_list_ VARCHAR2(32000);
+   current_contract_    VARCHAR2(5);
+   
+BEGIN
+   local_contract_list_ := contract_list_;  
+   WHILE (INSTR(local_contract_list_, Client_Sys.record_separator_) > 0) LOOP
+      current_contract_ := substr(local_contract_list_, 0, INSTR(local_contract_list_, Client_Sys.record_separator_ ) -1);    
+      IF (common_contract_ IS NULL) THEN
+         common_contract_ := current_contract_;         
+      ELSE
+         IF (current_contract_ != common_contract_) THEN
+            common_contract_ := NULL;
+            EXIT;           
+         END IF;   
+      END IF;
+      local_contract_list_ := SUBSTR(local_contract_list_, (INSTR(local_contract_list_, Client_Sys.record_separator_) + 1));      
+   END LOOP;
+   RETURN common_contract_;
+END Validate_Selected_Contact_On_Inv_Part___;
+
+
+FUNCTION Get_Selected_Company___(
+   contract_list_ IN VARCHAR2 )  RETURN VARCHAR2
+IS
+   contract_   VARCHAR2(5);
+   company_    VARCHAR2(20);
+BEGIN
+   -- here it is enough to get only one contract as the command is enable from client only if all of the selected lines belongs to one company 
+   contract_ := substr(contract_list_, 0, INSTR(contract_list_, Client_Sys.record_separator_ ) -1);
+   company_ := Site_API.Get_Company(contract_);
+   RETURN company_;
+END Get_Selected_Company___;
+
+FUNCTION Get_Any_Selected_Contract___(
+   contract_list_ IN VARCHAR2 )  RETURN VARCHAR2
+IS
+   contract_   VARCHAR2(5);
+BEGIN
+   -- here it is enough to get only one contract as the command is enable from client only if all of the selected lines belongs to one company 
+   -- Contract is used to get_allowed_codeparts for company
+   contract_ := substr(contract_list_, 0, INSTR(contract_list_, Client_Sys.record_separator_ ) -1);
+   RETURN contract_;
+END Get_Any_Selected_Contract___;
+
+PROCEDURE Update_Expiration_Date_On_Inv_Part___ (
+  contract_          IN VARCHAR2,
+  part_no_           IN VARCHAR2,
+  configuration_id_  IN VARCHAR2,
+  location_no_       IN VARCHAR2,
+  lot_batch_no_      IN VARCHAR2,
+  serial_no_         IN VARCHAR2,
+  eng_chg_level_     IN VARCHAR2,
+  waiv_dev_rej_no_   IN VARCHAR2,
+  activity_seq_      IN NUMBER,
+  handling_unit_id_  IN NUMBER,
+  expiration_date_   IN DATE)
+IS 
+BEGIN
+   INVENTORY_PART_IN_STOCK_API.Modify_Expiration_Date( contract_,
+                                                       part_no_,
+                                                       configuration_id_,
+                                                       location_no_,
+                                                       lot_batch_no_,
+                                                       serial_no_,
+                                                       eng_chg_level_,
+                                                       waiv_dev_rej_no_,
+                                                       activity_seq_,
+                                                       handling_unit_id_,
+                                                       expiration_date_);
+END Update_Expiration_Date_On_Inv_Part___;
+
+FUNCTION Check_Same_Expiration_Date___ (
+   selection_ IN VARCHAR2 ) RETURN DATE
+IS
+   selection_in_              VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_         VARCHAR2(32000);
+   expiration_date_           DATE;
+   temp_expiration_date_      DATE;
+   contract_                  VARCHAR2(5);
+   part_no_                   VARCHAR2(25);
+   configuration_id_          VARCHAR2(50);
+   location_no_               VARCHAR2(35);
+   lot_batch_no_              VARCHAR2(20);
+   serial_no_                 VARCHAR2(50);
+   eng_chg_level_             VARCHAR2(6);
+   waiv_dev_rej_no_           VARCHAR2(15);
+   activity_seq_              NUMBER;
+   handling_unit_id_          NUMBER;
+   CURSOR get_expiration_date IS
+      SELECT Expiration_Date 
+      FROM Inventory_Part_In_Stock 
+         WHERE Contract        = contract_ AND               
+               Part_No          = part_no_ AND        
+               Configuration_Id = configuration_id_ AND
+               Location_No      = location_no_ AND    
+               Lot_Batch_No      = lot_batch_no_ AND   
+               Serial_No        = serial_no_ AND      
+               Eng_Chg_Level     = eng_chg_level_ AND  
+               Waiv_Dev_Rej_No    = waiv_dev_rej_no_ AND
+               Activity_Seq     = activity_seq_ AND   
+               Handling_Unit_Id  = handling_unit_id_;
+BEGIN
+   WHILE (INSTR(selection_in_, ';') > 0) LOOP
+      current_selection_ := substr(selection_in_, 0, INSTR(selection_in_, ';'));
+      contract_          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT');
+      part_no_           := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PART_NO');
+      configuration_id_  := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONFIGURATION_ID');
+      location_no_       := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOCATION_NO');
+      lot_batch_no_      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOT_BATCH_NO');
+      serial_no_         := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SERIAL_NO');
+      eng_chg_level_     := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ENG_CHG_LEVEL');
+      waiv_dev_rej_no_   := Client_SYS.Get_Key_Reference_Value(current_selection_, 'WAIV_DEV_REJ_NO');
+      activity_seq_      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ACTIVITY_SEQ');
+      handling_unit_id_  := Client_SYS.Get_Key_Reference_Value(current_selection_, 'HANDLING_UNIT_ID');
+      selection_in_      := substr(selection_in_, INSTR(selection_in_, ';')+1);
+        
+      OPEN get_expiration_date;
+      FETCH get_expiration_date INTO temp_expiration_date_;
+      CLOSE get_expiration_date;
+      IF (nvl(expiration_date_, temp_expiration_date_) = temp_expiration_date_) THEN
+         expiration_date_ := temp_expiration_date_;
+      ELSE
+         expiration_date_ := null;
+      END IF;
+   END LOOP;
+
+   RETURN expiration_date_;
+   
+END Check_Same_Expiration_Date___;
+
+FUNCTION Get_Serviceability_Report_Result_Key___ (
+   selection_                IN VARCHAR2,
+   serviceability_status_db_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   key_list_            VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_   VARCHAR2(32000);
+   inv_part_in_stock_keys_  Inventory_Part_In_Stock_key;
+   result_key_          NUMBER;
+   qty_on_hand_         NUMBER;
+   parameter_attr_      VARCHAR2(32000);
+   report_attr_         VARCHAR2(32000);
+   result_key_list_     VARCHAR2(5000);
+   end_user_            VARCHAR2(200) := Fnd_Session_API.Get_Fnd_User;
+BEGIN   
+   WHILE (INSTR(key_list_, ';') > 0) LOOP
+      current_selection_  := substr(key_list_, 0, INSTR(key_list_, ';'));
+      Client_SYS.Clear_attr(parameter_attr_);
+      Client_SYS.Clear_attr(report_attr_);
+      inv_part_in_stock_keys_.contract := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT');
+      inv_part_in_stock_keys_.configuration_id := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONFIGURATION_ID');
+      inv_part_in_stock_keys_.location_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOCATION_NO');
+      inv_part_in_stock_keys_.part_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PART_NO');
+      inv_part_in_stock_keys_.serial_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SERIAL_NO');
+      inv_part_in_stock_keys_.lot_batch_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOT_BATCH_NO');
+      inv_part_in_stock_keys_.eng_chg_level := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ENG_CHG_LEVEL');
+      inv_part_in_stock_keys_.waiv_dev_rej_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'WAIV_DEV_REJ_NO');
+      inv_part_in_stock_keys_.activity_seq := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'ACTIVITY_SEQ'));
+      inv_part_in_stock_keys_.handling_unit_id := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'HANDLING_UNIT_ID'));
+
+      IF ((NVL(inv_part_in_stock_keys_.serial_no, '*') = '*' AND serviceability_status_db_ IS NOT NULL) OR (inv_part_in_stock_keys_.serial_no != '*')) THEN         
+         Client_SYS.Add_To_Attr('PART_NO', inv_part_in_stock_keys_.part_no, parameter_attr_);
+         IF (inv_part_in_stock_keys_.lot_batch_no != '*') THEN
+            Client_SYS.Add_To_Attr('LOT_BATCH_NO', inv_part_in_stock_keys_.lot_batch_no, parameter_attr_);
+         END IF;
+         IF (NVL(inv_part_in_stock_keys_.serial_no, '*') = '*' AND serviceability_status_db_ IS NOT NULL) THEN      
+            qty_on_hand_ := Inventory_Part_In_Stock_API.Get_Qty_Onhand(inv_part_in_stock_keys_.contract,
+                                                                       inv_part_in_stock_keys_.part_no,
+                                                                       inv_part_in_stock_keys_.configuration_id,
+                                                                       inv_part_in_stock_keys_.location_no,
+                                                                       inv_part_in_stock_keys_.lot_batch_no,
+                                                                       inv_part_in_stock_keys_.serial_no,
+                                                                       inv_part_in_stock_keys_.eng_chg_level,
+                                                                       inv_part_in_stock_keys_.waiv_dev_rej_no,
+                                                                       inv_part_in_stock_keys_.activity_seq,
+                                                                       inv_part_in_stock_keys_.handling_unit_id);
+            Client_SYS.Add_To_Attr('QUANTITY', qty_on_hand_, parameter_attr_);
+            Client_SYS.Add_To_Attr('STATUS', serviceability_status_db_, parameter_attr_);
+         ELSIF (inv_part_in_stock_keys_.serial_no != '*') THEN
+             Log_SYS.Fnd_Trace_(Log_SYS.debug_, ' WWWWWWWW {serial_no_ ' || inv_part_in_stock_keys_.serial_no);
+            Client_SYS.Add_To_Attr('SERIAL_NO', inv_part_in_stock_keys_.serial_no, parameter_attr_);
+            Client_SYS.Add_To_Attr('QUANTITY', '1', parameter_attr_);
+         END IF;
+         -- security check
+         Inventory_Part_In_Stock_Uiv_Initial_Check___(inv_part_in_stock_keys_.contract,
+                                                      inv_part_in_stock_keys_.part_no,
+                                                      inv_part_in_stock_keys_.configuration_id,
+                                                      inv_part_in_stock_keys_.location_no,
+                                                      inv_part_in_stock_keys_.lot_batch_no,
+                                                      inv_part_in_stock_keys_.serial_no,
+                                                      inv_part_in_stock_keys_.eng_chg_level,
+                                                      inv_part_in_stock_keys_.waiv_dev_rej_no,
+                                                      inv_part_in_stock_keys_.activity_seq,
+                                                      inv_part_in_stock_keys_.handling_unit_id); 
+          
+         Client_SYS.Add_To_Attr('REPORT_ID', 'SERVICEABILITY_TAG_REP', report_attr_);
+         result_key_ := Report_Format_API.Create_New_Report(report_attr_, parameter_attr_, end_user_);  
+         
+         IF (result_key_list_ IS NULL) THEN
+            result_key_list_ := result_key_;
+         ELSE
+            result_key_list_ := result_key_list_ || ',' || result_key_;
+         END IF;          
+      END IF;
+      key_list_ := SUBSTR(key_list_, (INSTR(key_list_, ';') + 1));
+   END LOOP;
+   
+   RETURN result_key_list_;
+END Get_Serviceability_Report_Result_Key___;
+
+FUNCTION Get_From_Availability_Control_Id___(
+   selected_availability_ctrl_ids_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   avail_ctrl_id_list_               VARCHAR2(32000);
+   current_selection_                VARCHAR2(32000);  
+   current_availability_control_id_  VARCHAR2(25); 
+   from_availability_control_id_     VARCHAR2(25);
+   set_availability_control_         BOOLEAN := FALSE; 
+BEGIN
+   avail_ctrl_id_list_ := selected_availability_ctrl_ids_;   
+   
+   WHILE (INSTR(avail_ctrl_id_list_, Client_Sys.record_separator_) > 0) LOOP
+      current_selection_  := substr(avail_ctrl_id_list_, 0, INSTR(avail_ctrl_id_list_, Client_Sys.record_separator_));
+      current_availability_control_id_ := substr(current_selection_, 0, INSTR(current_selection_, Client_Sys.record_separator_)-1);
+      IF (NOT set_availability_control_) THEN
+         from_availability_control_id_ := current_availability_control_id_;
+         set_availability_control_ := TRUE;
+      END IF;   
+      IF (NVL(from_availability_control_id_, '') != NVL(current_availability_control_id_, '')) THEN
+         from_availability_control_id_ := NULL;
+         EXIT;      
+      END IF;         
+      avail_ctrl_id_list_ := SUBSTR(avail_ctrl_id_list_, (INSTR(avail_ctrl_id_list_, Client_Sys.record_separator_) + 1));      
+   END LOOP;
+      
+   RETURN from_availability_control_id_;
+END Get_From_Availability_Control_Id___;
+
+PROCEDURE Modify_Availability_Control___ (
+   selection_                   IN VARCHAR2,
+   new_availability_control_id_ IN VARCHAR2 ) 
+IS
+   key_list_                 VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_        VARCHAR2(32000);
+   inv_part_in_stock_keys_   Inventory_Part_In_Stock_key;
+BEGIN
+   WHILE (INSTR(key_list_, ';') > 0) LOOP
+      current_selection_ := substr(key_list_, 0, INSTR(key_list_, ';'));
+      inv_part_in_stock_keys_.contract := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT');
+      inv_part_in_stock_keys_.configuration_id := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONFIGURATION_ID');
+      inv_part_in_stock_keys_.location_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOCATION_NO');
+      inv_part_in_stock_keys_.part_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PART_NO');
+      inv_part_in_stock_keys_.serial_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SERIAL_NO');
+      inv_part_in_stock_keys_.lot_batch_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOT_BATCH_NO');
+      inv_part_in_stock_keys_.eng_chg_level := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ENG_CHG_LEVEL');
+      inv_part_in_stock_keys_.waiv_dev_rej_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'WAIV_DEV_REJ_NO');
+      inv_part_in_stock_keys_.activity_seq := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'ACTIVITY_SEQ'));
+      inv_part_in_stock_keys_.handling_unit_id := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'HANDLING_UNIT_ID'));
+      
+      -- security check
+      Inventory_Part_In_Stock_Uiv_Initial_Check___(inv_part_in_stock_keys_.contract,
+                                                   inv_part_in_stock_keys_.part_no,
+                                                   inv_part_in_stock_keys_.configuration_id,
+                                                   inv_part_in_stock_keys_.location_no,
+                                                   inv_part_in_stock_keys_.lot_batch_no,
+                                                   inv_part_in_stock_keys_.serial_no,
+                                                   inv_part_in_stock_keys_.eng_chg_level,
+                                                   inv_part_in_stock_keys_.waiv_dev_rej_no,
+                                                   inv_part_in_stock_keys_.activity_seq,
+                                                   inv_part_in_stock_keys_.handling_unit_id);
+      
+      Inventory_Part_In_Stock_API.Modify_Availability_Control_Id(inv_part_in_stock_keys_.contract,
+                                                                 inv_part_in_stock_keys_.part_no,
+                                                                 inv_part_in_stock_keys_.configuration_id,
+                                                                 inv_part_in_stock_keys_.location_no,
+                                                                 inv_part_in_stock_keys_.lot_batch_no,
+                                                                 inv_part_in_stock_keys_.serial_no,
+                                                                 inv_part_in_stock_keys_.eng_chg_level,
+                                                                 inv_part_in_stock_keys_.waiv_dev_rej_no,
+                                                                 inv_part_in_stock_keys_.activity_seq,
+                                                                 inv_part_in_stock_keys_.handling_unit_id,
+                                                                 new_availability_control_id_); 
+      key_list_ := SUBSTR(key_list_, (INSTR(key_list_, ';') + 1));
+   END LOOP;   
+END Modify_Availability_Control___;
+
+FUNCTION Get_Connected_Objids_For_Inv_Part___(
+   selection_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   key_list_                VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_       VARCHAR2(32000);
+   inv_part_in_stock_keys_  Inventory_Part_In_Stock_key;
+   objid_                   INVENTORY_PART_IN_STOCK.OBJID%TYPE;
+   objversion_              INVENTORY_PART_IN_STOCK.OBJVERSION%TYPE;
+   objid_list_              VARCHAR2(32000);
+BEGIN
+   WHILE (INSTR(key_list_, ';') > 0) LOOP
+      current_selection_  := substr(key_list_, 0, INSTR(key_list_, ';'));
+      inv_part_in_stock_keys_.contract := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT');
+      inv_part_in_stock_keys_.part_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PART_NO');
+      inv_part_in_stock_keys_.configuration_id := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONFIGURATION_ID');
+      inv_part_in_stock_keys_.location_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOCATION_NO');
+      inv_part_in_stock_keys_.lot_batch_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOT_BATCH_NO');
+      inv_part_in_stock_keys_.serial_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SERIAL_NO');      
+      inv_part_in_stock_keys_.eng_chg_level := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ENG_CHG_LEVEL');
+      inv_part_in_stock_keys_.waiv_dev_rej_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'WAIV_DEV_REJ_NO');
+      inv_part_in_stock_keys_.activity_seq := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'ACTIVITY_SEQ'));
+      inv_part_in_stock_keys_.handling_unit_id := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'HANDLING_UNIT_ID'));
+      
+      Inventory_Part_In_Stock_API.Get_Id_Version_By_Keys(objid_,
+                                                         objversion_,
+                                                         inv_part_in_stock_keys_.contract,
+                                                         inv_part_in_stock_keys_.part_no,
+                                                         inv_part_in_stock_keys_.configuration_id,
+                                                         inv_part_in_stock_keys_.location_no,
+                                                         inv_part_in_stock_keys_.lot_batch_no,
+                                                         inv_part_in_stock_keys_.serial_no,
+                                                         inv_part_in_stock_keys_.eng_chg_level,
+                                                         inv_part_in_stock_keys_.waiv_dev_rej_no,
+                                                         inv_part_in_stock_keys_.activity_seq,
+                                                         inv_part_in_stock_keys_.handling_unit_id);
+      IF (objid_list_ IS NULL) THEN
+         objid_list_ := objid_;
+      ELSE
+         objid_list_ := objid_list_ || ',' ||objid_;
+      END IF;
+      key_list_ := SUBSTR(key_list_, (INSTR(key_list_, ';') + 1));
+   END LOOP; 
+   RETURN objid_list_;
+END Get_Connected_Objids_For_Inv_Part___;
+
+FUNCTION Get_Connected_Objids_List___(
+   selection_ IN CLOB ) RETURN VARCHAR2
+IS
+   key_list_                CLOB := CONCAT(selection_, ';');
+   current_selection_       VARCHAR2(32000);
+   inv_part_in_stock_keys_  Inventory_Part_In_Stock_key;
+   objid_                   INVENTORY_PART_IN_STOCK.OBJID%TYPE;
+   objversion_              INVENTORY_PART_IN_STOCK.OBJVERSION%TYPE;
+   objid_list_              VARCHAR2(32000);
+BEGIN
+   WHILE (INSTR(key_list_, ';') > 0) LOOP
+      current_selection_  := substr(key_list_, 0, INSTR(key_list_, ';'));
+      inv_part_in_stock_keys_.contract := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT');
+      inv_part_in_stock_keys_.part_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PART_NO');
+      inv_part_in_stock_keys_.configuration_id := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONFIGURATION_ID');
+      inv_part_in_stock_keys_.location_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOCATION_NO');
+      inv_part_in_stock_keys_.lot_batch_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOT_BATCH_NO');
+      inv_part_in_stock_keys_.serial_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SERIAL_NO');      
+      inv_part_in_stock_keys_.eng_chg_level := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ENG_CHG_LEVEL');
+      inv_part_in_stock_keys_.waiv_dev_rej_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'WAIV_DEV_REJ_NO');
+      inv_part_in_stock_keys_.activity_seq := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'ACTIVITY_SEQ'));
+      inv_part_in_stock_keys_.handling_unit_id := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'HANDLING_UNIT_ID'));
+      
+      Inventory_Part_In_Stock_API.Get_Id_Version_By_Keys(objid_,
+                                                         objversion_,
+                                                         inv_part_in_stock_keys_.contract,
+                                                         inv_part_in_stock_keys_.part_no,
+                                                         inv_part_in_stock_keys_.configuration_id,
+                                                         inv_part_in_stock_keys_.location_no,
+                                                         inv_part_in_stock_keys_.lot_batch_no,
+                                                         inv_part_in_stock_keys_.serial_no,
+                                                         inv_part_in_stock_keys_.eng_chg_level,
+                                                         inv_part_in_stock_keys_.waiv_dev_rej_no,
+                                                         inv_part_in_stock_keys_.activity_seq,
+                                                         inv_part_in_stock_keys_.handling_unit_id);
+      IF (objid_list_ IS NULL) THEN
+         objid_list_ := objid_;
+      ELSE
+         objid_list_ := objid_list_ || ',' ||objid_;
+      END IF;                                                         
+      key_list_ := SUBSTR(key_list_, (INSTR(key_list_, ';') + 1));
+   END LOOP; 
+   RETURN objid_list_;
+END Get_Connected_Objids_List___;
+   
+PROCEDURE Validate_Activity_State___ (
+   selection_ IN VARCHAR2 ) 
+IS
+   key_list_             VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_    VARCHAR2(32000);
+   activity_seq_         NUMBER;
+BEGIN
+   $IF (Component_Proj_SYS.INSTALLED) $THEN
+      WHILE (INSTR(key_list_, ';') > 0) LOOP
+         current_selection_ := substr(key_list_, 0, INSTR(key_list_, ';'));
+         activity_seq_ := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'ACTIVITY_SEQ'));
+         Activity_API.Validate_Activity_State(activity_seq_, 'INVENTORY_BALANCE_CHANGE');
+         key_list_ := SUBSTR(key_list_, (INSTR(key_list_, ';') + 1));
+      END LOOP;
+   $ELSE
+      NULL;
+   $END
+END Validate_Activity_State___;
+
+FUNCTION Create_Value_Attr___(
+   code_a_                       IN VARCHAR2,
+   code_b_                       IN VARCHAR2,
+   code_c_                       IN VARCHAR2,
+   code_d_                       IN VARCHAR2,
+   code_e_                       IN VARCHAR2,
+   code_f_                       IN VARCHAR2,
+   code_g_                       IN VARCHAR2,
+   code_h_                       IN VARCHAR2,
+   code_i_                       IN VARCHAR2,
+   code_j_                       IN VARCHAR2,
+   rental_asset_transfer_action_ IN VARCHAR2,
+   cost_detail_id_               IN NUMBER ) RETURN VARCHAR2
+IS
+   value_attr_              VARCHAR2(2000);
+BEGIN
+   Client_SYS.Clear_Attr(value_attr_);
+   Client_SYS.Add_To_Attr('ACCOUNT_NO', code_a_, value_attr_);
+   Client_SYS.Add_To_Attr('CODE_B', code_b_, value_attr_);
+   Client_SYS.Add_To_Attr('CODE_C', code_c_, value_attr_);
+   Client_SYS.Add_To_Attr('CODE_D', code_d_, value_attr_);
+   Client_SYS.Add_To_Attr('CODE_E', code_e_, value_attr_);
+   Client_SYS.Add_To_Attr('CODE_F', code_f_, value_attr_);
+   Client_SYS.Add_To_Attr('CODE_G', code_g_, value_attr_);
+   Client_SYS.Add_To_Attr('CODE_H', code_h_, value_attr_);
+   Client_SYS.Add_To_Attr('CODE_I', code_i_, value_attr_);
+   Client_SYS.Add_To_Attr('CODE_J', code_j_, value_attr_);
+   Client_SYS.Add_To_Attr('TRANSFER_ACTION', rental_asset_transfer_action_, value_attr_);
+   Client_SYS.Add_To_Attr('COST_DETAIL_ID', cost_detail_id_, value_attr_);
+   RETURN value_attr_;
+END Create_Value_Attr___;   
+   
+PROCEDURE Transfer_To_Rental_Asset___ (
+   selection_                    IN VARCHAR2,
+   code_a_                       IN VARCHAR2,
+   code_b_                       IN VARCHAR2,
+   code_c_                       IN VARCHAR2,
+   code_d_                       IN VARCHAR2,
+   code_e_                       IN VARCHAR2,
+   code_f_                       IN VARCHAR2,
+   code_g_                       IN VARCHAR2,
+   code_h_                       IN VARCHAR2,
+   code_i_                       IN VARCHAR2,
+   code_j_                       IN VARCHAR2,
+   rental_asset_transfer_action_ IN VARCHAR2,
+   cost_detail_id_               IN NUMBER,
+   part_tracking_session_id_     IN NUMBER ) 
+IS
+   key_list_                VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_       VARCHAR2(32000); 
+   inv_part_in_stock_keys_  Inventory_Part_In_Stock_key;
+   inv_part_instock_rec_    Inventory_Part_In_Stock_API.Public_Rec;
+   msg_                     CLOB;
+   value_attr_              VARCHAR2(2000);
+   dummy_str_               VARCHAR2(200);
+   dummy_number_            NUMBER;
+BEGIN
+   value_attr_ := Create_Value_Attr___(code_a_,
+                                       code_b_,
+                                       code_c_,
+                                       code_d_,
+                                       code_e_,
+                                       code_f_,
+                                       code_g_,
+                                       code_h_,
+                                       code_i_,
+                                       code_j_,
+                                       rental_asset_transfer_action_,
+                                       cost_detail_id_);   
+   
+   WHILE (INSTR(key_list_, ';') > 0) LOOP
+      current_selection_ := substr(key_list_, 0, INSTR(key_list_, ';'));    
+      inv_part_in_stock_keys_.contract := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT');
+      inv_part_in_stock_keys_.part_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PART_NO');
+      inv_part_in_stock_keys_.configuration_id := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONFIGURATION_ID');
+      inv_part_in_stock_keys_.location_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOCATION_NO');
+      inv_part_in_stock_keys_.lot_batch_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOT_BATCH_NO');
+      inv_part_in_stock_keys_.serial_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SERIAL_NO');
+      inv_part_in_stock_keys_.eng_chg_level := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ENG_CHG_LEVEL');
+      inv_part_in_stock_keys_.waiv_dev_rej_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'WAIV_DEV_REJ_NO');
+      inv_part_in_stock_keys_.activity_seq := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'ACTIVITY_SEQ'));
+      inv_part_in_stock_keys_.handling_unit_id := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'HANDLING_UNIT_ID'));
+      -- security check
+      Inventory_Part_In_Stock_Uiv_Initial_Check___(inv_part_in_stock_keys_.contract,
+                                                   inv_part_in_stock_keys_.part_no,
+                                                   inv_part_in_stock_keys_.configuration_id,
+                                                   inv_part_in_stock_keys_.location_no,
+                                                   inv_part_in_stock_keys_.lot_batch_no,
+                                                   inv_part_in_stock_keys_.serial_no,
+                                                   inv_part_in_stock_keys_.eng_chg_level,
+                                                   inv_part_in_stock_keys_.waiv_dev_rej_no,
+                                                   inv_part_in_stock_keys_.activity_seq,
+                                                   inv_part_in_stock_keys_.handling_unit_id);
+                                                   
+      inv_part_instock_rec_ := Inventory_Part_In_Stock_API.Get(inv_part_in_stock_keys_.contract,
+                                                               inv_part_in_stock_keys_.part_no,
+                                                               inv_part_in_stock_keys_.configuration_id,
+                                                               inv_part_in_stock_keys_.location_no,
+                                                               inv_part_in_stock_keys_.lot_batch_no,
+                                                               inv_part_in_stock_keys_.serial_no,
+                                                               inv_part_in_stock_keys_.eng_chg_level,
+                                                               inv_part_in_stock_keys_.waiv_dev_rej_no,
+                                                               inv_part_in_stock_keys_.activity_seq,
+                                                               inv_part_in_stock_keys_.handling_unit_id);
+      -- create message                                                               
+      Message_SYS.Add_Attribute(msg_, 'CONTRACT', inv_part_in_stock_keys_.contract);
+      Message_SYS.Add_Attribute(msg_, 'PART_NO', inv_part_in_stock_keys_.part_no);
+      Message_SYS.Add_Attribute(msg_, 'CONFIGURATION_ID', inv_part_in_stock_keys_.configuration_id);
+      Message_SYS.Add_Attribute(msg_, 'LOCATION_NO', inv_part_in_stock_keys_.location_no);
+      Message_SYS.Add_Attribute(msg_, 'LOT_BATCH_NO', inv_part_in_stock_keys_.lot_batch_no);
+      Message_SYS.Add_Attribute(msg_, 'SERIAL_NO', inv_part_in_stock_keys_.serial_no);
+      Message_SYS.Add_Attribute(msg_, 'ENG_CHG_LEVEL', inv_part_in_stock_keys_.eng_chg_level);
+      Message_SYS.Add_Attribute(msg_, 'WAIV_DEV_REJ_NO', inv_part_in_stock_keys_.waiv_dev_rej_no);
+      Message_SYS.Add_Attribute(msg_, 'ACTIVITY_SEQ', inv_part_in_stock_keys_.activity_seq);
+      Message_SYS.Add_Attribute(msg_, 'HANDLING_UNIT_ID', inv_part_in_stock_keys_.handling_unit_id);
+      Message_SYS.Add_Attribute(msg_, 'QTY_ON_HAND', inv_part_instock_rec_.qty_onhand);
+      Message_SYS.Add_Attribute(msg_, 'CATCH_QTY_ON_HAND', inv_part_instock_rec_.catch_qty_onhand);    
+      IF (inv_part_in_stock_keys_.serial_no = '*' AND Part_Catalog_API.Get_Rcpt_Issue_Serial_Track_Db(inv_part_in_stock_keys_.part_no) = 'TRUE') THEN
+         Message_SYS.Add_Attribute(msg_, 'PART_TRACKING_SESSION_ID', part_tracking_session_id_);
+      ELSE
+         Message_SYS.Add_Attribute(msg_, 'PART_TRACKING_SESSION_ID', dummy_number_);
+      END IF;                                                          
+     
+      key_list_ := SUBSTR(key_list_, (INSTR(key_list_, ';') + 1));
+   END LOOP;
+      
+   Inv_Part_Ownership_Manager_API.Packed_Transfer_Rental_Asset__(dummy_str_, value_attr_, msg_);
+END Transfer_To_Rental_Asset___;
+
+PROCEDURE Transfer_From_Rental_Asset___ (
+   contract_                     IN VARCHAR2,
+   part_no_                      IN VARCHAR2,
+   configuration_id_             IN VARCHAR2,
+   location_no_                  IN VARCHAR2,
+   lot_batch_no_                 IN VARCHAR2,
+   serial_no_                    IN VARCHAR2,
+   eng_chg_level_                IN VARCHAR2,
+   waiv_dev_rej_no_              IN VARCHAR2,
+   activity_seq_                 IN NUMBER,
+   handling_unit_id_             IN NUMBER,
+   qty_onhand_                   IN NUMBER,
+   catch_qty_onhand_             IN NUMBER,
+   code_a_                       IN VARCHAR2,
+   code_b_                       IN VARCHAR2,
+   code_c_                       IN VARCHAR2,
+   code_d_                       IN VARCHAR2,
+   code_e_                       IN VARCHAR2,
+   code_f_                       IN VARCHAR2,
+   code_g_                       IN VARCHAR2,
+   code_h_                       IN VARCHAR2,
+   code_i_                       IN VARCHAR2,
+   code_j_                       IN VARCHAR2,
+   rental_asset_transfer_action_ IN VARCHAR2,
+   cost_detail_id_               IN NUMBER,
+   part_tracking_session_id_     IN NUMBER ) 
+IS
+   value_attr_              VARCHAR2(2000);
+   dummy_str_               VARCHAR2(200);
+   msg_                     CLOB;
+   dummy_number_            NUMBER;
+BEGIN
+   value_attr_ := Create_Value_Attr___(code_a_,
+                                       code_b_,
+                                       code_c_,
+                                       code_d_,
+                                       code_e_,
+                                       code_f_,
+                                       code_g_,
+                                       code_h_,
+                                       code_i_,
+                                       code_j_,
+                                       rental_asset_transfer_action_,
+                                       cost_detail_id_);
+    
+   Message_SYS.Add_Attribute(msg_, 'CONTRACT', contract_);
+   Message_SYS.Add_Attribute(msg_, 'PART_NO', part_no_);
+   Message_SYS.Add_Attribute(msg_, 'CONFIGURATION_ID', configuration_id_);
+   Message_SYS.Add_Attribute(msg_, 'LOCATION_NO', location_no_);
+   Message_SYS.Add_Attribute(msg_, 'LOT_BATCH_NO', lot_batch_no_);
+   Message_SYS.Add_Attribute(msg_, 'SERIAL_NO', serial_no_);
+   Message_SYS.Add_Attribute(msg_, 'ENG_CHG_LEVEL', eng_chg_level_);
+   Message_SYS.Add_Attribute(msg_, 'WAIV_DEV_REJ_NO', waiv_dev_rej_no_);
+   Message_SYS.Add_Attribute(msg_, 'ACTIVITY_SEQ', activity_seq_);
+   Message_SYS.Add_Attribute(msg_, 'HANDLING_UNIT_ID', handling_unit_id_);
+   Message_SYS.Add_Attribute(msg_, 'QTY_ON_HAND', qty_onhand_);
+   Message_SYS.Add_Attribute(msg_, 'CATCH_QTY_ON_HAND', catch_qty_onhand_);    
+   IF (serial_no_ = '*' AND Part_Catalog_API.Get_Rcpt_Issue_Serial_Track_Db(part_no_) = 'TRUE') THEN
+      Message_SYS.Add_Attribute(msg_, 'PART_TRACKING_SESSION_ID', part_tracking_session_id_);
+   ELSE
+      Message_SYS.Add_Attribute(msg_, 'PART_TRACKING_SESSION_ID', dummy_number_);
+   END IF; 
+   Inv_Part_Ownership_Manager_API.Packed_Transfer_Rental_Asset__(dummy_str_, value_attr_, msg_);
+END Transfer_From_Rental_Asset___;
+
+FUNCTION Check_Define_Cost_Structure___(
+   contract_         IN VARCHAR2,
+   part_no_          IN VARCHAR2,
+   configuration_id_ IN VARCHAR2,
+   lot_batch_no_     IN VARCHAR2,
+   serial_no_        IN VARCHAR2,
+   condition_code_   IN VARCHAR2 )  RETURN BOOLEAN
+IS
+   std_cost_exist_     VARCHAR2(5);
+   zero_cost_only_     VARCHAR2(1);
+   define_code_string_ BOOLEAN := TRUE;
+BEGIN
+   std_cost_exist_ := Inventory_Part_Unit_Cost_API.Standard_Cost_Exist(contract_,
+                                                                       part_no_,
+                                                                       configuration_id_,
+                                                                       lot_batch_no_,
+                                                                       serial_no_,
+                                                                       condition_code_);
+   zero_cost_only_ := Inventory_Part_API.Get_Zero_Cost_Flag_Db(contract_, part_no_);
+   IF (zero_cost_only_ = 'O' OR std_cost_exist_ = 'TRUE') THEN
+      define_code_string_ := FALSE;
+   END IF;
+   RETURN define_code_string_;
+END Check_Define_Cost_Structure___;
+
+FUNCTION Create_Selection___(
+   contract_         IN VARCHAR2,
+   part_no_          IN VARCHAR2,
+   configuration_id_ IN VARCHAR2,
+   location_no_      IN VARCHAR2,
+   lot_batch_no_     IN VARCHAR2,
+   serial_no_        IN VARCHAR2,
+   eng_chg_level_    IN VARCHAR2,
+   waiv_dev_rej_no_  IN VARCHAR2,
+   activity_seq_     IN NUMBER,
+   handling_unit_id_ IN NUMBER )  RETURN VARCHAR2
+IS
+   selection_   VARCHAR2(2000);
+BEGIN
+   selection_ := 'CONTRACT=' ||'' ||contract_ ||'' ||'^PART_NO=' ||'' || part_no_ || '' ||'^CONFIGURATION_ID=' ||'' || configuration_id_ || '' ||
+                 '^LOCATION_NO=' ||'' || location_no_ || '' ||'^LOT_BATCH_NO=' ||'' || lot_batch_no_ || '' ||'^SERIAL_NO=' ||'' || serial_no_ || '' ||
+                 '^ENG_CHG_LEVEL=' ||'' || eng_chg_level_ || '' ||'^WAIV_DEV_REJ_NO=' ||'' || waiv_dev_rej_no_ || '' ||'^ACTIVITY_SEQ=' ||'' || activity_seq_ || '' ||
+                 '^HANDLING_UNIT_ID=' ||'' || NVL(handling_unit_id_, 0) || '^'; 
+   RETURN selection_;
+END Create_Selection___;
+
+PROCEDURE Identify_Serials___ (
+   contract_                 IN VARCHAR2,
+   part_no_                  IN VARCHAR2,
+   configuration_id_         IN VARCHAR2,
+   location_no_              IN VARCHAR2,
+   lot_batch_no_             IN VARCHAR2,
+   eng_chg_level_            IN VARCHAR2,
+   waiv_dev_rej_no_          IN VARCHAR2,
+   activity_seq_             IN NUMBER,
+   handling_unit_id_         IN NUMBER,
+   part_tracking_session_id_ IN NUMBER ) 
+IS
+   
+BEGIN   
+   Inventory_Part_In_Stock_API.Identify_Serials(contract_,
+                                                part_no_,
+                                                configuration_id_,
+                                                location_no_,
+                                                lot_batch_no_,
+                                                eng_chg_level_,
+                                                waiv_dev_rej_no_,
+                                                activity_seq_,
+                                                handling_unit_id_,
+                                                part_tracking_session_id_);
+END Identify_Serials___;
+
+
+FUNCTION Get_Navigator_Params___ (
+	contract_list_ IN VARCHAR2,
+	selection_     IN CLOB) RETURN Navigator_Param_Structure_Rec
+IS
+   rec_   Navigator_Param_Structure_Rec;
+BEGIN
+	rec_.contract := Validate_Selected_Contact_On_Inv_Part___(contract_list_);
+   rec_.objid_list := Get_Connected_Objids_List___(selection_);
+   RETURN rec_;
+END Get_Navigator_Params___;

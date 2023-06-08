@@ -1,0 +1,291 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     QuickCustOrdAddMultiplePartsAssistant
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+-- Date        Sign     History
+-- ----------  ------   -----------------------------------------------------
+-- 2022-02-25  DhAplk   SCDEV-7755, Modified some cursors in Add_Sales_Part_Lines___ to filter results according to customer.
+-- 2021-10-12  DhAplk   SC21R2-5048, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+@Override
+@IgnoreUnitTest MethodOverride
+PROCEDURE CRUD_Create___ (
+   rec_ IN Add_Multiple_Parts_Virtual_Rec )
+IS
+BEGIN
+   super(rec_);  
+   IF(rec_.part_selection_method = 'SITE') THEN
+      Add_Parts_From_Site___(rec_);
+   END IF;
+END CRUD_Create___;
+
+@Override
+@IgnoreUnitTest MethodOverride
+PROCEDURE CRUD_Update___(
+   old_ IN Add_Multiple_Parts_Virtual_Rec,
+   new_ IN Add_Multiple_Parts_Virtual_Rec )
+IS    
+BEGIN 
+   super(old_, new_);
+   Clear_Part_Lines___(new_.objkey);
+   
+   IF (new_.part_selection_method IS NOT NULL) THEN
+      CASE new_.part_selection_method
+         WHEN 'SITE' THEN 
+            Add_Parts_From_Site___(new_);
+         WHEN 'ASSORTMENT' THEN 
+            IF (new_.assortment_id IS NOT NULL) THEN
+               Add_Parts_From_Assortment___(new_);
+            END IF;          
+         WHEN 'PRICELIST' THEN 
+            Add_Parts_From_Price_List___(new_);  
+         WHEN 'AGREEMENT' THEN 
+            Add_Parts_From_Agreement___(new_);
+      END CASE; 
+   END IF;
+END CRUD_Update___;
+
+@IgnoreUnitTest NoOutParams
+PROCEDURE Add_Sales_Part_Lines___(
+   new_        IN Add_Multiple_Parts_Virtual_Rec,
+   catalog_no_ IN VARCHAR2)
+IS 
+   line_rec_                   Add_Parts_Virtual_Rec;
+   limit_sales_to_assortment_  BOOLEAN := FALSE;
+   
+   CURSOR get_sales_parts IS
+      SELECT catalog_no, catalog_desc, catalog_type, sales_unit_meas
+      FROM Sales_Part
+      WHERE contract = new_.contract
+      AND sales_type_db IN ('SALES', 'SALES RENTAL');
+   
+   CURSOR get_sales_parts_from_assortment IS
+      SELECT DISTINCT catalog_no, catalog_desc, catalog_type, sales_unit_meas
+      FROM Part_Valid_For_Assortment
+      WHERE contract = new_.contract
+      AND customer_no = new_.customer_no;
+   
+   CURSOR get_sales_parts_by_catalog_no(catalog_no_ IN VARCHAR2) IS
+      SELECT catalog_no, catalog_desc, catalog_type, sales_unit_meas
+      FROM Sales_Part
+      WHERE catalog_no = catalog_no_
+      AND contract = new_.contract
+      AND sales_type_db IN ('SALES', 'SALES RENTAL');
+      
+   CURSOR get_sales_parts_assort_by_catalog_no(catalog_no_ IN VARCHAR2) IS
+      SELECT DISTINCT catalog_no, catalog_desc, catalog_type, sales_unit_meas
+      FROM Part_Valid_For_Assortment
+      WHERE catalog_no = catalog_no_
+      AND contract = new_.contract
+      AND customer_no = new_.customer_no;
+  
+BEGIN
+   line_rec_.parent_objkey   := new_.objkey;
+   line_rec_.add_line        := FALSE;
+   line_rec_.contract        := new_.contract;
+   limit_sales_to_assortment_ := Check_Limit_Sales_Assortments___(new_.customer_no);
+   
+   IF (catalog_no_ IS NULL) THEN 
+      IF (limit_sales_to_assortment_) THEN
+         FOR sales_part_rec_ IN get_sales_parts_from_assortment LOOP        
+            line_rec_.objkey              := sys_guid();
+            line_rec_.catalog_no          := sales_part_rec_.catalog_no;
+            line_rec_.catalog_description := sales_part_rec_.catalog_desc; 
+            line_rec_.sales_unit_meas     := sales_part_rec_.sales_unit_meas;       
+            line_rec_.catalog_type        := sales_part_rec_.catalog_type;
+            CRUD_Create___(line_rec_);
+         END LOOP;
+      ELSE
+         FOR sales_part_rec_ IN get_sales_parts LOOP 
+            line_rec_.objkey              := sys_guid();
+            line_rec_.catalog_no          := sales_part_rec_.catalog_no;
+            line_rec_.catalog_description := sales_part_rec_.catalog_desc;  
+            line_rec_.sales_unit_meas     := sales_part_rec_.sales_unit_meas;
+            line_rec_.catalog_type        := sales_part_rec_.catalog_type;
+            CRUD_Create___(line_rec_);
+         END LOOP;
+      END IF;     
+   ELSE
+      IF (limit_sales_to_assortment_) THEN
+         FOR sales_part_rec_ IN get_sales_parts_assort_by_catalog_no(catalog_no_) LOOP     
+            line_rec_.objkey              := sys_guid();
+            line_rec_.catalog_no          := sales_part_rec_.catalog_no;
+            line_rec_.catalog_description := sales_part_rec_.catalog_desc;  
+            line_rec_.sales_unit_meas     := sales_part_rec_.sales_unit_meas;
+            line_rec_.catalog_type        := sales_part_rec_.catalog_type;
+            CRUD_Create___(line_rec_);
+         END LOOP;
+      ELSE
+         FOR sales_part_rec_ IN get_sales_parts_by_catalog_no(catalog_no_) LOOP    
+            line_rec_.objkey              := sys_guid();
+            line_rec_.catalog_no          := sales_part_rec_.catalog_no;
+            line_rec_.catalog_description := sales_part_rec_.catalog_desc;  
+            line_rec_.sales_unit_meas     := sales_part_rec_.sales_unit_meas;
+            line_rec_.catalog_type        := sales_part_rec_.catalog_type;
+            CRUD_Create___(line_rec_);
+         END LOOP;
+      END IF;          
+   END IF; 
+END Add_Sales_Part_Lines___;
+
+@IgnoreUnitTest TrivialFunction
+PROCEDURE Add_Parts_From_Site___(
+   new_ IN Add_Multiple_Parts_Virtual_Rec )
+IS 
+BEGIN
+   Add_Sales_Part_Lines___(new_, NULL);
+END Add_Parts_From_Site___;
+
+@IgnoreUnitTest NoOutParams
+PROCEDURE Add_Parts_From_Assortment___(
+   new_ IN Add_Multiple_Parts_Virtual_Rec)
+IS 
+   part_tab_     Assortment_Node_API.part_table;
+   
+   CURSOR get_parts_by_assortment IS
+      SELECT DISTINCT part_no
+      FROM Customer_Parts_By_Assortment
+      WHERE assortment_id = new_.assortment_id;                  
+BEGIN
+   IF(new_.assortment_node_id IS NULL) THEN
+      FOR part_rec_ IN get_parts_by_assortment LOOP         
+         Add_Sales_Part_Lines___(new_, part_rec_.part_no);        
+      END LOOP;
+   ELSE     
+      part_tab_ := Assortment_Node_API.Get_Connected_Parts(new_.assortment_id, new_.assortment_node_id);
+      
+      IF (part_tab_.COUNT > 0) THEN
+         FOR i IN part_tab_.FIRST..part_tab_.LAST LOOP
+            Add_Sales_Part_Lines___(new_, part_tab_(i).part_no); 
+         END LOOP;      
+      END IF; 
+   END IF;
+END Add_Parts_From_Assortment___;
+
+@IgnoreUnitTest TrivialFunction
+PROCEDURE Add_Parts_From_Price_List___(
+   new_ IN Add_Multiple_Parts_Virtual_Rec )
+IS 
+   CURSOR get_sales_parts_by_price_list IS
+      SELECT DISTINCT catalog_no
+      FROM Sales_Price_List_Part
+      WHERE price_list_no = new_.price_list_no;
+BEGIN
+   FOR part_rec_ IN get_sales_parts_by_price_list LOOP         
+      Add_Sales_Part_Lines___(new_, part_rec_.catalog_no);        
+   END LOOP;
+END Add_Parts_From_Price_List___;
+
+@IgnoreUnitTest TrivialFunction
+PROCEDURE Add_Parts_From_Agreement___(
+   new_ IN Add_Multiple_Parts_Virtual_Rec )
+IS 
+   CURSOR get_sales_parts_by_agreement IS
+      SELECT catalog_no
+      FROM Agreement_Sales_Part_Deal
+      WHERE agreement_id = new_.agreement_id;
+BEGIN
+   FOR part_rec_ IN get_sales_parts_by_agreement LOOP         
+      Add_Sales_Part_Lines___(new_, part_rec_.catalog_no);        
+   END LOOP;
+END Add_Parts_From_Agreement___;
+
+@IgnoreUnitTest TrivialFunction
+PROCEDURE Clear_Part_Lines___ (
+	parent_key_ IN VARCHAR2)
+IS
+   line_rec_   Add_Parts_Virtual_Rec;   
+   key_        Add_Multiple_Parts_Virtual_Key;
+BEGIN
+   key_.objkey := parent_key_;   
+   
+	FOR rec_ IN Get_Part_Lines___(key_) LOOP     
+      line_rec_.objkey   := rec_.objkey;
+      CRUD_Delete___(line_rec_);
+   END LOOP;  
+END Clear_Part_Lines___;
+
+@IgnoreUnitTest TrivialFunction
+PROCEDURE Add_Lines_To_Temp_Virtual___ (
+   source_objkey_ IN VARCHAR2)
+IS
+   part_parent_key_     Add_Multiple_Parts_Virtual_Key;
+   tmp_line_rec_        Add_Parts_Temp_Virtual_Rec;  
+BEGIN
+   part_parent_key_.objkey := source_objkey_;
+	FOR line_rec_ IN Get_Part_Lines___(part_parent_key_) LOOP
+      IF (line_rec_.add_line = 'TRUE' AND line_rec_.quantity IS NOT NULL) THEN               
+         tmp_line_rec_.objkey          := sys_guid();
+         tmp_line_rec_.parent_objkey   := line_rec_.parent_objkey;
+         tmp_line_rec_.contract        := line_rec_.contract;
+         tmp_line_rec_.catalog_no      := line_rec_.catalog_no;
+         tmp_line_rec_.quantity        := line_rec_.quantity;
+         tmp_line_rec_.sales_unit_meas := line_rec_.sales_unit_meas;
+         tmp_line_rec_.catalog_type    := line_rec_.catalog_type;        
+         tmp_line_rec_.configurable    := CASE line_rec_.configurable WHEN 'TRUE' THEN TRUE WHEN 'FALSE' THEN FALSE ELSE NULL END;
+         CRUD_Create___(tmp_line_rec_);       
+      END IF;
+   END LOOP;
+   Reset_Add_Parts_Virtual___();
+END Add_Lines_To_Temp_Virtual___;
+
+@IgnoreUnitTest NoOutParams
+PROCEDURE Check_Price_List_Availability___ (
+   customer_no_   IN VARCHAR2,
+   price_list_no_ IN VARCHAR2)
+IS
+   count_  NUMBER := 0;
+BEGIN
+	SELECT COUNT(*) INTO count_ 
+   FROM CUST_CONNECTED_PRICE_LISTS 
+   WHERE customer_no = customer_no_
+   AND price_list_no = price_list_no_;
+   
+   IF (count_ <= 0 AND price_list_no_ IS NOT NULL) THEN
+      Error_SYS.Record_General(lu_name_, 'INVALIDPICELIST: Price List is not valid');
+   END IF;
+END Check_Price_List_Availability___;
+
+@IgnoreUnitTest NoOutParams
+PROCEDURE Reset_Add_Parts_Virtual___
+IS
+   CURSOR get_selected_part_lines IS
+      SELECT *
+      FROM ${PROJECTION}_ADD_PARTS_VIRTUAL_VRT
+      WHERE add_line = 'TRUE';
+      
+   new_rec_  Add_Parts_Virtual_Rec; 
+   old_rec_  Add_Parts_Virtual_Rec;  
+BEGIN 
+   FOR part_rec_ IN get_selected_part_lines LOOP  
+      old_rec_.objkey              := part_rec_.objkey;
+      old_rec_.parent_objkey       := part_rec_.parent_objkey;
+      old_rec_.add_line            := CASE part_rec_.add_line WHEN 'TRUE' THEN TRUE WHEN 'FALSE' THEN FALSE ELSE NULL END;
+      old_rec_.configurable        := CASE part_rec_.configurable WHEN 'TRUE' THEN TRUE WHEN 'FALSE' THEN FALSE ELSE NULL END;
+      old_rec_.contract            := part_rec_.contract;
+      old_rec_.catalog_no          := part_rec_.catalog_no;
+      old_rec_.catalog_description := part_rec_.catalog_description;
+      old_rec_.quantity            := part_rec_.quantity;
+      old_rec_.sales_unit_meas     := part_rec_.sales_unit_meas;
+      old_rec_.catalog_type        := part_rec_.catalog_type;
+
+      new_rec_                     := old_rec_;
+      new_rec_.add_line            := FALSE;
+      new_rec_.quantity            := NULL;
+      CRUD_Update___(old_rec_, new_rec_);
+   END LOOP;
+END Reset_Add_Parts_Virtual___;
+
+@IgnoreUnitTest TrivialFunction
+FUNCTION Check_Limit_Sales_Assortments___ (
+   customer_no_ IN VARCHAR2) RETURN BOOLEAN
+IS
+BEGIN
+   RETURN Quick_Cust_Ord_Reg_Util_API.Check_Limit_Sales_Assortments(customer_no_);
+END Check_Limit_Sales_Assortments___;

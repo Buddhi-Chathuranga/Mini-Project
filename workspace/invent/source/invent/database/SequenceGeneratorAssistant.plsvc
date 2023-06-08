@@ -1,0 +1,228 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     SequenceGeneratorAssistant
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ----------------------------------------------------------------------------------------------------------------
+--  190606  JaThlk  SCUXXW4-22019, Fixed the FromSerialNo field format issue.
+--  190318  JaThlk  SCUXXW4-17804, Fixed the truncating issue in generated serials.
+--  181102  JaThlk  SCUXXW4-5801, Implemented dlgSequencePreview.
+--  181102  JaThlk  SCUXXW4-5801, Modified the Sort_Serial___ return type to VARCHAR2 from CLOB since CLOB/LongText is not supported
+--                  as a input parameter to action/function.
+--  181031  JaThlk  SCUXXW4-5801, Added the method, Sort_Serial___ to sort the generated serial list.
+--  181031  JaThlk  SCUXXW4-5801, Created.
+-------------------------------------------------------------------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Create_Serial_Sequence___ (
+   parent_objkey_ IN  VARCHAR2,
+   prefix_        IN  VARCHAR2,
+   suffix_        IN  VARCHAR2,
+   length_        IN  NUMBER,
+   info$_         OUT VARCHAR2 ) RETURN CLOB
+IS
+   parent_key_          Sequence_Generator_Virtual_Key;
+   child_key_           Sequences_Virtual_Key;
+   child_rec_           Sequences_Virtual_Rec;
+   serial_list_         CLOB;
+   generated_sum_       NUMBER :=0;
+   records_             NUMBER;
+   generated_serials_   CLOB := ''; 
+   add_warning_         BOOLEAN := FALSE;
+   
+BEGIN
+   parent_key_.objkey := parent_objkey_;
+   FOR line_rec_ IN Get_Sequence_Array___(parent_key_) LOOP
+      child_key_.objkey := line_rec_.objkey;
+      child_rec_ := Get_Record___(child_key_);
+      IF (child_rec_.to_serial_no IS NULL) THEN
+         generated_sum_ := generated_sum_ + 1;
+         IF (generated_sum_ <= child_rec_.quantity) THEN
+            generated_serials_ := Insert_Into_List___(generated_serials_, TO_CHAR(child_rec_.from_serial_no) , prefix_, suffix_, length_);           
+         END IF;
+         
+      ELSE
+         IF NOT (Is_Valid_Integer___(child_rec_.from_serial_no)) THEN
+            Display_Error___(0);
+         END IF;
+         IF NOT (Is_Valid_Integer___(child_rec_.to_serial_no)) THEN
+            Display_Error___(1);
+         END IF; 
+         IF child_rec_.from_serial_no IS NULL THEN
+            Display_Error___(2);
+         END IF;
+         IF child_rec_.from_serial_no < 0 THEN
+            Display_Error___(3);
+         END IF;
+         IF child_rec_.to_serial_no < 0 THEN
+            Display_Error___(3);
+         END IF;
+         records_ := ABS(child_rec_.to_serial_no - child_rec_.from_serial_no) + 1;
+         generated_sum_ := generated_sum_ + records_;
+         IF generated_sum_ > child_rec_.quantity  THEN
+            IF records_ > generated_sum_ - child_rec_.quantity THEN
+               records_ := records_ - (generated_sum_ - child_rec_.quantity);
+            END IF;
+         END IF;
+         generated_serials_ := Create_Interval_Between___(generated_serials_, TO_NUMBER(child_rec_.from_serial_no), child_rec_.to_serial_no, records_, prefix_, suffix_, length_);
+         IF (generated_sum_ > child_rec_.quantity) AND NOT add_warning_ THEN
+            Client_SYS.Add_Info('PARTSERIALCATALOG', 'GENERATEDTOOMANYSERIALS: More serials were generated than existing records. Remaining serials will be discarded');
+            add_warning_ := TRUE;
+         END IF;
+      END IF;
+   END LOOP;
+   Sort_Serial___(serial_list_, generated_serials_);
+   info$_ := Client_SYS.Get_All_Info;
+   RETURN serial_list_;
+END Create_Serial_Sequence___;
+
+
+FUNCTION Is_Valid_Integer___(
+   number_value_ IN  NUMBER) RETURN BOOLEAN
+IS
+
+BEGIN
+   
+   IF number_value_ !=  TRUNC(number_value_) THEN
+      RETURN FALSE;
+   END IF;
+   
+   RETURN TRUE;
+   
+   EXCEPTION
+      WHEN VALUE_ERROR THEN
+      RETURN FALSE;
+      
+END Is_Valid_Integer___;   
+
+
+PROCEDURE Display_Error___(
+   error_message_ IN NUMBER)
+IS
+BEGIN
+   CASE error_message_
+      WHEN 0 THEN Error_SYS.Record_General(lu_name_, 'FROMSERIALNOTNUMERIC: The start value must be an integer if an interval is used');
+      WHEN 1 THEN Error_SYS.Record_General(lu_name_, 'TOSERIALNOTNUMERIC: The end value must be an integer if an interval is used');
+      WHEN 2 THEN Error_SYS.Record_General(lu_name_, 'FROMSERIALEMPTY: The start value must have a value when an interval is used');
+      WHEN 3 THEN Error_SYS.Record_General(lu_name_, 'NONEGATIVEINTERVAL: Negative values not allowed in intervals');       
+   END CASE;
+END Display_Error___;
+
+
+FUNCTION Insert_Into_List___(
+   msg_               IN CLOB,
+   serial_value_      IN VARCHAR2,
+   prefix_            IN VARCHAR2,
+   suffix_            IN VARCHAR2,
+   length_            IN NUMBER) RETURN CLOB   
+IS
+   new_msg_ CLOB;
+   generated_serial_  VARCHAR2(32000) := '';
+BEGIN
+   new_msg_ := msg_;
+   generated_serial_ := serial_value_;
+   IF serial_value_ IS NOT NULL THEN
+      IF length_ IS NOT NULL THEN
+         IF LENGTH(generated_serial_) < length_ THEN
+           generated_serial_ := LPAD(generated_serial_, length_, '0'); 
+         END IF;
+      END IF;
+      IF prefix_ IS NOT NULL THEN
+         generated_serial_ := prefix_ || ''|| generated_serial_;
+      END IF;
+      IF suffix_ IS NOT NULL THEN
+         generated_serial_ := generated_serial_ || ''|| suffix_;
+      END IF;
+      IF LENGTH(generated_serial_) > 50 THEN
+         Error_SYS.Record_General(lu_name_, 'TOOLONGSERIALS: The length of one or several of the generated serials exceeds 50 characters.');  
+      END IF;
+      Message_SYS.Add_Attribute(new_msg_, 'SN',generated_serial_);
+   END IF;
+   RETURN new_msg_;
+END  Insert_Into_List___; 
+
+
+FUNCTION Create_Interval_Between___ (
+   msg_               IN CLOB,
+   from_serial_no_    IN NUMBER, 
+   to_serial_no_      IN NUMBER,
+   records_           IN NUMBER,
+   prefix_            IN VARCHAR2,
+   suffix_            IN VARCHAR2,
+   length_            IN NUMBER  ) RETURN CLOB
+IS
+   new_msg_ CLOB := '';
+   add_steps_ NUMBER := 0;
+   serial_value_  VARCHAR2(50);
+BEGIN
+   new_msg_ := msg_;
+   WHILE records_ > add_steps_ LOOP
+      serial_value_ := LEAST(from_serial_no_,to_serial_no_) + add_steps_ ;
+      new_msg_ := Insert_Into_List___(new_msg_, TO_CHAR(serial_value_), prefix_, suffix_, length_);
+      add_steps_ := add_steps_ + 1;
+   END LOOP;
+	RETURN new_msg_;
+END Create_Interval_Between___;
+
+
+PROCEDURE Sort_Serial___ (
+   sorted_list_      OUT CLOB,
+   unsorted_serials_ IN CLOB )
+IS
+   message_name_arr_       Message_SYS.name_table;
+   message_value_arr_      Message_SYS.line_table;
+   serial_no_sorted_tab_   Message_SYS.line_table;
+   count_                  NUMBER := 0;
+   
+   CURSOR get_serial_nos IS
+      SELECT *
+      FROM TABLE (message_value_arr_)
+      ORDER BY 1;
+   
+BEGIN
+	Message_SYS.Get_Attributes(unsorted_serials_, count_, message_name_arr_, message_value_arr_);
+   OPEN get_serial_nos;
+   FETCH get_serial_nos BULK COLLECT INTO serial_no_sorted_tab_;
+   CLOSE get_serial_nos;
+   FOR i_ IN 1..count_ LOOP
+      IF sorted_list_ IS NULL THEN
+         sorted_list_ := serial_no_sorted_tab_(i_);
+      ELSE
+         sorted_list_ := sorted_list_ || Client_SYS.record_separator_ || serial_no_sorted_tab_(i_);
+      END IF;
+   END LOOP;
+END Sort_Serial___;
+
+  
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Sequence_Preview_Virtual_Rec )
+IS
+   serial_no_list_   CLOB;
+   info_             VARCHAR2(32000);
+   line_rec_         Sequence_Preview_List_Virtual_Rec;
+BEGIN
+   Super(rec_);
+   
+   serial_no_list_ := Create_Serial_Sequence___(rec_.serial_objkey, rec_.prefix, rec_.suffix, rec_.length, info_);
+   serial_no_list_ := CONCAT(serial_no_list_, Client_SYS.record_separator_);
+   
+   WHILE (INSTR(serial_no_list_, Client_SYS.record_separator_) > 0) LOOP
+      line_rec_.objkey         := sys_guid();
+      line_rec_.parent_objkey  := rec_.objkey;
+      line_rec_.serial_no      := substr(serial_no_list_, 0, INSTR(serial_no_list_, Client_SYS.record_separator_) - 1);
+      line_rec_.line_no        := 1;
+      CRUD_Create___(line_rec_);
+      
+      serial_no_list_ := SUBSTR(serial_no_list_, (INSTR(serial_no_list_, Client_SYS.record_separator_) + 1)); 
+   END LOOP;
+   
+   IF info_ IS NOT NULL THEN
+      Client_SYS.Add_Info(lu_name_, SUBSTR(info_, 6, LENGTH(info_) - 6));
+   END IF;
+END CRUD_Create___;
+

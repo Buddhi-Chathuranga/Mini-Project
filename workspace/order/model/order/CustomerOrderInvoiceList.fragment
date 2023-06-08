@@ -1,0 +1,955 @@
+-------------------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  --------------------------------------------------------------------------
+-- 2022-02-01  PumJlk  SCZ-17478, Added 'Details' command in YourReferenceRef lov in CustomerInvoiceList.
+-- 2021-10-11  NiDalk  SC21R2-5004, Added default filter to CustomerOrderInvHeadSet.
+-- 2021-09-28  NiDalk  SC21R2-2983, Modified attributes AdvancePrepayInvoice, CorrectionInvoice and Notes in CustomerOrderInvHead fetch data directly to improve performace.
+-- 2021-09-15  ErFelk  Bug 160904(SC21R2-2543), Override the default luname of CustomerOrderInvHead entity to support document attachement.
+-- 2020-04-06  DhAplk  SCXTEND-4165, Changed OrderDate, PrintDate attributes datatype to Timestamp and added showonlydate = [true] for them.
+-- 2019-08-19  KHVESE  SCUXXW4-23534, Added function IsRateCorrectionInvoice and extra validation on field InvoiceDate when invoice is Currency Rate Correction Invoice(CORRECTION_INV).
+-- 2019-03-21  DaZase  SCUXXW4-16379, moved code to fragment.
+-- 2018-11-07  KHVESE  SCUXXW4-1054, SCUXXW4-8720, Implemented action ReprintModifiedInvoice and function GetNoInvoiceCopies and added framgment ReprintModifiedCustomerInvoiceDialog.
+-- 2018-11-07  KHVESE  SCUXXW4-1054, SCUXXW4-8720, Implemented ReprintModifiedCommand and added framgment ReprintModifiedCustomerInvoiceDialog.
+-- 2018-09-12  KHVESE  SCUXXW4-12339, Modified method BeforeModifySaveCommand to validate NcfReference and also moved validation for InvoiceDate to
+-- 2018-09-12          the field itself (validation we have on DataRecordCheckModify in IEE client).
+-- 2018-08-10  KHVESE  SCUXXW4-12339, Implemented methods FetchCustRef, GetUnblockedDueDate, CalculateDueDate, GetInstallmentCount,
+-- 2018-08-10          GetConsiderPayVacPeriod, GetDefaultPayWay, GetNewVacDueDate.
+-- 2018-08-10  KHVESE  SCUXXW4-12339, Implemented the validation for all fields that are editable.
+-- 2018-08-10  KHVESE  SCUXXW4-1054, Added structure ReportResultStruc, function CheckNoteExist and actions ReprintOriginalResultKey and ReprintOrgDuplicateResultKey.
+-- 2018-08-10          Also added attributes OrderExist and OrgReportExists.
+-- 2018-08-10  KHVESE  SCUXXW4-1054, Implemented command ReprintOriginalfromArchiveCommand and ReprintOriginalDuplicateCommand and modified command NotesDlgCmd.
+-- 2018-07-05  KHVESE  SCUXXW4-1054, Modified command NotesDlgCmd, implemented command PrintWorkCopyCommand and added command BeforeModifySaveCommand to the CustomerInvoiceList.
+-- 2018-07-05  KHVESE  SCUXXW4-1054, Changed the query CustomerOrderInvHead to entity and added exclude attribtes also added
+-- 2018-07-05          refrence CreatorsReferenceRef and removed refrences PaymentTermRef and CompanyDefInvoiceTypeRef.
+-- 2018-07-05          Also Added methods PrintWorkCopyResultKey, NotesDialogLabel, CheckInvDatePeriodClose and structure InvDatePeriodStruc.
+-- 2018-05-31  StHose  SCUXXW4-1054, include  FinNotesDialog
+-- 2018-06-20  HPetse  SCUXXW4-1054, Changed labels
+-- 2018-06-08  HPetse  SCUXXW4-1054, Changed field sizes and added fieldranking
+-- 2018-06-08  HPetse  SCUXXW4-1054, Added description
+-- 2018-05-31  StHose  SCUXXW4-1054, Converted from tbwOverviewCustomerInvoice using MTG Version: 1.20
+-------------------------------------------------------------------------------------------------
+fragment CustomerOrderInvoiceList;
+component ORDER;
+layer Core;
+description "Use this fragment to display an overview of the customer invoices that are created.";
+include fragment CustInfoContactLovPubSelector;
+include fragment CustAddressShipLovSelector;
+include fragment CustBillAddressLovSelector;
+include fragment CustOrdCust1Selector;
+include fragment UserAllowedSiteLovSelector;
+include fragment OrdInvoiceTypeLovSelector;
+include fragment OrdInvoiceSeriesLovSelector;
+include fragment ReprintModifiedCustomerInvoiceDialog;
+include fragment FinNotesDialog;
+include fragment CustomerOrderInvHeadUivInitialCheck;
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+
+--------------------------------- COMMANDS ----------------------------------
+command CustomerInvoicePostingsAnalysisCommand for CustomerOrderInvHead {
+   label = "Postings Analysis";
+   mode = SelectedRecords;
+   enabled = [true];
+   bulkexecute {
+      bulknavigate "page/CustomerInvoicePostingsAnalysis/Form?contexts=Company:$[Company]&$filter=InvoiceId eq $[InvoiceId]";
+   }
+}
+
+command PrintWorkCopyCommand for CustomerOrderInvHead {
+   label = "Print Work Copy";
+   mode = SelectedRecords;
+   enabled = [Company != null and InvoiceId != null and(count(*, Objstate = "Preliminary") > 0)];
+   variable ResultKeyListStrVar {
+      type = Text;
+   }
+   bulkexecute {
+      call PrintWorkCopyResultKey(Selection) into ResultKeyListStrVar;
+      if [ResultKeyListStrVar != null] {
+         printdialog ResultKeyListStrVar;
+      }
+   }
+}
+
+command ReprintOriginalfromArchiveCommand for CustomerOrderInvHead {
+   label = "Reprint Original from Archive";
+   mode = SelectedRecords;
+   enabled = [Company != null and InvoiceId != null and(count(*, Objstate != "Preliminary" and Objstate != "Cancelled" and Objstate != null and OrgReportExists = "TRUE") > 0)];
+   variable ReportResultStrucVar {
+      type = Structure(ReportResultStruc);
+   }
+   variable ResultKeyListStrVar {
+      type = Text;
+   }
+   bulkexecute {
+      call ReprintOriginalResultKey(Selection) into ReportResultStrucVar;
+      if [ReportResultStrucVar.InfoMessage != null] {
+         alert("${ReportResultStrucVar.InfoMessage}");
+      }
+      if [ReportResultStrucVar.ResultKeyList != null] {
+         set ResultKeyListStrVar = ReportResultStrucVar.ResultKeyList;
+         printdialog ResultKeyListStrVar;
+      }
+   }
+}
+
+command ReprintOriginalDuplicateCommand for CustomerOrderInvHead {
+   label = "Reprint Original Duplicate";
+   mode = SelectedRecords;
+   enabled = [Company != null and InvoiceId != null and(count(*, Objstate != "Preliminary" and Objstate != "Cancelled" and Objstate != null and OrgReportExists = "TRUE") > 0)];
+   variable ReportResultStrucVar {
+      type = Structure(ReportResultStruc);
+   }
+   variable ResultKeyListStrVar {
+      type = Text;
+   }
+   bulkexecute {
+      call ReprintOrgDuplicateResultKey(Selection) into ReportResultStrucVar;
+      if [ReportResultStrucVar.InfoMessage != null] {
+         alert("${ReportResultStrucVar.InfoMessage}");
+      }
+      if [ReportResultStrucVar.ResultKeyList != null] {
+         set ResultKeyListStrVar = ReportResultStrucVar.ResultKeyList;
+         printdialog ResultKeyListStrVar;
+      }
+   }
+}
+
+command ReprintModifiedCommand for CustomerOrderInvHead {
+   label = "Reprint Modified";
+   mode = SelectedRecords;
+   enabled = [count(*, Objstate != "Preliminary" and Objstate != "Cancelled" and Objstate != null and OrderExist = 1) > 0];
+   variable ReportResultStrucVar {
+      type = Structure(ReportResultStruc);
+   }
+   variable ResultKeyListStrVar {
+      type = Text;
+   }
+   variable PrintOption;
+   variable Duplicate;
+   variable CopyNo;
+   bulkexecute {
+      call GetNoInvoiceCopies(Selection) into MaxCopyNo;
+      dialog ReprintModifiedInvoiceDialog(MaxCopyNo) into(PrintOption, Duplicate, CopyNo) {
+         when OK {
+            call ReprintModifiedInvoice(Selection, Duplicate, CopyNo, PrintOption) into ReportResultStrucVar;
+            if [ReportResultStrucVar.InfoMessage != null] {
+               alert("${ReportResultStrucVar.InfoMessage}");
+            }
+            if [ReportResultStrucVar.ResultKeyList != null] {
+               set ResultKeyListStrVar = ReportResultStrucVar.ResultKeyList;
+               printdialog ResultKeyListStrVar;
+            }
+            exit OK;
+         }
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+
+command NotesDlgCmd for CustomerOrderInvHead {
+   label = "Notes";
+   enabled = [InvoiceId != null];
+   variable NoteIdNum {
+      type = Number;
+   }
+   execute {
+      set PackageNameStr = "INVOICE_NOTE_API";
+      set CallingProjectionNameStr = "CustomerOrderInvoicesHandling";
+      assistant NotesAssistant(PackageNameStr, CallingProjectionNameStr, keyref, luname, "") into(NoteIdNum) {
+         when OK {
+            exit;
+         }
+      }
+   }
+}
+
+command BeforeModifySaveCommand for CustomerOrderInvHead {
+   bulkexecute {
+      ifany [JsInvoiceState != "NonJinsui" and JsInvoiceState != ""] {
+         ifany [original.NcfReference != NcfReference] {
+            inquire("It is not recommended to specify the Payment Reference for a Jinsui invoice manually. Do you want to continue?") {
+               when CANCEL {
+                  exit CANCEL;
+               }
+               when NO {
+                  bulkset NcfReference = original.NcfReference;
+               }
+            }
+         }
+      }
+   }
+}
+
+----------------------------- VISUAL COMPONENTS -----------------------------
+
+--------------------------------- SELECTORS ---------------------------------
+
+---------------------------------- GROUPS -----------------------------------
+
+----------------------------------- LISTS -----------------------------------
+
+list CustomerInvoiceList for CustomerOrderInvHead {
+   orderby = Company, InvoiceId;
+   crudactions {
+      before command BeforeModifySaveCommand;
+   }
+   field CompanyRef;
+   lov SeriesIdRef with ReferenceOrdInvoiceSeriesLovSelector {
+      size = Small;
+   }
+   field InvoiceNo;
+   field InvoiceId;
+   badge Objstate {
+      label = "Invoice Status";
+      emphasis Progress1 = [Objstate = "Preliminary"];
+      emphasis Progress3 = [Objstate = "Printed"];
+      emphasis Progress5 = [Objstate = "Posted"];
+      emphasis Progress7 = [Objstate = "PostedAuth"];
+      emphasis Progress9 = [Objstate = "PartlyPaidPosted"];
+      emphasis Progress12 = [Objstate = "PaidPosted"];
+      emphasis StateCancelled = [Objstate = "Cancelled"];
+      style = TextOnly;
+   }
+   lov InvoiceTypeRef with ReferenceOrdInvoiceTypeLovSelector {
+      size = Large;
+      description = InvoiceTypeDescription;
+   }
+   field AdvancePrepaymBasedInvoice {
+      size = Small;
+   }
+   field CorrectionInvoice {
+      size = Small;
+   }
+   field CorrectionExist {
+      size = Small;
+   }
+   field NotesExist {
+      size = Small;
+   }
+   field BranchRef {
+      editable = [Objstate = "Preliminary"];
+   }
+   field Currency {
+      size = Small;
+   }
+   field CreatorsReferenceRef;
+   field RmaNo;
+
+   lov ContractRef with ReferenceUserAllowedSiteLovSelector;
+   lov DeliveryIdentityRef with ReferenceCustOrdCust1Selector {
+      contactwidget {
+         enabled = [true];
+         source = Customer;
+      }
+   }
+   lov IdentityRef with ReferenceCustOrdCust1Selector {
+      contactwidget {
+         enabled = [true];
+         source = Customer;
+      }
+   }
+   field CustomerAddressName;
+   lov InvoiceAddressIdRef with ReferenceCustBillAddressLovSelector {
+      validate command {
+         execute {
+            call FetchCustRef(Identity, InvoiceAddressId) into YourReference;
+            call GetCustomerContactName(Identity, InvoiceAddressId, YourReference) into CustomerRefName;
+         }
+      }
+   }
+   lov DeliveryAddressIdRef with ReferenceCustAddressShipLovSelector;
+   field InvoiceDate {
+      validate command {
+         variable InvDatePeriodStructure {
+            type = Structure(InvDatePeriodStruc);
+         }
+         execute {
+            if [original.InvoiceDate != InvoiceDate] {
+               call IsRateCorrectionInvoice(Company, InvoiceId) into RateCorrectionInvoiceVar;
+               if [RateCorrectionInvoiceVar = "CORRECTION_INV"] {
+                  messagebox("", warning, "Changing the invoice date will cause a mismatch in dates against the first currency rate correction invoice. Do you want to continue?") {
+                     when "Yes" {
+                        log("Continue with InvoiceDate change.");
+                     }
+                     when "No" {
+                        set InvoiceDate = original.InvoiceDate;
+                     }
+                  }
+               }
+               call CheckInvDatePeriodClose(Company, InvoiceId, InvoiceDate, Objstate) into InvDatePeriodStructure;
+               if [InvDatePeriodStructure.IsPeriodClose] {
+                  messagebox("", warning, "The modified invoice date falls on a closed accounting period for the user group ${InvDatePeriodStructure.UserGroup}. Do you want to continue?") {
+                     when "Yes" {
+                        log("Continue with InvoiceDate change.");
+                     }
+                     when "No" {
+                        set InvoiceDate = original.InvoiceDate;
+                     }
+                  }
+               }
+            }
+            if [original.InvoiceDate = PayTermBaseDate] {
+               set PayTermBaseDate = InvoiceDate;
+               call GetUnblockedDueDate(Company, Identity, PartyType, PayTermId, PayTermBaseDate) into DueDate;
+            }
+         }
+      }
+   }
+   field DeliveryDate {
+      editable = [Objstate = "Preliminary"];
+   }
+   field WantedDeliveryDate;
+   lov PayTermIdRef with ReferencePaymentTermSelector {
+      description = PayTermIdRef.Description;
+      validate command {
+         execute {
+            call CalculateDueDate(Company, PayTermId, PayTermBaseDate) into DueDate;
+            call GetInstallmentCount(Company, PayTermId) into InstallmentCount;
+         }
+      }
+   }
+   field PayTermBaseDate {
+      validate command {
+         execute {
+            call GetUnblockedDueDate(Company, Identity, PartyType, PayTermId, PayTermBaseDate) into DueDate;
+         }
+      }
+   }
+   field DueDate {
+      validate command {
+         variable UsePayVacPeriodVar {
+            type = Text;
+         }
+         variable PaymentMethodVar {
+            type = Text;
+         }
+         variable NewDueDateVar {
+            type = Date;
+         }
+         execute {
+            call GetConsiderPayVacPeriod(Company, PayTermId) into UsePayVacPeriodVar;
+            if [UsePayVacPeriodVar = "TRUE"] {
+               call GetDefaultPayWay(Company, Identity, PartyType) into PaymentMethodVar;
+               call GetNewVacDueDate(Company, PaymentMethodVar, Identity, DueDate) into NewDueDateVar;
+            }
+            if [UsePayVacPeriodVar = "TRUE" and DueDate != NewDueDateVar] {
+               alert("Due Date is in a Vacation Period.");
+            }
+         }
+      }
+      editable = [InstallmentCount <= 1];
+   }
+   field Collect {
+      size = Small;
+   }
+   field CurrRate;
+   field OrderDate {
+      showonlydate = [true];
+   }
+   field OurReference {
+      contactwidget {
+         enabled = [OurReference != null];
+         source = Person;
+      }
+   }
+   lov YourReferenceRef with ReferenceCustInfoContactLovPubSelector {
+      validate command {
+         execute {
+            call GetCustomerContactName(Identity, InvoiceAddressId, YourReference) into CustomerRefName;
+         }
+      }
+      contactwidget {
+         enabled = [YourReference != null];
+         source = Customer;
+      }
+      details = "page/Customer/AddressInfo?$filter=CustomerId eq $[Identity]";
+   }
+   field CustomerRefName;
+   field ShipVia;
+   field ForwardAgentIdRef;
+   field LabelNote;
+   field DeliveryTerms;
+   field DelTermsLocation;
+   field PriceAdjustment {
+      size = Small;
+      editable = [Objstate = "Preliminary" and RmaNo = null and((InvoiceType in("CUSTORDCRE", "CUSTCOLCRE")) or
+      (InvoiceType = CustOrdCorrective) or(InvoiceType = CustColCorrective))];
+   }
+   field NetCurrAmount;
+   field VatCurrAmount;
+   field GrossAmount;
+   field PrintDate {
+      showonlydate = [true];
+   }
+   field NcfReference {
+      editable = [(Objstate = "Preliminary" and RefMethod = "CJIN" and(JsInvoiceState = "NonJinsui" or(IsJinsuiOrder = "TRUE" and(JsInvoiceState = "JinsuiOpen" or(JsInvoiceState = "Transferred" and IsAllowedToModify = "TRUE"))))) or
+      (RefMethod = "NONE" and(Objstate = "Preliminary" or Objstate = null))];
+   }
+   field JsInvoiceState {
+      size = Small;
+   }
+   field SbReferenceNo {
+      size = Small;
+   }
+   field ProjectId;
+   field ShipmentId;
+   field AggregationNo;
+   field FinalSettlement {
+      size = Small;
+   }
+   field CancelReason;
+
+   fieldranking InvoiceNo, Objstate, IdentityRef, InvoiceDate, DueDate, NetAmount, GrossAmount;
+
+   commandgroup PostingsCmdGroup {
+      label = "Posting";
+      command CustomerInvoicePostingsAnalysisCommand;
+   }
+
+   commandgroup PrintingCmdGroup {
+      label = "Printing";
+      command PrintWorkCopyCommand;
+      command ReprintOriginalfromArchiveCommand;
+      command ReprintOriginalDuplicateCommand;
+      command ReprintModifiedCommand;
+   }
+
+   commandgroup NotesCmdGroup {
+      label = "Notes";
+      command NotesDlgCmd;
+   }
+}
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+----------------------------- MAIN ENTRY POINTS -----------------------------
+
+entityset CustomerOrderInvHeadSet for CustomerOrderInvHead {
+   defaultwhere = "(OBJSTATE = 'PaidPosted' AND
+                       INVOICE_DATE > (SYSDATE - 100)) OR
+                       (OBJSTATE IN ('Preliminary',
+                                      'Posted',
+                                      'Printed',
+                                      'PartlyPaidPosted',
+                                      'PostedAuth'))";
+}
+
+------------------------------ ENTITY DETAILS -------------------------------
+
+@Override
+entity CustomerOrderInvHead {
+   from = "cust_order_inv_head_uiv_all";
+   crud = Update, Read;
+   luname = "'CustomerOrderInvHead'";
+   keys = Company, InvoiceId {
+      where = "COMPANY = :Company and INVOICE_ID = :InvoiceId";
+   }
+   ludependencies = FinNotesVirtual;
+   exclude attributes = CodeA, CodeB, CodeC, CodeD, CodeE, CodeF, CodeG, CodeH, CodeI, CodeJ, NationalBankCode, Creator,
+   ArrivalDate, ProjectActivityId, PrelimCode, DbPreAccCodeString, VoucherNoRef, VoucherTypeRef, VoucherDateRef, LanguageCode,
+   TransferStatus, TransferError, NatureOfBusiness, PaymentAddressId, WayPayId, PlPayDate, InvActualNetCurrAmt, InvVatCurrAmt,
+   ActualNetCurrAmount, ActualNetDomAmount, ActualNetParallelAmount, NonDeductTaxCurrAmount, NonDeductTaxDomAmount,
+   NonDedTaxParallelAmt, ChkHandlingCode, MultiCompanyInvoice, AutomaticInvoice, InvoiceVersion, PayerIdentity, DeductionGroup,
+   DeductionGroup, AdvInv, InvoiceRecipient, ProposalExist, BatchId, BankAccount, TaxInvoiceSeriesId, TaxInvoiceDate, SubConNo,
+   InvoicingAdviceId, MsgSequenceNo, MsgVersionNo, MediaCode, SendStatus, SendTime, SendError, Attachments, SendFlagAttr,
+   OldAdvInv, TaxLiability, LoadType, OneTimeAddressId, AdditionalReference, NetParallelAmount, VoucherText, PostPrelTaxWith,
+   UseProjAddressForTax, CustomsDeclarationDate, LatestResultKey, SelfBillingRef, WhtAmountBase, PrepayBasedInv, CoCurrRate,
+   OriginalResultKey, VatParallelAmount, TotalTaxCurrAmount, TotalTaxDomAmount, TotalTaxParallelAmount, TaxCurrType;
+   attribute Company Text {
+      fetch = "COMPANY";
+      label = "Company";
+      maxlength = 20;
+      editable = [false];
+      format = uppercase;
+   }
+   attribute SeriesId Text {
+      fetch = "SERIES_ID";
+      label = "Series ID";
+      maxlength = 20;
+      required = [true];
+      editable = [false];
+      format = uppercase;
+   }
+   attribute InvoiceNo Text {
+      fetch = "INVOICE_NO";
+      label = "Invoice No";
+      maxlength = 50;
+      required = [true];
+      editable = [false];
+      format = uppercase;
+   }
+   attribute InvoiceId Number {
+      fetch = "INVOICE_ID";
+      label = "Preliminary Invoice No";
+      required = [true];
+      editable = [ETag = null];
+   }
+   attribute Objstate Enumeration(CustomerOrderInvHeadState) {
+      fetch = "OBJSTATE";
+      label = "Invoice Status";
+      editable = [false];
+   }
+   attribute InvoiceType Text {
+      fetch = "INVOICE_TYPE";
+      label = "Invoice Type";
+      maxlength = 50;
+      required = [true];
+      editable = [false];
+      format = uppercase;
+   }
+   attribute InvoiceTypeDescription Text {
+      fetch = "Invoice_Type_API.Get_Description_Db(COMPANY, PARTY_TYPE, INVOICE_TYPE)";
+      label = "Invoice Type Description";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute AdvancePrepaymBasedInvoice Boolean("TRUE", "FALSE") {
+      fetch = "prepay_adv_inv_db";
+      label = "Advance/Prepaym Based Invoice";
+      editable = [false];
+   }
+   attribute CorrectionInvoice Boolean("TRUE", "FALSE") {
+      fetch = "Invoice_Type_API.Get_Correction_Invoice_Db(COMPANY, 'CUSTOMER', INVOICE_TYPE)";
+      label = "Correction Invoice";
+      editable = [false];
+   }
+   attribute CorrectionExist Boolean("TRUE", "FALSE") {
+      fetch = "DECODE(CORRECTION_INVOICE_ID, NULL, 'FALSE', 'TRUE')";
+      label = "Correction Exist";
+      editable = [false];
+   }
+   attribute NotesExist Boolean("TRUE", "FALSE") {
+      fetch = "DECODE(NOTES, NULL, 'FALSE', 'TRUE')";
+      label = "Notes";
+      editable = [false];
+   }
+   attribute UsePriceInclTaxDb Boolean("TRUE", "FALSE") {
+      fetch = "USE_PRICE_INCL_TAX_DB";
+      label = "Use Price Incl Tax Db";
+      editable = [false];
+   }
+   attribute Branch Text {
+      fetch = "BRANCH";
+      label = "Branch";
+      maxlength = 20;
+      format = uppercase;
+   }
+   attribute Currency Text {
+      fetch = "CURRENCY";
+      label = "Currency";
+      maxlength = 3;
+      editable = [false];
+      format = uppercase;
+   }
+   attribute CreatorsReference Text {
+      fetch = "CREATORS_REFERENCE";
+      label = "Order No";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute RmaNo Number {
+      fetch = "RMA_NO";
+      label = "RMA No";
+      editable = [false];
+   }
+   attribute Contract Text {
+      fetch = "CONTRACT";
+      label = "Site";
+      maxlength = 5;
+      editable = [false];
+      format = uppercase;
+   }
+   attribute DeliveryIdentity Text {
+      fetch = "DELIVERY_IDENTITY";
+      label = "Ordering Customer";
+      maxlength = 200;
+      editable = [false];
+   }
+   attribute Identity Text {
+      fetch = "IDENTITY";
+      label = "Customer No";
+      maxlength = 200;
+      required = [true];
+      editable = [false];
+   }
+   attribute CustomerAddressName Text {
+      fetch = "NAME";
+      label = "Customer Address Name";
+      maxlength = 200;
+      editable = [false];
+   }
+   attribute InvoiceAddressId Text {
+      fetch = "INVOICE_ADDRESS_ID";
+      label = "Invoice Address";
+      maxlength = 50;
+      editable = [ETag != null];
+   }
+   attribute DeliveryAddressId Text {
+      fetch = "DELIVERY_ADDRESS_ID";
+      label = "Delivery Address";
+      maxlength = 50;
+      editable = [false];
+   }
+   attribute InvoiceDate Date {
+      fetch = "INVOICE_DATE";
+      label = "Invoice Date";
+      required = [true];
+      editable = [ETag != null];
+   }
+   attribute DeliveryDate Date {
+      fetch = "LATEST_DELIVERY_DATE";
+      label = "Latest Ship Date";
+   }
+   attribute WantedDeliveryDate Timestamp {
+      fetch = "WANTED_DELIVERY_DATE";
+      label = "Wanted Delivery Date/Time";
+      editable = [false];
+   }
+   attribute PayTermId Text {
+      fetch = "PAY_TERM_ID";
+      label = "Payment Terms";
+      maxlength = 20;
+      required = [true];
+      editable = [ETag != null];
+   }
+   attribute PayTermBaseDate Date {
+      fetch = "PAY_TERM_BASE_DATE";
+      label = "Pay Term Base Date";
+      editable = [false];
+   }
+   attribute DueDate Date {
+      fetch = "DUE_DATE";
+      label = "Due Date";
+      required = [true];
+      editable = [ETag != null];
+   }
+   attribute Collect Boolean("TRUE", "FALSE") {
+      fetch = "COLLECT";
+      label = "Collective Invoice";
+      editable = [false];
+   }
+   attribute CurrRate Number {
+      fetch = "FIN_CURR_RATE";
+      label = "Currency Rate";
+      required = [true];
+      editable = [ETag = null];
+   }
+   attribute OrderDate Timestamp {
+      fetch = "ORDER_DATE";
+      label = "Order Date";
+      editable = [false];
+   }
+   attribute OurReference Text {
+      fetch = "OUR_REFERENCE";
+      label = "Our Reference";
+      maxlength = 35;
+      editable = [ETag != null];
+   }
+   attribute YourReference Text {
+      fetch = "YOUR_REFERENCE";
+      label = "Customer Reference";
+      maxlength = 30;
+      editable = [ETag != null];
+   }
+   attribute CustomerRefName Text {
+      fetch = "Contact_Util_API.Get_Cust_Contact_Name(IDENTITY, INVOICE_ADDRESS_ID, YOUR_REFERENCE)";
+      label = "Customer Refrence Name";
+      maxlength = 200;
+      editable = [false];
+      updatable = [false];
+   }
+   attribute ShipVia Text {
+      fetch = "SHIP_VIA";
+      label = "Ship Via Desc";
+      maxlength = 35;
+      editable = [ETag != null];
+   }
+   attribute ForwardAgentId Text {
+      fetch = "FORWARD_AGENT_ID";
+      label = "Forwarder ID";
+      maxlength = 20;
+      editable = [ETag != null];
+      format = uppercase;
+   }
+   attribute LabelNote Text {
+      fetch = "LABEL_NOTE";
+      label = "Label Note";
+      maxlength = 50;
+      editable = [ETag != null];
+   }
+   attribute DeliveryTerms Text {
+      fetch = "DELIVERY_TERMS";
+      label = "Delivery Terms Desc";
+      maxlength = 35;
+      editable = [ETag != null];
+   }
+   attribute DelTermsLocation Text {
+      fetch = "DEL_TERMS_LOCATION";
+      label = "Del Terms Location";
+      maxlength = 100;
+      editable = [ETag != null];
+   }
+   attribute PriceAdjustment Boolean("TRUE", "FALSE") {
+      fetch = "PRICE_ADJUSTMENT";
+      label = "Price Adjustment";
+      editable = [false];
+   }
+   attribute NetCurrAmount Number {
+      fetch = "NET_AMOUNT";
+      label = "Net Amount";
+      editable = [false];
+      format = ifscurrency;
+   }
+   attribute VatCurrAmount Number {
+      fetch = "VAT_AMOUNT";
+      label = "Tax Amount";
+      editable = [false];
+      format = ifscurrency;
+   }
+   attribute GrossAmount Number {
+      fetch = "GROSS_AMOUNT";
+      label = "Gross Amount";
+      editable = [false];
+      format = ifscurrency;
+   }
+   attribute PrintDate Timestamp {
+      fetch = "PRINT_DATE";
+      label = "Printed Date";
+      editable = [ETag = null];
+   }
+   attribute NcfReference Text {
+      fetch = "NCF_REFERENCE";
+      label = "Payment Reference";
+      maxlength = 50;
+      editable = [ETag != null];
+   }
+   attribute JsInvoiceState Enumeration(JsInvoiceState) {
+      fetch = "JS_INVOICE_STATE_DB";
+      label = "Jinsui Status";
+      editable = [false];
+   }
+   attribute SbReferenceNo Text {
+      fetch = "SB_REFERENCE_NO";
+      label = "SBI Ref No";
+      editable = [ETag = null];
+   }
+   attribute ProjectId Text {
+      fetch = "PROJECT_ID";
+      label = "Project ID";
+      editable = [false];
+      format = uppercase;
+   }
+   attribute ShipmentId Number {
+      fetch = "SHIPMENT_ID";
+      label = "Shipment ID";
+      editable = [false];
+   }
+   attribute AggregationNo Number {
+      fetch = "AGGREGATION_NO";
+      label = "Rebate Settlement";
+   }
+   attribute FinalSettlement Boolean("TRUE", "FALSE") {
+      fetch = "FINAL_SETTLEMENT";
+      label = "Final Settlement";
+      editable = [false];
+   }
+   attribute PartyType Text {
+      fetch = "PARTY_TYPE";
+      label = "Party Type";
+      editable = [false];
+      format = uppercase;
+   }
+   attribute CorrectionInvoiceId Number {
+      fetch = "CORRECTION_INVOICE_ID";
+      label = "Correction Invoice ID";
+      editable = [false];
+   }
+   attribute CancelReason Text {
+      fetch = "CANCEL_REASON";
+      label = "Cancellation Reason";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute OrgReportExists Text {
+      fetch = "Customer_Order_Inv_Head_API.Org_Print_Exists_In_Archive__(COMPANY, INVOICE_ID)";
+      label = "Report Exists";
+      editable = [false];
+   }
+   attribute OrderExist Number {
+      fetch = "Customer_Order_Inv_Head_API.Check_Connected_Co_Exist__(COMPANY, INVOICE_ID, CREATORS_REFERENCE, INVOICE_TYPE)";
+      label = "Order Exist";
+      editable = [false];
+   }
+   attribute InstallmentCount Number {
+      fetch = "Payment_Plan_API.Get_Record_Count(COMPANY, INVOICE_ID)";
+      label = "Installment Count";
+      editable = [false];
+   }
+   attribute CustOrdCorrective Text {
+      fetch = "Company_Def_Invoice_Type_API.Get_Def_Co_Cor_Inv_Type(COMPANY)";
+      editable = [false];
+   }
+   attribute CustColCorrective Text {
+      fetch = "Company_Def_Invoice_Type_API.Get_Def_Col_Cor_Inv_Type(COMPANY)";
+      editable = [false];
+   }
+   // ToDo! TEUXX-11519: This column needs to be removed when we have possiblity to call to a method when setting a field editable/not editable
+   attribute RefMethod Text {
+      fetch = "Company_Invoice_Info_API.Get_Ncf_Reference_Method_Db(COMPANY)";
+   }
+   // ToDo! TEUXX-11519: This column needs to be removed when we have possiblity to call to a method when setting a field editable/not editable
+   attribute IsJinsuiOrder Text {
+      fetch = "Customer_Order_API.Get_Jinsui_Invoice_Db(CREATORS_REFERENCE)";
+   }
+   // ToDo! TEUXX-11519: This column needs to be removed when we have possiblity to call to a method when setting a field editable/not editable
+   attribute IsAllowedToModify Text {
+      fetch = "Customer_Order_Inv_Head_API.Allow_Changes_To_Js_Inv(COMPANY, IDENTITY)";
+   }
+
+   reference CompanyRef(Company) to CompanyFinance(Company) {
+      label = "Company";
+   }
+   reference SeriesIdRef(Company, SeriesId) to OrdInvoiceSeriesLov(Company, SeriesId) {
+      label = "Series ID";
+   }
+   reference InvoiceTypeRef(InvoiceType) to OrdInvoiceTypeLov(TypeId) {
+      label = "Invoice Type";
+   }
+   reference BranchRef(Company, Branch) to Branch(Company, Branch) {
+      label = "Branch";
+   }
+   reference ContractRef(Contract) to UserAllowedSiteLov(Contract) {
+      label = "Site";
+   }
+   reference DeliveryIdentityRef(DeliveryIdentity) to CustOrdCust1(CustomerNo) {
+      label = "Ordering Customer";
+   }
+   reference IdentityRef(Identity) to CustOrdCust1(CustomerNo) {
+      label = "Customer No";
+   }
+   reference InvoiceAddressIdRef(Identity, InvoiceAddressId) to CustBillAddressLov(CustomerNo, AddrNo) {
+      label = "Invoice Address";
+   }
+   reference DeliveryAddressIdRef(DeliveryIdentity, DeliveryAddressId) to CustAddressShipLov(CustomerNo, AddrNo) {
+      label = "Delivery Address";
+   }
+   reference PayTermIdRef(Company, PayTermId) to PaymentTerm(Company, PayTermId) {
+      label = "Payment Terms";
+   }
+   reference YourReferenceRef(Identity, InvoiceAddressId, YourReference) to CustInfoContactLovPub(CustomerId, AddressId, PersonId) {
+      label = "Customer Reference";
+   }
+   reference ForwardAgentIdRef(ForwardAgentId) to ForwarderInfo(ForwarderId) {
+      label = "Forwarder ID";
+   }
+   reference CreatorsReferenceRef(CreatorsReference) to CustomerOrder(OrderNo) {
+      label = "Order No";
+   }
+}
+---------------------------------- ACTIONS ----------------------------------
+
+action PrintWorkCopyResultKey Text {
+   initialcheck implementation;
+   parameter Selection Text;
+}
+
+action ReprintOriginalResultKey Structure(ReportResultStruc) {
+   initialcheck implementation;
+   parameter Selection Text;
+}
+
+action ReprintOrgDuplicateResultKey Structure(ReportResultStruc) {
+   initialcheck implementation;
+   parameter Selection Text;
+}
+
+action ReprintModifiedInvoice Structure(ReportResultStruc) {
+   initialcheck implementation;
+   parameter Selection Text;
+   parameter Duplicate Boolean;
+   parameter CopyNo Number;
+   parameter PrintOption Enumeration(PrintOptionEnum);
+}
+
+--------------------------------- FUNCTIONS ---------------------------------
+
+function GetCustomerContactName Text {
+   parameter Identity         Text;
+   parameter InvoiceAddressId Text;
+   parameter YourReference    Text;
+}
+
+function CheckInvDatePeriodClose Structure(InvDatePeriodStruc) {
+   parameter Company       Text;
+   parameter InvoiceId     Number;
+   parameter InvoiceDate   Date;
+   parameter Objstate      Enumeration(CustomerOrderInvHeadState);
+}
+
+function IsRateCorrectionInvoice Text {
+   parameter Company       Text;
+   parameter InvoiceId     Number;
+}
+
+function CheckNoteExist Boolean {
+   parameter Company       Text;
+   parameter InvoiceId     Number;
+}
+
+function FetchCustRef Text {
+   parameter Identity         Text;
+   parameter InvoiceAddressId Text;
+}
+
+function GetUnblockedDueDate Date {
+   parameter Company    Text;
+   parameter Identity   Text;
+   parameter PartyType  Text;
+   parameter PayTermId  Text;
+   parameter BaseDate   Date;
+}
+
+function CalculateDueDate Date {
+   parameter Company          Text;
+   parameter PayTermId        Text;
+   parameter PayTermBaseDate  Date;
+}
+
+function GetInstallmentCount Number {
+   parameter Company    Text;
+   parameter PayTermId  Text;
+}
+
+function GetConsiderPayVacPeriod Text {
+   parameter Company    Text;
+   parameter PayTermId  Text;
+}
+
+function GetDefaultPayWay Text {
+   parameter Company    Text;
+   parameter Identity   Text;
+   parameter PartyType  Text;
+}
+
+function GetNewVacDueDate Date {
+   parameter Company          Text;
+   parameter PaymentMethod    Text;
+   parameter Identity         Text;
+   parameter DueDate          Date;
+}
+
+function GetNoInvoiceCopies Number {
+   parameter Selection Text;
+}
+--------------------------------- STRUCTURE ---------------------------------
+
+structure InvDatePeriodStruc {
+   attribute UserGroup      Text;
+   attribute IsPeriodClose  Boolean;
+}
+
+structure ReportResultStruc {
+   attribute ResultKeyList Text;
+   attribute InfoMessage   Text;
+}

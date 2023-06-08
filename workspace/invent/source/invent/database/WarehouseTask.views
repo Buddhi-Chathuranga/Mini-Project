@@ -1,0 +1,247 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: WarehouseTask
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  180504   SURBLK  Added new views WAREHOUSE_TASK_TOTAL_BALANCE.
+--  180221   DilMlk  Bug 140176, Modified views Warehouse_Task_Local_1 and Warehouse_Task_Total to enable custom fields in MyWarehouseTask window.
+--  180112   BudKlk  Bug 139555, Modified the view Warehouse_Task_Total to improve the performance.
+--  170824   RuLiLk  Bug 137210, Modified viewS Warehouse_Task_Local_1 AND Warehouse_Task_Total by removing
+--  170824           task_type and state to avoid method calls to improve perforamance.
+--  151103  JeLise   LIM-4392, Removed 'PALLET TRANSPORT TASK' from Warehouse_Task_Local_1
+--  141116  MeAblk   Modified Warehouse_Task_Total in order to validate the warehouse worker.
+--  141024  MeAblk   Added new view Warehouse_Task_Local_1 and modified WAREHOUSE_TASK_TOTAL accordingly.
+--  141022  MeAblk   Added new views WAREHOUSE_TASK_STATUS_LOV.
+--  141014  MeAblk   Added new view WAREHOUSE_TASK_TOTAL.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+-------------------- COMMON COLUMN DEFINITIONS ------------------------------
+
+-------------------- PUBLIC VIEW DEFINITIONS --------------------------------
+@ServerOnlyAccess
+VIEW Warehouse_Task_Pub IS
+   Prompt = 'Warehouse Task'
+SELECT task_id                        task_id,
+       source_ref1                    source_ref1,
+       source_ref2                    source_ref2,
+       source_ref3                    source_ref3,
+       source_ref4                    source_ref4,
+       requested_date_finished        requested_date_finished,
+       task_type                      task_type_db,
+       (actual_date_started + (planned_time_needed/1440) * number_of_lines)  expected_date_finished,
+       rowkey                        objkey
+FROM warehouse_task_tab;
+
+
+-------------------- PRIVATE VIEW DEFINITIONS -------------------------------
+
+@Override
+VIEW Warehouse_Task IS
+   WHERE (contract IN (SELECT site FROM user_allowed_site_pub)
+          OR contract IS NULL);
+
+VIEW Warehouse_Task_Local_1 AS
+   SELECT DISTINCT wt.task_id                                                  task_id,
+                   NVL(wt.worker_id, NVL(ww.worker_id, wwtt.worker_id))        possible_worker_id,
+                   wt.worker_id                                                worker_id,
+                   wt.worker_group                                             worker_group,
+                   wt.location_group                                           location_group,
+                   wt.task_type                                                task_type_db,
+                   wt.park_reason_id                                           park_reason_id,
+                   wt.source_ref1                                              source_ref1,
+                   wt.contract                                                 contract,
+                   wt.rowstate                                                 objstate,
+                   wt.info                                                     info,
+                   wt.assigned_priority                                        assigned_priority,
+                   wt.priority                                                 priority,
+                   wt.number_of_lines                                          number_of_lines,
+                   wt.requested_date_finished                                  requested_date_finished,
+                   wt.actual_date_started                                      actual_date_started,
+                   wt.actual_date_finished                                     actual_date_finished,
+                   wt.planned_time_needed                                      planned_time_needed,
+                   Warehouse_Task_API.Finite_State_Events__(wt.rowstate)       objevents,
+                   wt.rowid                                                    objid,
+                   ltrim(lpad(to_char(wt.rowversion,'YYYYMMDDHH24MISS'),2000)) objversion,
+                   wt.rowkey                                                   objkey,
+                   NVL((SELECT DISTINCT ttl.to_contract
+                        FROM transport_task_line_tab ttl
+                        WHERE wt.task_type = 'TRANSPORT TASK'
+                        AND   ttl.transport_task_id = wt.source_ref1),
+                              wt.contract)                                     to_contract,
+                   CASE wt.task_type
+                      WHEN 'TRANSPORT TASK'        THEN 'TRUE'
+                      ELSE                              'FALSE'
+                      END                                                      is_transport_task
+   FROM warehouse_task_tab             wt,
+        warehouse_worker_tab           ww,
+        warehouse_worker_task_type_tab wwtt
+   WHERE wt.rowstate IN ('Released', 'Started', 'Parked') 
+   AND   wt.worker_group = ww.worker_group (+)
+   AND   wt.task_type    = wwtt.task_type
+   AND   wt.contract     = wwtt.contract
+   AND   wwtt.status     = 'ACTIVE';
+
+   
+VIEW Warehouse_Task_Total AS
+   SELECT wtl1.task_id                                                task_id,
+          wtl1.possible_worker_id                                     possible_worker_id,
+          wtl1.worker_id                                              worker_id,
+          wtl1.worker_group                                           worker_group,
+          wtl1.location_group                                         location_group,
+          wtl1.task_type_db                                           task_type_db,
+          wtl1.park_reason_id                                         park_reason_id,
+          wtl1.source_ref1                                            source_ref1,
+          wtl1.contract                                               contract,
+          wtl1.objstate                                               objstate,
+          wtl1.info                                                   info,
+          wtl1.assigned_priority                                      assigned_priority,
+          wtl1.priority                                               priority,
+          wtl1.number_of_lines                                        number_of_lines,
+          wtl1.requested_date_finished                                requested_date_finished,
+          wtl1.actual_date_started                                    actual_date_started,
+          wtl1.actual_date_finished                                   actual_date_finished,
+          wtl1.planned_time_needed                                    planned_time_needed,
+          wtl1.to_contract                                            to_contract,
+          wtl1.objevents                                              objevents,
+          wtl1.objid                                                  objid,
+          wtl1.objversion                                             objversion,
+          wtl1.objkey                                                 objkey
+   FROM warehouse_task_local_1 wtl1
+   WHERE EXISTS (SELECT 1 FROM warehouse_worker_tab wwt
+                 WHERE wwt.worker_id = wtl1.possible_worker_id
+                 AND   wwt.contract  = wtl1.contract
+                 AND   ((wwt.start_date <= sysdate) AND (NVL(wwt.end_date, sysdate) >= sysdate)))         
+   AND   EXISTS (SELECT 1 FROM warehouse_worker_task_type_tab wwtt
+                 WHERE wwtt.worker_id = wtl1.possible_worker_id
+                 AND wwtt.contract    = wtl1.to_contract
+                 AND wwtt.task_type   = wtl1.task_type_db
+                 AND wwtt.status      = 'ACTIVE')
+   AND   EXISTS (SELECT 1 FROM warehouse_worker_loc_group_tab wwlg
+                 WHERE wwlg.worker_id    = wtl1.possible_worker_id
+                 AND wwlg.location_group = wtl1.location_group
+                 AND wwlg.contract       = wtl1.contract
+                 AND wwlg.status         = 'ACTIVE')
+   AND   EXISTS (SELECT 1 FROM user_allowed_site_pub WHERE site = wtl1.contract)  
+   AND   EXISTS (SELECT 1 FROM user_allowed_site_pub WHERE site = wtl1.to_contract)
+   AND   (wtl1.worker_id IS NOT NULL OR wtl1.worker_group IS NULL OR (EXISTS (SELECT 1
+                                                                              FROM warehouse_worker_tab wwt1
+                                                                              WHERE wwt1.worker_id    = wtl1.possible_worker_id 
+                                                                              AND   wwt1.contract     = wtl1.contract
+                                                                              AND   wwt1.worker_group = wtl1.worker_group))) 
+   AND   ((wtl1.is_transport_task = 'FALSE') OR ((SELECT count(*)
+                                                  FROM  transport_task_line_tab ttl2
+                                                  WHERE ttl2.transport_task_id = wtl1.source_ref1
+                                                  AND   ttl2.transport_task_status IN ('CREATED', 'PICKED')
+                                                  AND   ttl2.destination = 'N'
+                                                  AND   wtl1.is_transport_task = 'TRUE') = (SELECT count(*)
+                                                                                            FROM transport_task_line_tab ttl3,
+                                                                                                 warehouse_bay_bin_tab wbb,
+                                                                                                 warehouse_worker_loc_group_tab wwlg2
+                                                                                            WHERE ttl3.transport_task_id      = wtl1.source_ref1
+                                                                                            AND   ttl3.transport_task_status IN ('CREATED', 'PICKED')
+                                                                                            AND   ttl3.destination            = 'N'
+                                                                                            AND   wtl1.is_transport_task      = 'TRUE'
+                                                                                            AND   wbb.contract                = ttl3.to_contract
+                                                                                            AND   wbb.location_no             = ttl3.to_location_no
+                                                                                            AND   wwlg2.worker_id             = wtl1.possible_worker_id
+                                                                                            AND   wwlg2.location_group        = wbb.location_group
+                                                                                            AND   wwlg2.contract              = wbb.contract
+                                                                                            AND   wwlg2.status                = 'ACTIVE') AND (wtl1.worker_id IS NOT NULL OR wtl1.worker_group IS NULL OR (SELECT count(*)
+                                                                                                                                                                                                           FROM transport_task_line_tab ttl2
+                                                                                                                                                                                                           WHERE ttl2.transport_task_id = wtl1.source_ref1
+                                                                                                                                                                                                           AND   ttl2.transport_task_status IN ('CREATED', 'PICKED')
+                                                                                                                                                                                                           AND   ttl2.destination            = 'N'
+                                                                                                                                                                                                           AND   wtl1.is_transport_task = 'TRUE') = (SELECT count(*)
+                                                                                                                                                                                                                                                     FROM transport_task_line_tab ttl3,
+                                                                                                                                                                                                                                                          warehouse_bay_bin_tab wbb,
+                                                                                                                                                                                                                                                          warehouse_worker_group_loc_tab wwgl
+                                                                                                                                                                                                                                                     WHERE ttl3.transport_task_id      = wtl1.source_ref1
+                                                                                                                                                                                                                                                     AND   ttl3.transport_task_status IN ('CREATED', 'PICKED')
+                                                                                                                                                                                                                                                     AND   ttl3.destination            = 'N'
+                                                                                                                                                                                                                                                     AND   wtl1.is_transport_task      = 'TRUE'
+                                                                                                                                                                                                                                                     AND   wbb.contract                = ttl3.to_contract
+                                                                                                                                                                                                                                                     AND   wbb.location_no             = ttl3.to_location_no
+                                                                                                                                                                                                                                                     AND   wwgl.worker_group           = wtl1.worker_group
+                                                                                                                                                                                                                                                     AND   wwgl.location_group         = wbb.location_group
+                                                                                                                                                                                                                                                     AND   wwgl.contract               = wbb.contract
+                                                                                                                                                                                                                                                     AND   wwgl.status                 = 'ACTIVE'))))
+ORDER BY worker_id ASC, worker_group ASC, objstate DESC, assigned_priority ASC,  priority ASC, (requested_date_finished - (planned_time_needed/1440) * number_of_lines) ASC;
+   
+         
+VIEW WAREHOUSE_TASK_STATUS IS
+   Prompt = 'Warehouse Task Status'
+   Status.Flags = 'K---L'
+   Status.Datatype = 'STRING(20)'
+   Status.Prompt = 'Status'
+   Description.Flags = 'A---L'
+   Description.Datatype = 'STRING(50)'
+   Description.Prompt = 'Description'
+SELECT  'Parked'                                              status,
+        Warehouse_Task_API.Finite_State_Decode__('Parked')    description
+FROM DUAL
+UNION ALL
+SELECT  'Planned'                                             status,
+        Warehouse_Task_API.Finite_State_Decode__('Planned')   description
+FROM DUAL
+UNION ALL
+SELECT  'Released'                                            status,
+        Warehouse_Task_API.Finite_State_Decode__('Released')  description
+FROM DUAL
+UNION ALL
+SELECT  'Started'                                             status,
+        Warehouse_Task_API.Finite_State_Decode__('Started')   description
+FROM DUAL
+UNION ALL
+SELECT  'Cancelled'                                           status,
+        Warehouse_Task_API.Finite_State_Decode__('Cancelled') description
+FROM DUAL;
+
+
+VIEW WAREHOUSE_TASK_TOTAL_BALANCE IS
+   Prompt = 'Warehouse Task Total Balance'
+   balance.Flags = 'A----'
+   balance.Datatype = 'STRING(30)'
+   balance.Prompt = 'Balance'
+   total_balance.Flags = 'A----'
+   total_balance.Datatype = 'STRING(30)'
+   total_balance.Prompt = 'Total Balance'
+SELECT
+       task_id                        task_id,
+       priority                       priority,
+       source_ref1                    source_ref1,
+       source_ref2                    source_ref2,
+       source_ref3                    source_ref3,
+       source_ref4                    source_ref4,
+       info                           info,
+       number_of_lines                number_of_lines,
+       requested_date_finished        requested_date_finished,
+       actual_date_finished           actual_date_finished,
+       actual_date_started            actual_date_started,
+       planned_time_needed            planned_time_needed,
+       Warehouse_Task_Type_API.Decode(task_type) task_type,
+       task_type                      task_type_db,
+       location_group                 location_group,
+       contract                       contract,
+       worker_id                      worker_id,
+       worker_group                   worker_group,
+       assigned_priority              assigned_priority,
+       park_reason_id                 park_reason_id,
+       rowstate                       objstate,
+       Warehouse_Task_API.Finite_State_Events__(rowstate)                     objevents,
+       Warehouse_Task_API.Finite_State_Decode__(rowstate)                         state,
+       rowkey                         objkey,
+       to_char(rowversion,'YYYYMMDDHH24MISS') objversion,
+       rowid                          objid,
+       NVL(Warehouse_Worker_API.Get_Working_Time(Contract, task_type, location_group, requested_date_finished),0) - (number_of_lines * planned_time_needed)   balance,
+       SUM(NVL(Warehouse_Worker_API.Get_Working_Time(Contract, task_type, location_group, requested_date_finished),0) - (number_of_lines * planned_time_needed)) 
+                                                               OVER(PARTITION BY Contract, task_type, location_group ORDER BY requested_date_finished) total_balance
+FROM   warehouse_task_tab
+WHERE (contract IN (SELECT site FROM user_allowed_site_pub)
+          OR contract IS NULL) AND rowstate NOT IN ('Closed', 'Cancelled')
+WITH   READ ONLY;

@@ -1,0 +1,230 @@
+--  Date        Sign    History
+--  ---------   ------  -------------------------------------------------------------------------
+--  2021-07-14  Inaklk  SC21R2-1763, Dynalically bound enumeration subsets for field SourcingOption
+--  2019-06-11  AwWelk  SCUXXW4-22211, Removed the enumeration subset from CreateSalesPart() action.
+--  2019-06-10  AwWelk  SCUXXW4-22211, Removed the enumeration subset from CreateSalesPart() action.
+--  2019-04-03  bajelk  SCUXXW4-17419, Added label for SalesTaxable field in SalesPartTaxGroup.
+--  2019-01-23  AwWelk  SCUXXW4-1699, Created to handled the New Part Wizard functionality in IFSEE.
+-------------------------------------------------------------------------------------------------
+fragment NewPartAssistantOrder;
+component ORDER;
+layer Core;
+description "New Part Assistant Order Elements";
+
+include fragment TaxCodeExemptRestrictedSelector;
+include fragment TaxCodeRestrictedSelector;
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+---------------------------------- GROUPS -----------------------------------
+group SalesPartGeneralGroup for NewPartAssistantVirtual {
+   label = "General";
+   field SalesType {
+      validate command {
+         execute {
+            if [SalesType = "SalesOnly"] {
+               set SalesListPrice = null;
+               set SalesListPriceInclTax = null;
+               set SalesRentalListPrice = 0;
+               set SalesRentalListPriceInclTax = 0;
+            }
+            else {
+               if [SalesType = "RentalOnly"] {
+                  set SalesListPrice = 0;
+                  set SalesListPriceInclTax = 0;
+                  set SalesRentalListPrice = null;
+                  set SalesRentalListPriceInclTax = null;
+               }
+               else {
+                  set SalesListPrice = null;
+                  set SalesListPriceInclTax = null;
+                  set SalesRentalListPrice = null;
+                  set SalesRentalListPriceInclTax = null;
+               }
+            }
+
+         }
+      }
+   }
+   field NonInvPartType {
+      visible = [PartType = "NonInventorySalesPart"];
+   }
+}
+
+group SalesPartSourcingGroup for NewPartAssistantVirtual {
+   label = "Sourcing";
+   field SourcingOption {
+      when [PartType = "NonInventorySalesPart"] use subset Subset2;
+      when [PartType != "NonInventorySalesPart"] use subset Subset1;
+   }
+   lov RuleIdRef with ReferenceSourcingRuleSelector {
+      label = "Sourcing Rule";
+      description = RuleIdRef.Description;
+   }
+}
+
+group SalesPartGroup for NewPartAssistantVirtual {
+   label = "Grouping";
+   lov SalesPriceGroupIdRef with ReferenceSalesPriceGroupSelector;
+   lov CatalogGroupRef with ReferenceSalesGroupSelector;
+   lov DiscountGroupRef with ReferenceSalesDiscountGroupSelector;
+   lov SalesPartRebateGroupRef with ReferenceSalesPartRebateGroupSelector;
+}
+
+group SalesPartUnitOfMeasureGroup for NewPartAssistantVirtual {
+   label = "Unit of Measure";
+   lov SalesUnitMeasRef with ReferenceIsoUnitSelector {
+      validate command {
+         variable ConversionFactorVar Number;
+         execute {
+            if[SalesUnitMeas != null] {
+               set SalesPriceUnitMeas = SalesUnitMeas;
+               if [PartType = "PurchasedInventorySalesPart"] {
+                  call GetConversionFactor(Contract, CatalogNo, SalesUnitMeas) into ConversionFactorVar;
+                  set SalesConvFactor = ConversionFactorVar;
+                  if[SalesConvFactor != null and SalesConvFactor != 1] {
+                     set InvertedConvFactor = 1;
+                  }
+               }
+            }
+         }
+      }
+   }
+   field SalesConvFactor {
+      visible = [PartType = "PurchasedInventorySalesPart"];
+      validate command {
+         execute {
+            if [SalesConvFactor != null and SalesConvFactor != 1] {
+               set InvertedConvFactor = 1;
+            }
+         }
+      }
+   }
+   lov SalesPriceUnitMeasRef with ReferenceIsoUnitSelector {
+      validate command {
+         variable PriceConversionFactorVar Number;
+         execute {
+            if [SalesPriceUnitMeas != null] {
+               call GetPriceConversionFactor(SalesUnitMeas, SalesPriceUnitMeas) into PriceConversionFactorVar;
+               if[PriceConversionFactorVar != null] {
+                  set SalesPriceConvFactor = PriceConversionFactorVar;
+               }
+            }
+         }
+      }
+   }
+   field SalesPriceConvFactor;
+   field InvertedConvFactor {
+      visible = [PartType = "PurchasedInventorySalesPart"];
+      validate command {
+         execute {
+            if [InvertedConvFactor != null and InvertedConvFactor != 1] {
+               set SalesConvFactor = 1;
+            }
+         }
+      }
+   }
+}
+
+group SalesPartPricingGroup for NewPartAssistantVirtual {
+   label = "Pricing";
+   currency SalesListPrice(CompanyCurrencyCode) {
+      uniteditable = [false];
+      editable = [not UsePriceIncludingTaxOrder];
+   }
+   currency SalesListPriceInclTax(CompanyCurrencyCode) {
+      uniteditable = [false];
+      editable = [UsePriceIncludingTaxOrder];
+   }
+   currency SalesRentalListPrice(CompanyCurrencyCode) {
+      uniteditable = [false];
+      editable = [RentalInstalled = "TRUE" and(not UsePriceIncludingTaxOrder)];
+   }
+   currency SalesRentalListPriceInclTax(CompanyCurrencyCode) {
+      uniteditable = [false];
+      editable = [RentalInstalled = "TRUE" and UsePriceIncludingTaxOrder];
+   }
+   currency SalesCost(CompanyCurrencyCode) {
+      uniteditable = [false];
+      visible = [PartType = "NonInventorySalesPart"];
+   }
+}
+
+group SalesPartTaxGroup for NewPartAssistantVirtual {
+   label = "Tax";
+   field TaxCode {
+      lovswitch {
+         when[SalesTaxable] {
+            lov TaxCodeRef with ReferenceTaxCodeRestrictedSelector using GetTaxCodeRestricted(Company) {
+               description = TaxCodeRef.Description;
+            }
+         }
+         when[true] {
+            lov TaxCodeRef with ReferenceTaxCodeExemptRestrictedSelector using GetTaxCodeExemptRestricted(Company) {
+               description = TaxCodeRef.Description;
+            }
+         }
+      }
+
+      editable = [TaxClassId = null];
+   }
+   lov TaxClassRef with ReferenceTaxClassSelector {
+      editable = [TaxCode = null];
+   }
+   field SalesTaxable {
+      label = "Taxable";
+   }
+   field UsePriceIncludingTaxOrder;
+}
+--------------------------------- COMMANDS ----------------------------------
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+
+--------------------------------- FUNCTIONS ---------------------------------
+function GetConversionFactor Number {
+   parameter Contract Text;
+   parameter CatalogNo Text;
+   parameter SalesUnitMeas Text;
+}
+
+function GetPriceConversionFactor Number {
+   parameter SalesUnitMeas Text;
+   parameter SalesPriceUnitMeas Text;
+}
+
+function GetTaxCodeRestricted List < Entity(TaxCodeRestricted) >  {
+   parameter Company Text;
+   where = "COMPANY = :Company AND (VALID_FROM <= SYSDATE AND VALID_UNTIL >= SYSDATE)";
+}
+
+function GetTaxCodeExemptRestricted List < Entity(TaxCodeExemptRestricted) >  {
+   parameter Company Text;
+   where = "COMPANY = :Company AND (VALID_FROM <= SYSDATE AND VALID_UNTIL >= SYSDATE)";
+}
+---------------------------------- ACTIONS ----------------------------------
+action CreateSalesPart {
+   initialcheck UserAllowedSite(Contract);
+   parameter Contract Text;
+   parameter CatalogNo Text;
+   parameter CatalogType Text;
+   parameter SalesType Enumeration(SalesType);
+   parameter NonInvPartType Enumeration(NonInventoryPartType);
+   parameter SourcingOption Enumeration(SourcingOption);
+   parameter RuleId Text;
+   parameter SalesPriceGroupId Text;
+   parameter CatalogGroup Text;
+   parameter DiscountGroup Text;
+   parameter SalesPartRebateGroup Text;
+   parameter SalesUnitMeas Text;
+   parameter SalesConvFactor Number;
+   parameter SalesPriceUnitMeas Text;
+   parameter SalesPriceConvFactor Number;
+   parameter InvertedConvFactor Number;
+   parameter SalesListPrice Number;
+   parameter SalesListPriceInclTax Number;
+   parameter SalesRentalListPrice Number;
+   parameter SalesRentalListPriceInclTax Number;
+   parameter TaxCode Text;
+   parameter TaxClassId Text;
+   parameter SalesTaxable Boolean;
+   parameter UsePriceIncludingTaxOrder Boolean;
+}

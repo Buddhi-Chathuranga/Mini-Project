@@ -1,0 +1,215 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     RunCapabilityCheck
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date        Sign    History
+--  ------      ------  ---------------------------------------------------------
+--  2022-01-31  ShWtlk  MF21R2-6749, Modified Get_Init_Details___ to check if the customerOrder or SalesQuotation is not visible for planning 
+--                      and only run capability check in neither reserve nor allocate option.
+--  2021-06-16  ManWlk  MF21R2-2098, Modified Get_Init_Details___() to set required date to planned due date instead of 
+--  2021-06-16          setting it to previous work day.
+--  2018-10-17  SeJalk  SCUXXW4-8207, Added Methods Previous_Work_Day___ ,Check_Allocate___,Interim_Get_Description___ 
+--  2018-10-17          and Perform_Capability_Check___
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Previous_Work_Day___(
+   site_                 IN VARCHAR2,
+   supply_site_          IN VARCHAR2,
+   supply_site_due_date_ IN DATE,
+   planned_due_date_     IN DATE )  RETURN DATE
+IS
+   required_date_ DATE;
+BEGIN
+   required_date_:= Work_Time_Calendar_API.Get_Previous_Work_Day(Site_API.Get_Manuf_Calendar_Id(NVL(supply_site_, site_)),
+                                                                NVL(supply_site_due_date_, planned_due_date_));
+   RETURN  required_date_;                                                        
+END Previous_Work_Day___;
+
+FUNCTION Interim_Get_Description___(
+   interim_header_ IN VARCHAR2, 
+   identity1_      IN VARCHAR2,
+   identity2_      IN VARCHAR2,
+   identity3_      IN VARCHAR2)  RETURN VARCHAR2
+IS
+   interim_header_desc_ VARCHAR2(100);
+BEGIN
+   $IF Component_Ordstr_SYS.INSTALLED $THEN
+      interim_header_desc_ := Interim_Demand_head_API.Get_Description(interim_header_);
+   $END
+   IF interim_header_desc_ IS NULL THEN
+      RETURN identity1_ || '-' || identity2_ || '-' || identity3_ ;
+   END IF;
+   RETURN interim_header_desc_;
+END Interim_Get_Description___;
+
+FUNCTION Perform_Capability_Check___ (
+   planned_due_date_          IN DATE,
+	supply_site_due_date_      IN DATE,
+	planned_delivery_date_     IN DATE,
+	interim_header_            IN VARCHAR2,
+	contract_                  IN VARCHAR2,
+	inventory_part_no_         IN VARCHAR2,
+	configuration_id_          IN VARCHAR2,
+	required_date_             IN DATE,
+	org_planned_due_date_      IN DATE,
+	buy_qty_due_               IN NUMBER,
+	interim_demand_usage_type_ IN VARCHAR2,
+	identity1_                 IN VARCHAR2,
+   identity2_                 IN VARCHAR2,
+   identity3_                 IN VARCHAR2,
+   identity4_                 IN NUMBER,
+	customer_no_               IN VARCHAR2,
+	allocate_                  IN VARCHAR2,
+	supply_code_               IN VARCHAR2,
+	supply_site_supply_code_   IN VARCHAR2,
+	supply_site_               IN VARCHAR2,
+	info$_ OUT VARCHAR2)  RETURN Status_Structure_Rec
+IS
+   message_                   VARCHAR2(4000);
+   info_                      VARCHAR2(4000);   
+   is_deliverable_            VARCHAR2(4000);
+   planned_due_dates_         DATE;
+   supply_site_due_dates_     DATE;
+   
+   objid_                     VARCHAR2(4000);
+   objversion_                VARCHAR2(4000);
+   rec_                       Status_Structure_Rec;
+BEGIN
+   IF (interim_demand_usage_type_ = 'CUSTOMERORDER') THEN
+      Customer_Order_Line_Initial_Check___(identity1_, identity2_, identity3_, identity4_);
+   ELSE
+      Order_Quotation_Line_Initial_Check___(identity1_, identity2_, identity3_, identity4_);
+   END IF;
+      
+   planned_due_dates_           := planned_due_date_;
+   supply_site_due_dates_       := supply_site_due_date_;  
+   rec_.planned_delivery_date   := planned_delivery_date_;
+   Get_Objid_Objversion___( objid_, objversion_, identity1_, identity2_, identity3_, identity4_, interim_demand_usage_type_);
+   Cust_Ord_Date_Calculation_API.Perform_Capability_Check(message_,info_,rec_.ctp_run_id,planned_due_dates_,supply_site_due_dates_,
+                                                         rec_.planned_delivery_date,interim_header_,contract_,inventory_part_no_,
+                                                         configuration_id_,required_date_, org_planned_due_date_,buy_qty_due_,
+                                                         interim_demand_usage_type_,identity1_, identity2_, identity3_, identity4_,
+                                                         customer_no_,allocate_,supply_code_,supply_site_supply_code_,supply_site_,
+                                                         objid_,objversion_);
+   $IF Component_Ordstr_SYS.INSTALLED $THEN
+      is_deliverable_ := Interim_Ctp_Critical_Path_API.Get_Is_Deliverable(rec_.ctp_run_id);  
+      IF is_deliverable_ = 'FALSE' AND message_ IS NULL THEN
+          info_ :=  SUBSTR(info_, INSTR(info_, chr(31))+ 1, INSTR(info_, chr(30)));
+          info_ :=  REPLACE(info_, chr(30),'');
+          info_ :=  trim(REPLACE(info_, chr(31),''));
+         IF info_ IS NOT NULL THEN
+            rec_.type := 'CONFIRM';
+            rec_.info_message := info_;
+            RETURN rec_;
+         END IF;   
+      END IF;
+   $END
+   IF message_ IS NULL THEN 
+      info$_          := info_;
+   END IF;  
+   rec_.type := NULL;
+   rec_.info_message := message_;    
+   RETURN rec_;
+END Perform_Capability_Check___;
+
+PROCEDURE Get_Objid_Objversion___ (
+   objid_         OUT VARCHAR2,
+   objversion_    OUT VARCHAR2,  
+   identity1_     IN VARCHAR2,
+   identity2_     IN VARCHAR2,
+   identity3_     IN VARCHAR2,
+   identity4_     IN NUMBER,
+   source_        IN VARCHAR2)
+IS
+   CURSOR Get_Quotation_Info IS
+      SELECT objid, objversion
+         FROM  order_quotation_line
+         WHERE quotation_no = identity1_
+         AND   line_no = identity2_
+         AND   rel_no = identity3_        
+         AND   line_item_no = identity4_;
+         
+   CURSOR Get_Cust_Order_Info IS
+      SELECT objid, objversion
+         FROM  customer_order_line
+         WHERE order_no = identity1_
+         AND   line_no = identity2_
+         AND   rel_no = identity3_        
+         AND   line_item_no = identity4_;
+BEGIN
+   IF source_ = 'CUSTOMERQUOTE' THEN
+     OPEN Get_Quotation_Info;
+     FETCH Get_Quotation_Info INTO objid_, objversion_;
+     CLOSE Get_Quotation_Info;
+   ELSIF source_ = 'CUSTOMERORDER' THEN
+     OPEN Get_Cust_Order_Info;
+     FETCH Get_Cust_Order_Info INTO objid_, objversion_;
+     CLOSE Get_Cust_Order_Info;
+   ELSE
+      objid_ := NULL;
+      objversion_ := NULL;
+   END IF;
+END Get_Objid_Objversion___;
+
+
+FUNCTION Get_Init_Details___ (
+	site_                  IN VARCHAR2,
+	supply_site_           IN VARCHAR2,
+	planned_due_date_      IN DATE,
+   planned_delivery_date_ IN DATE,
+	interim_header_        IN VARCHAR2,
+	identity1_             IN VARCHAR2,
+	identity2_             IN VARCHAR2,
+	identity3_             IN VARCHAR2,
+   identity4_             IN NUMBER,
+   customer_no_           IN VARCHAR2,
+   supply_code_           IN VARCHAR2,
+   inventory_part_no_     IN VARCHAR2,
+   source_                IN VARCHAR2) RETURN Capability_Check_Structure_Rec
+IS
+   rec_                      Capability_Check_Structure_Rec;
+   line_                     Order_Quotation_Line_API.Public_Rec;
+   dummy_del_date_           DATE := planned_delivery_date_;
+   dummy_due_date_           DATE := planned_due_date_;
+   sales_quot_line_status_   Order_Quotation_Line_TAB.ROWSTATE%TYPE;
+BEGIN
+   IF source_ = 'CUSTOMERQUOTE' AND supply_code_ IN ('IPT', 'IPD') THEN 
+      line_ := Order_Quotation_Line_API.Get(identity1_, identity2_, identity3_, identity4_);
+      Cust_Ord_Date_Calculation_API.Calc_Quotation_Dates(dummy_del_date_, dummy_due_date_, rec_.supply_site_due_date, line_.wanted_delivery_date, line_.date_entered, customer_no_, line_.ship_addr_no, line_.vendor_no, line_.ship_via_code, line_.delivery_leadtime, line_.picking_leadtime, line_.ext_transport_calendar_id, supply_code_, site_, inventory_part_no_, inventory_part_no_);
+   END IF;
+   
+	rec_.required_date := NVL(rec_.supply_site_due_date, planned_due_date_);
+   
+   $IF Component_Ordstr_SYS.INSTALLED $THEN
+      rec_.interim_header_desc := Interim_Demand_head_API.Get_Description(interim_header_);
+   $END
+   IF rec_.interim_header_desc IS NULL THEN
+      rec_.interim_header_desc := identity1_ || '-' || identity2_ || '-' || identity3_ ;
+   END IF;   
+   
+   rec_.sourcing_option := Sales_Part_API.Get_Sourcing_Option_Db(supply_site_, inventory_part_no_);
+   IF (rec_.sourcing_option NOT IN ('DOPORDER', 'INVENTORYORDER', 'SHOPORDER')) THEN
+      rec_.sourcing_option := NULL;
+   END IF;
+   
+   rec_.allocate_field_editable := true;
+   
+   IF source_ = 'CUSTOMERQUOTE' THEN
+      sales_quot_line_status_ := Order_Quotation_Line_API.Get_Objstate(identity1_, identity2_, identity3_, identity4_);
+      
+      IF  sales_quot_line_status_ = 'Planned' OR (sales_quot_line_status_ != 'Planned' AND Order_Quotation_Line_API.Get_Release_Planning_Db(identity1_, identity2_, identity3_, identity4_) = 'NOTRELEASED') THEN
+         rec_.allocate_field_editable := false;
+      END IF;
+   ELSE
+      IF Customer_Order_Line_API.Get_Rel_Mtrl_Planning(identity1_, identity2_, identity3_, identity4_) = 'FALSE' THEN
+         rec_.allocate_field_editable := false;
+      END IF;
+   END IF;
+      
+   RETURN rec_;
+END Get_Init_Details___;

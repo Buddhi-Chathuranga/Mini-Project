@@ -1,0 +1,313 @@
+--------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  ---------------------------------------------------------------
+-- 2021-02-24  WaSalk  SC2020R1-12573,Removed LocalizationControlCenterHandler fragment and InitLocalizationFunctionalitiesCommand and
+-- 2020-02-24          Modified StatisticalCodeGroup visibility and ContractRef validate command using EnabledLccParams.
+-- 2020-02-18  RaVdlk  SCXTEND-2222, Enabled the Duplicate functionality
+-- 2019-11-07  FRBESE  SCXTEND-1156, Changed SalesChargeTypeNavEntry navigator entry index from 500 to 600.
+-- 2019-05-20  fgusse  SCUXXW4-20685, Update call to Document Text where needed in Supply Chain components
+-- 2018-11-12  IzShlk  SCUXXW4-9382, Converted from frmSalesChargeType using MTG Version: 1.32
+--------------------------------------------------------------------------------------
+
+client SalesChargeType;
+component ORDER;
+layer Core;
+projection SalesChargeTypeHandling;
+include fragment UserAllowedSiteLovSelector;
+include fragment TaxCodeRestrictedSelector;
+include fragment TaxCodeExemptRestrictedSelector;
+include fragment MpccomPhraseTextLovSelector;
+include fragment OutputTypeLovSelector;
+include fragment DocumentText;
+-- gelr: good_service_statistical_code, begin
+include fragment StatisticalCodeSelector;
+-- gelr: good_service_statistical_code, end
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+navigator {
+   entry SalesChargeTypeNavEntry parent OrderNavigator.SalesPart at index 600 {
+      label = "Sales Charge Type";
+      page Form home SalesChargeType;
+   }
+}
+
+-------------------------------- MAIN PAGES ---------------------------------
+page Form using SalesChargeTypeSet {
+   label = "Sales Charge Type";
+   startupmode = search;
+   crudactions {
+      duplicate {
+         enabled = [true];
+      }
+   }
+   selector SalesChargeTypeSelector;
+   group SalesChargeTypeGroup;
+
+   tabs {
+      tab {
+         label = "General";
+         arrange {
+            group ChargeGroup;
+            group TaxGroup;
+            -- gelr: good_service_statistical_code, begin
+            group StatisticalCodeGroup {
+               visible = ["GOOD_SERVICE_STATISTICAL_CODE" in EnabledLccParams];
+            }
+            -- gelr: good_service_statistical_code, end
+         }
+         group ChargeIndicatorGroup;
+      }
+      tab {
+         label = "Descriptions";
+         list SalesChargeTypeDescList(SalesChargeTypeDescArray);
+      }
+   }
+}
+
+--------------------------------- COMMANDS ----------------------------------
+command DocumentTextCommand for SalesChargeTypeDesc {
+   label = "Document Text";
+   enabled = [true];
+   variable LabelTextVar;
+   execute {
+      set LabelTextVar = "for Charge Type - ${ChargeType} ${Contract} ${LanguageCode}" {
+         translatable = true;
+      }
+      assistant DocumentText(NoteId, LabelTextVar) {
+         when OK {
+            exit OK;
+         }
+      }
+      refresh;
+   }
+}
+--------------------------------- SELECTORS ---------------------------------
+@Override
+selector SalesChargeTypeSelector for SalesChargeType {
+   orderby = ChargeType;
+   label = "${ChargeType} - ${ChargeTypeDesc}";
+   static ChargeType;
+   static ChargeTypeDesc;
+   static Contract;
+   fieldorder = ChargeType, ChargeTypeDesc, Contract;
+}
+
+---------------------------------- GROUPS -----------------------------------
+group SalesChargeTypeGroup for SalesChargeType {
+   label = "";
+
+   field ChargeType {
+      size = Small;
+   }
+   field ChargeTypeDesc;
+   field ChargeGroupRef {
+      size = Small;
+      validate command {
+         execute {
+            call GetGroupDescription(ChargeGroup) into ChargeGroupDescription;
+            if [ChargeGroup = null] {
+               set SalesChgTypeCategory = null;
+            }
+            else {
+               set SalesChgTypeCategory = ChargeGroupRef.SalesChgTypeCategory;
+            }
+         }
+      }
+   }
+   field ChargeGroupDescription {
+      editable = [false];
+   }
+   field SalesChgTypeCategory {
+      size = Small;
+      editable = [false];
+   }
+   lov ContractRef with ReferenceUserAllowedSiteLovSelector {
+      preview = UserAllowedSiteLovCard;
+      size = Small;
+      validate command {
+         variable ContractInfoVar {
+            type = Structure(ContractInfoStruct);
+         }
+         execute {
+            call ValidateContract(Contract, TaxClassId) into ContractInfoVar;
+            set Company = ContractInfoVar.Company;
+            set CurrencyCode = ContractInfoVar.Currency;
+            set TaxCode = ContractInfoVar.TaxCode;
+            set UsePriceInclTax = ContractInfoVar.UsePriceInclTax;
+            set Taxable = ContractInfoVar.Taxable;
+            -- gelr:localization_control_center, begin
+            set EnabledLccParams = ContractInfoVar.EnabledLccParams;
+            -- gelr:localization_control_center, end
+         }
+      }
+   }
+   field SalesUnitMeasRef {
+      size = Small;
+   }
+   field CurrencyCode {
+      label = "Currency";
+      size = Small;
+      editable = [false];
+   }
+   field Company {
+      columnexclude = [true];
+      visible = [false];
+   }
+}
+
+group ChargeGroup for SalesChargeType {
+   label = "Details";
+
+   field ChargeAmount {
+      editable = [Charge = null and not(UsePriceInclTax)];
+      preserveprecision = [true];
+
+      validate command {
+         execute {
+            call CalculatePriceInclTax(ChargeAmount, Taxable, TaxCode, Company) into ChargeAmountInclTax;
+         }
+      }
+   }
+   field ChargeAmountInclTax {
+      editable = [Charge = null and UsePriceInclTax];
+      preserveprecision = [true];
+
+      validate command {
+         execute {
+            call CalculatePrice(ChargeAmountInclTax, Taxable, TaxCode, Company) into ChargeAmount;
+         }
+      }
+   }
+   field ChargeCost {
+      editable = [ChargeCostPercent = null];
+   }
+
+   field Charge {
+      editable = [ChargeAmount = null];
+   }
+   field ChargeCostPercent {
+      size = Small;
+      editable = [ChargeCost = null];
+   }
+}
+
+group TaxGroup for SalesChargeType {
+   label = "Tax";
+   field CurrDate {
+      visible = [false];
+   }
+   field TaxCode {
+      editable = [TaxClassId = null];
+      lovswitch {
+         when [Taxable] {
+            lov TaxCodeRef with ReferenceTaxCodeRestrictedSelector using TaxCodeRestrictedFetchValidTaxCodes(CurrDate) {
+               preview = TaxCodeRestrictedCard;
+               description = TaxCodeRef.Description;
+            }
+         }
+
+         when [not(Taxable)] {
+            lov TaxCodeExemptRef with ReferenceTaxCodeExemptRestrictedSelector using TaxCodeExemptRestrictedFetchValidTaxCodes(CurrDate) {
+               preview = TaxCodeExemptRestrictedCard;
+               description = TaxCodeExemptRef.Description;
+            }
+         }
+      }
+
+      validate command {
+         variable ChargePriceInclTaxVar {
+            type = Number;
+         }
+
+         execute {
+            if [UsePriceInclTax] {
+               call CalculatePrice(ChargeAmountInclTax, Taxable, TaxCode, Company) into ChargeAmountVar;
+               set ChargeAmount = ChargeAmountVar;
+            }
+            else {
+               call CalculatePriceInclTax(ChargeAmount, Taxable, TaxCode, Company) into ChargePriceInclTaxVar;
+               set ChargeAmountInclTax = ChargePriceInclTaxVar;
+            }
+         }
+      }
+   }
+   lov TaxClassIdRef with ReferenceTaxClassSelector {
+      description = TaxClassIdRef.Description;
+      editable = [TaxCode = null];
+   }
+   lov DeliveryTypeRef with ReferenceDeliveryTypeSelector {
+      description = DeliveryTypeRef.Description;
+   }
+   field Taxable {
+      validate command {
+         variable ChargeAmountVar {
+            type = Number;
+         }
+         variable ChargePriceInclTaxVar {
+            type = Number;
+         }
+         execute {
+            if [UsePriceInclTax] {
+               call CalculatePrice(ChargeAmountInclTax, Taxable, TaxCode, Company) into ChargeAmountVar;
+               set ChargeAmount = ChargeAmountVar;
+            }
+            else {
+               call CalculatePriceInclTax(ChargeAmount, Taxable, TaxCode, Company) into ChargePriceInclTaxVar;
+               set ChargeAmountInclTax = ChargePriceInclTaxVar;
+            }
+         }
+      }
+   }
+   field UsePriceInclTax {
+      validate command {
+         variable ExternalTaxCalMethodVar;
+
+         execute {
+            if [UsePriceInclTax] {
+               call GetExternalTaxCalMethod(Company) into ExternalTaxCalMethodVar;
+               if [ExternalTaxCalMethodVar != "NOT_USED"] {
+                  set UsePriceInclTax = false;
+                  error("Price including tax cannot be used when using an external tax system.");
+               }
+            }
+         }
+      }
+   }
+}
+
+group ChargeIndicatorGroup for SalesChargeType {
+   label = "Indicators";
+
+   field IntrastatExempt;
+   field UnitCharge;
+   field PrintCollectCharge {
+      enumerationtrue = "Print";
+      enumerationfalse = "NoPrint";
+   }
+   field PrintChargeType {
+      searchable = false;
+      enumerationtrue = "Yes";
+      enumerationfalse = "No";
+   }
+}
+-- gelr: good_service_statistical_code, begin
+group StatisticalCodeGroup for SalesChargeType {
+   label = "Goods/Services Statistical Code";
+   lov StatisticalCodeRef with ReferenceStatisticalCodeSelector using StatisticalCodeFilter(Company) {
+      description = StatisticalCodeRef.Description;
+      size = Large;
+   }
+}
+-- gelr: good_service_statistical_code, end
+
+----------------------------------- LISTS -----------------------------------
+list SalesChargeTypeDescList for SalesChargeTypeDesc {
+   lov LanguageCodeRef with ReferenceApplicationLanguageSelector {
+      label = "Language";
+      description = LanguageCodeRef.Description;
+   }
+   field ChargeTypeDesc;
+   field DocumentText;
+
+   command DocumentTextCommand;
+}

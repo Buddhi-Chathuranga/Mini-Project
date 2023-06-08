@@ -1,0 +1,375 @@
+--------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  ---------------------------------------------------------------
+-- 2021-06-15  KiSalk  Bug 159757(SCZ-15206), Changed ClearDefaultsCommand by setting mode as Global and calling ClearDefaults on execution.
+-- 2021-02-02  ThKrlk  Bug 157106 (SCZ-13272), Removed ReturnAll field and all the related method calls.
+-- 2020-07-03  WaSalk  GESPRING20-4880, Modified columns added by gelr functionalities to columnvisible = [false].
+-- 2020-03-04  Kagalk  GESPRING20-1798, Added warehouse_journal functionality.
+-- 2020-01-31  Kagalk  GESPRING20-1624, Added modify_date_applied functionality.
+-- 2019-06-20  MaEelk  SCUXXW4-13507, Merged LCS Bugs 143062 and 147914.
+-- 2018-05-31  IzShlk  SCUXXW4-8697, Converted from dlgReceivePartsOrderDeliveries using MTG Version: 1.19
+--------------------------------------------------------------------------------------
+
+client ReceivePartsAgainstOrderDeliveries;
+component ORDER;
+layer Core;
+
+include fragment InventoryLocation5Selector;
+
+-------------------------------- ASSISTANTS ---------------------------------
+assistant ReceivePartsOrderDeliveriesAssistant using ReceivePartsOrderDeliveriesSet {
+   label = "Receive Parts against Order Deliveries";
+
+   setup InitParameters {
+      variable RmaNoNum {
+         type = Number;
+      }
+      variable RmaLineNoNum {
+         type = Number;
+      }
+      variable FullSelectionStr Text;
+
+
+      execute {
+         set FullSelection = FullSelectionStr;
+      }
+   }
+
+   steps {
+      step {
+         list RecPartsOrderDelList(RecPartsOrderDelArray);
+      }
+      final step {
+
+      }
+      cancelled step {
+
+      }
+   }
+   finish command {
+
+      execute {
+         call CheckValidDates(FullSelection) into ValidDateErrorFlag;
+         if [ValidDateErrorFlag] {
+            confirm("These parts are being received after the specified latest return date.") {
+               when CANCEL {
+                  exit CANCEL;
+               }
+            }
+         }
+
+         call ValidateOk(Objkey) into ValidateOkInfo;
+
+         if [ValidateOkInfo.QtyToReturnNullErr] {
+            error("The quantity to be returned must have a value.");
+            exit;
+         }
+
+         if [ValidateOkInfo.SerialConditionCodeDiff] {
+            confirm("Condition code in Return Material Lines is different from the condition code defined for the serial number in Part Serial Catalog. OK to change to condition code ${ValidateOkInfo.ConditionCode}?") {
+               when CANCEL {
+                  exit CANCEL;
+               }
+            }
+         }
+
+         if [ValidateOkInfo.DiffLSRNo] {
+            confirm("The possible quantity to receive, based on previous deliveries and/or returns, for the
+            lot/batch number ${ValidateOkInfo.LotBatchNo}, of serial number ${ValidateOkInfo.SerialNo}, and revision number ${ValidateOkInfo.EngChgLevel} is ${ValidateOkInfo.QtyCanReturnOnLot} ${ValidateOkInfo.ReturnUnitMeas}.
+               Do you want to receive ${ValidateOkInfo.QtyToReturn} ${ValidateOkInfo.ReturnUnitMeas} into inventory?") {
+               when CANCEL {
+                  exit CANCEL;
+               }
+            }
+         }
+
+         if [ValidateOkInfo.ReturnZeroQuantity] {
+            error("You cannot return zero quantity.");
+            exit;
+         }
+
+         if [ValidateOkInfo.WoExistForSerialObject] {
+            confirm("Serial ${ValidateOkInfo.SerialNo} of part ${ValidateOkInfo.PartNo} which is going to be returned/scrapped has active work order(s) connected.") {
+               when CANCEL {
+                  exit CANCEL;
+               }
+            }
+         }
+
+         if [ValidateOkInfo.ExpirationDateNull] {
+            error("Expiration date must have a value for RMA number ${ValidateOkInfo.RmaNo} - line number ${ValidateOkInfo.RmaLineNo}");
+            exit;
+         }
+         call ExecuteOk(Objkey);
+         call CheckSourceOrderComsumption(Objkey) into SourceConsumption;
+         if [SourceConsumption = 1] {
+            confirm("Do you want to reduce consumption for the Customer Order license?") {
+               when OK {
+                  call UpdateCoverageQuantities(Objkey);
+               }
+            }
+         }
+         if [PartNo != null] {
+            call CheckShortageExist(Contract, PartNo) into PartShortage;
+            if [PartShortage != 0] {
+               confirm("There are shortages for part ${CatalogNo}") {
+                  when OK {
+                     exit;
+
+                  }
+               }
+            }
+         }
+         navigate back;
+      }
+   }
+
+   cancel command {
+      execute {
+         navigate back;
+      }
+   }
+   restart command {
+      visible = [false];
+   }
+}
+
+--------------------------------- COMMANDS ----------------------------------
+command ClearDefaultsCommand for ReceivePartsVirtual {
+   label = "Clear Defaults";
+   mode = Global;
+
+   enabled = [true];
+   execute {
+      call ClearDefaults(Objkey);
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+list RecPartsOrderDelList for ReceivePartsVirtual {
+   orderby = RmaNo, RmaLineNo;
+   editmode = SingleRowEdit;
+
+   lov RmaNoRef with ReferenceReturnMaterialSelector;
+   field RmaLineNo {
+      label = "RMA Line No";
+   }
+   field Contract {
+      label = "Site";
+   }
+   lov SalesPartRef with ReferenceSalesPartSelector {
+      label = "Sales Part";
+      description = ReturnMaterialLineRef.CatalogDesc;
+   }
+   measure SalesQtyToReturn(SalesUom) {
+      validate command {
+         execute {
+            if [SalesQtyToReturn != null and SalesQtyToReturn < 0] {
+               error("The returned quantity can not be negative");
+               exit;
+            }
+            else {
+               if [PartNo = null or SalesQtyToReturn = null] {
+                  set InvQtyToReturn = null;
+               }
+               else {
+                  set InvQtyToReturn = "#{SalesQtyToReturn * InvConvFactor / InvertedConvFactor}";
+               }
+            }
+         }
+      }
+   }
+   measure InvQtyToReturn(InvUom) {
+      editable = [PartNo != null];
+      validate command {
+         execute {
+            if [PartNo != null and InvQtyToReturn != null and InvQtyToReturn < 0] {
+               error("The returned quantity can not be negative");
+               exit;
+            }
+            else {
+               if [PartNo = null or InvQtyToReturn = null] {
+                  set SalesQtyToReturn = null;
+               }
+               else {
+                  set SalesQtyToReturn = "#{InvQtyToReturn / InvConvFactor * InvertedConvFactor}";
+               }
+            }
+         }
+      }
+   }
+   measure CatchQtyToReturn(CatchUom) {
+      editable = [PartNo != null];
+   }
+   measure QtyDelivered(SalesUom) {
+      label = "Delivered Qty";
+   }
+   lov LocationNoRef with ReferenceInventoryLocation5Selector {
+      editable = [PartNo != null];
+      validate command {
+         execute {
+            call WarehouseDetails(Contract, LocationNo) into WarehouseInfo;
+            set Warehouse = WarehouseInfo.Warehouse;
+            set BayNo = WarehouseInfo.BayNo;
+            set RowNo = WarehouseInfo.RowNo;
+            set TierNo = WarehouseInfo.TierNo;
+            set BinNo = WarehouseInfo.BinNo;
+            call FetchExpirationDate(Contract, PartNo, ConfigurationId, LocationNo, LotBatchNo, SerialNo, EngChgLevel, WaivDevRejNo, ActivitySeq, HandlingUnitId, ExpirationDate) into ExpirationDate;
+         }
+      }
+   }
+   field ConfigurationId {
+      label = "Configuration ID";
+   }
+   lov ConditionCodeRef with ReferenceConditionCodeSelector {
+      label = "Condition Code";
+      description = ConditionCodeRef.Description;
+   }
+   field ReturnMaterialLineRef.ReturnReasonCode {
+      label = "Return Reason";
+   }
+   field ExpirationDate {
+      searchable = false;
+   }
+   field HandlingUnitId;
+   field Sscc;
+   field AltHandlingUnitLabelId;
+   field Warehouse {
+      searchable = false;
+   }
+   field BayNo {
+      searchable = false;
+   }
+   field RowNo {
+      searchable = false;
+   }
+   field TierNo {
+      searchable = false;
+   }
+   field BinNo {
+      searchable = false;
+   }
+   field LotBatchNo;
+   field SerialNo;
+   field WaivDevRejNo;
+   field EngChgLevel;
+   field PartOwnership;
+   field OwningVendorNo;
+   field OrderNo {
+      label = "Customer Order No";
+   }
+   field LineNo;
+   field RelNo {
+      label = "Del No";
+   }
+   field Credited;
+   field InvConvFactor {
+      columnexclude = [true];
+   }
+   field InvertedConvFactor {
+      columnexclude = [true];
+   }
+
+   -- gelr:modify_date_applied, begin
+   field ArrivalDate {
+      columnvisible = [false];
+   }
+   -- gelr:modify_date_applied, end
+   -- gelr:warehouse_journal, begin
+   field ExternalDeliveryNoteRef {
+      columnvisible = [false];
+      editable = [WarehouseJournalEnabled];
+   }
+   field ExternalDeliveryNoteDate {
+      columnvisible = [false];
+      editable = [WarehouseJournalEnabled];
+   }
+   lov DeliveryReasonIdRef with ReferenceDeliveryReasonSelector {
+      description = DeliveryReasonIdRef.Description;
+      columnvisible = [false];
+      editable = [WarehouseJournalEnabled];
+   }
+   -- gelr:warehouse_journal, end
+   fieldranking RmaNoRef, RmaLineNo, SalesPartRef, SalesQtyToReturn, InvQtyToReturn, LocationNoRef;
+
+
+   command ClearDefaultsCommand;
+}
+
+@Override
+list ReturnMaterialLovList for ReturnMaterial {
+   label = "";
+   static RmaNo;
+   static CustomerNo;
+   static Contract;
+   static ReturnApproverId {
+      label = "Coordinator ID";
+   }
+   static RmaReportPrinted {
+      label = "Return Note Printed";
+   }
+   static JinsuiInvoice;
+   static UsePriceInclTax;
+   static OrderNo;
+   static ShipmentId;
+   static ReturnToVendorNo {
+      label = "Return to Supplier";
+   }
+   static ReturnToContract {
+      label = "Return to Site";
+   }
+   static ReturnAddrNo {
+      label = "Return Address";
+   }
+   static Objstate;
+}
+
+@Override
+list InventoryLocation5LovList for InventoryLocation5 {
+   label = "";
+   static LocationNo;
+   static Warehouse;
+   static BayNo;
+   static RowNo;
+   static TierNo;
+   static BinNo;
+   static LocationName {
+      label = "Location Desc";
+   }
+   static LocationGroup;
+   static LocationType;
+   static BinWidth;
+   static BinHeight;
+   static BinDepth;
+   static UomForLength {
+      label = "Length UoM";
+   }
+   static BinCarryingCapacity;
+   static UomForWeight {
+      label = "Weight UoM";
+   }
+   static MinTemperature;
+   static MaxTemperature;
+   static UomForTemperature {
+      label = "Temperature UoM";
+   }
+   static MinHumidity;
+   static MaxHumidity;
+}
+
+@Override
+selector ReferenceReturnMaterialSelector for ReturnMaterial {
+   label = "";
+   static RmaNo;
+   static CustomerNo;
+   static Contract;
+   static ReturnApproverId {
+      visible = [false];
+   }
+   static RmaReportPrinted {
+      visible = [false];
+   }
+   badge Objstate {
+      visible = [false];
+   }
+}

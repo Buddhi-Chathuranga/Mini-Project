@@ -1,0 +1,399 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     CopyConfigurationMessagesAssistant
+--  Component:    SHPMNT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  190826   MaIklk  SCUXXW4-23888, Fixed some issues on BO to pass selected configuration id and use part no, effective date, spec_rev_no_ in Handle_Manually_Entered_Configuration_Id___.
+--  190805   RuLilk  SCUXXW4-23312, Modified Handle_Manually_Entered_Configuration_Id___ by removing a condition to validate mandatory character price miss match. 
+--  190619   AyAmlk  SCUXXW4-4659, Corrected some bugs in the assistant and refactored the code.
+--  190123   RuLilk  SCUXXW4-4661, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Copy_Configuration_Message_Virtual_Rec )
+   
+IS
+   selection_in_         VARCHAR2(32000);
+   current_selection_    VARCHAR2(32000);
+  
+   source_ref_1_        VARCHAR2(12);
+   source_ref_2_        VARCHAR2(4);
+   source_ref_3_        VARCHAR2(4);
+   source_ref_4_        NUMBER;
+   key_                 Copy_Configuration_Message_Virtual_Key;
+   old_rec_             Copy_Configuration_Message_Virtual_Rec;
+   new_rec_             Copy_Configuration_Message_Virtual_Rec;   
+   source_config_id_    VARCHAR2(50);
+   warning_exists_      NUMBER;
+   info_exists_         NUMBER;
+
+   CURSOR get_message_warning_exists(parent_objkey_ VARCHAR2) IS
+      SELECT 1
+      FROM   ${PROJECTION}_COPY_CONFIGURATION_MESSAGE_LINE_VIRTUAL_VRT
+      WHERE  parent_objkey = parent_objkey_
+      AND    message_type = 'Warning';
+
+   CURSOR get_message_info_exists(parent_objkey_ VARCHAR2) IS
+      SELECT 1
+      FROM   ${PROJECTION}_COPY_CONFIGURATION_MESSAGE_LINE_VIRTUAL_VRT
+      WHERE  parent_objkey = parent_objkey_
+      AND    message_type = 'Information';
+BEGIN
+   new_rec_ := rec_;
+   IF rec_.order_selection IS NOT NULL THEN
+      selection_in_  := CONCAT(rec_.order_selection, ';');
+      WHILE (INSTR(selection_in_, ';') > 0) LOOP 
+         current_selection_    := substr(selection_in_, 0, INSTR(selection_in_, ';'));
+         IF (rec_.source = 'CustomerOrderLine') THEN
+            source_ref_1_     := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');
+            source_ref_2_     := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_NO');
+            source_ref_3_     := Client_SYS.Get_Key_Reference_Value(current_selection_, 'REL_NO');
+            source_ref_4_     := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_ITEM_NO');
+            $IF Component_Order_SYS.INSTALLED $THEN
+               source_config_id_ := Customer_order_Line_API.Get_Configuration_Id(source_ref_1_,source_ref_2_, source_ref_3_,source_ref_4_);
+            $END
+         ELSIF (rec_.source = 'OrderQuotationLine') THEN
+            source_ref_1_     := Client_SYS.Get_Key_Reference_Value(current_selection_, 'QUOTATION_NO');
+            source_ref_2_     := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_NO');
+            source_ref_3_     := Client_SYS.Get_Key_Reference_Value(current_selection_, 'REL_NO');
+            source_ref_4_     := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_ITEM_NO');
+            $IF Component_Order_SYS.INSTALLED $THEN
+               source_config_id_ := Order_Quotation_Line_API.Get_Configuration_Id(source_ref_1_,source_ref_2_, source_ref_3_,source_ref_4_);
+            $END
+         ELSIF (rec_.source =  'BusinessOpportunityLine') THEN
+            source_ref_1_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'OPPORTUNITY_NO');
+            source_ref_2_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'REVISION_NO');
+            source_ref_3_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_NO');
+            $IF Component_Crm_SYS.INSTALLED $THEN
+               source_config_id_ := Business_Opportunity_Line_API.Get_Configuration_Id(source_ref_1_,source_ref_2_, source_ref_3_);
+            $END            
+         END IF;
+         selection_in_ := substr(selection_in_, INSTR(selection_in_, ';')+1);
+      END LOOP;
+
+      new_rec_.source_ref1      := source_ref_1_;
+      new_rec_.source_ref2      := source_ref_2_;
+      new_rec_.source_ref3      := source_ref_3_;
+      new_rec_.source_ref4      := source_ref_4_;
+      new_rec_.configuration_id := source_config_id_;
+   ELSIF rec_.configuration_id IS NOT NULL THEN
+      new_rec_.configuration_id := rec_.configuration_id;
+   END IF;
+   
+   super(new_rec_);
+   key_.objkey := new_rec_.objkey;
+   
+   IF rec_.copy_from = 'TRUE' THEN        
+      Validate_Configuration___(new_rec_.source, key_.objkey, new_rec_.source_ref1, new_rec_.source_ref2, new_rec_.source_ref3, new_rec_.source_ref4, rec_.dest_part_no, rec_.required_date, rec_.to_configured_line_price_id);
+   END IF;
+
+   Handle_Manually_Entered_Configuration_Id___(key_.objkey, new_rec_.source,  new_rec_.to_source_ref1, new_rec_.to_source_ref2, new_rec_.to_source_ref3, new_rec_.to_source_ref4, new_rec_.configuration_id, new_rec_.copy_from);
+
+   OPEN get_message_warning_exists(key_.objkey);
+   FETCH get_message_warning_exists INTO warning_exists_;
+   CLOSE get_message_warning_exists;
+   
+   OPEN get_message_info_exists(key_.objkey);
+   FETCH get_message_info_exists INTO info_exists_;
+   CLOSE get_message_info_exists;
+
+   old_rec_ := new_rec_;
+   IF warning_exists_ IS NOT NULL AND info_exists_ IS NOT NULL THEN
+      new_rec_.state := 'Info/Warning';
+   ELSIF warning_exists_ IS NOT NULL THEN
+      new_rec_.state := 'Warning';
+   ELSIF info_exists_ IS NOT NULL THEN
+      new_rec_.state := 'Info';
+   END IF;
+
+   IF new_rec_.state IS NOT NULL THEN 
+      CRUD_Update___(old_rec_,new_rec_ );
+   END IF;
+END CRUD_Create___;
+
+PROCEDURE Validate_Configuration___(
+   source_           IN VARCHAR2,
+   parent_objkey_    IN VARCHAR2,
+   source_ref_1_     IN VARCHAR2,
+   source_ref_2_     IN VARCHAR2,
+   source_ref_3_     IN VARCHAR2,
+   source_ref_4_     IN VARCHAR2,
+   dest_part_no_     IN VARCHAR2,
+   required_date_    IN DATE,
+   configured_line_price_id_ NUMBER)
+IS
+   $IF (Component_Order_SYS.INSTALLED) $THEN
+      order_rec_ Customer_Order_Line_API.Public_Rec;
+      quote_rec_ Order_Quotation_Line_API.Public_Rec;
+   $END
+   $IF (Component_Crm_SYS.INSTALLED) $THEN
+      bo_rec_ Business_Opportunity_Line_API.Public_Rec;
+   $END
+   current_rev_no_    NUMBER;
+   selected_rev_no_   NUMBER;
+   new_rev_no_        NUMBER;
+   valid_rev_no_      VARCHAR2(5);
+   new_required_date_ DATE := NVL(required_date_, sysdate);
+   info_              VARCHAR2(32000);
+   config_part_exist_ VARCHAR2(5) := Fnd_Boolean_API.DB_FALSE;
+BEGIN
+   $IF (Component_Order_SYS.INSTALLED) $THEN
+      $IF (Component_Crm_SYS.INSTALLED) $THEN
+         --Valid_Revision___
+         $IF Component_Cfgchr_SYS.INSTALLED $THEN
+            current_rev_no_ := Config_Part_Spec_Rev_API.Get_Spec_Rev_For_Date(dest_part_no_, new_required_date_);
+         $END
+         IF source_ = 'CustomerOrderLine' THEN
+            order_rec_       := Customer_Order_Line_API.Get(source_ref_1_,source_ref_2_, source_ref_3_, source_ref_4_ );
+            $IF Component_Cfgchr_SYS.INSTALLED $THEN
+               selected_rev_no_ := Configuration_Spec_API.Get_Spec_Revision_No(nvl(order_rec_.part_no, order_rec_.catalog_no), order_rec_.configuration_id);
+            $END
+            
+            IF current_rev_no_ = selected_rev_no_ THEN
+               new_rev_no_ := 0; -- return true
+               valid_rev_no_ := 'TRUE';
+            ELSIF current_rev_no_ > selected_rev_no_ THEN
+               new_rev_no_ := -1; -- return false
+               valid_rev_no_ := 'FALSE';
+            ELSE
+               new_rev_no_ := 1; -- return false   
+               valid_rev_no_ := 'FALSE';
+            END IF;
+
+            $IF Component_Mfgstd_SYS.INSTALLED $THEN
+               config_part_exist_ := Manuf_Part_Attribute_API.Parts_Exist_From_Config_Id(order_rec_.configuration_id);
+            $END
+            IF config_part_exist_ = 'TRUE' THEN
+               Add_Message___(parent_objkey_, source_ref_1_,source_ref_2_, source_ref_3_, source_ref_4_, 'TEXT_WarningStandardPartExist',  'Standard Sales Part exists for this configuration. You can replace the Sales Part by using Replace with Standard Part.', '1', 'Information');
+            END IF;
+            IF configured_line_price_id_ IS NOT NULL THEN
+               Configured_Line_Price_API.Copy_Pricing__(info_, order_rec_.configured_line_price_id, configured_line_price_id_ );
+            END IF;
+            IF info_ IS NOT NULL THEN
+               info_ := Trim_Info___(info_);
+               Add_Message___(parent_objkey_, source_ref_1_,source_ref_2_, source_ref_3_, source_ref_4_, 'SERVER',  info_, '1', 'Information');
+            END IF;
+            Order_Config_Util_API.Check_Configuration_Revision(dest_part_no_, order_rec_.configuration_id, new_required_date_);  
+
+         ELSIF source_ = 'OrderQuotationLine' THEN
+            quote_rec_       := Order_Quotation_Line_API.Get(source_ref_1_,source_ref_2_, source_ref_3_, source_ref_4_ );
+            $IF Component_Cfgchr_SYS.INSTALLED $THEN
+               selected_rev_no_ := Configuration_Spec_API.Get_Spec_Revision_No(nvl(quote_rec_.part_no, quote_rec_.catalog_no), quote_rec_.configuration_id);
+            $END
+
+            IF ( current_rev_no_ = selected_rev_no_ )THEN
+               valid_rev_no_ := 'TRUE';
+            ELSE
+               valid_rev_no_ := 'FALSE';
+            END IF;
+
+            $IF Component_Mfgstd_SYS.INSTALLED $THEN
+               config_part_exist_ := Manuf_Part_Attribute_API.Parts_Exist_From_Config_Id(quote_rec_.configuration_id);
+            $END
+            IF config_part_exist_ = 'TRUE' THEN
+               Add_Message___(parent_objkey_, source_ref_1_,source_ref_2_, source_ref_3_, source_ref_4_, 'TEXT_WarningStandardPartExist',  'Standard Sales Part exists for this configuration. You can replace the Sales Part by using Replace with Standard Part.', '1', 'Information');
+            END IF;
+            IF configured_line_price_id_ IS NOT NULL THEN
+               Configured_Line_Price_API.Copy_Pricing__(info_,quote_rec_.configured_line_price_id,configured_line_price_id_ );
+            END IF;
+            IF info_ IS NOT NULL THEN
+               info_ := Trim_Info___(info_);
+               Add_Message___(parent_objkey_, source_ref_1_,source_ref_2_, source_ref_3_, source_ref_4_, 'SERVER',  info_, '1', 'Information');
+            END IF;
+            Order_Config_Util_API.Check_Configuration_Revision(dest_part_no_, quote_rec_.configuration_id, new_required_date_);
+         ELSIF source_ = 'BusinessOpportunityLine' THEN
+            bo_rec_          := Business_Opportunity_Line_API.Get(source_ref_1_,source_ref_2_, source_ref_3_ );
+            $IF Component_Cfgchr_SYS.INSTALLED $THEN
+               selected_rev_no_ := Configuration_Spec_API.Get_Spec_Revision_No(nvl(NVL(Sales_Part_API.Get_Part_No(bo_rec_.contract, bo_rec_.catalog_no), bo_rec_.catalog_no), bo_rec_.catalog_no), bo_rec_.configuration_id);
+            $END
+            
+            IF ( current_rev_no_ = selected_rev_no_ )THEN
+            valid_rev_no_ := 'TRUE';
+            ELSE
+               valid_rev_no_ := 'FALSE';
+            END IF;
+            
+            $IF Component_Mfgstd_SYS.INSTALLED $THEN
+               config_part_exist_ := Manuf_Part_Attribute_API.Parts_Exist_From_Config_Id(bo_rec_.configuration_id);
+            $END
+            IF config_part_exist_ = 'TRUE' THEN
+               Add_Message___(parent_objkey_, source_ref_1_,source_ref_2_, source_ref_3_, source_ref_4_, 'TEXT_WarningStandardPartExist',  'Standard Sales Part exists for this configuration. You can replace the Sales Part by using Replace with Standard Part.', '1', 'Information');
+            END IF;
+            IF configured_line_price_id_ IS NOT NULL THEN
+            Configured_Line_Price_API.Copy_Pricing__(info_,bo_rec_.configured_line_price_id,configured_line_price_id_ );
+            END IF;
+            IF info_ IS NOT NULL THEN
+               info_ := Trim_Info___(info_);
+                Add_Message___(parent_objkey_, source_ref_1_,source_ref_2_, source_ref_3_, source_ref_4_, 'SERVER',  info_, '1', 'Information');
+            END IF;
+            Order_Config_Util_API.Check_Configuration_Revision(dest_part_no_, bo_rec_.configuration_id, new_required_date_);  
+         END IF;
+
+         IF valid_rev_no_ = 'FALSE' THEN
+            IF new_rev_no_ < 0 THEN
+               Add_Message___(parent_objkey_, source_ref_1_,source_ref_2_, source_ref_3_, source_ref_4_, 'TEXT_OldConfig',  'The chosen configuration is based on an old revision, prices etc must be updated manually', '1', 'Warning');
+            ELSIF new_rev_no_ > 0 THEN
+               Add_Message___(parent_objkey_, source_ref_1_,source_ref_2_, source_ref_3_, source_ref_4_, 'TEXT_FutuConfig',  'The chosen configuration is based on a future revision, prices etc must be updated manually', '1', 'Warning');
+            END IF;
+         END IF;
+      $ELSE
+         NULL;
+      $END
+   $ELSE
+      NULL;
+   $END
+   Add_Message___(parent_objkey_, source_ref_1_,source_ref_2_, source_ref_3_, source_ref_4_, 'TEXT_ConfigPricingManualInfo',  'Default configuration pricing set for the configuration. You may have to manually edit the configuration to change pricing.', '1', 'Information');   
+END Validate_Configuration___;
+
+
+
+PROCEDURE Handle_Manually_Entered_Configuration_Id___(
+   parent_objkey_          IN VARCHAR2,
+   source_                 IN VARCHAR2, -- ConfigSpecUsage
+   to_source_ref1_         IN VARCHAR2,
+   to_source_ref2_         IN VARCHAR2,
+   to_source_ref3_         IN VARCHAR2,
+   to_source_ref4_         IN NUMBER,
+   copy_configuration_id_  IN VARCHAR2,
+   copy_from_              IN VARCHAR2)
+IS
+   $IF (Component_Order_SYS.INSTALLED) $THEN
+      order_rec_ Customer_Order_Line_API.Public_Rec;
+      quote_rec_ Order_Quotation_Line_API.Public_Rec;
+   $END
+   $IF (Component_Crm_SYS.INSTALLED) $THEN
+      bo_rec_ Business_Opportunity_Line_API.Public_Rec;
+   $END
+   spec_rev_no_                   NUMBER;
+   to_configured_line_price_id_   NUMBER;
+   mandatory_chr_missmatch_       NUMBER;
+   mandatory_chr_price_missmatch_ VARCHAR2(24);
+   new_config_id_                 VARCHAR2(50);
+   configuration_id_              VARCHAR2(50) := copy_configuration_id_;
+   part_no_                       VARCHAR2(50);
+   eff_date_                      DATE;
+BEGIN
+   $IF (Component_Order_SYS.INSTALLED) $THEN
+      $IF (Component_Crm_SYS.INSTALLED) $THEN
+         $IF (Component_Cfgchr_SYS.INSTALLED) $THEN
+            IF source_ = 'CustomerOrderLine' THEN
+               order_rec_   := Customer_Order_Line_API.Get(to_source_ref1_,to_source_ref2_, to_source_ref3_, to_source_ref4_ );
+               eff_date_    :=  NVL(order_rec_.wanted_delivery_date, sysdate);
+               spec_rev_no_ := Config_Part_Spec_Rev_API.Get_Spec_Rev_For_Date(order_rec_.part_no,eff_date_);
+               part_no_     := order_rec_.part_no;
+               to_configured_line_price_id_ := order_rec_.configured_line_price_id;
+            ELSIF source_ = 'OrderQuotationLine' THEN
+               quote_rec_   := Order_Quotation_Line_API.Get(to_source_ref1_,to_source_ref2_, to_source_ref3_, to_source_ref4_  );
+               eff_date_    :=  NVL(quote_rec_.wanted_delivery_date, sysdate);
+               spec_rev_no_ := Config_Part_Spec_Rev_API.Get_Spec_Rev_For_Date(quote_rec_.part_no, eff_date_);
+               part_no_     := quote_rec_.part_no;
+               to_configured_line_price_id_ := quote_rec_.configured_line_price_id;
+            ELSIF source_ = 'BusinessOpportunityLine' THEN
+               bo_rec_ := Business_Opportunity_Line_API.Get(to_source_ref1_,to_source_ref2_, to_source_ref3_ );
+               eff_date_ :=  NVL(bo_rec_.wanted_delivery_date, sysdate);                
+               to_configured_line_price_id_ := bo_rec_.configured_line_price_id;
+               part_no_ := NVL(Sales_Part_API.Get_Part_No(bo_rec_.contract, bo_rec_.catalog_no), bo_rec_.catalog_no);
+               spec_rev_no_ := Config_Part_Spec_Rev_API.Get_Spec_Rev_For_Date(part_no_, eff_date_);
+            END IF;            
+            
+            Configuration_Spec_API.Check_Configuration_Validity(copy_configuration_id_, part_no_,eff_date_ );
+            IF  Config_Manager_API.All_Mandatory_Char_Exist(copy_configuration_id_, part_no_, spec_rev_no_) THEN 
+               mandatory_chr_missmatch_ := 0;
+            ELSE
+               mandatory_chr_missmatch_ := 1;
+            END IF;
+            
+            IF mandatory_chr_missmatch_ = 1 THEN
+               -- if cancel copy * as config
+               Add_Message___(parent_objkey_, null,null, null, null, 'TEXT_MandatoryCharMismatchQuestion',  'Mismatch in mandatory characteristics causes the configuration status to be incomplete, edit configuration to handle the mismatch.', '1', 'Warning');
+               Configuration_Spec_API.Merge_Configuration_Spec(new_config_id_, copy_configuration_id_, part_no_,   to_configured_line_price_id_, eff_date_,
+                                                               to_source_ref1_, to_source_ref2_, to_source_ref3_, to_source_ref4_ , '');
+               configuration_id_ :=   new_config_id_;     
+            ELSIF mandatory_chr_missmatch_ = 0 THEN 
+               IF spec_rev_no_ IS NULL THEN
+                  Add_Message___(parent_objkey_, null,null, null, null, 'TEXT_NoEffRevision',  'There is no configuration specification revision released for the current date.', '1', 'Information');
+                  IF ( Configured_Line_Price_API.Check_Exist( to_configured_line_price_id_) = 'TRUE') THEN
+                     Configured_Line_Price_API.Remove_Pricing( to_configured_line_price_id_, Configured_Line_Price_API.Get_Parent_Configuration_Id(to_configured_line_price_id_));
+                  END IF;
+                  Configured_Line_Price_API.Update_Parent_Config_Id(to_configured_line_price_id_, '*', 'FALSE');
+                  RETURN;
+               END IF;
+            END IF;
+            IF copy_from_ = 'FALSE' THEN
+               Add_Message___(parent_objkey_, null,null, null, null, 'TEXT_ConfigPricingManualInfo',  'Default configuration pricing set for the configuration. You may have to manually edit the configuration to change pricing.', '1', 'Information');
+            END IF;
+--            IF ( Configured_Line_Price_API.Check_Exist( to_configured_line_price_id_) = 'TRUE') THEN
+--                     Configured_Line_Price_API.Remove_Pricing( to_configured_line_price_id_, Configured_Line_Price_API.Get_Parent_Configuration_Id(to_configured_line_price_id_));
+--            END IF;
+--            Configured_Line_Price_API.Create_Pricing( to_configured_line_price_id_);
+--            Configured_Line_Price_API.Update_Parent_Config_Id( to_configured_line_price_id_, configuration_id_, 'TRUE');
+            mandatory_chr_price_missmatch_ := Configured_Line_Price_API.Validate_Mandatory_Prices(to_configured_line_price_id_, configuration_id_);
+            IF mandatory_chr_price_missmatch_ IS NOT NULL THEN 
+               Add_Message___(parent_objkey_, null,null, null, null, 'TEXT_MandatoryCharPriceMissing',  'Missing mandatory price for characteristic '|| mandatory_chr_price_missmatch_ ||' causes the configuration status to be incomplete, edit configuration to handle missing price.', '2', 'Information');
+               Configuration_Spec_API.Copy_Configuration_Spec(new_config_id_,part_no_,configuration_id_,Config_Spec_Usage_API.Get_Count_Of_Usages(part_no_,configuration_id_),to_configured_line_price_id_);
+               IF ( Configured_Line_Price_API.Check_Exist( to_configured_line_price_id_) = 'TRUE') THEN
+                  Configured_Line_Price_API.Remove_Pricing( to_configured_line_price_id_, Configured_Line_Price_API.Get_Parent_Configuration_Id(to_configured_line_price_id_));
+               END IF;
+               Configured_Line_Price_API.Update_Parent_Config_Id( to_configured_line_price_id_, new_config_id_, 'TRUE'); 
+            END IF;
+         $ELSE
+            NULL;
+         $END
+      $ELSE
+         NULL;
+      $END
+   $ELSE
+      NULL;
+   $END
+END Handle_Manually_Entered_Configuration_Id___;
+
+   
+PROCEDURE Add_Message___(
+   parent_objkey_ IN VARCHAR2,
+   source_ref1_   IN VARCHAR2,
+   source_ref2_   IN VARCHAR2,
+   source_ref3_   IN VARCHAR2,
+   source_ref4_   IN NUMBER,
+   error_code_    IN varchar2,
+   message_       IN VARCHAR2,
+   step_          IN VARCHAR2,
+   type_          IN VARCHAR2 DEFAULT NULL)
+IS
+   message_rec_ Copy_Configuration_Message_Line_Virtual_Rec;   
+   
+BEGIN   
+   message_rec_.parent_objkey := parent_objkey_;
+   message_rec_.objkey := sys_guid();
+   message_rec_.source_ref1 := source_ref1_;
+   IF source_ref2_ IS NOT NULL THEN 
+      message_rec_.source_ref2 := source_ref2_;
+   END IF;
+   IF source_ref3_ IS NOT NULL THEN 
+      message_rec_.source_ref3 := source_ref3_;
+   END IF;
+   IF source_ref4_ IS NOT NULL THEN 
+      message_rec_.source_ref4 := source_ref4_;
+   END IF;
+      
+   message_rec_.message := message_;
+   message_rec_.error_code := error_code_;       
+   message_rec_.step := step_;
+   message_rec_.message_type := type_;
+   CRUD_Create___(message_rec_);
+END Add_Message___;
+
+
+FUNCTION Trim_Info___(
+   info_ IN VARCHAR2) RETURN VARCHAR2
+IS
+   trimed_info_  VARCHAR2(32000);
+BEGIN
+   trimed_info_ := RTRIM(LTRIM(info_, 'INFO'||CHR(31)), CHR(30));
+   RETURN REPLACE(trimed_info_, CHR(30)||'INFO'||CHR(31), CHR(13)||CHR(10));
+END;

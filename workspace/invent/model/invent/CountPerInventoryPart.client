@@ -1,0 +1,354 @@
+--------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  ---------------------------------------------------------------
+-- 2021-10-28  DigPlk  SC21R2-2882, Replaced the functionality of IdentifySerialsInLocAssistant with IdentifySerialsInLocRepeatAssistant.
+-- 2020-07-08  DIJWLK  SCXTEND-4338, Enabled Duplicate function for list CountPartList
+-- 2019-07-24  ChFolk  SCUXXW4-22798, Included fragment ProjectDetailsFieldSet.
+-- 2019-07-10  ChFolk  SCUXXW4-22798, Modified Project information by using get methods instead of reference to increase performance.
+-- 2019-06-11  DaZase  SCUXXW4-12778, Added function SetLovUserWhereForPart to PartNoRef.
+-- 2019-06-11  JaThlk  SCUXXW4-14147, Set the CostDetailId in before command, BeforeSaveChecks.
+-- 2020-04-22  KHVESE  SCZ-9720, Disabled dublicate on list since extra coding is needed to get duplicatdue to work on this page. Issue AP10-2094 has been reported and needs to be corrected in next release.
+-- 2019-04-04  SWiclk  SCUXXW4-12331, Implemented Define Cost Structure functionality.
+-- 2019-04-01  ShKolk  SCUXXW4-17948, Added create and update actions for CountPartList to avoid overtaking crud methods in plsvc
+-- 2019-03-16  ChFolk  SCUXXW4-16871, Added dependency anootation where necessary.
+-- 2018-06-13  SWiclk  SCUXXW4-6059, Converted from frmCountPart using MTG Version: 1.17
+--------------------------------------------------------------------------------------
+client CountPerInventoryPart;
+component INVENT;
+layer Core;
+
+--------------------------------- FRAGMENTS ---------------------------------
+include fragment HandlingUnitLov9Selector;
+include fragment InventoryLocation8Selector;
+include fragment UserAllowedSiteLovSelector;
+include fragment InventoryPartLovSelector;
+include fragment ProjectDetailsFieldSet;
+// Everything needed for the IdentifySerialsInLocationAssistant
+include fragment IdentifySerialsInLocationAssistant;
+include fragment DefineCostStructureAssistant;
+warningsenabled = CreateCountingResult;
+warningsenabled = UpdateCountingResult;
+
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+navigator {
+   entry CountPerInventoryPartNavEntry parent InventNavigator.WarehouseManagementCounting at index 500 {
+      label = "Count per Inventory Part";
+      page Form;
+   }
+}
+
+-------------------------------- MAIN PAGES ---------------------------------
+page Form using InventoryPartConfigurations {
+   label = "Count per Inventory Part";
+   startupmode = search;
+   selector InventoryPartConfigSelector;
+
+   group CountPartGroup;
+   arrange {
+      group QuantitiesInInventoryUoMGroup;
+      arrange {
+         group UnitsOfMeasureGroup;
+      }
+   }
+   list CountPartList(CountPartArray);
+
+   commandgroup CommandGroupCmdGroup {
+
+      command ResolveShortagesCommand;
+      @DynamicComponentDependency CFGCHR
+      command ViewConfigurationCommand;
+   }
+}
+
+--------------------------------- COMMANDS ----------------------------------
+command ResolveShortagesCommand for InventoryPartConfiguration {
+   label = "Resolve Shortages";
+   enabled = [SystemParameterShortageFlag = "Y" and PartShortageFlagDb = "Y" and NumberOfShortageDemands > 0];
+   execute {
+      navigate "page/ResolveShortagesForInventoryPart/Form?$filter=PartNo eq $[PartNo] and Contract eq $[Contract]";
+   }
+}
+
+@DynamicComponentDependency CFGCHR
+command ViewConfigurationCommand for InventoryPartConfiguration {
+   label = "View Configuration";
+   variable Mode;
+   enabled = [ConfigurationId != "*"];
+   execute {
+      set Mode = "View";
+      navigate "assistant/PartConfigurationAssistant/EditConfiguration?$action=InitConfiguration{  VarMode:$[Mode],
+                                                                                                   VarPartNo:$[PartNo],
+                                                                                                   VarConfigurationId:$[ConfigurationId]}";
+   }
+}
+
+command InventoryPartInStockCommand for InventoryPartInStock {
+   label = "Inventory Part In Stock";
+   mode = SelectedRecords;
+   enabled = [true];
+   bulkexecute {
+      bulknavigate "page/InventoryPartInStock/List?$filter=PartNo eq $[PartNo] and Contract eq $[Contract] and ConfigurationId eq $[ConfigurationId] and LocationNo eq $[LocationNo] and LotBatchNo eq $[LotBatchNo] and SerialNo eq $[SerialNo] and EngChgLevel eq $[EngChgLevel] and WaivDevRejNo eq $[WaivDevRejNo] and ActivitySeq eq $[ActivitySeq] and HandlingUnitId eq $[HandlingUnitId]";
+   }
+}
+
+command BeforeSaveChecks for InventoryPartInStock {
+   variable SessionSelection Text;
+   variable CostDetailIdNum {
+      type = Number;
+   }
+   variable LaunchDefineCostStructureAssistant {
+      type = Boolean;
+   }
+   variable DefaultCostExist Boolean;
+   execute {
+
+      // For customer owned parts unit cost is 0, don't display the assistant
+      // "Zero cost only" - the dialog doesn't have to be displayed
+      if [PartOwnership = "CUSTOMER OWNED" or parent.ZeroCostFlagDb != "O"] {
+         set LaunchDefineCostStructureAssistant = false;
+      }
+
+      if [(parent.InventoryValuationMethodDb in("FIFO", "LIFO", "AV") and DefineCost and CountedQty > QtyOnhand)] {
+         set LaunchDefineCostStructureAssistant = true;
+      }
+      else {
+         call CheckDefaultCostExist(Contract, PartNo, ConfigurationId, LotBatchNo, SerialNo, ConditionCode) into DefaultCostExist;
+         if [QtyOnhand = 0 and QtyInTransit = 0 and(not DefaultCostExist)] {
+            set LaunchDefineCostStructureAssistant = true;
+         }
+      }
+
+      if [LaunchDefineCostStructureAssistant] {
+         assistant DefineCostStructureAssistant(Contract, PartNo, ConfigurationId, LotBatchNo, SerialNo, ConditionCode, "COUNTING", null) into(CostDetailIdNum) {
+            when OK {
+               set CostDetailId = CostDetailIdNum;
+            }
+            when CANCEL {
+               exit CANCEL;
+            }
+         }
+      }
+      set DefaultCostExist = false;
+
+     // GenPartTrackingSessionId start
+      // set the CountingDiffStr aka AssistantContext
+      set CountingDiffStr = "OTHER";
+      if [CountedQty < QtyOnhand] {
+         set CountingDiffStr = "NEGATIVE_COUNTING_DIFF";
+      }
+      else {
+         if [CountedQty > QtyOnhand] {
+            set CountingDiffStr = "POSITIVE_COUNTING_DIFF";
+         }
+      }
+      if [(RcptIssuePartTrackingDb = "TRUE" and InvSerialTrackingDb != "SERIAL TRACKING") and
+      CountedQty != QtyOnhand and CountedQty != null and SerialNo = "*"] {
+         set QtyNum = "#{CountedQty - QtyOnhand}";
+         // NumberABS
+         if [QtyNum < 0] {
+            set QtyNum = "#{QtyNum * (-1)}";
+         }
+         // Input for assistant (Contract, PartNo, ConfigurationId, LocationNo, LotBatchNo, EngChgLevel, WaivDevRejNo, ActivitySeq, HandlingUnitId, QtyIssue, CatchQtyIssue, AssistantTitle, AssistantContext, SessionId)
+         call GetSessionIdSelection(Contract, PartNo, ConfigurationId, LocationNo, LotBatchNo, EngChgLevel, WaivDevRejNo, ActivitySeq, HandlingUnitId, QtyNum, NULL, NULL, CountingDiffStr, SessionIdNum) into IdentifySerialsRecStructure;
+         assistant IdentifySerialsInLocRepeatAssistant(IdentifySerialsRecStructure.RemainingSelection, IdentifySerialsRecStructure.Total, null, null) into(SessionSelection) {
+            when OK {
+               set PartTrackingSessionId = IdentifySerialsRecStructure.SessionId;
+            }
+            when CANCEL {
+               exit CANCEL;
+            }
+         }
+      }
+      // GenPartTrackingSessionId end
+   }
+}
+
+--------------------------------- SELECTORS ---------------------------------
+@Override
+selector InventoryPartConfigSelector for InventoryPartConfiguration {
+   label = "${PartNo} - ${Contract} - ${InventoryPartRef.Description} - ${ConfigurationId}";
+   static PartNo;
+   static Contract;
+   static InventoryPartRef.Description;
+   static ConfigurationId;
+}
+
+
+selector ConditionCodeLovSelector for ConditionCode {
+   label = "";
+   static ConditionCode {
+      label = "";
+   }
+   static Description {
+      label = "";
+   }
+   static ConditionCodeType {
+      label = "";
+      truelabel = "Default";
+      falselabel = " ";
+   }
+}
+
+---------------------------------- GROUPS -----------------------------------
+group CountPartGroup for InventoryPartConfiguration {
+   label = "";
+   lov InventoryPartRef with ReferenceInventoryPartLovSelector using SetLovUserWhereForPart {
+      description = InventoryPartRef.Description;
+   }
+   lov ContractRef with ReferenceUserAllowedSiteLovSelector;
+   field ConfigurationId {
+      label = "Configuration ID";
+   }
+}
+
+group QuantitiesInInventoryUoMGroup for InventoryPartConfiguration {
+   label = "Quantities in Inventory UoM";
+   field OnHandQty;
+   field InTransitQty;
+   field ReservedQty;
+   field InOrderTransitQty;
+   field InventoryPartRef.CountVariance {
+      label = "Accumulated Count Difference";
+   }
+}
+
+group UnitsOfMeasureGroup for InventoryPartConfiguration {
+   label = "Units of Measure";
+   field InventoryPartRef.UnitMeas {
+      label = "Inventory UoM";
+   }
+   field CatchUoM {
+      visible = [CatchUnitEnabled];
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+list CountPartList for InventoryPartInStock {
+   // SingleRowEdit + the before command creates issues sometimes, think we have it under control for the moment but be careful if any changes is
+   // done on the before command, workaround is to disable SingleRowEdit
+   //editmode = SingleRowEdit;
+   label = "";
+   crudactions {
+      before command BeforeSaveChecks;
+      create action = CreateCountingResult;
+      update action = UpdateCountingResult;
+   }
+
+   field CountedQty;
+   field QtyOnhand;
+   field CountedCatchQty {
+      columnvisible = [parent.CatchUnitEnabled];
+      editable = [parent.CatchUnitEnabled];
+   }
+   field CatchQtyOnhand {
+      columnvisible = [parent.CatchUnitEnabled];
+      editable = [false];
+   }
+   lov LocationNoRef with ReferenceInventoryLocation8Selector;
+   lov HandlingUnitRef with ReferenceHandlingUnitLov9Selector using SetLovWhereForHandlingUnit(LocationNo, Contract) {
+      label = "Handling Unit ID";
+      validate command {
+         variable Temp;
+         execute {
+            call GetDetailsByHandlingUnitId(HandlingUnitId) into Temp;
+            if [LocationNo = null] {
+               set LocationNo = Temp.LocationNo;
+            }
+            set HandlingUnitTypeId = Temp.HandlingUnitTypeId;
+            set TypeDescription = Temp.HadlingUnitTypeDescription;
+            set Sscc = Temp.Sscc;
+            set AltHandlingUnitLabelID = Temp.AltHandlingUnitLabelId;
+
+         }
+      }
+   }
+   field HandlingUnitRef.HandlingUnitTypeId {
+      label = "Handling Unit Type ID";
+   }
+   field TypeDescription;
+   field SSCC {
+      searchable = false;
+   }
+   field AltHandlingUnitLabelID {
+      searchable = false;
+   }
+   lov SSCCRef with ReferenceHandlingUnitLov9Selector using SetLovWhereForHandlingUnit(LocationNo, Contract) {
+      editable = [Etag = NULL];
+      columnvisible = [false];
+      validate command {
+         variable HandlingUntiTypeDescription;
+         execute {
+            set HandlingUnitId = SSCCRef.HandlingUnitId;
+            call GetHandlingUnitTypeDescription(HandlingUnitId) into HandlingUntiTypeDescription;
+            set TypeDescription = HandlingUntiTypeDescription;
+         }
+      }
+   }
+   lov AltHandlingUnitLabelIDRef with ReferenceHandlingUnitLov9Selector using SetLovWhereForHandlingUnit(LocationNo, Contract) {
+      editable = [Etag = NULL];
+      columnvisible = [false];
+      validate command {
+         variable HandlingUntiTypeDescription;
+         execute {
+            set HandlingUnitId = AltHandlingUnitLabelIDRef.HandlingUnitId;
+            call GetHandlingUnitTypeDescription(HandlingUnitId) into HandlingUntiTypeDescription;
+            set TypeDescription = HandlingUntiTypeDescription;
+         }
+      }
+   }
+   field LocationNoRef.Warehouse {
+      label = "Warehouse";
+   }
+   field LocationNoRef.BayNo;
+   field LocationNoRef.RowNo;
+   field LocationNoRef.TierNo;
+   field LocationNoRef.BinNo;
+   field ExpirationDate;
+   field LotBatchNo;
+   field SerialNo;
+   lov ConditionCodeRef with ConditionCodeLovSelector {
+      description = ConditionCodeRef.Description;
+   }
+
+   field InventoryValue;
+   field DefineCost {
+      size = Small;
+   }
+   field WaivDevRejNo;
+   field AvailabilityControlId;
+   field AvailabilityControlDescription;
+   @DynamicComponentDependency MFGSTD
+   field EngChgLevelRef;
+
+   field LastCountDate;
+   field PartOwnership;
+   field Owner;
+   field OwnerName;
+   fieldset ProjectDetailsFieldSet;
+   field ActivitySeq;
+
+   field TopParentHandlingUnitID;
+   field TopParentHandlingUnitType;
+   field TopParentTypeDescription;
+   field TopParentSSCC;
+   field TopParentAltHandlingUnitLabelID;
+   field Note {
+      multiline = true;
+   }
+   field RcptIssuePartTrackingDb {
+      columnvisible = [false];
+      columnexclude = [true];
+   }
+   field InvSerialTrackingDb {
+      columnvisible = [false];
+      columnexclude = [true];
+   }
+
+   commandgroup CommandGroupCmdGroup {
+
+      command InventoryPartInStockCommand;
+   }
+}
+
+

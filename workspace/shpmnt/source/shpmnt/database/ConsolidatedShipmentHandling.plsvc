@@ -1,0 +1,291 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: ConsolidatedShipmentHandling
+--  Component:    SHPMNT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  191210  MeAblk  SCSPRING20-180, Modified CRUD_Default___() to correctly set the value for shipment_category_db.
+--  190712  ErRalk  SCUXXW4-20159, Added Validate_Capacities___ and modified Connect_To_Shipment___  
+--  190628  ErRalk  SCUXXW4-20271, Removed unnecessary method Validate_Route_Id___.
+--  190621  JaBalk  SCUXXW4-15272, Added error messages if negative values entered for Volume Capacity and Weight Capacity.
+--  190219  JaBalk  SCUXXW4-12724, Extended the length of info_ in Connect_To_Shipment___ and added capacity parameters
+--  190219          Get_Total_Weight_And_Volume___ and Get_Available_Shipments_Details___.
+--  190211  JaBalk  SCUXXW4-12724, Added actual_ship_date parameter to Get_Available_Shipments_Details___ and modified Get_Total_Weight_And_Volume___
+--  190211          to assign uom_for_weight, uom_for_volume.
+--  190204  JaBalk  SCUXXW4-13315, Added Get_Total_Weight_And_Volume___ and parameters to Get_Available_Shipments_Details___.
+--  181225  ErRalk  SCUXXW4-14986, Added CRUD_Update___ to handle code in Data RecordExecuteModify
+--  181224  ErRalk  SCUXXW4-13365, Added methods Get_Available_Shipments_Details___ and Get_Consolidated_Shipment_Search_Context_Defaults___
+--  181224  ErRalk  SCUXXW4-12721, Added method Connect_To_Shipment___
+--  181221  KuBalk  SCUXXW4-14987, Added methods Fetch_Shipment_Type___, Validate_Ship_Via_Code___and Validate_Route_Id___
+--  181112  RaVdlk  SCUXXW4-4824,  Modified the method Connect_To_Shipment___ 
+--  180919  RaVdlk  SCUXXW4-4824,  Added the method Connect_To_Shipment___ 
+--  180904  RoJalk  SCUXXW4-4709,  Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+PROCEDURE Connect_To_Shipment___ (
+   shipment_id_              IN  NUMBER,
+   consolidated_shipment_id_ IN  NUMBER) 
+IS
+BEGIN
+   Shipment_API.Modify_Parent_Shipment_Id__(shipment_id_,consolidated_shipment_id_);          
+END Connect_To_Shipment___;
+
+
+FUNCTION Consol_Ship_Delnote_Nos___(
+   shipment_id_ IN NUMBER )  RETURN VARCHAR2
+IS
+   delivery_note_no_list_  VARCHAR2(32000);
+   delnote_no_count_       NUMBER;
+   delnote_no_tab_         utility_sys.STRING_TABLE;
+   stmt_                   VARCHAR2(32000);
+BEGIN
+   Shipment_API.Get_Consol_Ship_Delnote_Nos(delivery_note_no_list_, shipment_id_);
+   Utility_SYS.Tokenize(delivery_note_no_list_, Client_SYS.field_separator_, delnote_no_tab_, delnote_no_count_);
+   
+   IF(delnote_no_tab_.COUNT > 0 ) THEN
+      FOR i_ IN delnote_no_tab_.FIRST..delnote_no_tab_.LAST LOOP
+         stmt_ := CONCAT(stmt_, REPLACE('DelnoteNo eq '':P1'' or ', ':P1', delnote_no_tab_(i_)));
+      END LOOP; 
+   END IF; 
+    
+   IF stmt_ IS NOT NULL THEN
+      stmt_ := SUBSTR(stmt_, 0, length(stmt_)-4);
+   END IF;   
+   
+   RETURN stmt_;
+END Consol_Ship_Delnote_Nos___;
+
+
+FUNCTION Fetch_Shipment_Type___(
+   contract_ IN VARCHAR2 )  RETURN VARCHAR2
+IS
+BEGIN
+   RETURN Site_Discom_Info_API.Get_Shipment_Type(contract_);
+END Fetch_Shipment_Type___;
+
+
+FUNCTION Validate_Ship_Via_Code___(
+   ship_via_code_ IN VARCHAR2 )  RETURN VARCHAR2
+IS  
+BEGIN
+   RETURN Mpccom_Ship_Via_API.Get_Transport_Unit_Type(ship_via_code_);
+END Validate_Ship_Via_Code___;
+
+
+FUNCTION Validate_Transport_Unit_Type___(
+   transport_unit_type_ IN VARCHAR2,
+   contract_             IN VARCHAR2 )  RETURN Data_Struct_Rec
+IS
+   data_struct_rec_  Data_Struct_Rec;
+   uom_for_weight_ VARCHAR2(30);
+   uom_for_volume_ VARCHAR2(30);
+   
+BEGIN
+   uom_for_weight_ :=  NVL(uom_for_weight_, Company_Invent_Info_API.Get_Uom_For_Weight(Site_API.Get_Company(contract_)));
+   data_struct_rec_.weight_capacity  := Shipment_API.Get_Converted_Weight_Capacity(transport_unit_type_, uom_for_weight_); 
+   uom_for_volume_:= NVL(uom_for_volume_, Company_Invent_Info_API.Get_Uom_For_Volume(Site_API.Get_Company(contract_))); 
+   data_struct_rec_.volume_capacity := Shipment_API.Get_Converted_Volume_Capacity(transport_unit_type_, uom_for_volume_);
+   data_struct_rec_.uom_for_weight := uom_for_weight_;
+   data_struct_rec_.uom_for_volume := uom_for_volume_;  
+   RETURN data_struct_rec_;
+END Validate_Transport_Unit_Type___;
+
+
+FUNCTION Get_Consolidated_Shipment_Search_Context_Defaults___ RETURN Consolidated_Shipment_Search_Context_Structure_Rec
+IS
+  search_context_struct_  Consolidated_Shipment_Search_Context_Structure_Rec; 
+BEGIN
+  search_context_struct_.Show_Details := 'ViewMatching';
+  RETURN search_context_struct_;
+END Get_Consolidated_Shipment_Search_Context_Defaults___;
+
+FUNCTION Get_Total_Weight_And_Volume___ (
+   selection_ IN VARCHAR2) RETURN Total_Weight_And_Volume_Structure_Rec
+IS
+   current_selection_             VARCHAR2(32000);
+   uom_for_volume_                VARCHAR2(10);
+   uom_for_weight_                VARCHAR2(10);
+   shipment_id_                   NUMBER;
+   parent_shipment_id_            NUMBER;   
+   total_weight_and_volume_rec_   Total_Weight_And_Volume_Structure_Rec;   
+   shipments_rec_                 json_array_t := json_array_t.parse(selection_);   
+BEGIN      
+   FOR parent_shipment_rec_ IN 0 .. shipments_rec_.get_size - 1 LOOP    
+      current_selection_ := shipments_rec_.get_string(parent_shipment_rec_);
+      -- Consolidated shipment information
+      parent_shipment_id_  := TO_NUMBER(Client_SYS.Get_Key_Reference_Value(current_selection_, 'PARENT_SHIPMENT_ID'));
+      total_weight_and_volume_rec_.parent_shipment_id := parent_shipment_id_;
+      total_weight_and_volume_rec_.connected_shipments_total_weight := TO_NUMBER(Client_SYS.Get_Key_Reference_Value(current_selection_, 'PARENT_OPERATIVE_GROSS_WEIGHT'));
+      total_weight_and_volume_rec_.connected_shipments_total_volume := TO_NUMBER(Client_SYS.Get_Key_Reference_Value(current_selection_, 'PARENT_OPERATIVE_VOLUME'));     
+      total_weight_and_volume_rec_.uom_for_weight   := Client_SYS.Get_Key_Reference_Value(current_selection_, 'UOM_FOR_WEIGHT');
+      total_weight_and_volume_rec_.uom_for_volume   := Client_SYS.Get_Key_Reference_Value(current_selection_, 'UOM_FOR_VOLUME');
+      IF ((Client_SYS.Get_Key_Reference_Value(current_selection_, 'WEIGHT_CAPACITY')) != 'null') THEN          
+         total_weight_and_volume_rec_.weight_capacity  := TO_NUMBER(Client_SYS.Get_Key_Reference_Value(current_selection_, 'WEIGHT_CAPACITY'));
+      END IF;
+      IF ((Client_SYS.Get_Key_Reference_Value(current_selection_, 'VOLUME_CAPACITY')) != 'null') THEN 
+         total_weight_and_volume_rec_.volume_capacity  :=  TO_NUMBER(Client_SYS.Get_Key_Reference_Value(current_selection_, 'VOLUME_CAPACITY'));
+      END IF;   
+     
+      -- available shipments information
+      shipment_id_       := TO_NUMBER(Client_SYS.Get_Key_Reference_Value(current_selection_, 'SHIPMENT_ID'));
+      uom_for_volume_    := Company_Invent_Info_API.Get_Uom_For_Volume(Site_API.Get_Company(Shipment_API.Get_Contract(shipment_id_)));
+      uom_for_weight_    := Company_Invent_Info_API.Get_Uom_For_Weight(Site_API.Get_Company(Shipment_API.Get_Contract(shipment_id_)));      
+      total_weight_and_volume_rec_.total_weight_selected := NVL(total_weight_and_volume_rec_.total_weight_selected,0) + Shipment_API.Get_Operational_Gross_Weight(shipment_id_, uom_for_weight_, 'FALSE');
+      total_weight_and_volume_rec_.total_volume_selected := NVL(total_weight_and_volume_rec_.total_volume_selected,0) + Shipment_API.Get_Operational_Volume(shipment_id_, uom_for_volume_);     
+   END LOOP;
+   
+   total_weight_and_volume_rec_.weight_total          := NVL(total_weight_and_volume_rec_.connected_shipments_total_weight,0) + total_weight_and_volume_rec_.total_weight_selected;      
+   total_weight_and_volume_rec_.volume_total          := NVL(total_weight_and_volume_rec_.connected_shipments_total_volume,0) + total_weight_and_volume_rec_.total_volume_selected;             
+
+   IF ((total_weight_and_volume_rec_.weight_capacity IS NOT NULL AND total_weight_and_volume_rec_.weight_capacity != 0) AND (total_weight_and_volume_rec_.weight_total IS NOT NULL)) THEN
+     total_weight_and_volume_rec_.weight_utilization := NVL(total_weight_and_volume_rec_.weight_utilization,0) + ROUND(100 * (total_weight_and_volume_rec_.weight_total/total_weight_and_volume_rec_.weight_capacity),2);
+   END IF;  
+   
+   IF ((total_weight_and_volume_rec_.volume_capacity IS NOT NULL AND total_weight_and_volume_rec_.volume_capacity != 0) AND (total_weight_and_volume_rec_.volume_total IS NOT NULL)) THEN
+      total_weight_and_volume_rec_.volume_utilization := NVL(total_weight_and_volume_rec_.volume_utilization,0) + ROUND(100 * (total_weight_and_volume_rec_.volume_total/total_weight_and_volume_rec_.volume_capacity),2);
+   END IF;  
+   RETURN total_weight_and_volume_rec_;
+END Get_Total_Weight_And_Volume___;
+
+@Override
+PROCEDURE CRUD_Update___ (
+   etag_   IN OUT VARCHAR2,
+   key_    IN OUT Shipment_Key,
+   attr_   IN OUT VARCHAR2,
+   info_   OUT VARCHAR2,
+   action_ IN  VARCHAR2 )
+IS
+   shipments_connected_  NUMBER;
+   weight_capacity_      NUMBER:=0;
+   volume_capacity_      NUMBER:=0;
+BEGIN  
+   weight_capacity_ := Client_SYS.Get_Item_Value_To_Number('WEIGHT_CAPACITY', attr_, lu_name_);
+   volume_capacity_ := Client_SYS.Get_Item_Value_To_Number('VOLUME_CAPACITY', attr_, lu_name_);
+   IF  (weight_capacity_ < 0) THEN
+      Error_SYS.Record_General(lu_name_, 'WEIGHTCAPACITYZERO: Weight Capacity must be greater than 0');  
+   ELSIF (volume_capacity_ <0) THEN
+      Error_SYS.Record_General(lu_name_, 'VOLUMECAPACITYZERO: Volume Capacity must be greater than 0');  
+   END IF;
+   shipments_connected_ := Shipment_API.Shipments_Connected__(key_.shipment_id);
+  
+   IF (shipments_connected_ = 1) THEN 
+      IF CLIENT_SYS.Item_Exist('SHIP_VIA_CODE', attr_) OR
+         CLIENT_SYS.Item_Exist('ROUTE_ID', attr_) OR 
+         CLIENT_SYS.Item_Exist('SHIP_INVENTORY_LOCATION_NO', attr_) OR 
+         CLIENT_SYS.Item_Exist('SHIP_INVENTORY_LOCATION_NO', attr_) OR 
+         CLIENT_SYS.Item_Exist('PLANNED_SHIP_DATE', attr_) OR 
+         CLIENT_SYS.Item_Exist('FORWARD_AGENT_ID', attr_)
+      THEN 
+         Client_SYS.Add_Warning(lu_name_, 'MANUALUPDATECOLINES1: The connected shipment(s) will be updated, but the connected source lines of these shipment(s) will not be automatically updated. Changes will not be reflected in already printed shipping documents.'); 
+      ELSIF CLIENT_SYS.Item_Exist('SHIPMENT_TYPE', attr_) AND Client_sys.Get_Item_Value('SHIPMENT_TYPE', attr_) IS NOT NULL THEN       
+         Client_SYS.Add_Warning(lu_name_, 'MANUALUPDATECOLINES2: The connected shipment(s) will be updated, but the connected source lines of these shipment(s) will not be automatically updated.');
+      END IF;
+   END IF;  
+   super(etag_, key_, attr_, info_, action_);
+END CRUD_Update___;
+
+
+@Override
+PROCEDURE CRUD_Default___ (
+   key_  IN  Shipment_Key,
+   attr_ IN OUT VARCHAR2,
+   info_ OUT VARCHAR2 )
+IS
+BEGIN
+   Client_SYS.Add_To_Attr('SHIPMENT_CATEGORY_DB', Shipment_Category_API.DB_CONSOLIDATED , attr_);
+   super(key_, attr_, info_);
+END CRUD_Default___;
+
+
+FUNCTION Check_Pack_Handl_Unit_Allowed___ (
+	shipment_id_ IN NUMBER) RETURN BOOLEAN
+IS
+   pack_handl_unit_allowed_ NUMBER;
+BEGIN
+	pack_handl_unit_allowed_ := Shipment_API.Pack_Acc_HU_Capacity_Allowed__(shipment_id_);
+   IF (pack_handl_unit_allowed_ = 1) THEN  
+      RETURN TRUE;
+   ELSE
+      RETURN FALSE;
+   END IF; 
+END Check_Pack_Handl_Unit_Allowed___;
+
+
+FUNCTION Check_Pack_Acc_Pack_Instr_Allowed___ (
+	shipment_id_ IN NUMBER) RETURN BOOLEAN
+IS
+   pack_acc_pack_instr_allowed_ NUMBER;
+BEGIN
+	pack_acc_pack_instr_allowed_ := Shipment_API.Pack_Acc_Pack_Instr_Allowed__(shipment_id_);
+   IF (pack_acc_pack_instr_allowed_ = 1) THEN  
+      RETURN TRUE;
+   ELSE
+      RETURN FALSE;
+   END IF; 
+END Check_Pack_Acc_Pack_Instr_Allowed___;
+
+
+FUNCTION Check_Send_Disadv_Allowed___ (
+	shipment_id_ IN NUMBER) RETURN BOOLEAN
+IS
+   send_disadv_allowed_ NUMBER;
+BEGIN
+	send_disadv_allowed_ := Shipment_API.Send_Disadv_Allowed__(shipment_id_);
+   IF (send_disadv_allowed_ = 1) THEN  
+      RETURN TRUE;
+   ELSE
+      RETURN FALSE;
+   END IF; 
+END Check_Send_Disadv_Allowed___;
+
+
+FUNCTION Check_Delivery_Notes_Exist___ (
+	shipment_id_ IN NUMBER) RETURN BOOLEAN
+IS
+   delivery_notes_exist_ NUMBER;
+BEGIN
+	delivery_notes_exist_ := Shipment_API.Delivery_Note_Exist__(shipment_id_);
+   IF (delivery_notes_exist_ = 1) THEN  
+      RETURN TRUE;
+   ELSE
+      RETURN FALSE;
+   END IF; 
+END Check_Delivery_Notes_Exist___;
+
+
+FUNCTION Check_Shipments_Connected___ (
+	shipment_id_ IN NUMBER) RETURN BOOLEAN
+IS
+   shipments_connected_ NUMBER;
+BEGIN
+	shipments_connected_ := Shipment_API.Shipments_Connected__(shipment_id_);
+   IF (shipments_connected_ = 1) THEN  
+      RETURN TRUE;
+   ELSE
+      RETURN FALSE;
+   END IF; 
+END Check_Shipments_Connected___;
+
+
+PROCEDURE Validate_Capacities___ (
+	selection_   IN VARCHAR2,
+	info$_        OUT VARCHAR2)
+IS
+   info_                 VARCHAR2 (2000);  
+   current_selection_    VARCHAR2(32000);
+   shipments_rec_        json_array_t := json_array_t.parse(selection_);   
+   consolidated_shipment_id_ NUMBER;
+BEGIN
+   FOR parent_shipment_rec_ IN 0..0 LOOP    
+      current_selection_ := shipments_rec_.get_string(parent_shipment_rec_);
+      consolidated_shipment_id_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PARENT_SHIPMENT_ID');
+      Shipment_API.Validate_Capacities(info_,consolidated_shipment_id_);
+   END LOOP;
+ info$_ := info_;
+END Validate_Capacities___;
+

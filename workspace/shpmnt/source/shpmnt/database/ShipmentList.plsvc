@@ -1,0 +1,365 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     ShipmentsOverview
+--  Component:    SHPMNT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date         Sign    History
+--  --------     ------  ---------------------------------------------------------
+--  2022-01-27   RasDlk  SC21R2-7291, Modified Undo_Delivery___ to support looping through selected shipments during Undo Shipment Delivery.
+--  2021-12-30   RasDlk  SC21R2-3145, Added Undo_Delivery___ and Check_Undo_Shipment_Allowed___ to support Undo Shipment Delivery.
+--  2021-05-28   Aabalk  SC21R2-1019, Removed Get_Approve_Before_Delivery___. Added Validate_Shipment_Type___ method to fetch default values when shipment type is selected.
+--  2020-06-04   RasDlk  SCSPRING20-1238, Modified the places where Shipment_Source_Utility_API.Fetch_Source_And_Deliv_Info is used by changing the parameters accordingly.
+--  2020-03-04   RasDlk  SCSPRING20-1238, Modified Validate_Ship_Via_Code___() by passing sender_id and sender_type to Shipment_Source_Utility_API.Fetch_Source_And_Deliv_Info method.
+--  2019-07-18   ErRalk  SCUXXW4-22857, Added functions Validate_Ship_Via_Code___ and Get_Approve_Before_Delivery___
+--  2019-07-09   ErRalk  SCUXXW4-22146, Renamed function Finish___ into Send___. 
+--  2019-06-17   SBalLK  SCUXXW4-22436, Handled Multi record navigation to Handling Units in Shipment Inventory by adding Generate_Shipment_List_For_Navigate___() method.
+--  2019-01-03   ErRalk  SCUXXW4-4709, Moved common code in tbwOverviewShipments into a fragment
+-----------------------------------------------------------------------------
+
+layer Core;
+
+
+FUNCTION Get_Receiver_Contact_Name___(
+   receiver_id_             IN VARCHAR2,
+   receiver_type_           IN VARCHAR2,
+   receiver_reference_      IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   receiver_reference_name_ VARCHAR2(100);
+   bill_addr_no_            VARCHAR2(50);
+BEGIN
+   bill_addr_no_            := Shipment_Source_Utility_API.Get_Document_Address(receiver_id_, receiver_type_);
+   receiver_reference_name_ := Shipment_Source_Utility_API.Get_Receiver_Contact_Name(receiver_id_, bill_addr_no_, 
+                                                                                     receiver_reference_, receiver_type_);
+   RETURN receiver_reference_name_;
+END Get_Receiver_Contact_Name___;
+
+FUNCTION Fetch_Route_Information___(
+   route_id_         IN VARCHAR2,
+   ship_via_code_    IN VARCHAR2,
+   contract_         IN VARCHAR2,
+   receiver_id_      IN VARCHAR2,
+   receiver_type_    IN VARCHAR2,
+   receiver_addr_id_ IN VARCHAR2 ) RETURN Route_Information_Struct_Rec
+IS
+   route_information_struct_rec_   Route_Information_Struct_Rec; 
+BEGIN
+   $IF Component_Order_SYS.INSTALLED $THEN 
+      IF (receiver_type_ = Sender_Receiver_Type_API.DB_CUSTOMER) THEN
+         route_information_struct_rec_.load_sequence_no := Load_Plan_Line_API.Get_Load_Seq_No(route_id_, ship_via_code_, contract_, 
+                                                                                              receiver_id_, receiver_addr_id_);
+      END IF;                                                                                     
+   $END                                                                                     
+   route_information_struct_rec_.forwarder    := NVL(Delivery_Route_API.Get_Forward_Agent_Id(route_id_), 
+                                                         Shipment_Source_Utility_API.Get_Forward_Agent_Id(receiver_id_, receiver_type_)); 
+                                                         
+   RETURN route_information_struct_rec_;
+END Fetch_Route_Information___;
+
+FUNCTION Fetch_Freight_Payer_Information___(
+   contract_                  IN  VARCHAR2,
+   delivery_terms_            IN  VARCHAR2,
+   forward_agent_id_          IN  VARCHAR2,
+   receiver_type_             IN  VARCHAR2,
+   receiver_id_               IN  VARCHAR2,
+   receiver_addr_id_          IN  VARCHAR2,
+   fecth_freight_payer_       IN  BOOLEAN,
+   shipment_freight_payer_    IN  VARCHAR2,
+   addr_flag_db_              IN  VARCHAR2 ) RETURN Freight_Payer_Information_Struct_Rec
+IS
+   freight_payer_information_struct_rec_ Freight_Payer_Information_Struct_Rec; 
+   freight_payer_id_                     VARCHAR2(20);
+   shipment_freight_payer_to_use_        VARCHAR2(20);
+   receiver_addr_id_to_use_              VARCHAR2(50);
+BEGIN  
+   IF (NOT fecth_freight_payer_) THEN
+      shipment_freight_payer_to_use_ := shipment_freight_payer_;
+   END IF;   
+   
+   IF (addr_flag_db_ = Gen_Yes_No_API.DB_YES) THEN
+      receiver_addr_id_to_use_ := '*';
+   ELSE   
+      receiver_addr_id_to_use_ := receiver_addr_id_;
+   END IF;
+   Shipment_API.Fetch_Freight_Payer_Info(freight_payer_id_,
+                                         shipment_freight_payer_to_use_, 
+                                         contract_, 
+                                         delivery_terms_, 
+                                         forward_agent_id_, 
+                                         receiver_type_, 
+                                         receiver_id_,
+                                         receiver_addr_id_to_use_);                                   
+   IF (fecth_freight_payer_) THEN      
+      freight_payer_information_struct_rec_.shipment_freight_payer := shipment_freight_payer_to_use_;   
+   END IF;  
+   freight_payer_information_struct_rec_.shipment_freight_payer_id  := freight_payer_id_;    
+   RETURN freight_payer_information_struct_rec_;  
+   
+END Fetch_Freight_Payer_Information___;
+
+PROCEDURE Approve_Shipment___ (
+   key_ IN Shipment_List_Key ) 
+IS
+BEGIN
+   Shipment_API.Approve_Shipment(key_.shipment_id);
+END Approve_Shipment___;
+
+FUNCTION Report_Picking_With_Difference___(
+   full_selection_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   selection_                  VARCHAR2(32000) := CONCAT(full_selection_, ';');
+   current_selection_          VARCHAR2(32000);
+   attr_                       VARCHAR2(32000);
+   pick_lists_for_shipments_   VARCHAR2(32000);
+   pick_list_no_tab_           Utility_SYS.STRING_TABLE;
+   pick_list_count_            NUMBER;
+   stmt_                       VARCHAR2(32000);
+   shipment_id_                NUMBER;
+BEGIN
+   WHILE (INSTR(selection_, ';') > 0) LOOP
+      current_selection_  := substr(selection_, 0, INSTR(selection_, ';'));
+      shipment_id_        := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'SHIPMENT_ID'));
+      Client_SYS.Add_To_Attr('SHIPMENT_ID',  shipment_id_, attr_);
+      selection_ := substr(selection_, INSTR(selection_, ';')+1); 
+   END LOOP;
+   
+   pick_lists_for_shipments_ := Shipment_Flow_API.Get_Pick_Lists_For_Shipments(attr_);
+   Utility_SYS.Tokenize(pick_lists_for_shipments_, Client_SYS.field_separator_, pick_list_no_tab_, pick_list_count_);
+   
+   IF (pick_list_no_tab_.COUNT > 0 ) THEN
+      FOR i_ IN pick_list_no_tab_.FIRST..pick_list_no_tab_.LAST LOOP
+         stmt_ := CONCAT(stmt_, REPLACE('PickListNo eq '':P1'' or ', ':P1', pick_list_no_tab_(i_)));
+      END LOOP;
+      IF (stmt_ IS NOT NULL) THEN
+         stmt_ := SUBSTR(stmt_, 0, length(stmt_)-4);
+      END IF;   
+   END IF;
+   
+   RETURN stmt_;
+END Report_Picking_With_Difference___;
+
+PROCEDURE Modify_Parent_Shipment_Id___ (
+   shipment_id_ IN NUMBER ) 
+IS
+BEGIN
+   Shipment_API.Modify_Parent_Shipment_Id__(shipment_id_, NULL);
+END Modify_Parent_Shipment_Id___;
+
+FUNCTION Get_Language_Description___(
+   language_code_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   description_   VARCHAR2(2000);
+BEGIN
+   description_ := Application_Language_API.Get_Description(language_code_);
+   RETURN description_;
+END Get_Language_Description___;
+
+PROCEDURE Release_Not_Reserved_Qty___ (
+   full_selection_ IN VARCHAR2 )
+IS
+   selection_           VARCHAR2(32000) := CONCAT(full_selection_, ';');
+   current_selection_   VARCHAR2(32000);
+   shipment_id_         NUMBER; 
+BEGIN
+   WHILE (INSTR(selection_, ';') > 0) LOOP
+      current_selection_  := substr(selection_, 0, INSTR(selection_, ';'));
+      
+      shipment_id_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SHIPMENT_ID');
+      Shipment_Initial_Check___(shipment_id_);
+      Shipment_API.Release_Not_Reserved_Qty(shipment_id_);
+      
+      selection_ := substr(selection_, INSTR(selection_, ';')+1); 
+   END LOOP;
+   
+END Release_Not_Reserved_Qty___;
+
+FUNCTION Send___ (
+   key_       IN Create_Resend_Dispatch_Advice_Virtual_Key,
+   selection_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   parent_selection_  VARCHAR2(2000) := '';
+   rec_               Create_Resend_Dispatch_Advice_Virtual_Rec;
+BEGIN
+   rec_              := Get_Record___(key_);
+   parent_selection_ := rec_.selection;
+  
+   FOR record_ IN Get_Resend_Dispatch_Advice_Array___(key_) LOOP   
+      -- Only selected and unsent messages will remain in parent_selection_
+      IF ((INSTR(selection_, record_.objkey) = 0) OR (selection_ IS NULL)) THEN     
+         parent_selection_ := REPLACE(parent_selection_, 'SHIPMENT_ID=' ||record_.shipment_id || '^;', '');
+         parent_selection_ := REPLACE(parent_selection_, 'SHIPMENT_ID=' ||record_.shipment_id || '^', ''); 
+      END IF;
+   END LOOP;
+   
+   IF SUBSTR(parent_selection_, -1) = ';' THEN     
+      parent_selection_ := SUBSTR(parent_selection_, 1, LENGTH(parent_selection_)-1);  
+   END IF;
+   RETURN parent_selection_;
+   
+END Send___;
+
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Create_Resend_Dispatch_Advice_Virtual_Rec )
+IS
+BEGIN
+   super(rec_);
+   Check_Create_Resend_Dispatch_Advice___(rec_.objkey, rec_.Selection);
+END CRUD_Create___;
+
+PROCEDURE Check_Create_Resend_Dispatch_Advice___ (
+   objkey_      IN VARCHAR2,  
+   selection_   IN VARCHAR2 ) 
+IS
+   selection_in_        VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_   VARCHAR2(32000);
+   shipment_id_         NUMBER;
+BEGIN
+   WHILE (INSTR(selection_in_, ';') > 0) LOOP
+      current_selection_ := substr(selection_in_, 0, INSTR(selection_in_, ';'));
+      shipment_id_       := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SHIPMENT_ID');
+      
+      Check_Resend_Dispatch_Advice_List___(shipment_id_, objkey_);
+      selection_in_          := substr(selection_in_, INSTR(selection_in_, ';')+1);
+      
+   END LOOP;
+END Check_Create_Resend_Dispatch_Advice___;
+
+PROCEDURE Create_Resend_Dispatch_Advice_List___ ( 
+   shipment_id_   IN NUMBER,
+   parent_objkey_ IN VARCHAR2 ) 
+IS
+   new_rec_      Create_Resend_Dispatch_Advice_List_Virtual_Rec;  
+BEGIN
+   new_rec_.shipment_id   := shipment_id_;
+   new_rec_.objkey        := sys_guid();
+   new_rec_.parent_objkey := parent_objkey_;
+      
+   CRUD_Create___(new_rec_); 
+     
+END Create_Resend_Dispatch_Advice_List___;
+
+PROCEDURE Check_Resend_Dispatch_Advice_List___ (
+   shipment_id_    IN NUMBER,
+   parent_objkey_  IN VARCHAR2 ) 
+IS
+BEGIN
+   IF (Delivery_Note_API.Get_Shipment_Dis_Adv_Send_Db(shipment_id_) = 'SENT') THEN
+      Create_Resend_Dispatch_Advice_List___(shipment_id_, parent_objkey_); 
+   END IF;
+END Check_Resend_Dispatch_Advice_List___;
+
+FUNCTION Generate_Shipment_List_For_Navigate___ (
+	full_selection_ IN VARCHAR2) RETURN VARCHAR2
+IS
+   selection_           VARCHAR2(32000) := CONCAT(full_selection_, ';');
+   current_selection_   VARCHAR2(32000);
+   shipment_id_list_    VARCHAR2(32000);
+BEGIN
+   WHILE (INSTR(selection_, ';') > 0) LOOP
+      current_selection_  := substr(selection_, 0, INSTR(selection_, ';'));
+      shipment_id_list_ := CONCAT(CONCAT(shipment_id_list_, Client_SYS.Get_Key_Reference_Value(current_selection_, 'SHIPMENT_ID')), ';');
+      selection_ := substr(selection_, INSTR(selection_, ';')+1); 
+   END LOOP;
+   RETURN SUBSTR(shipment_id_list_, 1, (length(shipment_id_list_)-1));
+END Generate_Shipment_List_For_Navigate___;
+
+
+FUNCTION Check_Any_Lines_Picked___ (
+	shipment_id_ IN NUMBER) RETURN BOOLEAN
+IS
+   any_lines_picked_ BOOLEAN := FALSE;
+BEGIN
+   IF (Shipment_API.Any_Picked_Lines__(shipment_id_) = 'TRUE') THEN  
+      any_lines_picked_ := TRUE;
+   END IF;
+   RETURN any_lines_picked_;
+END Check_Any_Lines_Picked___;
+
+
+FUNCTION Check_All_Lines_Reserved___ (
+	shipment_id_ IN NUMBER) RETURN BOOLEAN
+IS
+   all_lines_reserved_ BOOLEAN := FALSE;
+BEGIN
+   IF (Shipment_API.All_Lines_Reserved(shipment_id_) = 'FALSE') THEN  
+      all_lines_reserved_ := TRUE;
+   END IF;  
+   RETURN all_lines_reserved_;
+END Check_All_Lines_Reserved___;
+
+
+FUNCTION Validate_Ship_Via_Code___(
+   route_id_                   IN VARCHAR2,
+   forward_agent_id_           IN VARCHAR2,
+   shipment_type_              IN VARCHAR2,
+   ship_inventory_location_no_ IN VARCHAR2,
+   contract_                   IN VARCHAR2,
+   receiver_id_                IN VARCHAR2,
+   receiver_addr_id_           IN VARCHAR2,
+   addr_flag_                  IN VARCHAR2,
+   ship_via_code_              IN VARCHAR2,
+   fetch_from_supply_chain_    IN VARCHAR2,
+   receiver_type_              IN VARCHAR2,
+   sender_id_                  IN VARCHAR2,
+   sender_type_                IN VARCHAR2)  RETURN Source_And_Deliv_Info_Structure_Rec
+IS
+   source_and_deliv_info_rec_  Source_And_Deliv_Info_Structure_Rec;
+   route_                 VARCHAR2(12) := route_id_;
+   forward_agent_         VARCHAR2(20) := forward_agent_id_;
+   shipment_type_var_     VARCHAR2(3)  := shipment_type_;
+   inventory_location_no_ VARCHAR2(35) := ship_inventory_location_no_;
+   ship_via_code_temp_    VARCHAR2(3)  := ship_via_code_;
+   delivery_terms_        VARCHAR2(10);
+   del_terms_location_    VARCHAR2(100);
+   
+BEGIN  
+   Shipment_Source_Utility_API.Fetch_Source_And_Deliv_Info(route_,
+                                                           forward_agent_,
+                                                           shipment_type_var_,
+                                                           inventory_location_no_,                                                           
+                                                           delivery_terms_,
+                                                           del_terms_location_,
+                                                           ship_via_code_temp_,
+                                                           contract_,
+                                                           receiver_id_,
+                                                           receiver_addr_id_,
+                                                           addr_flag_,                                                           
+                                                           fetch_from_supply_chain_,
+                                                           receiver_type_,
+                                                           sender_id_,
+                                                           sender_type_);
+   source_and_deliv_info_rec_.Route_Id                    := route_;
+   source_and_deliv_info_rec_.Forward_Agent_Id            := forward_agent_;
+   source_and_deliv_info_rec_.Shipment_Type               := shipment_type_var_; 
+   source_and_deliv_info_rec_.Ship_Inventory_Location_No  := inventory_location_no_;   
+   RETURN source_and_deliv_info_rec_;
+END Validate_Ship_Via_Code___;
+
+FUNCTION Validate_Shipment_Type___ (
+   shipment_type_ IN VARCHAR2 )  RETURN Shipment_Type_Info_Structure_Rec
+IS
+   shipment_type_info_structure_rec_ Shipment_Type_Info_Structure_Rec;
+   shipment_type_rec_                Shipment_Type_API.Public_Rec;
+BEGIN
+   shipment_type_rec_ := Shipment_Type_API.Get(shipment_type_);
+   shipment_type_info_structure_rec_.approve_before_delivery := shipment_type_rec_.approve_before_delivery = Fnd_Boolean_API.DB_TRUE;
+   shipment_type_info_structure_rec_.packing_proposal_id := shipment_type_rec_.packing_proposal_id;
+   RETURN shipment_type_info_structure_rec_;
+END Validate_Shipment_Type___;
+
+PROCEDURE Undo_Delivery___ (
+   shipment_id_ IN NUMBER)
+IS
+BEGIN
+	Shipment_API.Undo_Shipment_Delivery(shipment_id_);
+END Undo_Delivery___;
+
+FUNCTION Check_Undo_Shipment_Allowed___ (
+   shipment_id_ IN NUMBER) RETURN BOOLEAN
+IS
+BEGIN
+   RETURN Shipment_API.Undo_Shipment_Allowed(shipment_id_);
+END Check_Undo_Shipment_Allowed___;

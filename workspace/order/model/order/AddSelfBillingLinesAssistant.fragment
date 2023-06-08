@@ -1,0 +1,565 @@
+-----------------------------------------------------------------------------------------------------
+-- Date        Sign     History
+-- ----------  ------   -----------------------------------------------------------------------------
+-- 2018-12-05  KHVESE   SCUXXW4-8460, Converted from dlgMatchSBLines using MTG Version: 1.34
+-----------------------------------------------------------------------------------------------------
+
+fragment AddSelfBillingLinesAssistant;
+component ORDER;
+layer Core;
+description "Use this API to add delivery lines to a customer self-billing invoice. This will be based on the information received from the customer.";
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+
+-------------------------------- ASSISTANTS ---------------------------------
+
+assistant AddSBLinesAssistant using AddSBLinesSet {
+   label = "Add Self-Billing Lines";
+   savemode = OnLostFocus;
+   input(SbiNo, CustomerNo, CustomerName, CurrencyCode, Company);
+   steps {
+      step {
+         group SBLinesGeneralGroup;
+         group SBLinesAmountsGroup;
+         list LinesToMatchList(LinesToMatchArray);
+      }
+      final step {
+      }
+      cancelled step {
+      }
+   }
+   finish command {
+      enabled = [component.LinesToMatchList.SelectionCount > 0];
+      execute {
+         call AddMatchedLines(Objkey, component.LinesToMatchList.Selection) {
+            when SUCCESS {
+               exit OK;
+            }
+            when FAIL {
+               error("${error.Message}");
+               exit;
+            }
+         }
+      }
+   }
+   cancel command {
+      execute {
+         exit CANCEL;
+      }
+   }
+   restart command {
+      visible = [false];
+   }
+}
+
+--------------------------------- COMMANDS ----------------------------------
+
+--------------------------------- SELECTORS ---------------------------------
+
+---------------------------------- GROUPS -----------------------------------
+
+group SBLinesGeneralGroup for AddSelfBillingLinesVirtual {
+   label = "";
+   field CustomerNo {
+      editable = [false];
+   }
+   field CustomerName {
+      label = "Name";
+      editable = [false];
+   }
+   field Company {
+      editable = [false];
+   }
+   computedfield AvailableLinesToMatch {
+      value = "#{LinesToMatchArray.count(LineNo)}";
+      size = Small;
+      type = Number;
+      searchable = false;
+   }
+   // TODO! the following syntax is not working currently. The request SCUXXW4-15185 has been created for it.
+   computedfield SelectedLinesToMatch {
+      label = "Selected Lines";
+      value = "${component.LinesToMatchList.SelectionCount}";
+      size = Small;
+      searchable = false;
+   }
+}
+
+group SBLinesAmountsGroup for AddSelfBillingLinesVirtual {
+   label = "Amounts";
+   // TODO! The following computed fields need to calculate values based on selected lines. The request SCUXXW4-15185 has been created for it.
+   computedfield NetAmount {
+      label = "Net Amount";
+      value = "#{LinesToMatchArray.sum(SelfBilledNetAmtCurr)}";
+      --component.LinesToMatchList.Selection.sum(NetAmountCurr)}";
+      searchable = false;
+   }
+   computedfield GrossAmount {
+      label = "Gross Amount/Curr";
+      value = "#{LinesToMatchArray.sum(SelfBilledGrossAmtCurr)}";
+      --component.LinesToMatchList.Selection.sum(GrossAmtCurr)}";
+      searchable = false;
+   }
+   computedfield TaxAmount {
+      label = "Total Tax/Curr";
+      value = "#{LinesToMatchArray.sum(SelfBilledTaxAmtCurr)}";
+      --component.LinesToMatchList.Selection.sum(TaxAmountCurr)}";
+      searchable = false;
+   }
+   field CurrencyCode {
+      editable = [false];
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+
+list LinesToMatchList for UnmatchedSbiDeliveryVirtual {
+   label = "";
+   orderby = OrderNo desc;
+   preselect = [false];
+   multiselect = [true];
+   editmode = SingleCellEdit;
+   crudactions {
+      new {
+         enabled = [false];
+      }
+      delete {
+         enabled = [false];
+      }
+   }
+   field CloseDelivery {
+      editable = [QtyDiff < 0];
+      size = Small;
+   }
+   field DelnoteNo;
+   field OrderNo;
+   field LineNo {
+      size = Small;
+   }
+   field RelNo {
+      size = Small;
+   }
+   field Contract {
+      size = Small;
+   }
+   lov CatalogNoRef with ReferenceNonRentalSalesPartLovSelector {
+      size = Large;
+      description = CustomerOrderLineRef.CatalogDesc;
+   }
+   field CustomerPartNo;
+   field BuyQtyDue {
+      size = Small;
+   }
+   field SalesUnitMeasRef {
+      size = Small;
+   }
+   field CustomerQty {
+      validate command {
+         variable AmountsStructVar {
+            type = AmountsStruct;
+         }
+         execute {
+            if [CustomerQty = null] {
+               alert("Customer Qty to Match must have value.");
+               set CustomerQty = original.CustomerQty;
+            }
+            set CustomerPartConvFactorVar = CustomerPartConvFactor;
+            set CustPartInvertConvFactVar = CustPartInvertConvFact;
+            set CustPriceConvFactorVar = 1;
+            set CustUnitSalesQty = "#{CustomerQty/CustomerPartConvFactorVar*CustPartInvertConvFactVar}";
+            call GetAmounts(Company, OrderNo, LineNo, RelNo, LineItemNo, CustUnitPartPrice, CustUnitSalesQty, CustPriceConvFactorVar, CurrencyCode) into AmountsStructVar;
+            set SelfBilledNetAmtCurr = AmountsStructVar.CustNetCurrAmount;
+            set SelfBilledGrossAmtCurr = AmountsStructVar.CustGrossCurrAmount;
+            set SelfBilledTaxAmtCurr = AmountsStructVar.CustTaxCurrAmount;
+            set ConfirmedSbiQtyVar = ConfirmedSbiQty;
+            set QtyDiff = "#{ConfirmedSbiQtyVar + CustomerQty - QtyToInvoice}";
+            if [QtyDiff < 0 and CloseDelivery] {
+               warning("The remaining quantity will not be available for further matching if Close Delivery has been set to Yes.");
+            }
+         }
+      }
+   }
+   field CustUnitSalesQty {
+      validate command {
+         execute {
+            if [CustUnitSalesQty = null] {
+               alert("Customer Sales Qty must have value.");
+               set CustUnitSalesQty = original.CustUnitSalesQty;
+            }
+            set CustomerPartConvFactorVar = CustomerPartConvFactor;
+            set CustPartInvertConvFactVar = CustPartInvertConvFact;
+            set CustPriceConvFactorVar = 1;
+            set CustomerQty = "#{(CustUnitSalesQty*CustomerPartConvFactorVar)/CustPartInvertConvFactVar}";
+            call GetAmounts(Company, OrderNo, LineNo, RelNo, LineItemNo, CustUnitPartPrice, CustUnitSalesQty, CustPriceConvFactorVar, CurrencyCode) into AmountsStructVar;
+            set SelfBilledNetAmtCurr = AmountsStructVar.CustNetCurrAmount;
+            set SelfBilledGrossAmtCurr = AmountsStructVar.CustGrossCurrAmount;
+            set SelfBilledTaxAmtCurr = AmountsStructVar.CustTaxCurrAmount;
+            set ConfirmedSbiQtyVar = ConfirmedSbiQty;
+            set QtyDiff = "#{ConfirmedSbiQtyVar + CustomerQty - QtyToInvoice}";
+            if [QtyDiff < 0 and CloseDelivery] {
+               warning("The remaining quantity will not be available for further matching if Close Delivery has been set to Yes.");
+            }
+         }
+      }
+   }
+   field PartPrice {
+      preserveprecision = [true];
+   }
+   field CustUnitPartPrice {
+      preserveprecision = [true];
+
+      validate command {
+         execute {
+            if [CustUnitPartPrice = null] {
+               alert("Self-Billed Price/Curr must have value.");
+               set CustUnitPartPrice = original.CustUnitPartPrice;
+            }
+            set CustPriceConvFactorVar = 1;
+            call GetAmounts(Company, OrderNo, LineNo, RelNo, LineItemNo, CustUnitPartPrice, CustUnitSalesQty, CustPriceConvFactorVar, CurrencyCode) into AmountsStructVar;
+            set SelfBilledNetAmtCurr = AmountsStructVar.CustNetCurrAmount;
+            set SelfBilledGrossAmtCurr = AmountsStructVar.CustGrossCurrAmount;
+            set SelfBilledTaxAmtCurr = AmountsStructVar.CustTaxCurrAmount;
+         }
+      }
+   }
+   field CalculatedNetPriceCurr;
+   field IncludedTotalOrderLineDiscount;
+   field QtyDelivered {
+      size = Small;
+   }
+   field QtyInvoiced {
+      size = Small;
+   }
+   field QtyToInvoice {
+      size = Small;
+   }
+   field TotalQtyToMatch {
+      size = Small;
+   }
+   field CurrencyCode {
+      size = Small;
+   }
+   field ConsignmentStock {
+      size = Small;
+   }
+   field PayTermId {
+      size = Small;
+   }
+   field GrossAmountCurr {
+      size = Small;
+   }
+   field TaxAmountCurr {
+      size = Small;
+   }
+   field NetAmountCurr {
+      size = Small;
+   }
+   field SelfBilledNetAmtCurr {
+      size = Small;
+   }
+   field WantedDeliveryDate;
+   field DateDelivered;
+   field DateConfirmed;
+   field ShipmentId;
+   field ReasonRef;
+   field ReferenceId {
+      size = Small;
+   }
+   field CustomerPoNo;
+   field CustomerPoLineNo {
+      size = Small;
+   }
+   field CustomerPoRelNo {
+      size = Small;
+   }
+   fieldranking DelnoteNo, OrderNo, LineNo, RelNo, Contract, CatalogNoRef, CustomerQty, CustUnitSalesQty, CustUnitPartPrice;
+}
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+
+----------------------------- MAIN ENTRY POINTS -----------------------------
+
+entityset AddSBLinesSet for AddSelfBillingLinesVirtual;
+
+------------------------------ ENTITY DETAILS -------------------------------
+
+--------------------------------- VIRTUALS ----------------------------------
+
+virtual AddSelfBillingLinesVirtual {
+   attribute SbiNo Text {
+      label = "SBI No";
+      maxlength = 100;
+      format = uppercase;
+   }
+   attribute CustomerNo Text {
+      label = "Customer No";
+      maxlength = 20;
+   }
+   attribute CustomerName Text {
+      label = "Name";
+      maxlength = 100;
+   }
+   attribute Company Text {
+      label = "Company";
+      maxlength = 100;
+   }
+   attribute AvailableLinesToMatch Number {
+      label = "Lines to Add";
+      editable = [false];
+   }
+   attribute SelectedLinesToMatch Number {
+      label = "Remaining Lines to Add";
+      editable = [false];
+   }
+   attribute CurrencyCode Text {
+      label = "Currency Code";
+      maxlength = 100;
+   }
+   array LinesToMatchArray() to UnmatchedSbiDeliveryVirtual();
+}
+
+
+
+virtual UnmatchedSbiDeliveryVirtual {
+   attribute DelnoteNo Text {
+      label = "Delivery Note No";
+      maxlength = 15;
+      editable = [false];
+   }
+   attribute OrderNo Text {
+      label = "Order No";
+      maxlength = 12;
+      editable = [false];
+      format = uppercase;
+   }
+   attribute LineNo Text {
+      label = "Line No";
+      maxlength = 4;
+      editable = [false];
+   }
+   attribute RelNo Text {
+      label = "Del No";
+      maxlength = 4;
+      editable = [false];
+   }
+   attribute CustomerNo Text {
+      label = "Customer No";
+      maxlength = 20;
+   }
+   attribute Contract Text {
+      label = "Site";
+      maxlength = 5;
+      editable = [false];
+      format = uppercase;
+   }
+   attribute CatalogNo Text {
+      label = "Sales Part No";
+      maxlength = 25;
+      editable = [false];
+      format = uppercase;
+   }
+   attribute CustomerPartNo Text {
+      label = "Customer's Part No";
+      maxlength = 45;
+      editable = [false];
+   }
+   attribute BuyQtyDue Number {
+      label = "Sales Qty";
+      editable = [false];
+   }
+   attribute SalesUnitMeas Text {
+      label = "UoM";
+      maxlength = 10;
+      editable = [false];
+   }
+   attribute CustomerQty Number {
+      label = "Customer Qty to Match";
+   }
+   attribute CustUnitSalesQty Number {
+      label = "Customer Sales Qty";
+   }
+   attribute PartPrice Number {
+      label = "Source Price/Curr";
+      editable = [false];
+      format = ifscurrency;
+   }
+   attribute CustUnitPartPrice Number {
+      label = "Self-Billed Price/Curr";
+      format = ifscurrency;
+   }
+   attribute CalculatedNetPriceCurr Number {
+      label = "Calculated Net Price/Curr";
+      editable = [false];
+      format = ifscurrency;
+   }
+   attribute IncludedTotalOrderLineDiscount Number {
+      label = "Included Total Order Line Discount (%)";
+      editable = [false];
+   }
+   attribute QtyDelivered Number {
+      label = "Delivered Qty";
+      editable = [false];
+   }
+   attribute QtyInvoiced Number {
+      label = "Invoiced Qty";
+      editable = [false];
+   }
+   attribute QtyToInvoice Number {
+      label = "Total Qty to Invoice";
+      editable = [false];
+   }
+   attribute TotalQtyToMatch Number {
+      label = "Total Qty to Match";
+      editable = [false];
+   }
+   attribute CurrencyCode Text {
+      label = "Currency Code";
+      maxlength = 3;
+      editable = [false];
+   }
+   attribute ConsignmentStock Boolean {
+      label = "Consignment Stock";
+      editable = [false];
+   }
+   attribute PayTermId Text {
+      label = "Payment Terms";
+      maxlength = 20;
+      editable = [false];
+   }
+   attribute GrossAmountCurr Number {
+      label = "Gross Amt/Curr";
+      editable = [false];
+      format = ifscurrency;
+   }
+   attribute TaxAmountCurr Number {
+      label = "Tax Amount/Curr";
+      editable = [false];
+      format = ifscurrency;
+   }
+   attribute NetAmountCurr Number {
+      label = "Net Amount/Curr";
+      editable = [false];
+      format = ifscurrency;
+   }
+   attribute SelfBilledNetAmtCurr Number {
+      label = "Self-Billed Net Amt/Curr";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute SelfBilledGrossAmtCurr Number {
+      label = "Self-Billed Gross Amt/Curr";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute SelfBilledTaxAmtCurr Number {
+      label = "Self-Billed Tax Amt/Curr";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute WantedDeliveryDate Date {
+      label = "Wanted Delivery Date";
+      editable = [false];
+   }
+   attribute DateDelivered Date {
+      label = "Delivered Date";
+      editable = [false];
+   }
+   attribute DateConfirmed Date {
+      label = "Confirmed Date";
+      editable = [false];
+   }
+   attribute ShipmentId Number {
+      label = "Shipment ID";
+      editable = [false];
+   }
+   attribute DelivNo Number {
+      label = "Delivery No";
+      editable = [false];
+   }
+   attribute LineItemNo Number {
+      label = "Line Item No";
+      editable = [false];
+   }
+   attribute Company Text {
+      label = "Company";
+      maxlength = 4000;
+      editable = [false];
+   }
+   attribute ConfirmedSbiQty Number {
+      label = "Confirmed SBI Qty";
+      editable = [false];
+   }
+   attribute PriceConvFactor Number {
+      label = "Price Conv Factor";
+      editable = [false];
+   }
+   attribute CustomerPartConvFactor Number {
+      label = "Conv Factor";
+      editable = [false];
+   }
+   attribute CustPartInvertConvFact Number {
+      label = "Invert Conv Fact";
+      editable = [false];
+   }
+   attribute ReferenceId Text {
+      label = "Reference ID";
+      maxlength = 35;
+      editable = [false];
+   }
+   attribute CustomerPoNo Text {
+      label = "Customer's PO No";
+      maxlength = 50;
+      editable = [false];
+   }
+   attribute CustomerPoLineNo Text {
+      label = "Customer's PO Line No";
+      maxlength = 4;
+      editable = [false];
+   }
+   attribute CustomerPoRelNo Text {
+      label = "Customer's PO Rel No";
+      maxlength = 4;
+      editable = [false];
+   }
+   attribute CloseDelivery Boolean {
+      label = "Close Delivery";
+      editable = [false];
+      required = [true];
+   }
+   attribute QtyDiff Number {
+      editable = [false];
+   }
+   attribute Reason Text {
+      label = "Deviation Reason";
+      maxlength = 10;
+      format = uppercase;
+   }
+   reference CustomerOrderLineRef(OrderNo, LineNo, RelNo, LineItemNo) to CustomerOrderLine(OrderNo, LineNo, RelNo, LineItemNo);
+   reference CurrencyCodeRef(Company, CurrencyCode) to CurrencyCode(Company, CurrencyCode);
+   reference CatalogNoRef(Contract, CatalogNo) to NonRentalSalesPartLov(Contract, CatalogNo) {
+      label = "Sales Part";
+   }
+   reference SalesUnitMeasRef(SalesUnitMeas) to IsoUnit(UnitCode) {
+      label = "UoM";
+   }
+   reference ReasonRef(Reason) to SelfBillingDevReason(Reason) {
+      label = "Deviation Reason";
+   }
+}
+
+---------------------------------- ACTIONS ----------------------------------
+
+action AddMatchedLines {
+   initialcheck AddMatchedLinesInitialCheck(ParentKey, Selection);
+   ludependencies = SelfBillingItem;
+   parameter ParentKey Text;
+   parameter Selection Text;
+}
+
+--------------------------------- FUNCTIONS ---------------------------------
+
+-------------------------------- STRUCTURES ---------------------------------
+
+--------------------------------- SUMMARIES ---------------------------------
+
+-------------------------------- SINGLETONS ---------------------------------

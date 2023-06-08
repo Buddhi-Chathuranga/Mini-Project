@@ -1,0 +1,340 @@
+client RegisterSalesPart;
+component ORDER;
+layer Core;
+projection RegisterSalesPartHandling;
+include fragment TaxCodeRestrictedSelector;
+-----------------------------------------------------------------------------
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  210711  ErFelk  Bug 159608(MFZ-8108), Added TaxCodeRestrictedSelector fragment. Added a new field TaxClassIdRef under PriceGroup.
+--  191014  NiDalk  Bug 150128 (SCZ-6784), Modified InitSalesPartDetails to fetch all details from oportunity line except part no when an estimate is connected.
+--  190704  Pavrlk  SCUXXW4-13528, Changed the labels of SalesPartTypeGroup,SalesPartGroup,ConversionFact,InvertConvFact,PriceGroup
+--  190616  MaIklk  SCUXXW4-20330, Added message related to inventory part whether it should be pruchased or manufatured.
+--  190530  MaIklk  SCUXXW4-21462, Used VarConObjectType check to differentiate between estimate and opportunity if the source is Bo lines.
+--  190504  ChWkLk  MFUXXW4-11615, Added Estimate related logics to the Register Sales Part.
+--  190205  MaIklk  SCUXX-5323, Removed FNDAB1 condition.
+--  180516  KoDelk  SCUXX-3182, Created
+-----------------------------------------------------------------------------
+
+--------------------------------- SELECTORS ---------------------------------
+selector UserAllowedCompanySiteSelector for UserAllowedSiteWithCompany {
+   static Site;
+   static Description;
+}
+selector PriceGroupSelector for SalesPriceGroup {
+   static SalesPriceGroupId;
+   static Description;
+   badge SalesPriceGroupType;
+}
+selector GroupSelector for SalesGroup {
+   static CatalogGroup;
+   static Description;
+   field DeliveryConfirmation;
+}
+selector DiscountGroupSelector for SalesDiscountGroup {
+   static DiscountGroup;
+   static Description;
+   field DiscountCode {
+      label = "Discount Basis";
+   }
+}
+@Override
+selector RebateGroupSelector for SalesPartRebateGroup {
+   static SalesPartRebateGroup;
+   static Description;
+}
+@Override
+selector IsoUnitSelector for IsoUnit {
+   static Description;
+}
+
+-------------------------------- ASSISTANTS ---------------------------------
+assistant RegisterSalesPartAssistant for RegisterSalesPartStructure {
+   label = "Register Sales Part";
+
+
+   setup InitSalesPartDetails {
+      variable DefaultValue {
+         type = RegSalesPartDefaultsStructure;
+      }
+      variable EstTransferDetails {
+         type = EstTransferStatusStruct;
+      }
+      variable VarSource;
+      variable VarSourceRef1;
+      variable VarSourceRef2;
+      variable VarSourceRef3;
+      variable VarEstimateId          Number;
+      variable VarEstimateRevisionNo  Number;
+      variable VarNodeId              Number;
+      variable VarEstimateCostVersion Number;
+      variable VarCustomerNo          Text;
+      variable VarConObjectType       Text;
+      execute {
+         set Source = VarSource;
+         if[Source = "OpportunityLine"] {
+            set SourceRef1 = VarSourceRef1;
+            set SourceRef2 = VarSourceRef2;
+            set SourceRef3 = VarSourceRef3;
+            set EstimateId = "#{VarEstimateId}";
+            set EstimateRevisionNo = "#{VarEstimateRevisionNo}";
+            set NodeId = "#{VarNodeId}";
+
+            if [VarConObjectType = "Estimate"] {
+               call GetEstimateTransferDetails(VarEstimateId, VarEstimateRevisionNo, VarNodeId) into EstTransferDetails;
+               copy EstTransferDetails into this;
+               set PartNo = EstTransferDetails.InventoryPartNo;
+            }
+
+            call GetDefaultsForSalesPart(Source, SourceRef1, SourceRef2, SourceRef3) into DefaultValue;
+            set Description = DefaultValue.Description;
+            set Company = DefaultValue.Company;
+            set Site = DefaultValue.Site;
+            set UnitOfMeasure = DefaultValue.SalesUnitMeas;
+            set SalesUom = DefaultValue.SalesUnitMeas;
+            set PriceUom = DefaultValue.SalesUnitMeas;
+            set ConversionFact = 1;
+            set InvertConvFact = 1;
+            set PriceConvFact = 1;
+            set Cost = DefaultValue.Cost;
+            set Price = DefaultValue.SaleUnitPrice;
+            set TaxCode = DefaultValue.TaxCode;
+            set Taxable = DefaultValue.Taxable;
+            set UsePriceIncTax = DefaultValue.UsePriceIncTax;
+            set TaxRate = DefaultValue.TaxRate;
+            set PriceIncTax = "#{Price*(TaxRate+100)/100}";
+         }
+         if[Source = "Estimate"] {
+            set EstimateId = VarEstimateId;
+            set EstimateRevisionNo = VarEstimateRevisionNo;
+            set NodeId = VarNodeId;
+            set EstimateCostVersion = VarEstimateCostVersion;
+            set CustomerNo = VarCustomerNo;
+            set EstimateDeliverableContrac = VarCustomerNo;
+            call GetDefaultValuesForEstimate(EstimateId, EstimateRevisionNo, NodeId, EstimateCostVersion, CustomerNo) into DefaultValue;
+            copy DefaultValue into this;
+         }
+      }
+   }
+   steps {
+      step {
+         group SalesPartTypeGroup;
+         group SalesPartGroup;
+         group InvetoryPartGroup;
+         group UnitOfMeasuresGroup;
+         group GroupingGroup;
+         group PriceGroup;
+      }
+      final step {
+      }
+   }
+   finish command {
+      label = "Register Part";
+
+      enabled = [SalesPartType != null and PartNo != null and Description != null and Site != null and SalesUom != null and PriceUom != null and PriceConvFact != null and SalesPriceGroup != null and SalesGroup != null and Price != null and
+      ((InventoryPartNo != null and UnitOfMeasure != null and ConversionFact != null and InvertConvFact != null) or(EstimateId != null and SalesPartType != "InventoryPart"))];
+
+      execute {
+         if [SalesPartType = "InventoryPart" and Transferred != 1 and Source != "Estimate"] {
+            messagebox("", question, "Do you want the inventory part to be Purchased?
+                     If Yes - the inventory part will be Purchased and a purchase part will be created.
+                     If No - the inventory part will be Manufactured.") {
+               when "Yes" {
+                  set CreatePurPart = true;
+
+               }
+               when "No" {
+                  set CreatePurPart = false;
+
+               }
+               when "Cancel" {
+                  exit CANCEL;
+               }
+            }
+         }
+         if [Source = "Estimate" and(ComponentType = "4" or ComponentType = "3")] {
+            set CreatePurPart = true;
+         }
+         call RegisterSalesPart(Source, SourceRef1, SourceRef2, SourceRef3, SalesPartType, PartNo, InventoryPartNo, Description, Site, UnitOfMeasure,
+         ConversionFact, InvertConvFact, SalesUom, PriceUom, PriceConvFact, SalesPriceGroup, SalesGroup,
+         DiscountGroup, RebateGroup, Taxable, UsePriceIncTax, TaxCode, Cost, Price, PriceIncTax, CreatePurPart, EstimateId, EstimateRevisionNo, NodeId, EstimateCostVersion, TaxClass);
+
+         navigate back;
+      }
+   }
+   cancel command {
+      execute {
+         navigate back;
+      }
+   }
+}
+
+---------------------------------- GROUPS -----------------------------------
+group SalesPartTypeGroup for RegisterSalesPartStructure {
+   label = "Sales Part Type";
+   field SalesPartType {
+      editable = [Source != "Estimate"];
+      validate command {
+         execute {
+            if[SalesPartType = "PackagePart"] {
+               set Cost = 0;
+            }
+            if[EstimateId != null and SalesPartType = "InventoryPart"] {
+               set ConversionFact = 1;
+               set InvertConvFact = 1;
+            }
+
+         }
+      }
+   }
+}
+
+group SalesPartGroup for RegisterSalesPartStructure {
+   label = "Sales Part";
+   field PartNo {
+      format = uppercase;
+      validate command {
+         execute {
+            if [Source != "Estimate"] {
+               set InventoryPartNo = PartNo;
+            }
+         }
+      }
+   }
+   field Description;
+   lov SiteRef with UserAllowedCompanySiteSelector {
+      label = "Site";
+      description = SiteRef.Description;
+      editable = [Source != "Estimate" or(Source = "Estimate" and EstDeliverableSite = null)];
+   }
+}
+
+group InvetoryPartGroup for RegisterSalesPartStructure {
+   label = "Inventory Part";
+   visible = [SalesPartType = "InventoryPart"];
+
+   field InventoryPartNo {
+      format = uppercase;
+      editable = [Source != "Estimate" and  Transferred != 1];
+   }
+   lov UomRef with IsoUnitSelector {
+      label = "Inventory U/M";
+      editable = [Source != "Estimate" and  Transferred != 1];
+      description = UomRef.Description;
+   }
+   field ConversionFact {
+      label = "Conversion Factor";
+      size = Small;
+      editable = [Transferred != 1];
+   }
+   field InvertConvFact {
+      label = "Invert Conversion Factor";
+      size = Small;
+      editable = [Transferred != 1];
+   }
+   field CreatePurPart {
+      label = "Create Purchase Part";
+      visible = [EstimateId = null];
+   }
+}
+
+group UnitOfMeasuresGroup for RegisterSalesPartStructure {
+   label = "Units of Measure";
+
+   lov SalesUomRef with IsoUnitSelector {
+      label = "Sales U/M";
+      description = SalesUomRef.Description;
+   }
+   lov PriceUomRef with IsoUnitSelector {
+      label = "Price U/M";
+      description = PriceUomRef.Description;
+   }
+   field PriceConvFact {
+      label = "Price Conversion Factor";
+      size = Small;
+   }
+}
+
+group GroupingGroup for RegisterSalesPartStructure {
+   label = "Grouping";
+   lov SalesPriceGroupRef with PriceGroupSelector {
+      label = "Sales Price Group";
+      description = SalesPriceGroupRef.Description;
+   }
+   lov SalesGroupRef with GroupSelector {
+      label = "Sales Group";
+      description = SalesPriceGroupRef.Description;
+   }
+   lov DiscountGroupRef with DiscountGroupSelector {
+      label = "Discount Group";
+      description = DiscountGroupRef.Description;
+   }
+   lov RebateGroupRef with RebateGroupSelector {
+      label = "Rebate Group";
+      description = RebateGroupRef.Description;
+   }
+}
+
+group PriceGroup for RegisterSalesPartStructure {
+   label = "Price";
+   currency Cost(CurrencyCode) {
+      label = "Cost";
+      size = Small;
+      editable = [SalesPartType != "PackagePart"];
+      uniteditable = [false];
+      format = ifscurrency;
+   }
+   currency Price(CurrencyCode) {
+      label = "Price";
+      size = Small;
+      editable = [UsePriceIncTax = false];
+      uniteditable = [false];
+      format = ifscurrency;
+      preserveprecision = [true];
+
+      validate command {
+         execute {
+            set TaxRate = TaxCodeRef.FeeRate;
+            set PriceIncTax = "#{Price * (TaxRate + 100) / 100}";
+         }
+      }
+
+   }
+   currency PriceIncTax(CurrencyCode) {
+      label = "Price Incl. Tax";
+      size = Small;
+      uniteditable = [false];
+      editable = [UsePriceIncTax];
+      format = ifscurrency;
+      preserveprecision = [true];
+      validate command {
+         execute {
+            set TaxRate = TaxCodeRef.FeeRate;
+            set Price = "#{PriceIncTax * 100 / (TaxRate + 100)}";
+         }
+      }
+   }
+   lov TaxCodeRef with TaxCodeRestrictedSelector {
+      label = "Tax Code";
+      description = TaxCodeRef.Description;
+      editable = [TaxClassIdRef = null];
+      validate command {
+         execute {
+            set TaxRate = TaxCodeRef.FeeRate;
+            if [UsePriceIncTax] {
+               set Price = "#{PriceIncTax * 100 / (TaxRate + 100)}";
+            }
+            else {
+               set PriceIncTax = "#{Price * (TaxRate + 100) / 100}";
+            }
+         }
+      }
+   }
+   field TaxClassIdRef {
+      label = "Tax Class";
+      editable = [TaxCodeRef = null];
+   }
+   field Taxable;
+   field UsePriceIncTax;
+}
+

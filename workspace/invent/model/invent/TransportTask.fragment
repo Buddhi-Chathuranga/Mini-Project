@@ -1,0 +1,606 @@
+----------------------------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  -----------------------------------------------------------------------------------
+-- 2021-08-11  WaSalk  Bug 160262 (SCZ-15730), Modified PrintTransportTaskCommand to enable for executed transport tasks.
+-- 2021-02-08  GrGalk  SC2020R1-12289, Removed enabled conditions from command PrintTransportTaskCommand
+-- 2019-08-19  ChFolk  SCUXXW4-23842, modified CreateDate to use truncated value.
+-- 2019-07-01  bajelk  SCUXXW4-22811, Reverted some minor corrections according to a design.
+-- 2019-06-21  bajelk  SCUXXW4-22811, Made some label changes for Transport_FromGroup, Transport_ToGroup and ForwardToGroup.
+-- 2019-06-21  ChFolk  SCUXXW4-22729, Added ludependencies for TransportTaskLine.
+-- 2019-06-07  bajelk  SCUXXW4-21958, Added partNoRef lov field , PartNo field to TransportTaskCompiledViewGroup and
+--                     added Description attribute in TransportTask entity.
+-- 2019-05-09  DaZase  SCUXXW4-19706, Added initialcheck to all unbounded actions.
+-- 2019-03-21  ChFolk  SCUXXW4-14910, include fragments for each tab in Transport Task and moved the fragments to the respective fragment for tab.
+-- 2019-0321           Moved the codes to the respectived fragments for tabs.
+-- 2018-03-14  ChFolk  SCUXXW4-17206, Added dynamic dependency where necessary.
+-- 2018-12-27  KoDelk  SCUXXW4-6562, Created.
+----------------------------------------------------------------------------------------------------------
+fragment TransportTask;
+component INVENT;
+layer Core;
+description "Transport Task Page";
+
+include fragment TransportTaskLineDetailsTab;
+include fragment TransportTaskLineAggregatedTab;
+include fragment TransportTaskAvailableSingleLinesTab;
+include fragment TransportTaskAvailableHandlingUnitsTab;
+include fragment InventoryLocation17Selector;
+include fragment UserAllowedSiteLovSelector;
+include fragment InventoryPartLovSelector;
+include fragment IdentifySerialsInMultipleLocationsAssistant;
+include fragment TransportTaskInitialCheck;
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+
+--------------------------------- COMMANDS ----------------------------------
+command ExecuteCommand for TransportTask {
+   label = "Execute";
+   mode = SelectedRecords;
+   variable PartTrackingSessionIdNum {
+      type = Number;
+   }
+   variable ConfirmExecuteBool {
+      type = Boolean;
+   }
+   variable NoOfUnidentifiedSerialsNum {
+      type = Number;
+   }
+   variable TransportTaskIdStr {
+      type = Text;
+   }
+   enabled = [not CompletelyExecuted and LinesCount > 0];
+
+   execute {
+      call GetNoOfUnidentifiedSerials(TransportTaskId, "FALSE") into NoOfUnidentifiedSerialsNum;
+
+      set ConfirmExecuteBool = false;
+      if [DestinationDb = "Y" and ForwardToLocationNo != null] {
+         confirm("The parts on the transport task will be put in transit for the destination location.") {
+            when CANCEL {
+               exit;
+            }
+            when OK {
+               set ConfirmExecuteBool = true;
+            }
+         }
+      }
+      else {
+         confirm("This will move the parts on the transport task to the destination location.") {
+            when CANCEL {
+               exit;
+            }
+            when OK {
+               set ConfirmExecuteBool = true;
+            }
+         }
+      }
+      if [ConfirmExecuteBool] {
+         if [NoOfUnidentifiedSerialsNum > 0] {
+            call ConvertToString(TransportTaskId) into TransportTaskIdStr;
+            assistant IdentifySerialsInMultipleLocAssistant("33", TransportTaskIdStr, null, null, null, null, FromContract, PartNo, NoOfUnidentifiedSerialsNum) into(PartTrackingSessionIdNum) {
+               when OK {
+                  call Execute(TransportTaskId, PartTrackingSessionIdNum);
+               }
+            }
+         }
+         else {
+            call Execute(TransportTaskId, PartTrackingSessionIdNum);
+         }
+         refresh;
+      }
+   }
+}
+
+command ExecutePickedLinesCommand for TransportTask {
+   label = "Execute Picked Lines";
+   enabled = [not CompletelyExecuted and LinesCount > 0 and Picked];
+   variable PartTrackingSessionIdNum {
+      type = Number;
+   }
+   variable ConfirmPick {
+      type = Boolean;
+   }
+   variable NoOfUnidentifiedPickedSerialsNum {
+      type = Number;
+   }
+   variable TransportTaskIdStr {
+      type = Text;
+   }
+   execute {
+      call GetNoOfUnidentifiedSerials(TransportTaskId, "TRUE") into NoOfUnidentifiedPickedSerialsNum;
+      set ConfirmPick = false;
+      if [DestinationDb = "N"] {
+         confirm("This will move the parts on the transport task to the destination location.") {
+            when CANCEL {
+               exit;
+            }
+            when OK {
+               set ConfirmPick = true;
+            }
+         }
+      }
+      else {
+         confirm("The parts on the transport task will be put in transit for the destination location.") {
+            when CANCEL {
+               exit;
+            }
+            when OK {
+               set ConfirmPick = true;
+            }
+         }
+      }
+      if [ConfirmPick] {
+         if [NoOfUnidentifiedPickedSerialsNum > 0] {
+            call ConvertToString(TransportTaskId) into TransportTaskIdStr;
+            assistant IdentifySerialsInMultipleLocAssistant("33", TransportTaskIdStr, null, null, null, null, FromContract, PartNo, NoOfUnidentifiedPickedSerialsNum) into(PartTrackingSessionIdNum) {
+               when OK {
+                  call Execute(TransportTaskId, PartTrackingSessionIdNum);
+               }
+            }
+         }
+         else {
+            call Execute(TransportTaskId, PartTrackingSessionIdNum);
+         }
+      }
+   }
+}
+
+command PrintTransportTaskCommand for TransportTask {
+   label = "Print Transport Task";
+   variable ResultKeyNum {
+      type = Number;
+   }
+   execute {
+      if[CompletelyExecuted] {
+         confirm("The transport task has already been executed.  There could be differences in the data included in the printed transport task, from the executed date to the current date.") {
+            when CANCEL {
+               exit;
+            }
+         }
+      }
+      call GetReportResultKey(TransportTaskId) into ResultKeyNum;
+      printdialog ResultKeyNum;
+      refresh;
+   }
+}
+
+command ApplyDropOffLocationCommand for TransportTask {
+   label = "Apply Drop-Off Location";
+   enabled = [Created and LinesCount > 0];
+   execute {
+      call ApplyDropOffOnLines(TransportTaskId);
+   }
+}
+
+command ConvertDirectTransportTaskCommand for TransportTask {
+   label = "Convert to Direct Transport Task";
+   enabled = [ConvertToDirectTransportTask = 1 and LinesCount > 0];
+   execute {
+      call RevokeTwoStepTransportTask(TransportTaskId);
+   }
+}
+
+--------------------------------- SELECTORS ---------------------------------
+@Override
+selector TransportTaskSelector for TransportTask {
+   label = "${TransportTaskId}";
+   static TransportTaskId;
+}
+
+---------------------------------- GROUPS -----------------------------------
+group TransportTaskGroup for TransportTask {
+   label = "Transport Task";
+   field TransportTaskId {
+      size = Small;
+   }
+   field CreateDate {
+      size = Small;
+   }
+   field FixedDb {
+      size = Small;
+   }
+   field ParentFixedDb {
+      visible = [false];
+   }
+   field NoteDb {
+      size = Small;
+   }
+   field Printed {
+      size = Small;
+   }
+   field NoteText {
+      size = Medium;
+      multiline = true;
+   }
+}
+
+group HasLinesInStatusGroup for TransportTask {
+   label = "Has Lines In Status";
+   field Created {
+      size = Small;
+   }
+   field Picked {
+      size = Small;
+   }
+   field Executed {
+      size = Small;
+   }
+}
+
+group TransportTaskCompiledViewGroup for TransportTask {
+   label = "";
+   lov PartNoRef with ReferenceInventoryPartLovSelector {
+      description = PartNoRef.Description;
+      label = "Part";
+   }
+   field ConfigurationId {
+      size = Small;
+   }
+   lov HandlingUnitTypeIdRef with HandlingUnitTypeSelector {
+      description = HandlingUnitTypeIdRef.Description;
+      label = "Outermost Handling Unit Type";
+   }
+}
+
+group SourceRefGroup for TransportTask {
+   label = "Source";
+   collapsed = [true];
+   field OrderRef1 {
+      label = "Order Ref 1";
+      size = Small;
+   }
+   field OrderRef2 {
+      label = "Order Ref 2";
+      size = Small;
+   }
+   field OrderRef3 {
+      label = "Order Ref 3";
+      size = Small;
+   }
+   field OrderRef4 {
+      label = "Order Ref 4";
+      size = Small;
+   }
+   field OrderType {
+      size = Small;
+   }
+}
+
+group Transport_FromGroup for TransportTask {
+   label = "Transport From";
+   lov FromContractRef with ReferenceUserAllowedSiteLovSelector {
+      size = Small;
+      label = "From Site";
+   }
+   lov FromLocationNoRef with ReferenceInventoryLocation17Selector {
+      size = Small;
+   }
+   field FromLocationGroup {
+      size = Small;
+      label = "Location Group";
+   }
+   field FromLocationType {
+      size = Small;
+      label = "Location Type";
+   }
+   field FromWarehouseId {
+      size = Small;
+      label = "Warehouse ID";
+   }
+   field FromBayId {
+      size = Small;
+      label = "Bay ID";
+   }
+   field FromRowId {
+      size = Small;
+      label = "Row ID";
+   }
+   field FromTierId {
+      size = Small;
+      label = "Tier ID";
+   }
+   field FromBinId {
+      size = Small;
+      label = "Bin ID";
+   }
+   field PartNoRef.UnitMeas {
+      size = Small;
+      label = "UoM";
+   }
+}
+
+group Transport_ToGroup for TransportTask {
+   label = "Transport To";
+   lov ToContractRef with ReferenceUserAllowedSiteLovSelector {
+      size = Small;
+      label = "To Site";
+   }
+   lov ToLocationNoRef with ReferenceInventoryLocation17Selector {
+      size = Small;
+   }
+   field ToLocationGroup {
+      size = Small;
+      label = "Location Group";
+   }
+   field ToLocationType {
+      size = Small;
+      label = "Location Type";
+   }
+   field ToWarehouseId {
+      size = Small;
+      label = "Warehouse ID";
+   }
+   field ToBayId {
+      size = Small;
+      label = "Bay ID";
+   }
+   field ToRowId {
+      size = Small;
+      label = "Row ID";
+   }
+   field ToTierId {
+      size = Small;
+      label = "Tier ID";
+   }
+   field ToBinId {
+      size = Small;
+      label = "Bin ID";
+   }
+   field PartNoRef.UnitMeas {
+      size = Small;
+      label = "UoM";
+   }
+   field Destination {
+      size = Small;
+   }
+}
+
+group ForwardToGroup for TransportTask {
+   label = "Forward To";
+   lov ToContractRef with ReferenceUserAllowedSiteLovSelector {
+      size = Small;
+      label = "Forward To Site";
+   }
+   lov ForwardToLocationNoRef with ReferenceInventoryLocation17Selector {
+      label = "Forward To Location No";
+      size = Small;
+   }
+
+   field ForwardToLocationGroup {
+      size = Small;
+      label = "Location Group";
+   }
+   field ForwardToLocationType {
+      size = Small;
+      label = "Location Type";
+   }
+   field ForwardToWarehouseId {
+      size = Small;
+      label = "Warehouse ID";
+   }
+   field ForwardToBayId {
+      size = Small;
+      label = "Bay ID";
+   }
+   field ForwardToRowId {
+      size = Small;
+      label = "Row ID";
+   }
+   field ForwardToTierId {
+      size = Small;
+      label = "Tier ID";
+   }
+   field ForwardToBinId {
+      size = Small;
+      label = "Bin ID";
+   }
+   field PartNoRef.UnitMeas {
+      size = Small;
+      label = "UoM";
+   }
+}
+----------------------------------- LISTS -----------------------------------
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+
+----------------------------- MAIN ENTRY POINTS -----------------------------
+
+------------------------------ ENTITY DETAILS -------------------------------
+@Override
+entity TransportTask {
+   keys = TransportTaskId;
+   ludependencies = TransportTaskLine;
+   attribute TransportTaskId Number {
+      label = "Transport Task ID";
+      editable = [false];
+   }
+   attribute CreateDate Date {
+      label = "Date Created";
+      fetch = "TRUNC(CREATE_DATE)";
+      editable = [false];
+   }
+   attribute FixedDb Boolean("TRUE", "FALSE") {
+      fetch = "FIXED_DB";
+      label = "Fixed";
+      required = [true];
+      editable = [true];
+   }
+   attribute ParentFixedDb Text {
+      fetch = "FIXED_DB";
+      label = "Fixed";
+      editable = [true];
+   }
+   attribute NoteText Text {
+      label = "Notes";
+   }
+   attribute NoteDb Boolean("TRUE", "FALSE") {
+      fetch = "Decode(NOTE_TEXT, null, 'FALSE', 'TRUE')";
+      label = "Note";
+      editable = [false];
+   }
+   attribute Printed Boolean("TRUE", "FALSE") {
+      fetch = "Decode(PRINTED_FLAG, 1, 'TRUE', 'FALSE')";
+      label = "Printed";
+      editable = [false];
+   }
+   attribute Created Boolean("TRUE", "FALSE") {
+      fetch = "Transport_Task_API.Has_Line_In_Status_Created(TRANSPORT_TASK_ID)";
+      label = "Created";
+      editable = [false];
+   }
+   attribute Picked Boolean("TRUE", "FALSE") {
+      fetch = "Transport_Task_API.Has_Line_In_Status_Picked(TRANSPORT_TASK_ID)";
+      label = "Picked";
+      editable = [false];
+   }
+   attribute Executed Boolean("TRUE", "FALSE") {
+      fetch = "Transport_Task_API.Has_Line_In_Status_Executed(TRANSPORT_TASK_ID)";
+      label = "Executed";
+      editable = [false];
+   }
+   attribute ConfigurationId Text {
+      maxlength = 32767;
+   }
+   attribute OrderRef4 Number {
+      label = "Order Ref 4";
+      maxlength = 32767;
+   }
+   attribute FromContract Text {
+      label = "From Site";
+   }
+   attribute FromLocationType Text {
+      fetch = "INVENTORY_LOCATION_API.Get_Location_Type(FROM_CONTRACT, FROM_LOCATION_NO)";
+      maxlength = 2000;
+   }
+   attribute FromWarehouseId Text {
+      label = "From Warehouse";
+   }
+   attribute FromBayId Text {
+      label = "From Bay";
+   }
+   attribute FromRowId Text {
+      label = "From Row";
+   }
+   attribute FromTierId Text {
+      label = "From Tier";
+   }
+   attribute FromBinId Text {
+      label = "From Bin";
+   }
+   attribute ToContract Text {
+      label = "To Site";
+   }
+   attribute ToLocationType Text {
+      fetch = "INVENTORY_LOCATION_API.Get_Location_Type(TO_CONTRACT, TO_LOCATION_NO)";
+      maxlength = 2000;
+   }
+   attribute ToWarehouseId Text {
+      label = "To Warehouse";
+   }
+   attribute ToBayId Text {
+      label = "To Bay";
+   }
+   attribute ToRowId Text {
+      label = "To Row";
+   }
+   attribute ToTierId Text {
+      label = "To Tier";
+   }
+   attribute ToBinId Text {
+      label = "To Bin";
+   }
+   attribute DestinationDb Text {
+      label = "Destination Db";
+   }
+   attribute CompletelyExecuted Boolean("TRUE", "FALSE") {
+      fetch = "Transport_Task_API.Is_Completely_Executed_Str(TRANSPORT_TASK_ID)";
+      label = "Completely Executed";
+      editable = [false];
+   }
+   attribute LinesCount Number {
+      fetch = "Transport_Task_Line_API.Count_Lines(TRANSPORT_TASK_ID)";
+      label = "Lines Count";
+      editable = [false];
+   }
+   attribute FixedOrStarted Boolean("TRUE", "FALSE") {
+      fetch = "Transport_Task_API.Is_Fixed_Or_Started_Str(TRANSPORT_TASK_ID)";
+      label = "Completely Executed";
+      editable = [false];
+   }
+   attribute ConvertToDirectTransportTask Number {
+      fetch = "Transport_Task_Line_API.Lines_FwdToLoc_Created_Exist(TRANSPORT_TASK_ID)";
+      label = "Convert to Direct Transport Task";
+      editable = [false];
+   }
+   reference HandlingUnitTypeIdRef(HandlingUnitTypeId) to HandlingUnitType(HandlingUnitTypeId);
+   reference PartNoRef(FromContract, PartNo) to InventoryPartLov(Contract, PartNo) {
+      label = "Part No";
+   }
+   reference FromContractRef(FromContract) to UserAllowedSiteLov(Contract) {
+      label = "From Site";
+   }
+   reference ForwardToLocationNoRef(ToContract, ForwardToLocationNo) to InventoryLocation17(Contract, LocationNo) {
+      label = "Location No";
+   }
+   reference FromLocationNoRef(FromContract, PartNo, FromLocationNo) to InventoryPartInStockLov3(Contract, PartNo, ConfigurationId) {
+      label = "From Location No";
+   }
+   reference ToContractRef(ToContract) to UserAllowedSiteLov(Contract) {
+      label = "To Site";
+   }
+   reference ToLocationNoRef(ToContract, ToLocationNo) to InventoryLocation17(Contract, LocationNo) {
+      label = "To Location No";
+   }
+}
+
+
+---------------------------------- ACTIONS ----------------------------------
+action Execute {
+   initialcheck TransportTaskInitialCheck(TransportTaskId);
+   parameter TransportTaskId Number;
+   parameter PartTrackingSessionId Number;
+   ludependencies = TransportTask;
+   ludependencies = TransportTaskLine;
+}
+
+action ExecutePickedLines {
+   initialcheck TransportTaskInitialCheck(TransportTaskId);
+   parameter TransportTaskId Number;
+   parameter PartTrackingSessionId Number;
+   ludependencies = TransportTask;
+   ludependencies = TransportTaskLine;
+}
+
+action GetReportResultKey Number {
+   initialcheck TransportTaskInitialCheck(TransportTaskId);
+   parameter TransportTaskId Number;
+   ludependencies = TransportTask;
+}
+
+action ApplyDropOffOnLines {
+   initialcheck TransportTaskInitialCheck(TransportTaskId);
+   parameter TransportTaskId Number;
+   ludependencies = TransportTask;
+   ludependencies = TransportTaskLine;
+}
+
+action RevokeTwoStepTransportTask {
+   initialcheck TransportTaskInitialCheck(TransportTaskId);
+   parameter TransportTaskId Number;
+   ludependencies = TransportTask;
+   ludependencies = TransportTaskLine;
+}
+
+//! TODO: Should be refactored as a function!
+action ConvertToString Text {
+   initialcheck none;
+   parameter TransportTaskId Number;
+}
+
+--------------------------------- FUNCTIONS ---------------------------------
+function GetNoOfUnidentifiedSerials Number {
+   parameter TransportTaskId Number;
+   parameter OnlyStatusPicked Text;
+}
+
+-------------------------------- STRUCTURES ---------------------------------

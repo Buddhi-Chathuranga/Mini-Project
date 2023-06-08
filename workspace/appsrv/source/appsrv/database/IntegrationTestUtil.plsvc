@@ -1,0 +1,465 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: IntegrationTestUtil
+--  Component:    APPSRV
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  
+--  220112  NiDalk  Added parameter only_in_state_posted_ to Get_Background_Job_Id___ and Re introduced Find_And_Execute_Connect_Procedure_Wait_Done___ 
+--  220112          to wait for posted background job.
+--  211210  NISMLK  Added Any_In_Executing_State___().
+--  210922  NiDalk  SCTA-10807, Modified Get_Background_Job_Id___ to support procedure name and record and field separators in argument string. 
+--  220922          Modified Get_Job_Id_Wait_Done___ and added Find_And_Execute_Procedure_Wait_Done_With_Args___ to support argument string and description. 
+--  220922          Changed Prepare_Arg_Attr___ to Check_Arguments_Match___ and supported all types of argument strings. 
+--  220922          Removed Find_And_Execute_Connect_Procedure_Wait_Done___ and Find_And_Execute_Procedure_Wait_Done___.
+--  210816  NiDalk  SCTA-10479, Renamed Get_Job_Name_Wait_Done___ to Get_Job_Id_Wait_Done___.
+--  210528  NISMLK  Added Find_And_Execute_Procedure_Wait_Done___().
+--  201001  KHVESE  Renamed function Is_Job_Done___ to Is_Job_Executable___ respectively.
+--  201001          Added functions Is_Executable_State___, Is_Executing_State___ and Is_Job_Executing___. Modifed method Execute_Background_Job_No_Wait___.
+--  200723  ISPALK  Added function Get_Work_Day___.
+--  200602  Asawlk  Added function Get_Latest_Job_Id_By_Parameters___.
+--  200501  NASALK  Added Remove_All_Cost_Rev_Elements_Per_Code_Part___ and Remove_All_Cost_Rev_Elements___ to delete records
+--  200501          created from STD company template.
+--  200311  MDAHSE  Add a way to force background jobs to be run.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+-- Here, a job is "done" when it has executed, and regardless if it was successful or not.
+FUNCTION Is_Done_State___ (state_ IN VARCHAR2) RETURN BOOLEAN
+IS
+BEGIN
+   RETURN state_ IN ('Ready', 'Error', 'Warning');
+END Is_Done_State___;
+
+FUNCTION Any_In_Executing_State___ (
+   description_      IN VARCHAR2,
+   procedure_name_   IN VARCHAR2 DEFAULT NULL) RETURN NUMBER
+IS
+   dummy_ NUMBER := 0 ;
+   CURSOR get_user_jobs IS 
+      SELECT 1 
+        FROM transaction_sys_local_tab
+       WHERE (upper(procedure_name) = upper(NVL(procedure_name_, procedure_name)))
+         AND upper(description) LIKE '%'||upper(NVL(description_,description))||'%'
+         AND state = 'Executing';
+BEGIN
+   OPEN get_user_jobs;
+   FETCH get_user_jobs INTO dummy_;
+   CLOSE get_user_jobs;
+   RETURN dummy_;
+END Any_In_Executing_State___;
+
+-- Here, a job is "excutable" when it is in state Error or Posted. We need to consider state Error to allow re-execute action.
+FUNCTION Is_Executable_State___ (state_ IN VARCHAR2) RETURN BOOLEAN
+IS
+BEGIN
+   RETURN state_ IN ('Posted', 'Error');
+END Is_Executable_State___;
+
+FUNCTION Is_Executing_State___ (state_ IN VARCHAR2) RETURN BOOLEAN
+IS
+BEGIN
+   RETURN state_ = 'Executing';
+END Is_Executing_State___;
+
+FUNCTION Is_Job_Executable___ (
+   job_id_ IN NUMBER) RETURN BOOLEAN
+IS
+BEGIN
+   RETURN Is_Executable_State___ (Get_Job_State_No_Wait___ (job_id_));
+END Is_Job_Executable___;
+
+FUNCTION Is_Job_Executing___ (
+   job_id_ IN NUMBER) RETURN BOOLEAN
+IS
+BEGIN
+   RETURN Is_Executing_State___(Get_Job_State_No_Wait___ (job_id_));
+END Is_Job_Executing___;
+
+FUNCTION Get_Job_State_No_Wait___ (
+   job_id_ IN NUMBER) RETURN VARCHAR2
+IS
+BEGIN
+   RETURN Deferred_Job_API.Get_State_Db (job_id_);
+END Get_Job_State_No_Wait___;
+
+
+FUNCTION Get_Job_State_Wait_Done___ (
+   job_id_ IN NUMBER) RETURN VARCHAR2
+IS
+   state_ VARCHAR2(10);
+BEGIN
+   LOOP
+      state_ := Get_Job_State_No_Wait___ (job_id_);
+      EXIT WHEN Is_Done_State___ (state_);
+      -- It's ugly, but it works. And! You asked for it!
+      DBMS_LOCK.Sleep (0.1);
+   END LOOP;
+   RETURN state_;
+END Get_Job_State_Wait_Done___;
+
+
+-------------------------------------------------------------------
+-- Get_Background_Job_Id___
+--   Fetches latest background  that stisfies the given criteria.
+--   When only_in_state_posted_ is 'TRUE' finds only jobs in 'Posted' state.
+--------------------------------------------------------------------
+FUNCTION Get_Background_Job_Id___ (
+   description_            IN VARCHAR2,
+   argument_string_        IN VARCHAR2,
+   procedure_name_         IN VARCHAR2 DEFAULT NULL,
+   only_in_state_posted_   IN VARCHAR2 DEFAULT 'FALSE') RETURN NUMBER
+IS
+   job_id_          NUMBER := NULL;
+  
+   CURSOR get_user_jobs IS 
+      SELECT * 
+      FROM ( SELECT id job_id, arguments_string 
+             FROM transaction_sys_local_tab
+             WHERE (upper(procedure_name) = upper(NVL(procedure_name_, procedure_name)))
+             AND upper(description) LIKE '%'||upper(NVL(description_,description))||'%'
+             AND (only_in_state_posted_ = 'FALSE' OR state IN ('Posted'))
+             ORDER BY job_id DESC)
+      WHERE rownum < 5;
+    
+BEGIN
+   
+   FOR rec_ IN get_user_jobs LOOP 
+      IF  Check_Arguments_Match___(argument_string_, rec_.arguments_string) THEN
+         job_id_ := rec_.job_id;
+         EXIT;
+      END IF;
+   END LOOP;
+   
+   RETURN job_id_;
+END Get_Background_Job_Id___;
+
+
+FUNCTION Check_Arguments_Match___ (
+   argument_string_        IN  VARCHAR2,
+   job_argument_string_    IN  VARCHAR2 ) RETURN BOOLEAN 
+   
+IS
+   position_        NUMBER;
+   start_pos_       NUMBER;
+   occurance_       NUMBER;
+   key_value_pair_  VARCHAR2(2000);
+   name_            VARCHAR2(50);
+   value_           VARCHAR2(2000);
+   arg_string_      VARCHAR2(2000);
+   job_arg_string_  VARCHAR2(2000);
+   found_           NUMBER := 0;
+   CURSOR split_argument IS
+      SELECT SUBSTR(key_value_pair_, 0, INSTR(key_value_pair_, '=', 1)-1) name,  
+             SUBSTR(key_value_pair_, INSTR(key_value_pair_, '=', 1)+1 ) value
+       FROM DUAL;
+       
+    CURSOR check_arguments(job_arguments_ VARCHAR2, in_arguments_ VARCHAR2) IS
+      SELECT 1
+      FROM dual
+      WHERE job_arguments_ LIKE '%' || in_arguments_ || '%';
+ BEGIN
+   job_arg_string_ := job_argument_string_;
+   
+   IF (INSTR(argument_string_, '=') > 0) THEN 
+      -- replaces fields separator with '='
+      job_arg_string_ := REPLACE(job_arg_string_, chr(31),'=');
+      -- replaces record separator with ';'
+      job_arg_string_ := REPLACE(job_arg_string_, chr(30),';');
+      arg_string_ := argument_string_;
+   ELSE
+      occurance_  := 1;
+      position_ := INSTR(argument_string_, ';', occurance_);
+
+      start_pos_ := 1;
+      WHILE position_ > 0 LOOP 
+         key_value_pair_ := SUBSTR(argument_string_, start_pos_, position_- start_pos_);
+         OPEN split_argument;
+         FETCH split_argument INTO name_,value_;
+         CLOSE split_argument;
+         Client_SYS.Add_To_Attr(name_, value_, arg_string_);
+
+         occurance_:= occurance_ +1;
+         start_pos_ := position_+1;
+         position_ := INSTR(argument_string_, ';', start_pos_);
+      END LOOP; 
+   END IF;
+   
+   OPEN check_arguments(job_arg_string_, arg_string_);
+   FETCH check_arguments INTO found_;
+   CLOSE check_arguments;
+   
+   IF found_ = 1 THEN
+      RETURN TRUE;
+   ELSE
+      RETURN FALSE;
+   END IF;
+   
+END Check_Arguments_Match___;
+
+-- This method retrieves latest background job id matching the parameters given in the argument_list_.
+-- The format of the argument_list_ should be, e.g. "CONTRACT=SC-S1^PART_NO=SC-P1^"
+FUNCTION Get_Latest_Job_Id_By_Parameters___(
+   procedure_name_ IN VARCHAR2,
+   argument_list_  IN VARCHAR2) RETURN NUMBER
+IS
+   CURSOR get_user_jobs IS
+      SELECT id job_id, arguments_string
+        FROM transaction_sys_local_tab
+       WHERE UPPER(procedure_name) = UPPER(procedure_name_)       
+    ORDER BY job_id DESC
+    FETCH NEXT 5 ROWS ONLY;
+   
+   results_tab_              Transaction_SYS.Arguments_Table;
+   in_parameter_name_tab_    Message_SYS.name_table;
+   in_parameter_value_tab_   Message_SYS.line_Table;   
+   posted_background_job_id_ NUMBER := 0;
+   in_parameter_count_       NUMBER := 0;
+   parameter_name_           VARCHAR2(1000);
+   parameter_value_          VARCHAR2(32000);
+   argument_list_local_      VARCHAR2(32000):= argument_list_; 
+   
+BEGIN
+   OPEN get_user_jobs;
+   FETCH get_user_jobs BULK COLLECT INTO results_tab_;
+   CLOSE get_user_jobs;
+   
+   WHILE INSTR(argument_list_local_, '=') > 0 LOOP
+      in_parameter_count_   := in_parameter_count_ + 1; 
+      parameter_name_       := SUBSTR(argument_list_local_, 1,  INSTR(argument_list_local_,'=')-1);
+      parameter_value_      := Client_SYS.Get_Key_Reference_Value(argument_list_local_, 1);
+      in_parameter_name_tab_(in_parameter_count_)  := parameter_name_;
+      in_parameter_value_tab_(in_parameter_count_) := parameter_value_;     
+      argument_list_local_        := SUBSTR(argument_list_local_, instr(argument_list_local_, '^') + 1);      
+   END LOOP;
+   IF results_tab_.COUNT > 0 THEN
+      FOR i IN results_tab_.FIRST..results_tab_.LAST LOOP         
+         FOR j IN in_parameter_name_tab_.FIRST..in_parameter_name_tab_.LAST LOOP
+            IF in_parameter_value_tab_(j) != Client_SYS.Get_Item_Value (in_parameter_name_tab_(j), results_tab_(i).arguments_string) THEN
+               EXIT;
+            END IF;            
+            IF (j = in_parameter_name_tab_.LAST) THEN               
+               posted_background_job_id_ := results_tab_(i).job_id;            
+            END IF;   
+         END LOOP;
+         IF posted_background_job_id_ != 0 THEN
+            EXIT;
+         END IF;   
+      END LOOP;
+   END IF;
+   RETURN posted_background_job_id_;   
+END Get_Latest_Job_Id_By_Parameters___;
+
+PROCEDURE Execute_Background_Job_Wait_Done___ (
+   job_id_           IN NUMBER)
+IS
+   dummy_ VARCHAR2(10);
+BEGIN
+   Execute_Background_Job_No_Wait___(job_id_);
+   dummy_ := Get_Job_State_Wait_Done___ (job_id_);
+END Execute_Background_Job_Wait_Done___;
+
+
+PROCEDURE Execute_Background_Job_No_Wait___ (
+   job_id_ IN NUMBER)
+IS
+BEGIN
+   IF Is_Job_Executable___(job_id_) THEN
+      Deferred_Job_API.Execute_Job (job_id_);
+   END IF;
+EXCEPTION 
+   WHEN OTHERS THEN
+      IF NOT Is_Job_Executing___(job_id_) THEN 
+         RAISE;
+      END IF;
+END Execute_Background_Job_No_Wait___;
+
+  
+PROCEDURE Find_And_Execute_Background_Job_Wait_Done___ (
+   description_      IN VARCHAR2,
+   argument_string_  IN VARCHAR2)
+IS
+   dummy_ VARCHAR2(10);
+   job_id_  NUMBER;
+BEGIN
+   job_id_ := Get_Background_Job_Id___(description_, argument_string_);
+   IF job_id_ IS NOT NULL THEN 
+      Execute_Background_Job_No_Wait___(job_id_);
+      dummy_ := Get_Job_State_Wait_Done___ (job_id_);
+   END IF; 
+END Find_And_Execute_Background_Job_Wait_Done___;
+
+PROCEDURE Find_And_Execute_Procedure_Wait_Done_With_Args___ (
+   procedure_name_   IN VARCHAR2,
+   description_      IN VARCHAR2,
+   argument_string_  IN VARCHAR2)
+IS
+   dummy_ VARCHAR2(10);
+   job_id_  NUMBER;
+BEGIN
+   job_id_ := Get_Job_Id_Wait_Done___(procedure_name_, description_, argument_string_);
+   IF job_id_ IS NOT NULL THEN 
+      Execute_Background_Job_No_Wait___(job_id_);
+      dummy_ := Get_Job_State_Wait_Done___ (job_id_);
+   END IF;
+END Find_And_Execute_Procedure_Wait_Done_With_Args___;
+
+PROCEDURE Remove_All_Cost_Rev_Elements_Per_Code_Part___ (
+   company_ IN VARCHAR2 ) 
+IS 
+   $IF Component_Accrul_SYS.INSTALLED $THEN
+   CURSOR get_all_recs IS
+      SELECT to_char(rowversion,'YYYYMMDDHH24MISS') objversion, rowid  objid
+      FROM cost_element_to_account_tab
+      WHERE company = company_; 
+   $END
+   info_   VARCHAR2(2000);
+   
+BEGIN
+   $IF Component_Accrul_SYS.INSTALLED $THEN
+   FOR rec_ IN get_all_recs LOOP
+      info_ := NULL; 
+      Cost_Element_To_Account_API.Remove__ ( info_        => info_,
+                                             objid_       => rec_.objid ,
+                                             objversion_  => rec_.objversion,
+                                             action_      => 'DO');
+   END LOOP;
+   $ELSE
+   NULL;
+   $END
+END Remove_All_Cost_Rev_Elements_Per_Code_Part___;
+
+
+PROCEDURE Remove_All_Cost_Rev_Elements___ (
+   company_ IN VARCHAR2 ) 
+IS 
+   $IF Component_Accrul_SYS.INSTALLED $THEN
+   CURSOR get_all_recs IS
+      SELECT to_char(rowversion,'YYYYMMDDHH24MISS') objversion, rowid  objid, project_cost_element
+      FROM project_cost_element_tab
+      WHERE company = company_; 
+   $END
+   $IF Component_Projbf_SYS.INSTALLED $THEN
+   CURSOR get_projbf_cost_element(project_cost_element_ VARCHAR2) IS
+      SELECT to_char(rowversion,'YYYYMMDDHH24MISS') objversion, rowid  objid
+      FROM proj_c_cost_el_code_p_dem_tab
+      WHERE company = company_
+      AND project_cost_element = project_cost_element_; 
+   $END
+   $IF Component_Estman_SYS.INSTALLED $THEN
+   CURSOR get_estman_cost_element(project_cost_element_ VARCHAR2) IS
+      SELECT to_char(rowversion,'YYYYMMDDHH24MISS') objversion, rowid  objid
+      FROM est_cost_type_connection_tab
+      WHERE company = company_
+      AND project_cost_element = project_cost_element_; 
+   $END
+   
+   code_part_demand_objid_      VARCHAR2(2000);
+   code_part_demand_objversion_ VARCHAR2(2000); 
+   info_                        VARCHAR2(2000);
+   
+BEGIN
+   $IF Component_Accrul_SYS.INSTALLED $THEN
+   
+   FOR rec_ IN get_all_recs LOOP
+      code_part_demand_objversion_ := NULL;
+      code_part_demand_objid_ := NULL;
+      $IF Component_Projbf_SYS.INSTALLED $THEN
+      OPEN get_projbf_cost_element(rec_.project_cost_element);
+      FETCH get_projbf_cost_element INTO code_part_demand_objversion_, code_part_demand_objid_; 
+      CLOSE get_projbf_cost_element;
+      info_ := NULL;
+      IF code_part_demand_objid_ IS NOT NULL THEN 
+         Proj_C_Cost_El_Code_P_Dem_API.Remove__ ( info_        => info_,
+                                                  objid_       => code_part_demand_objid_,
+                                                  objversion_  => code_part_demand_objversion_,
+                                                  action_      => 'DO');
+      END IF;                                            
+      $END
+      $IF Component_Estman_SYS.INSTALLED $THEN
+      FOR est_connection_ IN get_estman_cost_element(rec_.project_cost_element) LOOP
+         info_ := NULL;
+         Est_Cost_Type_Connection_API.Remove__ ( info_        => info_,
+                                                 objid_       => est_connection_.objid,
+                                                 objversion_  => est_connection_.objversion,
+                                                 action_      => 'DO');
+      END LOOP;
+      $END
+      info_ := NULL;                                         
+      Project_Cost_Element_API.Remove__ ( info_        => info_,
+                                          objid_       => rec_.objid ,
+                                          objversion_  => rec_.objversion,
+                                          action_      => 'DO');
+   END LOOP;
+   $ELSE
+   NULL;   
+   $END
+END Remove_All_Cost_Rev_Elements___;
+
+FUNCTION Get_Work_Day___ (
+   calendar_        IN VARCHAR2,
+   start_date_      IN DATE,
+   duration_        IN NUMBER) RETURN DATE
+IS
+   counter_ NUMBER;
+BEGIN
+   IF (duration_ = 0) THEN
+      RETURN start_date_;
+   END IF;
+      
+   IF (duration_ IS NOT NULL) THEN 
+      counter_ := Work_Time_Calendar_API.Get_Work_Day_Counter(calendar_, start_date_);
+      IF counter_ IS NULL THEN 
+         IF duration_ > 0 THEN 
+            counter_ := Work_Time_Calendar_API.Get_Work_Day_Counter(calendar_, Work_Time_Calendar_API.Get_Previous_Work_Day(calendar_, start_date_));
+         ELSE
+            counter_ := Work_Time_Calendar_API.Get_Work_Day_Counter(calendar_, Work_Time_Calendar_API.Get_Next_Work_Day(calendar_, start_date_));
+         END IF;
+      END IF;
+      
+      RETURN Work_Time_Calendar_API.Get_Work_Day(calendar_id_ => calendar_,
+                                                 counter_ => (counter_ + duration_));
+   ELSE
+      RETURN NULL;
+   END IF;
+END Get_Work_Day___;
+
+PROCEDURE Find_And_Execute_Connect_Procedure_Wait_Done___ (
+   procedure_name_ IN VARCHAR2)
+IS
+   dummy_ VARCHAR2(10);
+   job_id_  NUMBER;
+BEGIN
+	   job_id_ := Get_Job_Id_Wait_Done___(procedure_name_, NULL, NULL, 'TRUE');
+   IF job_id_ IS NOT NULL THEN 
+      Execute_Background_Job_No_Wait___(job_id_);
+      dummy_ := Get_Job_State_Wait_Done___ (job_id_);
+   END IF;
+END Find_And_Execute_Connect_Procedure_Wait_Done___;
+
+FUNCTION Get_Job_Id_Wait_Done___ (
+  procedure_name_          IN VARCHAR2,
+  description_             IN VARCHAR2,
+  argument_string_         IN VARCHAR2,
+  only_in_state_posted_    VARCHAR2 DEFAULT 'FALSE') RETURN NUMBER
+IS
+   job_id_              NUMBER;
+   start_time_          VARCHAR2(5) ;
+   end_time_            VARCHAR2(5) ;
+   run_time_            NUMBER := 0; 
+BEGIN
+   start_time_  := TO_CHAR(SYSDATE,'SSSSS');
+   LOOP
+      job_id_ := Get_Background_Job_Id___(description_, argument_string_, procedure_name_, only_in_state_posted_);
+      EXIT WHEN ((job_id_ IS NOT NULL)  OR (run_time_ >= 180));
+      -- It's ugly, but it works. And! You asked for it!
+      DBMS_LOCK.Sleep (0.1);
+      end_time_ := TO_CHAR(SYSDATE,'SSSSS');
+      run_time_ := TO_NUMBER(end_time_) - TO_NUMBER(start_time_);
+   END LOOP;
+   RETURN job_id_;
+END Get_Job_Id_Wait_Done___;
+

@@ -1,0 +1,733 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: SalesQuotationHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign    History
+--  ------     ------  -------------------------------------------------------------------------------------------------------
+-- 2021-12-06  ThKrlk  Bug 160468(SC21R2-6166), Modified Get_Result_Key___() to get the pdf parameters for the report and append it to the param_attr_.
+-- 2021-08-09  Inaklk  SC21R2-2251, Modified CRUD_Default_Copy___ to set printed as not printed and revision_no as 1 when duplicate
+-- 2021-01-29  Skanlk   SCZ-13274, Modified Get_Validate_Info___() by adding a method call to retrieve the tax liability type.
+-- 2020-07-17  RoJalk  Bug 154273 (SCZ-10310), Added ship_addr_no_changed_ parameter to the Validate_Header_Address_No___ method.
+-- 2020-07-06  NiDalk  SCXTEND-4444, Added Fetch_External_Tax___.
+-- 2020-05-25  NiDalk  SC2020R1-7190, CRUD_Default___ to set first representative as the main representative by default in representative list.
+-- 2020-02-20  MaRalk  SCXTEND-2838, Restructured the method Validate_Header_Address_No___ by having Address_Structure_Rec and agreement_changed_
+-- 2020-02-20          as IN parameters. Added attributes Ship Via Code, Del Term Location, Ext Transport Calendar, picking leadtime, delivery leadtime, 
+-- 2020-02-20          forward agent in the attribute string for the method call Customer_Order_API.Get_Delivery_Information.
+-- 2019-10-22  Hairlk  SCXTEND-800, Avalara integration, Added CustomerTaxUsageType to CustomerDefaults.
+-- 2019-07-24  Rulilk  SCUXXW4-23346, Modified Get_Customer_Defaults___ method to fetch correct freight price list number when UsePriceInclTax is true.
+-- 2019-04-08  bajelk  SCUXXW4-18225, Added Is_Filter_Enabled___() and Possible_To_Share___() functions in Access Tab to increase to increase UXXPerformance.
+--                     And moved IsFilterEnabled, PossibleToShare function implementation to RelationshipManagementAccessGeneral plsvc. 
+-- 2018-11-28  SeJalk  SCUXXW4-9277, Started implement frmOrderQuotation, fixed to add new record to the form.
+-- 2018-10-16  CHINLK  MFUXXW4-11798, Added function Get_Selected_Record_Count___.
+-- 2018-06-11  HaPulk  SCUXXW4-974, Added CRUD_Default___ to fetch DEFAULT values for Competitor.
+-- 2018-06-08  HaPulk  SCUXXW4-974, Required server interfaces to convert tbwOrderQuotationCompetitor using MTG Version: 1.20
+------------------------------------------------------------------------------------------------------------------------------
+
+layer Core;
+
+@Override
+PROCEDURE CRUD_Default_Copy___ (
+   rec_  IN OUT Order_Quotation_Rec )
+IS
+BEGIN
+   super(rec_);
+   rec_.quotation_no := NULL;
+   rec_.closed_status := NULL;
+   rec_.lost_to := NULL;
+   rec_.lose_win_reject_note := NULL;
+   rec_.reason_id := NULL;
+   rec_.cancel_reason := NULL;
+   rec_.note_id := NULL;
+   rec_.business_opportunity_no := NULL;
+   rec_.printed := 'NOTPRINTED';
+   rec_.revision_no := 1;
+END CRUD_Default_Copy___;
+
+@Override
+PROCEDURE CRUD_Update___ (
+   etag_ IN OUT VARCHAR2,
+   key_  IN OUT Order_Quotation_Key,
+   attr_ IN OUT VARCHAR2,
+   info_    OUT VARCHAR2,
+   action_ IN VARCHAR2 )
+IS
+   update_config_revision_  VARCHAR2(1);
+   quotation_no_            order_quotation_tab.quotation_no%TYPE;
+   wanted_del_date_         order_quotation_tab.wanted_delivery_date%TYPE;
+   change_line_date_        VARCHAR2(20);
+   objid_                   VARCHAR2(2000);
+   objversion_              VARCHAR2(2000);
+   new_etag_                VARCHAR2(4000);
+   rec_updated_             BOOLEAN := FALSE;
+   
+BEGIN
+   IF Client_SYS.Item_Exist('UPDATE_CONFIG_REVISION', attr_) THEN 
+      update_config_revision_ := Client_SYS.Get_Item_Value('UPDATE_CONFIG_REVISION', attr_);     
+      quotation_no_           := key_.quotation_no;
+      wanted_del_date_        := TO_DATE(Client_SYS.Get_Item_Value('WANTED_DELIVERY_DATE', attr_),'YYYY-MM-DD-HH24.MI.SS');
+      attr_                   := Client_SYS.Remove_Attr('UPDATE_CONFIG_REVISION', attr_);
+   END IF;
+   
+   -- SCUXXW4-23772, this fixed is to avoid object modified error raised since the Quotation record modified through the 'CHECK' mode in plsql layer.
+   change_line_date_ := Client_SYS.Get_Item_Value('CHANGE_LINE_DATE', attr_);
+   IF (change_line_date_ IS NOT NULL) THEN
+      IF action_ = 'DO' AND Order_Quotation_API.Get_Objstate(key_.quotation_no) = 'Revised' THEN        
+         Get_Objid_Objversion___(objid_, objversion_, key_);
+         new_etag_ := Get_Etag___(objid_, objversion_);
+         IF new_etag_ != etag_ THEN
+            rec_updated_ := TRUE;  
+            etag_ := new_etag_;
+         END IF;
+      END IF;
+   END IF;
+
+   super(etag_, key_,attr_, info_ , action_);
+   IF  rec_updated_ THEN
+       Client_SYS.Add_Info(lu_name_,'REVISION_CREATED: A New revision will be created for Quotation No :P1 ', key_.quotation_no );
+       info_ := info_ || Client_SYS.Get_All_Info;
+   END IF;
+   IF update_config_revision_ = 'Y' THEN
+      Order_Quotation_API.Update_Config_Revisions(quotation_no_, wanted_del_date_);
+      Client_SYS.Add_Info(lu_name_, 'CONFIGSPARKED: Configuration status will be set to Parked. Please edit configurations in order to Complete the configurations.');
+      info_ := info_ || Client_SYS.Get_All_Info;
+   END IF;
+END CRUD_Update___;
+
+FUNCTION Get_Compete_Description___(
+   compete_id_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   
+BEGIN
+   RETURN Competitiveness_API.Get_Compete_Description(compete_id_);
+END Get_Compete_Description___;
+
+@Override
+PROCEDURE CRUD_Default___ (
+   key_  IN     Order_Quotation_Competitor_Key,
+   attr_ IN OUT VARCHAR2,
+   info_ OUT    VARCHAR2 )
+IS
+   quotation_no_      order_quotation_competitor_tab.quotation_no%TYPE;
+   competitor_exists_ NUMBER;
+         
+   CURSOR Competitor_Exists IS
+      SELECT 1
+        FROM order_quotation_competitor_tab
+        WHERE quotation_no = quotation_no_;      
+BEGIN
+   -- PK(ie: QUOTATION_NO) needs to get before calling BASE method since attr_ is cleared inside     
+   quotation_no_ := Client_SYS.Get_Item_Value('QUOTATION_NO', attr_);
+   super(key_, attr_, info_);
+   -- attr_ is set based on CURSOR result using quotation_no_
+   OPEN Competitor_Exists;
+   FETCH Competitor_Exists INTO competitor_exists_;
+   IF Competitor_Exists%FOUND THEN
+      Client_SYS.Add_To_Attr('MAIN_COMPETITOR_DB', 'FALSE', attr_);
+   ELSE
+      Client_SYS.Add_To_Attr('MAIN_COMPETITOR_DB', 'TRUE', attr_);
+   END IF;
+   CLOSE Competitor_Exists;   
+END CRUD_Default___;
+
+@DynamicComponentDependency RMCOM
+@Override
+PROCEDURE CRUD_Default___ (
+   key_  IN     Bus_Object_Representative_Key,
+   attr_ IN OUT VARCHAR2,
+   info_ OUT    VARCHAR2 )
+IS
+   quotation_no_           bus_obj_representative_tab.business_object_id%TYPE;
+   rep_exists_             NUMBER;
+   
+   CURSOR representatives_exist IS
+      SELECT 1 
+      FROM bus_obj_representative_tab
+      WHERE business_object_id = quotation_no_
+      AND business_object_type = Business_Object_Type_API.DB_SALES_QUOTATION;
+BEGIN
+   -- PK needs to get before calling BASE method since attr_ is cleared inside     
+   quotation_no_ := Client_SYS.Get_Item_Value('BUSINESS_OBJECT_ID', attr_);
+   super(key_, attr_, info_);
+  
+   OPEN representatives_exist;
+   FETCH representatives_exist INTO rep_exists_;
+   IF representatives_exist%FOUND THEN
+      Client_SYS.Add_To_Attr('MAIN_REPRESENTATIVE_DB', 'FALSE', attr_);
+   ELSE
+      Client_SYS.Add_To_Attr('MAIN_REPRESENTATIVE_DB', 'TRUE', attr_);
+   END IF;
+   CLOSE representatives_exist;
+END CRUD_Default___;
+
+FUNCTION Get_Selected_Record_Count___(
+   key_ref_ IN VARCHAR2 )  RETURN NUMBER
+IS
+   
+BEGIN
+   RETURN REGEXP_COUNT(key_ref_, 'QUOTATION_NO', 1, 'c');
+END Get_Selected_Record_Count___;
+
+
+FUNCTION Get_Customer_Defaults___(
+	company_ IN VARCHAR2,
+	contract_ IN VARCHAR2,
+	customer_no_ IN VARCHAR2,
+	supply_country_db_ IN VARCHAR2,
+	vender_no_ IN VARCHAR2) RETURN Customer_Defaults_Structure_Rec
+IS
+   attr_  VARCHAR2(32000);
+   rec_ Customer_Defaults_Structure_Rec;
+   use_price_incl_tax_ VARCHAR2(5);
+BEGIN
+   
+   IF Customer_Info_API.Get_Customer_Category_Db(customer_no_) IS NULL OR Customer_Info_API.Get_Customer_Category_Db(customer_no_) = 'PROSPECT' THEN
+      use_price_incl_tax_ := NVL(Customer_Tax_Calc_Basis_API.Get_Use_Price_Incl_Tax_Db(customer_no_, company_), Site_Discom_Info_API.Get_Use_Price_Incl_Tax_Ord_Db(contract_));       
+   ELSE
+      use_price_incl_tax_ := Customer_Tax_Calc_Basis_API.Get_Use_Price_Incl_Tax_Db(customer_no_, company_);
+   END IF;
+   IF use_price_incl_tax_ = 'TRUE' THEN
+      rec_.use_price_incl_tax := TRUE;
+   ELSE
+      rec_.use_price_incl_tax := FALSE;
+   END IF;
+   
+	Client_SYS.Clear_Attr(attr_); 
+   Client_SYS.Add_To_Attr('CONTRACT', contract_, attr_);
+   Client_SYS.Add_To_Attr('COMPANY', company_, attr_);
+   Client_SYS.Add_To_Attr('CUSTOMER_NO', customer_no_, attr_);
+   Client_SYS.Add_To_Attr('SUPPLY_COUNTRY', Iso_Country_API.Decode(supply_country_db_), attr_);
+   Client_SYS.Add_To_Attr('VENDOR_NO', vender_no_, attr_);
+   Client_SYS.Add_To_Attr('USE_PRICE_INCL_TAX_DB', use_price_incl_tax_, attr_);
+   
+   Order_Quotation_API.Get_Customer_Defaults__(attr_);
+   rec_.ship_addr_no := Client_SYS.Get_Item_Value('SHIP_ADDR_NO', attr_);
+   rec_.bill_addr_no:= Client_SYS.Get_Item_Value('BILL_ADDR_NO', attr_);
+   rec_.customer_no_pay:= Client_SYS.Get_Item_Value('CUSTOMER_NO_PAY', attr_);
+   rec_.customer_no_pay_addr_no := Client_SYS.Get_Item_Value('CUSTOMER_NO_PAY_ADDR_NO', attr_);
+   rec_.language_code := Client_SYS.Get_Item_Value('LANGUAGE_CODE', attr_);
+   rec_.salesman_code := Client_SYS.Get_Item_Value('SALESMAN_CODE', attr_);
+   rec_.cust_ref := Client_SYS.Get_Item_Value('CUST_REF', attr_);
+   rec_.market_code := Client_SYS.Get_Item_Value('MARKET_CODE', attr_);  
+   rec_.print_control_code := Client_SYS.Get_Item_Value('PRINT_CONTROL_CODE', attr_);
+   rec_.company := Client_SYS.Get_Item_Value('COMPANY', attr_);
+   rec_.pay_term_id := Client_SYS.Get_Item_Value('PAY_TERM_ID', attr_);
+   rec_.supply_country_db := Iso_Country_API.Encode(Client_SYS.Get_Item_Value('SUPPLY_COUNTRY', attr_));
+   rec_.tax_liability := Client_SYS.Get_Item_Value('TAX_LIABILITY', attr_);
+   rec_.region_code := Client_SYS.Get_Item_Value('REGION_CODE', attr_);
+   rec_.district_code := Client_SYS.Get_Item_Value('DISTRICT_CODE', attr_);
+   rec_.currency_code := Client_SYS.Get_Item_Value('CURRENCY_CODE', attr_);
+   rec_.agreement_id := Client_SYS.Get_Item_Value('AGREEMENT_ID', attr_);
+   rec_.ship_via_code := Client_SYS.Get_Item_Value('SHIP_VIA_CODE', attr_);
+   rec_.delivery_leadtime := Client_SYS.Get_Item_Value('DELIVERY_LEADTIME', attr_);
+   rec_.picking_leadtime := Client_SYS.Get_Item_Value('PICKING_LEADTIME', attr_);
+   rec_.ext_transport_calendar_id := Client_SYS.Get_Item_Value('EXT_TRANSPORT_CALENDAR_ID', attr_);
+   rec_.freight_map_id := Client_SYS.Get_Item_Value('FREIGHT_MAP_ID', attr_);
+   rec_.zone_id := Client_SYS.Get_Item_Value('ZONE_ID', attr_);
+   rec_.freight_price_list_no := Client_SYS.Get_Item_Value('FREIGHT_PRICE_LIST_NO', attr_);
+   rec_.delivery_terms := Client_SYS.Get_Item_Value('DELIVERY_TERMS', attr_);
+   rec_.del_terms_location := Client_SYS.Get_Item_Value('DEL_TERMS_LOCATION', attr_);
+   rec_.wanted_delivery_date := to_date(Client_SYS.Get_Item_Value('WANTED_DELIVERY_DATE', attr_), 'YYYY-MM-DD-HH24.MI.SS.FF9');
+   rec_.classification_standard := Client_SYS.Get_Item_Value('CLASSIFICATION_STANDARD', attr_);
+   rec_.forward_agent_id := Client_SYS.Get_Item_Value('FORWARD_AGENT_ID', attr_);
+   rec_.free_of_chg_tax_pay_party := Company_Tax_Discom_Info_API.Get_Tax_Paying_Party_Db(company_);
+   rec_.customer_tax_usage_type := Customer_Info_API.Get_Customer_Tax_Usage_Type(customer_no_);
+   
+ RETURN rec_;
+   
+END Get_Customer_Defaults___;
+
+FUNCTION Get_Payer_Info___ (
+	company_ IN VARCHAR2,
+	customer_no_ IN VARCHAR2,
+	customer_no_pay_ IN VARCHAR2) RETURN Payer_Info_Struct_Rec
+IS
+   rec_ Payer_Info_Struct_Rec;
+BEGIN
+   IF customer_no_pay_ IS NULL THEN
+      rec_.payment_term := Identity_Invoice_Info_API.Get_Pay_Term_Id(company_, customer_no_, Party_Type_API.Decode('CUSTOMER'));
+   ELSE
+      rec_.customer_no_pay_addr_no := Cust_Ord_Customer_API.Get_Document_Address(customer_no_pay_);
+      rec_.payment_term := Identity_Invoice_Info_API.Get_Pay_Term_Id(company_, customer_no_pay_, Party_Type_API.Decode('CUSTOMER'));
+   END IF;
+   RETURN rec_;
+END Get_Payer_Info___;
+
+
+FUNCTION Get_First_Valid_Agreement___ (
+	customer_no_ IN VARCHAR2,
+	contract_ IN VARCHAR2,
+	currency_code_ IN VARCHAR2) RETURN VARCHAR2
+IS
+BEGIN
+	RETURN Customer_Agreement_API.Get_First_Valid_Agreement(customer_no_,
+                                                           contract_,
+                                                           currency_code_,
+                                                           Site_API.Get_Site_Date(contract_),
+                                                           'TRUE');
+END Get_First_Valid_Agreement___;
+
+
+FUNCTION Get_Email___ (
+	quotation_no_ IN VARCHAR2,
+	bill_addr_no_ IN VARCHAR2,
+	cust_ref_ IN VARCHAR2) RETURN VARCHAR2
+IS
+BEGIN
+	RETURN Cust_Ord_Customer_Address_API.Get_Email(quotation_no_, cust_ref_, bill_addr_no_);
+END Get_Email___;
+
+
+FUNCTION Get_Delivery_Information___ (
+	contract_ IN VARCHAR2,
+	delivery_terms_ IN VARCHAR2,
+	vendor_no_ IN VARCHAR2,
+	language_code_ IN VARCHAR2,
+	agreement_id_ IN VARCHAR2,
+	customer_no_ IN VARCHAR2,
+	ship_addr_no_ IN VARCHAR2) RETURN Delivery_Info_Struct_Rec
+IS
+   attr_ VARCHAR2(2000);
+   rec_ Delivery_Info_Struct_Rec;
+BEGIN
+   Client_SYS.Clear_Attr(attr_);
+   Client_SYS.Add_To_Attr('CONTRACT', contract_, attr_);
+   Client_SYS.Add_To_Attr('DELIVERY_TERMS', delivery_terms_, attr_);
+   Client_SYS.Add_To_Attr('VENDOR_NO', vendor_no_, attr_);
+   Order_Quotation_API.Get_Delivery_Information(attr_, language_code_, agreement_id_, customer_no_, ship_addr_no_);
+   rec_.ship_via_code := Client_SYS.Get_Item_Value('SHIP_VIA_CODE', attr_);
+   rec_.delivery_terms := Client_SYS.Get_Item_Value('DELIVERY_TERMS', attr_);
+   rec_.del_terms_location := Client_SYS.Get_Item_Value('DEL_TERMS_LOCATION', attr_);
+   rec_.delivery_leadtime := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Item_Value('DELIVERY_LEADTIME', attr_));
+   rec_.ext_transport_calendar_id := Client_SYS.Get_Item_Value('EXT_TRANSPORT_CALENDAR_ID', attr_);
+   rec_.picking_leadtime := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Item_Value('PICKING_LEADTIME', attr_));
+   rec_.forward_agent_id := Client_SYS.Get_Item_Value('FORWARD_AGENT_ID', attr_);
+   RETURN rec_;
+    
+END Get_Delivery_Information___;
+
+
+FUNCTION Get_Active_Freight_List_No___ (
+	contract_           IN VARCHAR2,
+	ship_via_code_      IN VARCHAR2,
+	freight_map_id_     IN VARCHAR2,
+	forward_agent_id_   IN VARCHAR2,
+	use_price_incl_tax_ IN BOOLEAN,
+	vendor_no_          IN VARCHAR2) RETURN VARCHAR2
+IS
+   price_incl_tax_ VARCHAR2(5);
+BEGIN
+   IF use_price_incl_tax_ THEN
+      price_incl_tax_ := 'TRUE';
+   ELSE
+      price_incl_tax_ := 'FALSE';
+   END IF;
+	IF (vendor_no_ IS NOT NULL) THEN
+      RETURN Freight_Price_List_Direct_API.Get_Active_Freight_List_No(contract_, ship_via_code_, freight_map_id_, forward_agent_id_, price_incl_tax_, vendor_no_);
+   ELSE
+      RETURN Freight_Price_List_Base_API.Get_Active_Freight_List_No(contract_, ship_via_code_, freight_map_id_, forward_agent_id_, price_incl_tax_);
+   END IF;
+END Get_Active_Freight_List_No___;
+
+
+FUNCTION Get_Fix_Deliv_Freight___ (
+	freight_price_list_no_  IN VARCHAR2,
+	freight_map_id_         IN VARCHAR2,
+	zone_id_                IN VARCHAR2) RETURN NUMBER
+IS
+BEGIN
+	RETURN NVL(Freight_Price_List_Zone_API.Get_Fix_Deliv_Freight(freight_price_list_no_, freight_map_id_, zone_id_), 0);
+END Get_Fix_Deliv_Freight___;
+
+
+FUNCTION Set_Tax_Info___ (
+	customer_no_    IN VARCHAR2,
+	ship_addr_no_   IN VARCHAR2,
+	company_        IN VARCHAR2,
+	supply_country_ IN VARCHAR2) RETURN VARCHAR2
+IS
+BEGIN
+	RETURN Tax_Handling_Util_API.Get_Customer_Tax_Liability(customer_no_, ship_addr_no_, company_, supply_country_);
+END Set_Tax_Info___;
+
+-- Need to keep this function since country is fetching dynamically
+FUNCTION Tax_Liability_Lov_Filter___ (
+	customer_no_            IN VARCHAR2,
+	ship_addr_no_           IN VARCHAR2,
+	category_               IN VARCHAR2,
+	single_occ_addr_flag_   IN BOOLEAN,
+	country_code_           IN VARCHAR2) RETURN Objid_Arr
+IS
+   country_code_temp_   VARCHAR2(2);   
+   base_collection_     Objid_Arr := Objid_Arr();
+   
+   CURSOR Get_filtered IS
+   SELECT *
+   FROM TAX_LIABILITY_LOV
+   WHERE COUNTRY_CODE = country_code_temp_ OR COUNTRY_CODE = '*';
+   
+   CURSOR Get_All IS
+   SELECT *
+   FROM TAX_LIABILITY_LOV;   
+BEGIN
+   IF single_occ_addr_flag_ THEN
+      country_code_temp_ := country_code_;
+   ELSE
+      country_code_temp_ := Cust_Ord_Customer_Address_API.Get_Country_Code(customer_no_, ship_addr_no_);
+   END IF;
+   IF country_code_temp_ IS NULL  AND ( category_ = 'CUSTOMER' OR  category_ IS NULL )THEN
+      FOR rec_ IN Get_All LOOP
+         base_collection_.extend;
+         base_collection_(base_collection_.last) := rec_.objid;
+      END LOOP;
+   ELSE
+      FOR rec_ IN Get_filtered LOOP
+         base_collection_.extend;
+         base_collection_(base_collection_.last) := rec_.objid;
+      END LOOP;
+   END IF;
+   RETURN base_collection_;
+END Tax_Liability_Lov_Filter___;
+
+FUNCTION Get_Min_Sales_Amount_Details___ (
+	contract_      IN VARCHAR2,
+	customer_no_   IN VARCHAR2) RETURN Min_Sales_Amount_Struct_Rec
+IS
+	rec_ Min_Sales_Amount_Struct_Rec;
+BEGIN
+	rec_.company_curr_code           := Company_Finance_API.Get_Currency_Code(Site_API.Get_Company(contract_));
+   rec_.customer_min_sales_amount   := Cust_Ord_Customer_API.Get_Min_Sales_Amount(customer_no_);
+   RETURN rec_;
+END Get_Min_Sales_Amount_Details___;
+
+
+PROCEDURE Check_Before_Close___ (
+   quotation_no_  IN VARCHAR2,
+   info$_         OUT VARCHAR2 ) 
+IS
+   
+BEGIN
+   Order_Quotation_API.Check_Before_Close__(info$_, quotation_no_);
+END Check_Before_Close___;
+
+
+
+FUNCTION Check_Exist_For_Quotation___ (
+	quotation_no_ IN VARCHAR2) RETURN VARCHAR2
+IS
+BEGIN
+	RETURN Promo_Deal_Quotation_API.Check_Exist_For_Quotation(quotation_no_);
+END Check_Exist_For_Quotation___;
+
+
+FUNCTION Calculate_Quote_Promotion___ (
+	key_                 IN Order_Quotation_Key,
+   check_deals_exists_  IN BOOLEAN) RETURN VARCHAR2
+IS
+BEGIN
+	Sales_Promotion_Util_API.Calculate_Quote_Promotion(key_.quotation_no);
+   IF check_deals_exists_ THEN
+      RETURN Sales_Promotion_Util_API.Check_Unutilized_Q_Deals_Exist(key_.quotation_no);
+   ELSE
+      RETURN NULL;
+   END IF;
+END Calculate_Quote_Promotion___;
+
+FUNCTION Rental_Order_Creatable___ (
+	quotation_no_  IN VARCHAR2) RETURN NUMBER
+IS
+BEGIN
+	RETURN Order_Quotation_API.Rental_Order_Creatable(quotation_no_);
+END Rental_Order_Creatable___;
+
+
+PROCEDURE Clear_Quote_Promotion___ (
+	key_ IN Order_Quotation_Key )
+IS
+BEGIN
+	Sales_Promotion_Util_API.Clear_Quote_Promotion(key_.quotation_no);
+END Clear_Quote_Promotion___;
+
+
+PROCEDURE Calculate_Discount___ (
+	key_ IN Order_Quotation_Key )
+IS
+BEGIN
+	Order_Quotation_API.Calculate_Discount__(key_.quotation_no);
+END Calculate_Discount___;
+
+
+PROCEDURE Calc_Consolidate_Charges___ (
+	key_ IN Order_Quotation_Key )
+IS
+BEGIN
+	Customer_Order_Charge_Util_API.Calc_Consolidate_Charges(NULL, key_.quotation_no);
+END Calc_Consolidate_Charges___;
+
+FUNCTION Get_Result_Key___(
+	key_ IN Order_Quotation_Key ) RETURN VARCHAR2
+IS
+   report_attr_       VARCHAR2(32000);
+   param_attr_        VARCHAR2(32000);
+   pdf_param_         VARCHAR2(32000);
+   order_rec_         Order_Quotation_API.Public_Rec;
+BEGIN
+   Client_SYS.Clear_Attr(report_attr_);
+   Client_SYS.Clear_Attr(param_attr_);
+   Client_SYS.Add_To_Attr('REPORT_ID', 'ORDER_QUOTATION_REP', report_attr_);
+   Client_SYS.Add_To_Attr('QUOTATION_NO', key_.quotation_no, param_attr_);
+   Order_Quotation_API.Generate_Pdf_Parameters(pdf_param_, key_.quotation_no, order_rec_.cust_ref, order_rec_.contract, '', order_rec_.customer_no, 'ORDER_QUOTATION_REP');
+   Client_SYS.Add_To_Attr('SETTINGS', pdf_param_, param_attr_);
+   RETURN Report_Format_API.Create_New_Report(report_attr_, param_attr_, Fnd_Session_API.Get_Fnd_User);
+END Get_Result_Key___;
+
+
+
+FUNCTION Updatable_Lines_Exist___ (
+	quotation_no_ IN VARCHAR2) RETURN NUMBER
+IS
+BEGIN
+	RETURN Order_Quotation_API.Updatable_Lines_Exist(quotation_no_);
+END Updatable_Lines_Exist___;
+
+
+FUNCTION Pack_Keys___ (
+	quotation_no_ IN VARCHAR2) RETURN Detail_Structure_Rec
+IS
+   line_no_             Order_Quotation_Line_tab.line_no%TYPE;
+   rel_no_              Order_Quotation_Line_tab.rel_no%TYPE;
+   line_item_no_        Order_Quotation_Line_tab.line_item_no%TYPE;
+   rec_                 Detail_Structure_Rec;
+   
+   CURSOR Get_Quotation_lines IS
+    SELECT * FROM ORDER_QUOTATION_LINE_TAB
+    WHERE QUOTATION_NO = quotation_no_
+    AND LINE_ITEM_NO <= 0;
+    
+BEGIN
+   FOR line_rec_ IN Get_Quotation_lines LOOP  
+      line_no_               := line_rec_.line_no;
+      rel_no_                := line_rec_.rel_no;
+      line_item_no_          := line_rec_.line_item_no;
+    
+      IF rec_.line_no_arr IS NULL THEN
+         rec_.line_no_arr := line_no_;      
+      ELSE
+         rec_.line_no_arr := rec_.line_no_arr || ';' || line_no_;
+      END IF;
+      IF rec_.rel_no_arr IS NULL THEN
+         rec_.rel_no_arr := rel_no_;
+      ELSE
+         rec_.rel_no_arr := rec_.rel_no_arr || ';' || rel_no_;
+      END IF;
+      IF rec_.line_item_no_arr IS NULL THEN
+         rec_.line_item_no_arr := line_item_no_;
+      ELSE
+         rec_.line_item_no_arr := rec_.line_item_no_arr || ';' || line_item_no_;
+      END IF;   
+   END LOOP;
+   RETURN rec_;
+END Pack_Keys___;
+
+FUNCTION Validate_Header_Address_No___ (
+   validation_rec_       IN Address_Structure_Rec,
+   delivery_address_     IN BOOLEAN,
+   validating_customer_  IN BOOLEAN,
+   agreement_changed_    IN VARCHAR2, 
+   ship_addr_no_changed_ IN VARCHAR2)  RETURN Address_Structure_Rec
+IS
+   temp_address_rec_ Address_Structure_Rec;
+   rec_              Address_Structure_Rec;
+   addrrec_          Cust_Ord_Customer_Address_API.Public_Rec;
+   shipaddr_         Customer_Info_Address_API.Public_Rec; 
+   delivery_time_    DATE;
+   attr_             VARCHAR2(32000);
+BEGIN
+   temp_address_rec_ := validation_rec_;
+   rec_ := validation_rec_;
+   IF delivery_address_ THEN 
+      addrrec_             := Cust_Ord_Customer_Address_API.Get(temp_address_rec_.customer_no, temp_address_rec_.ship_addr_no);
+      shipaddr_            := Customer_Info_Address_API.Get(temp_address_rec_.customer_no, temp_address_rec_.ship_addr_no);
+      rec_.district_code   := addrrec_.district_code;
+      rec_.region_code     := addrrec_.region_code; 
+      delivery_time_       := nvl(addrrec_.delivery_time, to_date('00:00', 'HH24:MI'));
+      IF  delivery_time_ IS NOT NULL AND temp_address_rec_.wanted_delivery_date IS NOT NULL THEN 
+         rec_.wanted_delivery_date := TO_DATE(TO_CHAR(temp_address_rec_.wanted_delivery_date, 'DD-MM-YYYY') || ' ' ||TO_CHAR(delivery_time_, 'HH24:MI'), 'DD-MM-YYYY HH24:MI');
+      ELSE
+         rec_.wanted_delivery_date := temp_address_rec_.wanted_delivery_date;
+      END IF;
+
+      rec_.forward_agent_id := nvl(Delivery_Route_API.Get_Forward_Agent_Id(addrrec_.route_id), Cust_Ord_Customer_API.Get_Forward_Agent_Id(temp_address_rec_.customer_no)); 
+      IF NOT validating_customer_ THEN
+         Client_SYS.Clear_Attr(attr_);
+         Client_SYS.Add_To_Attr('CONTRACT', temp_address_rec_.contract, attr_);
+         Client_SYS.Add_To_Attr('DELIVERY_TERMS', temp_address_rec_.delivery_terms, attr_);
+         Client_SYS.Add_To_Attr('VENDOR_NO', temp_address_rec_.vendor_no, attr_);         
+         Client_SYS.Add_To_Attr('SHIP_VIA_CODE', temp_address_rec_.ship_via_code, attr_);
+         Client_SYS.Add_To_Attr('DEL_TERMS_LOCATION', temp_address_rec_.del_terms_location, attr_);
+         Client_SYS.Add_To_Attr('DELIVERY_LEADTIME', temp_address_rec_.delivery_leadtime, attr_);
+         Client_SYS.Add_To_Attr('EXT_TRANSPORT_CALENDAR_ID', rec_.ext_transport_calendar_id, attr_);
+         Client_SYS.Add_To_Attr('PICKING_LEADTIME', rec_.picking_leadtime, attr_);
+         Client_SYS.Add_To_Attr('FORWARD_AGENT_ID', rec_.forward_agent_id, attr_);
+         Client_SYS.Add_To_Attr('AGREEEMENT_CHANGED', agreement_changed_, attr_);
+         Client_SYS.Add_To_Attr('ADDRESS_CHANGED', ship_addr_no_changed_, attr_);
+         rec_.tax_liability := Tax_Handling_Util_API.Get_Customer_Tax_Liability(temp_address_rec_.customer_no, temp_address_rec_.ship_addr_no, temp_address_rec_.company, temp_address_rec_.supply_country);
+         IF (rec_.tax_liability IS NULL AND Customer_Info_API.Get_Customer_Category_Db(temp_address_rec_.customer_no) = Customer_Category_API.Decode('PROSPECT')) THEN
+            rec_.tax_liability:= 'EXEMPT';
+         END IF;
+         Order_Quotation_API.Get_Delivery_Information(attr_, temp_address_rec_.language_code, temp_address_rec_.agreement_id, temp_address_rec_.customer_no, temp_address_rec_.ship_addr_no);
+         rec_.ship_via_code := Client_SYS.Get_Item_Value('SHIP_VIA_CODE', attr_);
+         rec_.delivery_terms := Client_SYS.Get_Item_Value('DELIVERY_TERMS',  attr_);
+         rec_.del_terms_desc := Client_SYS.Get_Item_Value('DELIVERY_TERMS_DESC',  attr_);
+         rec_.del_terms_location := Client_SYS.Get_Item_Value('DEL_TERMS_LOCATION', attr_);
+         IF Client_SYS.Get_Item_Value('DELIVERY_LEADTIME', attr_) IS NOT NULL THEN
+            rec_.delivery_Leadtime := TO_NUMBER(Client_SYS.Get_Item_Value('DELIVERY_LEADTIME', attr_));
+         END IF;
+         rec_.ext_transport_calendar_id := Client_SYS.Get_Item_Value('EXT_TRANSPORT_CALENDAR_ID', attr_);
+         IF Client_SYS.Get_Item_Value('PICKING_LEADTIME', attr_) IS NOT NULL THEN
+            rec_.picking_leadtime := TO_NUMBER(Client_SYS.Get_Item_Value('PICKING_LEADTIME', attr_));
+         END IF;
+         rec_.forward_agent_id := Client_SYS.Get_Item_Value('FORWARD_AGENT_ID', attr_);                       
+      END IF;
+   ELSE
+      rec_.customer_ref := Cust_Ord_Customer_API.Fetch_Cust_Ref(temp_address_rec_.customer_no, temp_address_rec_.bill_addr_no, 'TRUE');
+   END IF;
+   RETURN rec_;
+END Validate_Header_Address_No___;
+
+FUNCTION Fetch_Header_Delivery_Attributes___ (
+	quotation_no_ IN VARCHAR2,
+	contract_ IN VARCHAR2,
+	customer_no_ IN VARCHAR2,
+	ship_addr_no_ IN VARCHAR2,
+	ship_via_code_ IN VARCHAR2,
+	vendor_no_ IN VARCHAR2,
+	single_occ_addr_flag_ IN BOOLEAN,
+	delivery_terms_ IN VARCHAR2,
+	del_terms_location_ IN VARCHAR2,
+	forward_agent_id_ IN VARCHAR2,
+	delivery_leadtime_ IN NUMBER,
+	picking_leadtime_ IN NUMBER,
+	sin_occ_ship_addr_zip_code_ IN VARCHAR2,
+	sin_occ_ship_addr_city_ IN VARCHAR2,
+	sin_occ_ship_addr_county_ IN VARCHAR2,
+	sin_occ_ship_addr_state_ IN VARCHAR2,
+	sin_occ_ship_addr_country_code_ IN VARCHAR2,
+	ship_via_code_changed_ IN VARCHAR2) RETURN Address_Detail_Structure_Rec
+IS
+   rec_  Address_Detail_Structure_Rec;
+   single_occr_  VARCHAR2(5);
+   
+BEGIN
+   rec_.delivery_leadtime := delivery_leadtime_;
+   rec_.delivery_terms := delivery_terms_;
+   rec_.del_terms_location := del_terms_location_;
+   rec_.forward_agent_id := forward_agent_id_;
+   rec_.picking_leadtime := picking_leadtime_;
+   IF single_occ_addr_flag_ THEN
+      single_occr_ := 'TRUE';
+   ELSE
+      single_occr_ := 'FALSE';
+   END IF;
+
+	Order_Quotation_API.Fetch_Delivery_Attributes(rec_.delivery_leadtime,
+                                                   rec_.ext_transport_calendar_id,
+                                                   rec_.freight_map_id,
+                                                   rec_.zone_id,
+                                                   rec_.freight_price_list_no,
+                                                   rec_.picking_leadtime,
+                                                   rec_.delivery_terms,
+                                                   rec_.del_terms_location,
+                                                   rec_.forward_agent_id,                
+                                                   quotation_no_ ,                                   
+                                                   contract_,
+                                                   customer_no_,
+                                                   ship_addr_no_,
+                                                   ship_via_code_ ,                       
+                                                   vendor_no_,
+                                                   single_occr_,
+                                                   sin_occ_ship_addr_zip_code_,
+                                                   sin_occ_ship_addr_city_,
+                                                   sin_occ_ship_addr_county_,
+                                                   sin_occ_ship_addr_state_,
+                                                   sin_occ_ship_addr_country_code_, 
+                                                   ship_via_code_changed_);
+      RETURN rec_;
+END Fetch_Header_Delivery_Attributes___;
+
+FUNCTION Get_Validate_Info___ (
+	company_ IN VARCHAR2,
+	quotation_no_ IN VARCHAR2) RETURN Validate_Info_Structure_Rec
+IS
+   rec_ Validate_Info_Structure_Rec;
+BEGIN
+   rec_.tax_method := Company_Tax_Control_API.Get_External_Tax_Cal_Method_Db(company_);
+   rec_.quotation_lines_exist := Order_Quotation_API.Quotation_Lines_Exist(quotation_no_);
+   rec_.charge_lines_exist := Order_Quotation_API.Exist_Charges__(quotation_no_);
+   rec_.tax_liability_type_db := Order_Quotation_API.Get_Tax_Liability_Type_Db(quotation_no_);
+	RETURN rec_;
+END Get_Validate_Info___;
+
+
+FUNCTION Check_Config_Revisions___ (
+	quotation_no_ IN VARCHAR2,
+	wanted_delivery_date_ IN DATE) RETURN NUMBER
+IS
+  invalid_config_ NUMBER; 
+BEGIN
+	Order_Quotation_API.Check_Config_Revisions(invalid_config_, quotation_no_, wanted_delivery_date_);
+   RETURN invalid_config_;
+END Check_Config_Revisions___;
+
+
+
+FUNCTION Exist_Lines___ (
+	quotation_no_ IN VARCHAR2) RETURN VARCHAR2
+IS
+BEGIN
+	RETURN Order_Quotation_Line_API.Exist_Lines(quotation_no_);
+END Exist_Lines___;
+
+
+FUNCTION Get_External_Tax_Cal_Method___ (
+	contract_ IN VARCHAR2) RETURN VARCHAR2
+IS
+BEGIN
+	RETURN Company_Tax_Control_API.Get_External_Tax_Cal_Method_Db(Site_API.Get_Company(contract_));
+END Get_External_Tax_Cal_Method___;
+
+
+
+
+FUNCTION Get_Company_Info___ (
+	contract_ IN VARCHAR2) RETURN Company_Info_Structure_Rec
+IS
+   rec_ Company_Info_Structure_Rec;
+BEGIN
+	rec_.company := Site_API.Get_Company(contract_);
+   rec_.supply_country_db := Company_Site_API.Get_Country_Db(contract_);
+   RETURN rec_;
+END Get_Company_Info___;
+
+@Override
+PROCEDURE CRUD_Create___ (
+   etag_ IN OUT NOCOPY VARCHAR2,
+   key_  IN OUT NOCOPY Order_Quotation_Key,
+   attr_ IN OUT NOCOPY VARCHAR2,
+   info_    OUT VARCHAR2,
+   action_ IN VARCHAR2 )
+IS 
+   supply_country_db_ VARCHAR2(2) := Client_SYS.Get_Item_Value('SUPPLY_COUNTRY_DB',attr_);
+BEGIN
+   Client_SYS.Set_Item_Value('SUPPLY_COUNTRY',Iso_Country_API.Decode(supply_country_db_), attr_);
+   super(etag_, key_, attr_, info_, action_);
+END CRUD_Create___;
+
+PROCEDURE Fetch_External_Tax___ (
+   key_ IN Order_Quotation_Key ) 
+IS
+BEGIN
+   Order_Quotation_API.Fetch_External_Tax(key_.quotation_no);
+END Fetch_External_Tax___;

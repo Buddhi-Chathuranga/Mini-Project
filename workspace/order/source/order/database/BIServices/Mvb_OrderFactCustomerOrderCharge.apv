@@ -1,0 +1,199 @@
+-------------------------------------------------------------------
+-- Component:  ORDER  
+--                         
+-- File     :  Mvb_OrderFactCustomerOrderCharge.api
+--
+-- Purpose  :  Installs Business Intelligence specific view for Refreshing Data for Datamart version of FactCustomerOrderCharge in component ORDER.
+--
+-------------------------------------------------------------------
+--  Date    Sign    History
+--  ------  ------  -----------------------------------------------
+--  150722  MeAblk  BOULDER-2130, Change the source column of the attributes charge_percent_basis,  base_charge_percent_basis in order to get the correct values.
+--  150624  AyAmlk  BOULDER-132, Used in-line SELECTs instead of method
+--  150624          calls to improve performance.
+--  150323  MeAblk  BOULDER-948, Created.
+-------------------------------------------------------------------
+
+-------------------------------------------------------------------
+-- Create Basic MV source view, i.e. the old MV select statement
+-- Related to entity FACT_CUSTOMER_ORDER_CHARGE.
+-------------------------------------------------------------------
+
+DEFINE MVB_VIEW          = CUSTOMER_ORDER_CHARGE_MVB
+DEFINE MODULE            = ORDER
+DEFINE LU                = BiFactCustomerOrderCharge
+
+PROMPT Create fact view &MVB_VIEW
+
+CREATE OR REPLACE VIEW &MVB_VIEW AS
+ SELECT coc.order_no                                                           order_no_key,
+        coc.sequence_no                                                        sequence_no_key,
+        coc.charge                                                             charge,
+        coc.base_charge_amount * coc.charged_qty                               net_charge_amount_base,
+        coc.base_charge_amt_incl_tax * coc.charged_qty                         gross_charge_amount_base,
+        coc.charge_amount * coc.charged_qty                                    net_charge_amount_curr,
+        coc.charge_amount_incl_tax * coc.charged_qty                           gross_charge_amount_curr,
+        coc.charge_cost                                                        charge_cost,
+        coc.charge_cost_percent                                                charge_cost_percent,
+        coc.base_charge_amount                                                 charge_price_base,
+        coc.base_charge_amt_incl_tax                                           charge_price_incl_tax_base,
+        coc.charge_amount                                                      charge_price_curr,
+        coc.charge_amount_incl_tax                                             charge_price_incl_tax_curr,
+        coc.charged_qty                                                        qty_charged,
+        coc.invoiced_qty                                                       qty_invoiced,
+        coc.qty_returned                                                       qty_returned,
+        (SELECT buy_qty_due
+           FROM customer_order_line_tab
+          WHERE order_no = coc.order_no
+            AND line_no = coc.line_no
+            AND rel_no = coc.rel_no
+            AND line_item_no = coc.line_item_no)                               buy_qty_due,
+        (SELECT revised_qty_due
+           FROM customer_order_line_tab
+          WHERE order_no = coc.order_no
+            AND line_no = coc.line_no
+            AND rel_no = coc.rel_no
+            AND line_item_no = coc.line_item_no)                               qty_inventory,
+        DECODE(co.rowstate,'Cancelled',0,DECODE(coc.charged_qty,0,0,1))        count_charge_line,
+        DECODE(co.rowstate,'Cancelled',0,DECODE(coc.charged_qty,0,0,DECODE(coc.qty_returned,0,0,1)))      
+                                                                               count_charge_line_returns,
+        Customer_Order_Charge_API.Get_Total_Base_Charged_Amount(coc.order_no,  coc.sequence_no)
+                                                                               total_charge_amount_base,
+        Customer_Order_Charge_API.Get_Tot_Base_Chg_Amt_Incl_Tax(coc.order_no,  coc.sequence_no)
+                                                                               total_charge_amt_incl_tax_base,
+        Customer_Order_Charge_API.Get_Total_Charged_Amount(coc.order_no, coc.sequence_no)
+                                                                               total_charge_amount_curr,
+        Customer_Order_Charge_API.Get_Total_Charged_Amt_Incl_Tax(coc.order_no, coc.sequence_no)
+                                                                               total_charge_amt_incl_tax_curr,
+        Customer_Order_Charge_API.Get_Charge_Percent_Basis(coc.order_no, coc.sequence_no)                                                
+                                                                               charge_percent_basis,
+        Customer_Order_Charge_API.Get_Base_Charge_Percent_Basis(coc.order_no, coc.sequence_no) 
+                                                                               base_charge_percent_basis,
+       coc.order_no                                                            order_no,
+       coc.sequence_no                                                         sequence_no,
+       coc.line_no                                                             line_no,
+       coc.rel_no                                                              rel_no,
+       coc.line_item_no                                                        line_item_no,
+       coc.currency_rate                                                       currency_rate,
+       coc.date_entered                                                        date_entered,
+       coc.charge_price_list_no                                                charge_price_list_no,
+       SUBSTR(DECODE(coc.line_no, null, co.rowstate, Customer_Order_Line_API.Get_Objstate(co.order_no, coc.line_no, coc.rel_no, coc.line_item_no)),1,20)                                                             
+                                                                               state,
+       coc.unit_charge                                                         unit_charge,
+       coc.company                                                             dim_company_id,
+       coc.contract                                                            dim_site_id,
+       coc.contract || '^' || NVL(coc.charge_type, '#')                        dim_sales_charge_type_id,
+       NVL((SELECT charge_group
+              FROM sales_charge_type_tab
+             WHERE contract = coc.contract
+               AND charge_type = coc.charge_type), '#')  
+                                                                               dim_sales_charge_group_id,
+       coc.company || '^' || co.currency_code                                  dim_currency_code_id,
+       NVL(co.customer_no, '#')                                                dim_customer_id,
+       NVL(co.order_id, '#')                                                   dim_customer_order_type_id,
+       NVL(coc.campaign_id,0)                                                  dim_campaign_id,
+       DECODE(coc.campaign_id,NULL,0,coc.campaign_id) || '^' || DECODE(coc.deal_id,NULL,0,coc.deal_id)
+                                                                               dim_sales_promotion_deal_id,
+       coc.company || '^' || NVL(coc.delivery_type, '#')                       dim_delivery_type_id,
+       NVL(coc.sales_unit_meas, '#')                                           dim_iso_unit_id,
+       NVL(co.market_code, '#')                                                dim_sales_market_id,
+       NVL(co.salesman_code, '#')                                              dim_sales_person_id,
+       NVL((SELECT district_code
+              FROM customer_order_line_tab
+             WHERE order_no = coc.order_no
+               AND line_no = coc.line_no
+               AND rel_no = coc.rel_no
+               AND line_item_no = coc.line_item_no), '#')                      dim_sales_district_id,
+       NVL((SELECT region_code
+              FROM customer_order_line_tab
+             WHERE order_no = coc.order_no
+               AND line_no = coc.line_no
+               AND rel_no = coc.rel_no
+               AND line_item_no = coc.line_item_no), '#')                      dim_sales_region_id,
+       coc.contract|| '^' || NVL((SELECT catalog_no
+                                    FROM customer_order_line_tab
+                                   WHERE order_no = coc.order_no
+                                     AND line_no = coc.line_no
+                                     AND rel_no = coc.rel_no
+                                     AND line_item_no = coc.line_item_no), '#')
+                                                                               dim_sales_part_id,
+       NVL((SELECT project_id
+              FROM customer_order_line_tab
+             WHERE order_no = coc.order_no
+               AND line_no = coc.line_no
+               AND rel_no = coc.rel_no
+               AND line_item_no = coc.line_item_no), '#')                      dim_project_id,
+       NVL((SELECT activity_seq
+              FROM customer_order_line_tab
+             WHERE order_no = coc.order_no
+               AND line_no = coc.line_no
+               AND rel_no = coc.rel_no
+               AND line_item_no = coc.line_item_no),0)                         dim_activity_id,
+       coc.company|| '^' ||TO_CHAR(TRUNC(coc.date_entered),'YYYY-MM-DD')
+                                                                               dim_rpd_company_period_id,
+       TRUNC(coc.date_entered)                                                 dim_rpd_period_id,
+       coc.company                                                             company,
+       coc.contract                                                            site,
+       coc.charge_type                                                         sales_charge_type,
+       (SELECT charge_group
+          FROM sales_charge_type_tab
+         WHERE contract = coc.contract
+           AND charge_type = coc.charge_type)                                  sales_charge_group,
+       co.currency_code                                                        currency_code,
+       co.customer_no                                                          customer,
+       co.order_id                                                             customer_order_type,
+       coc.campaign_id                                                         campaign,
+       coc.deal_id                                                             sales_promotion_deal,
+       coc.delivery_type                                                       delivery_type,
+       coc.sales_unit_meas                                                     sales_unit_meas,
+       co.market_code                                                          sales_market,
+       co.salesman_code                                                        sales_person,
+       (SELECT district_code
+          FROM customer_order_line_tab
+         WHERE order_no = coc.order_no
+           AND line_no = coc.line_no
+           AND rel_no = coc.rel_no
+           AND line_item_no = coc.line_item_no)                                sales_district,
+       (SELECT region_code
+          FROM customer_order_line_tab
+         WHERE order_no = coc.order_no
+           AND line_no = coc.line_no
+           AND rel_no = coc.rel_no
+           AND line_item_no = coc.line_item_no)                                sales_region,
+       (SELECT catalog_no
+          FROM customer_order_line_tab
+         WHERE order_no = coc.order_no
+           AND line_no = coc.line_no
+           AND rel_no = coc.rel_no
+           AND line_item_no = coc.line_item_no)                                sales_part,
+       (SELECT project_id
+          FROM customer_order_line_tab
+         WHERE order_no = coc.order_no
+           AND line_no = coc.line_no
+           AND rel_no = coc.rel_no
+           AND line_item_no = coc.line_item_no)                                project,
+       (SELECT activity_seq
+          FROM customer_order_line_tab
+         WHERE order_no = coc.order_no
+           AND line_no = coc.line_no
+           AND rel_no = coc.rel_no
+           AND line_item_no = coc.line_item_no)                                activity,
+       TRUNC(coc.date_entered)                                                 reporting_date,
+       coc.order_no || '^' || TO_CHAR(coc.sequence_no)                         id
+    FROM CUSTOMER_ORDER_CHARGE_TAB coc, CUSTOMER_ORDER_TAB co
+    WHERE coc.order_no = co.order_no
+ WITH READ ONLY;
+   
+COMMENT ON TABLE &MVB_VIEW
+   IS 'LU=&LU^PROMPT=Bi Fact Customer Order Charge^MODULE=&MODULE^';   
+
+
+BEGIN
+   Is_Mv_Util_API.Create_Mvs_View('&MVB_VIEW');
+   COMMIT;
+END;
+/
+
+UNDEFINE MODULE
+UNDEFINE MVB_VIEW    
+UNDEFINE LU      

@@ -1,0 +1,237 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     UpdateCompanyTranslationAssistant
+--  Component:    ENTERP
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+-----------------------------------------------------------------------------
+
+layer Core;
+
+@Override
+PROCEDURE CRUD_Create___ (
+   rec_ IN Update_Company_Translation_Virtual_Rec )
+IS
+   master_      Update_Company_Translation_Virtual_Rec; 
+   key_         Update_Company_Translation_Virtual_Key;
+   template_id_ VARCHAR2(30);
+BEGIN
+   super(rec_);
+   key_.objkey := rec_.objkey;
+   master_ := Get_Record___(key_);
+   master_.temp_objkey := master_.objkey;
+   IF (master_.source_template_id IS NOT NULL) THEN
+      master_.key_name := 'TemplKeyLu';
+      CRUD_Update___(NULL, master_);
+      Populate_Translation_Virtual___(key_, master_.source_template_id, NULL);
+      --Reset template id, should be empty at this stage.
+      master_.template_id := '';
+      master_.template_name := '';
+      CRUD_Update___(NULL, master_);      
+   ELSIF (master_.source_company IS NOT NULL) THEN
+      master_.key_name := 'CompanyKeyLu';
+      CRUD_Update___(NULL, master_);
+      Populate_Translation_Virtual___(key_, master_.source_company, NULL);
+   ELSE
+      master_.key_name := 'TemplKeyLu';
+      CRUD_Update___(NULL, master_);
+      Create_Company_Tem_API.Get_Default_Template__(template_id_);
+      IF (template_id_ IS NOT NULL) THEN 
+         Populate_Translation_Virtual___(key_, template_id_, NULL);        
+      END IF;
+   END IF;  
+END CRUD_Create___;
+
+
+FUNCTION Get_Existing_Languages___ (
+   company_ IN VARCHAR2 ) RETURN VARCHAR2 
+IS
+   return_  VARCHAR2(32000);
+   CURSOR get_lang IS
+      SELECT language_code, Iso_Language_API.Decode(language_code) description 
+      FROM   company_translation_lng
+      WHERE  key_name = 'CompanyKeyLu'
+      AND    key_value = company_
+      GROUP BY language_code
+      ORDER BY description ASC;
+BEGIN
+   FOR c1 IN get_lang LOOP
+      return_ := return_ || c1.description||CHR(13)||CHR(10);
+   END LOOP;
+   RETURN return_;
+END Get_Existing_Languages___;
+
+
+FUNCTION Init_Update_Company_Translation___ (
+   company_ IN VARCHAR2 ) RETURN Update_Company_Translation_Init_Structure_Rec
+IS
+   rec_  Update_Company_Translation_Init_Structure_Rec;   
+BEGIN
+   rec_.name := Company_API.Get_Name(company_);
+   rec_.source_company := Company_API.Get_From_Company(company_);
+   rec_.source_template_id := Company_API.Get_From_Template_Id(company_);   
+   $IF Component_Accrul_SYS.INSTALLED $THEN   
+      rec_.currency_code := Company_Finance_API.Get_Currency_Code(company_); 
+      rec_.valid_from := Company_Finance_API.Get_Valid_From(company_);
+      rec_.existing_language := Get_Existing_Languages___(company_);
+   $END
+   RETURN rec_;
+END Init_Update_Company_Translation___;
+
+
+PROCEDURE Populate_Translation_Virtual___ (
+   key_       IN Update_Company_Translation_Virtual_Key,
+   key_value_ IN VARCHAR2,
+   key_name_  IN VARCHAR2 ) 
+IS
+   master_      Update_Company_Translation_Virtual_Rec; 
+   detail_      Update_Company_Translation_Languages_Virtual_Rec; 
+   CURSOR get_lang IS
+      SELECT language_code, Iso_Language_API.Decode(language_code) description
+      FROM   key_lu_translation_imp_tab
+      WHERE  key_name = NVL(key_name_, master_.key_name)
+      AND    key_value = key_value_ --Should be TemplateId or Company
+      GROUP BY language_code
+      ORDER BY description ASC;  
+BEGIN
+   Cleanup_Translation_Virtual___(key_, FALSE, TRUE);
+   master_ := Get_Record___(key_);
+   FOR c1 IN get_lang LOOP
+      detail_.objkey        := sys_guid();
+      detail_.parent_objkey := key_.objkey;      
+      detail_.key_name      := master_.key_name;
+      detail_.key_value     := key_value_;
+      detail_.language_code := c1.language_code;
+      detail_.description   := c1.description;      
+      CRUD_Create___(detail_);
+   END LOOP;
+   IF (master_.key_name = 'TemplKeyLu') OR (key_name_ IS NOT NULL) THEN
+      master_.template_id := key_value_;
+      master_.template_name := Create_Company_Tem_API.Get_Description(key_value_);
+      master_.key_name := NVL(key_name_, master_.key_name);      
+      CRUD_Update___(NULL, master_);      
+   END IF;
+END Populate_Translation_Virtual___;
+
+
+FUNCTION Finalize_Translation_Virtual___ (
+   key_ IN Update_Company_Translation_Virtual_Key ) RETURN NUMBER 
+IS
+   master_      Update_Company_Translation_Virtual_Rec;
+   detail_      Update_Company_Translation_Languages_Virtual_Rec;
+   detail_key_  Update_Company_Translation_Languages_Virtual_Key;
+   attr_        VARCHAR2(32000);
+   attr_upd_    VARCHAR2(32000);
+   error_       VARCHAR2(2000);
+   ptr_         NUMBER;
+   name_        VARCHAR2(2000);
+   value_       VARCHAR2(2000);
+   languages_   VARCHAR2(2000):=CHR(31);
+   cnt_         NUMBER:=0;
+BEGIN
+   IF (key_.objkey IS NOT NULL) THEN
+      master_ := Get_Record___(key_);
+      --Build attr_upd_ string.
+      Client_SYS.Clear_Attr(attr_upd_);
+      Client_SYS.Add_To_Attr('NEW_COMPANY', master_.company, attr_upd_);
+      Client_SYS.Add_To_Attr('VALID_FROM', master_.valid_from, attr_upd_);
+      Client_SYS.Add_To_Attr('TEMPLATE_ID', master_.source_template_id, attr_upd_);
+      Client_SYS.Add_To_Attr('DUPL_COMPANY', master_.source_company, attr_upd_);
+      IF (master_.source_template_id IS NOT NULL) THEN 
+         Client_SYS.Add_To_Attr('ACTION', 'NEW', attr_upd_);
+      ELSIF (master_.source_company IS NOT NULL) THEN 
+         Client_SYS.Add_To_Attr('ACTION', 'DUPLICATE', attr_upd_);
+      END IF;  
+      Client_SYS.Add_To_Attr('MAKE_COMPANY', 'IMPORT', attr_upd_);
+      IF (master_.template_id IS NOT NULL) THEN 
+         Client_SYS.Add_To_Attr('UPDATE_FROM_TEMPLATE', master_.template_id, attr_upd_);
+      END IF;
+      Client_SYS.Add_To_Attr('FROM_WINDOW', 'UPDATE_TRANSLATION', attr_upd_);
+      Client_SYS.Add_To_Attr('MAIN_PROCESS', 'UPDATE TRANSLATION', attr_upd_);
+      --Get and prepare languages selected.
+      WHILE (Get_Next_From_Itempicker_List___(master_.template_language_picker, ptr_, value_)) LOOP
+         detail_key_.objkey := value_;
+         detail_ := Get_Record___(detail_key_);
+         languages_ := languages_||detail_.language_code||CHR(31);
+         cnt_ := cnt_ +1;
+      END LOOP;
+      IF (languages_ IS NOT NULL) THEN 
+         Client_SYS.Clear_Attr(attr_);
+         Client_SYS.Add_To_Attr('NEW_COMPANY', master_.company, attr_);
+         Client_SYS.Add_To_Attr('PROCESS', 'ONLINE', attr_);
+         Create_Company_API.New_Company__(attr_);
+         ptr_ := 1;
+         --Update each component returned from New_Company__.
+         WHILE (Client_SYS.Get_Next_From_Attr(attr_, ptr_, name_, value_)) LOOP
+            IF (name_ = 'MODULE') THEN 
+               Create_Company_API.Create_New_Company__(error_, 
+                                                       master_.company, 
+                                                       value_, --component_
+                                                       value_, --package_
+                                                       attr_upd_, 
+                                                       languages_);
+            END IF;         
+         END LOOP;
+      END IF;
+   END IF;
+   --Clear virtual if everything was ok.
+   Cleanup_Translation_Virtual___(key_, TRUE, TRUE);
+   RETURN cnt_;
+END Finalize_Translation_Virtual___;
+
+
+FUNCTION Get_Next_From_Itempicker_List___ (
+   attr_  IN     VARCHAR2,
+   ptr_   IN OUT NUMBER,
+   value_ IN OUT VARCHAR2 ) RETURN BOOLEAN
+IS
+   from_  NUMBER;
+   to_    NUMBER;
+BEGIN
+   from_ := NVL(ptr_, 1);
+   to_   := INSTR(attr_, ',', from_);
+   IF (to_ = 0) THEN
+      to_ := INSTR(attr_, '"]', from_);
+   END IF;
+   IF (to_ > 0) THEN
+      value_ := SUBSTR(attr_, from_, to_-from_);
+      value_ := RTRIM(LTRIM(value_,'["'),'"');
+      ptr_   := to_+1;
+      RETURN(TRUE);
+   ELSE
+      RETURN(FALSE);
+   END IF;
+END Get_Next_From_Itempicker_List___;
+
+
+PROCEDURE Cleanup_Translation_Virtual___ (
+   key_            IN Update_Company_Translation_Virtual_Key,
+   cleanup_master_ IN BOOLEAN,
+   cleanup_detail_ IN BOOLEAN )
+IS
+   master_      Update_Company_Translation_Virtual_Rec;
+   detail_      Update_Company_Translation_Languages_Virtual_Rec; 
+BEGIN
+   IF (key_.objkey IS NOT NULL) THEN
+      master_.objkey := key_.objkey;
+      IF (cleanup_master_) THEN 
+         CRUD_Delete___(master_);  
+      END IF;
+      IF (cleanup_detail_) THEN
+         FOR c1 IN Get_Update_Company_Translation_Languages_Array___(key_) LOOP 
+            detail_.objkey := c1.objkey;
+            detail_.parent_objkey := c1.parent_objkey;
+            CRUD_Delete___(detail_);
+         END LOOP;
+         IF NOT (cleanup_master_) THEN 
+            --If not master is cleared, at least clear the picked items (if any).
+            master_ := Get_Record___(key_);
+            master_.template_language_picker := NULL;
+            CRUD_Update___(NULL, master_);
+         END IF;
+      END IF;
+   END IF;
+END Cleanup_Translation_Virtual___;   

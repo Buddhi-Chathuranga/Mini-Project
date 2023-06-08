@@ -1,0 +1,145 @@
+--
+-- Install all Foundation1 setting parameters for replication processes
+--
+-------------------------------------------------------------------------------------------- 
+-- 
+--  Date    Sign    History
+--  ------  ------  -----------------------------------------------------------
+--  030509  HAAR    Added commit in script (ToDo#4261).
+--  040122  NIPE    BugId#38010 - Message class settings for Replication are reset in an upgrade. 
+-------------------------------------------------------------------------------------------- 
+SET SERVEROUTPUT ON
+DECLARE
+   ifs_replication_ BOOLEAN;
+   ifs_replication_conf_ BOOLEAN;
+   
+   PROCEDURE New_Parameter (
+      parameter_   IN VARCHAR2,
+      description_ IN VARCHAR2,
+      dynamic_     IN VARCHAR2,
+      value_       IN VARCHAR2,
+      domain_      IN VARCHAR2,
+      domain_desc_ IN VARCHAR2 )
+   IS
+      info_  VARCHAR2(100);
+      objid_ VARCHAR2(100);
+      objv_  VARCHAR2(2000);
+      attr_  VARCHAR2(2000);
+      already_installed EXCEPTION;
+      PRAGMA exception_init(already_installed, -20112);
+   BEGIN
+      Client_SYS.Clear_Attr(attr_);
+      Client_SYS.Add_To_Attr('PARAMETER', parameter_, attr_);
+      Client_SYS.Add_To_Attr('PARAMETER_DESC', description_, attr_);
+      Client_SYS.Add_To_Attr('DYNAMIC', dynamic_, attr_);
+      Client_SYS.Add_To_Attr('VALUE', value_, attr_);
+      Client_SYS.Add_To_Attr('DOMAIN', domain_, attr_);
+      Client_SYS.Add_To_Attr('DOMAIN_DESC', domain_desc_, attr_);
+      Fnd_Setting_API.New__(info_, objid_, objv_, attr_, 'DO');
+   EXCEPTION
+      WHEN already_installed THEN
+         NULL;
+   END New_Parameter;
+   PROCEDURE New_Media (
+      media_code_  IN VARCHAR2,
+      description_ IN VARCHAR2 )
+   IS
+      info_  VARCHAR2(100);
+      objid_ VARCHAR2(100);
+      objv_  VARCHAR2(2000);
+      attr_  VARCHAR2(2000);
+      already_installed EXCEPTION;
+      PRAGMA exception_init(already_installed, -20112);
+   BEGIN
+      Client_SYS.Clear_Attr(attr_);
+      Client_SYS.Add_To_Attr('MEDIA_CODE', media_code_, attr_);
+      Client_SYS.Add_To_Attr('DESCRIPTION', description_, attr_);
+      Message_Media_API.New__(info_, objid_, objv_, attr_, 'DO');
+   EXCEPTION
+      WHEN already_installed THEN
+         NULL;
+   END New_Media;
+   PROCEDURE Activate_Class (
+      class_id_  IN VARCHAR2 )
+   IS
+      info_  VARCHAR2(100);
+      objid_ VARCHAR2(100);
+      objv_  VARCHAR2(2000);
+      attr_  VARCHAR2(2000);
+      not_installed EXCEPTION;
+      PRAGMA exception_init(not_installed, -20115);
+      CURSOR c1 IS
+         SELECT objid, objversion
+         FROM   message_class
+         WHERE  class_id = class_id_;
+   BEGIN
+      OPEN c1;
+      FETCH c1 INTO objid_, objv_;
+      IF ( c1%NOTFOUND ) THEN
+         RAISE not_installed;
+      END IF;
+      Client_SYS.Clear_Attr(attr_);
+      Client_SYS.Add_To_Attr('SEND_DB', 'TRUE', attr_);
+      Client_SYS.Add_To_Attr('RECEIVE_DB', 'TRUE', attr_);
+      Message_Class_API.Modify__(info_, objid_, objv_, attr_, 'DO');
+      EXCEPTION
+        WHEN others THEN
+           dbms_output.put_line(sqlerrm);
+   END Activate_Class;
+   FUNCTION Is_Installed (
+      class_id_  IN VARCHAR2 )RETURN BOOLEAN
+   IS
+      temp_         NUMBER;
+      found_        BOOLEAN;
+
+      CURSOR message_class_ IS
+         SELECT 1
+         FROM   message_class
+         WHERE  class_id = class_id_;
+   BEGIN
+      OPEN message_class_;
+      FETCH message_class_ INTO temp_;
+      IF (message_class_%NOTFOUND) THEN
+         found_ := FALSE;
+      ELSE
+         found_ := TRUE;
+      END IF;
+      CLOSE message_class_;
+      RETURN found_;
+   EXCEPTION
+      WHEN OTHERS THEN
+         IF (message_class_%ISOPEN) THEN
+            CLOSE message_class_;
+         END IF;
+	 RETURN FALSE;
+   END Is_Installed;
+BEGIN
+   --
+   -- Register Message Classes for replication - used by Connectivity
+   --
+   
+   ifs_replication_ := Is_Installed('IFS_REPLICATION');
+   ifs_replication_conf_ := Is_Installed('IFS_REPLICATION_CONFIGURATION');
+   
+   Message_Class_API.Install_Class__('IFS_REPLICATION', 'Replication_Util_API.Receive_Message__',
+                                     'Receive replicated data');
+   --
+   Message_Class_API.Install_Class__('IFS_REPLICATION_CONFIGURATION', 
+                                     'Replication_Util_API.Receive_Configuration__',
+                                     'Receive replication configuration data');
+   IF NOT ifs_replication_ THEN
+      Activate_Class('IFS_REPLICATION');
+   END IF;
+   IF NOT ifs_replication_conf_ THEN
+      Activate_Class('IFS_REPLICATION_CONFIGURATION');
+   END IF;
+   --
+   -- Register Message Media for replication - used by Connectivity
+   --
+   New_Media ('REPLICATION','IFS/Replication');
+END;
+/
+
+COMMIT
+/
+

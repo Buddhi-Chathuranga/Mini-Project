@@ -1,0 +1,327 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: MediaLibraryManagerHandling
+--  Component:    APPSRV
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  210421  Jihalk  AM21R2-1319, Modified the code inside the CRUD_UPDATE___() Method.
+--  210721  RUSSLK  AM21R2-591, Modified the Paste_Media_Items___() Method.
+--  210725  puvelk  AM21R2-591, Modified Paste_Media_Items___() Method.
+--  210912  DEEKLK  AMZDOC-1158, Modified CRUD_Update___() and CRUD_Create___().
+-----------------------------------------------------------------------------
+
+layer Core;
+
+PROCEDURE Copy_Media_Items___ (
+   key_ IN Media_Library_Key)
+IS
+BEGIN
+	INSERT INTO ${PROJECTION}_LIBRARY_ID_STORAGE_VRT
+   (objkey, library_id, obj_created_by)
+   VALUES
+   (sys_guid(), key_.library_id, Fnd_Session_API.Get_Fnd_User());
+END Copy_Media_Items___;
+
+
+PROCEDURE Paste_Media_Items___ (
+   key_ IN Media_Library_Key,
+	to_library_id_ IN VARCHAR2)
+IS
+   objkey_        VARCHAR2(50);   
+   library_id_    VARCHAR2(4000);
+   CURSOR get_virtual_details IS
+      SELECT objkey, library_id
+      FROM ${PROJECTION}_LIBRARY_ID_STORAGE_VRT
+      ORDER BY objmodified DESC
+      FETCH FIRST 1 ROWS ONLY;
+   
+BEGIN
+   OPEN get_virtual_details;
+   FETCH get_virtual_details INTO objkey_, library_id_;
+   IF get_virtual_details%NOTFOUND THEN
+      Error_SYS.Appl_General(lu_name_, 'COPYMEDIAITEM: No media items copied. Please use "Copy Media Items" command first.');
+      CLOSE get_virtual_details;
+   END IF ;   
+   CLOSE get_virtual_details;
+   
+   IF(library_id_ = to_library_id_)THEN
+      Error_SYS.Appl_General(lu_name_, 'PASTEMEDIAITEM: You cannot paste media items into to the same media library.');      
+   END IF;
+   
+	Media_Library_API.Copy_Library_By_Id(library_id_, to_library_id_);
+   
+   DELETE FROM ${PROJECTION}_LIBRARY_ID_STORAGE_VRT;
+END Paste_Media_Items___;
+
+
+FUNCTION Get_Media_Object___ (
+	var_item_id_ IN NUMBER) RETURN BLOB
+IS
+   media_object_     BLOB;
+BEGIN
+	Media_Item_API.Get_Media_Item(media_object_, var_item_id_);
+   RETURN media_object_;
+END Get_Media_Object___;
+
+
+PROCEDURE Copy_Library_By_Ref___ (
+   key_ IN Media_Library_Key,
+	var_connected_obj_source_ IN VARCHAR2,
+	var_connected_obj_ref1_ IN VARCHAR2,
+	var_connected_obj_ref2_ IN VARCHAR2,
+	var_connected_obj_ref3_ IN VARCHAR2,
+	var_connected_obj_ref4_ IN VARCHAR2,
+	var_connected_obj_ref5_ IN VARCHAR2,
+	var_to_library_id_ IN VARCHAR2)
+IS
+BEGIN
+	Media_Library_API.Copy_Library_By_Ref(var_connected_obj_source_, var_connected_obj_ref1_, var_connected_obj_ref2_, var_connected_obj_ref3_, var_connected_obj_ref4_, var_connected_obj_ref5_, var_to_library_id_);
+END Copy_Library_By_Ref___;
+
+
+@Override
+PROCEDURE CRUD_Create___ (
+   etag_   IN OUT VARCHAR2,
+   key_    IN OUT Media_Library_Item_Key,
+   attr_   IN OUT VARCHAR2,
+   info_   OUT    VARCHAR2,
+   action_ IN     VARCHAR2 )
+IS
+   media_item_info_ VARCHAR2(32000);
+   item_id_         media_item_tab.item_id%TYPE;
+BEGIN
+   item_id_ := Client_SYS.Get_Item_Value_To_Number('ITEM_ID', attr_, lu_name_);
+   New_Or_Modify_Media_Item___(media_item_info_, item_id_, attr_);
+   
+   Client_SYS.Add_To_Attr('ITEM_ID',      item_id_, attr_);
+   Client_SYS.Add_To_Attr('DEFAULT_MEDIA', 'FALSE', attr_);
+   
+   super(etag_, key_, attr_, info_, action_);
+   
+   Client_SYS.Add_To_Attr('MEDIA_FILE',                 Media_Item_API.Get_Media_File(item_id_), attr_);
+   Client_SYS.Add_To_Attr('MEDIA_ITEM_TYPE_DB', Media_Item_API.Get_Media_Item_Type_Db(item_id_), attr_);
+   
+   info_ := media_item_info_ || ' ' || info_;
+END CRUD_Create___;
+
+
+@Override
+PROCEDURE CRUD_Delete___ (
+   etag_ IN OUT VARCHAR2,
+   key_  IN     Media_Library_Item_Key,
+   info_    OUT VARCHAR2,
+   action_ IN VARCHAR2 )
+IS
+      media_library_item_objid_  VARCHAR2(2000);
+      media_library_item_objver_ MEDIA_LIBRARY_ITEM.objversion%TYPE; 
+BEGIN   
+   Get_Objid_Objversion___(media_library_item_objid_, media_library_item_objver_, key_);
+   
+   Media_Library_Report_API.Remove_Data(key_.library_id, key_.library_item_id);
+   IF (Media_Item_API.Get_Private_Media_Item(key_.item_id) = 'TRUE') THEN
+      Client_SYS.Add_Warning(lu_name_, 'CANTRECONPRIVATE: Private media item will be deleted from the media library.');
+   END IF;
+   --need to generate the etag from the actual objid and objversion
+   etag_ := Get_Etag___(media_library_item_objid_, media_library_item_objver_); 
+   super(etag_, key_, info_, action_);
+END CRUD_Delete___;
+
+
+@Override
+PROCEDURE Get_Objid_Objversion___ (
+   objid_         OUT VARCHAR2,
+   objversion_    OUT VARCHAR2,
+   key_        IN     Media_Library_Item_Key )
+IS
+BEGIN
+   super(objid_, objversion_, key_);
+   --ignore objid objversion from the view and fetch it form the base view
+   SELECT objid, objversion
+      INTO  objid_, objversion_
+      FROM  media_library_item
+      WHERE library_item_id = key_.library_item_id
+      AND   library_id = key_.library_id;
+   EXCEPTION
+      WHEN NO_DATA_FOUND THEN
+         Error_SYS.Odp_Record_Not_Exist(lu_name_);   
+END Get_Objid_Objversion___;
+   
+
+PROCEDURE Set_Default_Library_Media___ (
+   key_ IN Media_Library_Item_Key ) 
+IS
+   
+BEGIN
+   Media_Library_Item_API.Set_Default_Library_Media(key_.library_id, key_.library_item_id);
+END Set_Default_Library_Media___;
+
+
+@Override
+PROCEDURE CRUD_Update___ (
+   etag_   IN OUT VARCHAR2,
+   key_    IN OUT Media_Library_Item_Key,
+   attr_   IN OUT VARCHAR2,
+   info_   OUT    VARCHAR2,
+   action_ IN     VARCHAR2 )
+IS 
+   item_attr_                 VARCHAR2(32000);
+   library_item_attr_         VARCHAR2(32000);
+   media_item_info_           VARCHAR2(32000);
+   media_library_item_objid_  VARCHAR2(2000);
+   media_library_item_objver_ VARCHAR2(2000);
+   item_rec_                  Media_Item_API.Public_Rec;
+   library_item_rec_          Media_Library_Item_API.Public_Rec;
+BEGIN
+   item_rec_ := Media_Item_API.Get(key_.item_id);
+   Create_Item_Attr___(item_attr_, item_rec_, attr_);
+   
+   library_item_rec_ := Media_Library_Item_API.Get(key_.library_id, key_.library_item_id);
+   Create_Library_Item_Attr___(library_item_attr_, library_item_rec_, attr_);
+   
+   Media_Library_Item_API.Validate_Update__(item_attr_, library_item_attr_, key_.library_id, key_.library_item_id, key_.item_id);
+   
+   Modify_Media_Item___(media_item_info_, item_attr_, key_.item_id);
+   
+   Get_Objid_Objversion___(media_library_item_objid_, media_library_item_objver_, key_);
+   etag_ := Get_Etag___(media_library_item_objid_, media_library_item_objver_); 
+   
+   super(etag_, key_, attr_, info_, action_);
+   
+   info_ := media_item_info_ || ' ' || info_;
+END CRUD_Update___;
+
+
+FUNCTION Insert_Data___ (
+   key_ IN Media_Library_Item_Key) RETURN VARCHAR2
+IS
+   insert_ VARCHAR2(20);
+BEGIN
+	Media_Library_Report_API.Insert_Initial_Data(insert_, key_.library_id , key_.library_item_id);
+   RETURN insert_;
+END Insert_Data___;
+
+
+@Override
+PROCEDURE CRUD_Upload___ (
+   etag_        IN OUT VARCHAR2,
+   key_         IN     Media_Item_Key,
+   media_text## IN     CLOB)
+IS
+   media_txt_           NUMBER;
+   
+   CURSOR check_media_object IS
+        SELECT dbms_lob.getlength(t.media_text)
+        FROM media_item_tab t
+        WHERE t.item_id = key_.item_id;
+BEGIN
+   OPEN check_media_object;
+   FETCH check_media_object INTO media_txt_;
+   CLOSE check_media_object;
+   
+   IF (NVL(media_txt_,0) > 0)  THEN 
+      Error_SYS.Record_General(lu_name_ ,'UPDATENOTALLOWED: Updating a media item is not allowed.');
+   END IF;
+   
+   super(etag_, key_, media_text##);
+   --Add post-processing code here
+END CRUD_Upload___;
+
+
+PROCEDURE New_Or_Modify_Media_Item___ (
+   media_item_info_ IN OUT VARCHAR2,
+   item_id_         IN OUT NUMBER,
+   attr_            IN OUT VARCHAR2)
+IS
+   item_attr_       VARCHAR2(32000);
+BEGIN
+   Client_SYS.Add_To_Attr('NAME',        Client_SYS.Cut_Item_Value('NAME',        attr_), item_attr_);
+   Client_SYS.Add_To_Attr('DESCRIPTION', Client_SYS.Cut_Item_Value('DESCRIPTION', attr_), item_attr_);
+   
+   IF item_id_ IS NULL THEN
+      Client_SYS.Add_To_Attr('MEDIA_ITEM_TYPE_DB', Client_SYS.Cut_Item_Value('MEDIA_ITEM_TYPE_DB',  attr_), item_attr_);
+      
+      New_Media_Item___   (media_item_info_, item_attr_, item_id_);
+   ELSE
+      Modify_Media_Item___(media_item_info_, item_attr_, item_id_);
+   END IF;
+END New_Or_Modify_Media_Item___;
+
+@IgnoreUnitTest TrivialFunction
+PROCEDURE New_Media_Item___ (
+   media_item_info_ IN OUT VARCHAR2,
+   item_attr_       IN OUT VARCHAR2,
+   item_id_         IN OUT NUMBER)
+IS
+   objid_           VARCHAR2(100);
+   objversion_      VARCHAR2(100);
+BEGIN
+   Media_Item_API.New__(media_item_info_, objid_, objversion_, item_attr_, 'DO');
+   item_id_ := Client_SYS.Get_Item_Value_To_Number('ITEM_ID', item_attr_, lu_name_);
+END New_Media_Item___;
+
+@IgnoreUnitTest TrivialFunction
+PROCEDURE Modify_Media_Item___ (
+   media_item_info_ IN OUT VARCHAR2,
+   item_attr_       IN OUT VARCHAR2,
+   item_id_         IN     NUMBER)
+IS
+   objid_           VARCHAR2(2000);
+   objversion_      VARCHAR2(2000);
+BEGIN
+   Media_Item_API.Get_Id_Ver_By_Keys_Pub(objid_, objversion_, item_id_);
+   Media_Library_Item_API.Modify_Media_Item(media_item_info_, item_attr_, objid_, objversion_);
+END Modify_Media_Item___;
+
+@IgnoreUnitTest TrivialFunction
+PROCEDURE Create_Library_Item_Attr___ (
+   library_item_attr_ IN OUT VARCHAR2,
+   library_item_rec_  IN     Media_Library_Item_API.Public_Rec,
+   attr_              IN     VARCHAR2 )
+IS
+BEGIN
+   Client_SYS.Add_To_Attr('ITEM_ID',       library_item_rec_.item_id,       library_item_attr_);
+   Client_SYS.Add_To_Attr('DEFAULT_MEDIA', library_item_rec_.default_media, library_item_attr_);
+   
+   IF Client_SYS.Item_Exist('NOTE_TEXT', attr_) THEN
+      Client_SYS.Add_To_Attr('NOTE_TEXT', Client_SYS.Get_Item_Value('NOTE_TEXT', attr_), library_item_attr_);
+   ELSE
+      Client_SYS.Add_To_Attr('NOTE_TEXT', library_item_rec_.note_text, library_item_attr_);
+   END IF;
+   
+   IF Client_SYS.Item_Exist('MEDIA_PRINT_OPTION_DB', attr_) THEN
+      Client_SYS.Add_To_Attr('MEDIA_PRINT_OPTION_DB', Client_SYS.Get_Item_Value('MEDIA_PRINT_OPTION_DB', attr_), library_item_attr_);
+   ELSE
+      Client_SYS.Add_To_Attr('MEDIA_PRINT_OPTION_DB', library_item_rec_.media_print_option, library_item_attr_);
+   END IF;
+END Create_Library_Item_Attr___;
+
+@IgnoreUnitTest TrivialFunction
+PROCEDURE Create_Item_Attr___ (
+   item_attr_ IN OUT VARCHAR2,
+   item_rec_  IN     Media_Item_API.Public_Rec,
+   attr_      IN     VARCHAR2 )
+IS
+BEGIN
+   IF Client_SYS.Item_Exist('NAME', attr_) THEN
+      Client_SYS.Add_To_Attr('NAME', Client_SYS.Get_Item_Value('NAME', attr_), item_attr_);
+   ELSE
+      Client_SYS.Add_To_Attr('NAME', item_rec_.name, item_attr_);
+   END IF;
+   
+   IF Client_SYS.Item_Exist('DESCRIPTION', attr_) THEN
+      Client_SYS.Add_To_Attr('DESCRIPTION', Client_SYS.Get_Item_Value('DESCRIPTION', attr_), item_attr_);
+   ELSE
+      Client_SYS.Add_To_Attr('DESCRIPTION', item_rec_.description, item_attr_);
+   END IF;
+   
+   IF Client_SYS.Item_Exist('PRIVATE_MEDIA_ITEM', attr_) THEN
+      Client_SYS.Add_To_Attr('PRIVATE_MEDIA_ITEM', Client_SYS.Get_Item_Value('PRIVATE_MEDIA_ITEM', attr_), item_attr_);
+   ELSE
+      Client_SYS.Add_To_Attr('PRIVATE_MEDIA_ITEM', item_rec_.private_media_item, item_attr_);
+   END IF;
+   
+   Client_SYS.Add_To_Attr('OBSOLETE', item_rec_.obsolete, item_attr_);
+END Create_Item_Attr___;

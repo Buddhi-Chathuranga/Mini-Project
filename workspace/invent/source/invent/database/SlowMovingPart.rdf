@@ -1,0 +1,655 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: Inventory Part
+--
+--  File:         SLMOVPA.RDF
+--
+--  Date    Sign    History
+--  ------  ----    -----------------------------------------------------------
+--  141124  DaZase  PRSC-4337, Replaced calls to Company_Address_Deliv_Info_API.Get_Address_Name with Site_API.Get_Company_Address_Name.
+--  140716  TiRalk  Bug 117850, Modified report method to print company name properly.
+--  120731  SBalLK  Bug 101597, Modified &REPMETHOD ( Report_Printout ) to get location specific document phrase id table and for enhance code readability.
+--  120618  SBallk  Bug 103080, Modified to print document phrases in line level.
+--  110826  LEPESE  Added call to User_Allowed_Site_API.Exist_With_Wildcard and added EXIST clause
+--  110826          for user_allowed_site_pub in cursor get_slow_moving_parts. 
+--  110228  ChJalk  Used inventory_part_period_hist_tab instead of inventory_part_period_hist base view in cursors. 
+--  091030  ShKolk  Bug 86768, Merge IPR to APP75 core.
+--  090930  ChFolk  Removed unused variables in the package.
+---------------------------------- 14.0.0 -------------------------------------
+--  080228  NiBalk  Bug 71726, Modified report method to add correct header for the lines in the report.
+--  071017  MarSlk  Bug 68105, Modified report method to consider issue limit
+--  071017          in both do_rs and do_xml code blocks.
+--  060630  MaJalk  Changed column name Standard Price to Unit Cost.
+--  060601  RoJalk  Enlarge Part Description - Changed view comments.
+-----------------------------------13.4.0--------------------------------------
+--  051216  SuJalk  Changed the parameter VIEW_RPV to REPTAB in Define_Report_.
+--  051116  HoInlk  Bug 54328, Added validations to Report_Printout method.
+--  050923  SaJjlk  Converted to Report Designer format.
+--  050419  SaJjlk  Modified reference views connected to from_year,from_period, to_year, to_period in view comments.
+--  050220  KaDilk  Bug 49391, Added CREATE_DATE as an input parameter when selecting slow moving parts.
+--  040610  NaWilk  Bug 44975, Modified FROM clause in view SLOW_MOVING_PART_REP.
+--  031016  PrJalk  Bug fix 106237, Added procedure Init.
+--  021113  SaRalk  Bug 33337, Added code which enables to add different logos for different companies. 
+--  020816  LEPESE  Replaced use of Inventory_Part_Config_API.Get_Inventory_Value_By_Method
+--                  to instead use Inventory_Part_Unit_Cost_API.Get_Inventory_Value_By_Config.
+--  **********************  AD Baseline  ***********************************************
+--  010604  ISWILK  Bug Fix 21576, Removed the earlier corrrections and modified the cursors 
+--                  get_slow_moving_parts and get_issues.
+--  010517  ISWILK  Bug Fix 21576, Modified the check when inserting to the report table. 
+--  010517  ISWILK  Bug Fix 21576, Added the check when inserting to the report table. 
+--  000927  ANLASE  Added where clause for cursors in method Inventory_Abc_Analysis to exclude configured
+--                  parts from abc-analysis. Replaced calls to Inventory_Part_API with calls to 
+--                  Inventory_Part_Config_API.
+--  000925  JOHESE  Added undefines.
+--  000922  ANLASE  Added configuration_id in call to Inventory_Part_Period_Hist_API.Get_Qty_Onhand.
+--  000502  ANLASE  Changed validation for from_period_ and to_period_, added ref in view comments
+--                  for from_period_ and to_period_, added NVLfunction in procedure &RepMethod for
+--                  site_, from_commodity_ and to_commodity_ to enable query on all sites and commodities.
+--  000428  ANLASE  Added validation for issue_limit_ and min_value_.
+--  000418  NISOSE  Added General_SYS.Init_Method in test.
+--  000417  SHVE    Replaced reference to obsolete method Inventory_Part_API.Get_Inventory_Value
+--                  with Inventory_Part_API.Get_Inventory_Value_By_Method.
+--  990209  SHVE    Removed in parameter cost_set.
+--  981106  SHVE    Changed logic to handle only cost set 1.
+--  971124  GOPE    Added Report_SYS.refresh
+--  970924  JOKE    Changed Error_SYS Messages syntax.
+--  970908  JOMC    Changed Unit of Measure handling to conform to UoM handling 
+--                  in Application Services
+--  970903  JOMC    Changed report table to module specific INVENT_INFOO_SERVICES_RPT
+--  970820  GOPE    Added some date checks
+--  970820  GOPE    Removed a empty line, in the create of the view part
+--  970815  GOPE    Created.   
+--
+-----------------------------------------------------------------------------
+
+define MODULE = INVENT
+define LU  = InventoryPart
+define PKG = SLOW_MOVING_PART_RPI
+
+define REPTAB    = INVENT_INFO_SERVICES_RPT
+define REPVIEW   = SLOW_MOVING_PART_REP
+DEFINE VIEW_RPV  = INVENT_INFO_SERVICES_RPV
+define REPMETHOD = Report_Printout
+
+define SITE               = S1
+define COMMODITY          = S2
+define PART_NO            = S3
+define PART_DESC          = S4
+define UNIT_MEAS          = S5
+define SITE_DESC          = S6
+define COMMODITY_DESC     = S7
+define DOCUMENT_PHRASE    = S8
+define QTY_ONHAND         = N1
+define STD_PRICE          = N2
+define INVENTORY_VALUE    = N3
+define QTY_ISSUED         = N4
+define QTY_ISSUED_PERCENT = N5
+
+-----------------------------------------------------------------------------
+-- PACKAGE SPECIFICATION:     INVENT_TURNO_RPI
+-----------------------------------------------------------------------------
+
+PROMPT Creating &PKG specification
+
+CREATE OR REPLACE PACKAGE &PKG IS
+
+module_  CONSTANT VARCHAR2(6) := '&MODULE';
+lu_name_ CONSTANT VARCHAR2(25) := '&LU';
+
+PROCEDURE &REPMETHOD (
+   report_attr_    IN VARCHAR2,
+   parameter_attr_ IN VARCHAR2 );
+
+PROCEDURE test (
+   report_key_            IN NUMBER,
+   site_                  IN VARCHAR2,
+   from_commodity_        IN VARCHAR2,
+   to_commodity_          IN VARCHAR2,
+   issue_limit_           IN NUMBER,
+   min_value_             IN NUMBER,
+   from_year_             IN NUMBER,
+   from_period_           IN NUMBER,
+   to_year_               IN NUMBER,
+   to_period_             IN NUMBER,
+   create_date_           IN DATE );
+
+PROCEDURE Init;
+
+END &PKG;
+/
+SHOW ERROR
+
+-----------------------------------------------------------------------------
+-- VIEWS                     
+-----------------------------------------------------------------------------
+
+PROMPT Creating report view &REPVIEW
+
+-- Drop the view before recreating it to make sure the view is created
+-- from scratch again.
+CREATE OR REPLACE VIEW &REPVIEW AS
+SELECT RESULT_KEY                            RESULT_KEY,
+       ROW_NO                                ROW_NO,
+       Parent_row_no                         PARENT_ROW_NO,
+       TO_CHAR(NULL)                         QUERY_SITE, 
+       TO_CHAR(NULL)                         FROM_COMMODITY,
+       TO_CHAR(NULL)                         TO_COMMODITY,
+       TO_NUMBER(NULL)                       ISSUE_LIMIT,
+       TO_NUMBER(NULL)                       MIN_VALUE,
+       TO_NUMBER(NULL)                       STAT_YEAR_NO,
+       TO_NUMBER(NULL)                       FROM_PERIOD,
+       TO_NUMBER(NULL)                       TO_YEAR,
+       TO_NUMBER(NULL)                       TO_PERIOD,
+       TO_DATE(NULL)                         CREATE_DATE,
+       &SITE                                 SITE,
+       &SITE_DESC                            SITE_DESC,
+       &COMMODITY                            COMMODITY,
+       &COMMODITY_DESC                       COMMODITY_DESC,
+       &PART_NO                              PART_NO,
+       &PART_DESC                            PART_DESC,
+       &UNIT_MEAS                            UNIT_MEAS,
+       &QTY_ONHAND                           QTY_ONHAND,
+       &STD_PRICE                            STD_PRICE,
+       &INVENTORY_VALUE                      INVENTORY_VALUE,
+       &QTY_ISSUED                           QTY_ISSUED,
+       &QTY_ISSUED_PERCENT                   QTY_ISSUED_PERCENT,
+       &DOCUMENT_PHRASE                      DOCUMENT_PHRASE
+FROM   &VIEW_RPV
+WITH   read only;
+
+COMMENT ON TABLE &REPVIEW IS
+   'MODULE=&MODULE^LU=&LU^PROMPT=&LU^';
+
+COMMENT ON COLUMN &REPVIEW..result_key IS 
+   'FLAGS=M----^';
+COMMENT ON COLUMN &REPVIEW..row_no IS 
+   'FLAGS=M----^DATATYPE=NUMBER^TITLE=Row No^ITEM_NAME=iRowNo^';
+COMMENT ON COLUMN &REPVIEW..parent_row_no IS 
+   'FLAGS=M----^';
+COMMENT ON COLUMN &REPVIEW..query_site IS 
+   'FLAGS=A----^DATATYPE=STRING(5)/UPPERCASE^QUERY=Site:^QFLAGS=MCS-L^REF=USER_ALLOWED_SITE_LOV^QVALUE=%^';
+COMMENT ON COLUMN &REPVIEW..from_commodity IS
+   'FLAGS=A----^DATATYPE=STRING(5)/UPPERCASE^QUERY=From Commodity:^QFLAGS=MCS-L^REF=COMMODITY_GROUP^QVALUE=%^';
+COMMENT ON COLUMN &REPVIEW..to_commodity IS
+   'FLAGS=A----^DATATYPE=STRING(5)/UPPERCASE^QUERY=To Commodity:^QFLAGS=MCS-L^REF=COMMODITY_GROUP^QVALUE=%^';
+COMMENT ON COLUMN &REPVIEW..issue_limit IS
+   'FLAGS=A----^DATATYPE=NUMBER^QUERY=Quantity issued in %:^QFLAGS=MCS--^';
+COMMENT ON COLUMN &REPVIEW..min_value IS
+   'FLAGS=A----^DATATYPE=NUMBER^QUERY=Min Inventory Value:^QFLAGS=MCS--^';
+COMMENT ON COLUMN &REPVIEW..stat_year_no IS
+   'FLAGS=A----^DATATYPE=NUMBER(4)^QUERY=From Year:^QFLAGS=-WS--^REF=STATISTIC_PERIOD2^';
+COMMENT ON COLUMN &REPVIEW..from_period IS
+   'FLAGS=A----^DATATYPE=NUMBER^QUERY=From Period:^QFLAGS=-WS--^REF=StatisticPeriod(stat_year_no)^';
+COMMENT ON COLUMN &REPVIEW..to_year IS
+   'FLAGS=A----^DATATYPE=NUMBER^QUERY=To Year:^QFLAGS=-WS--^REF=STATISTIC_PERIOD2^';
+COMMENT ON COLUMN &REPVIEW..to_period IS
+   'FLAGS=A----^DATATYPE=NUMBER^QUERY=To Period:^QFLAGS=-WS--^REF=STATISTIC_PERIOD4(to_year)^';
+COMMENT ON COLUMN &REPVIEW..create_date IS
+   'FLAGS=A----^DATATYPE=DATE/DATE^QUERY=Create Date:^QFLAGS=-WS--^';
+COMMENT ON COLUMN &REPVIEW..site IS 
+   'FLAGS=A----^DATATYPE=STRING(5)^TITLE=Site^ITEM_NAME=iSite^';
+COMMENT ON COLUMN &REPVIEW..site_desc IS 
+   'FLAGS=A----^DATATYPE=STRING(20)^TITLE=Site Description^ITEM_NAME=iSiteDesc^';
+COMMENT ON COLUMN &REPVIEW..commodity IS 
+   'FLAGS=A----^DATATYPE=STRING(5)^TITLE=Commodity^ITEM_NAME=iCommodity^';
+COMMENT ON COLUMN &REPVIEW..commodity_desc IS 
+   'FLAGS=A----^DATATYPE=STRING(35)^TITLE=Commodity Description^ITEM_NAME=iCommodityDesc^';
+COMMENT ON COLUMN &REPVIEW..part_no IS 
+   'FLAGS=A----^DATATYPE=STRING(25)^TITLE=Part No^ITEM_NAME=iPartNo^';
+COMMENT ON COLUMN &REPVIEW..part_desc IS 
+   'FLAGS=A----^DATATYPE=STRING(200)^TITLE=Part Description^ITEM_NAME=iPartDesc^';
+COMMENT ON COLUMN &REPVIEW..unit_meas IS 
+   'FLAGS=A----^DATATYPE=STRING(10)^TITLE=U/M^ITEM_NAME=iUnitMeas^';
+COMMENT ON COLUMN &REPVIEW..qty_onhand IS 
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Qty Onhand^ITEM_NAME=iQtyOnhand^';
+COMMENT ON COLUMN &REPVIEW..std_price IS 
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Unit Cost^ITEM_NAME=iStdPrice^';
+COMMENT ON COLUMN &REPVIEW..inventory_value IS 
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Inventory Value^ITEM_NAME=iInventoryValue^';
+COMMENT ON COLUMN &REPVIEW..qty_issued IS 
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Qty Issued^ITEM_NAME=iQtyIssued^';
+COMMENT ON COLUMN &REPVIEW..qty_issued_percent IS 
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Qty Issued (%)^ITEM_NAME=iQtyIssuedPercent^';
+COMMENT ON COLUMN &REPVIEW..document_phrase
+   IS 'FLAGS=A----^DATATYPE=STRING(2000)^TITLE=Document Phrase^ITEM_NAME=iDocumentPhrase^';
+
+begin
+   Report_SYS.Define_Report_( '&REPVIEW', '&MODULE', '&LU', 'Slow Moving Inventory Parts', '&REPTAB', '&PKG..&REPMETHOD', 0, NULL, NULL, NULL, 'PLSQL1.2','TRUE','Warehouse Management','Warehouse Statistics');
+   Report_SYS.Refresh_('&REPVIEW');   
+end;   
+/
+-----------------------------------------------------------------------------
+-- PACKAGE IMPLEMENTATION     INVENTORY_PART_RPI
+-----------------------------------------------------------------------------
+
+PROMPT Creating &PKG implementation
+
+CREATE OR REPLACE PACKAGE BODY &PKG IS
+
+PROCEDURE &REPMETHOD (
+   report_attr_    IN VARCHAR2,
+   parameter_attr_ IN VARCHAR2 )
+IS
+   result_key_             NUMBER;
+   row_no_                 NUMBER;
+   to_year_                NUMBER;
+   to_period_              NUMBER;
+   from_year_              NUMBER;
+   from_period_            NUMBER;
+   from_year_period_       NUMBER;
+   to_year_period_         NUMBER;
+   from_commodity_         VARCHAR2(5);
+   to_commodity_           VARCHAR2(5);
+   issue_limit_            NUMBER;
+   min_value_              NUMBER;
+   site_                   VARCHAR2(5);
+   issues_                 NUMBER;
+   issues_percent_         NUMBER;
+   qty_onhand_             NUMBER;
+   phrase_                 VARCHAR2(2000);
+
+   to_                     NUMBER;
+   site_found_             BOOLEAN;
+   logotype_               VARCHAR2(100);  
+   company_                VARCHAR2(20);
+   company_name_           VARCHAR2(100);
+   create_date_            DATE := NULL; 
+                           
+   do_xml_                 BOOLEAN := Report_SYS.Should_Generate_Xml('&REPVIEW');
+   do_rs_                  BOOLEAN := Report_SYS.Should_Generate_Result_Set('&REPVIEW');
+   xml_                    CLOB;
+   package_name_           VARCHAR2(100) := 'SLOW_MOVING_PART_REP';
+
+   previous_commodity_     VARCHAR2(10) := NULL;
+   previous_site_          VARCHAR2(5)  := NULL;
+
+   language_code_          VARCHAR2(4);
+   parent_row_no_          NUMBER := 0;
+   phrase_on_document_tab_ Phrase_On_Document_API.Phrase_Id_Tab;
+   
+   CURSOR get_slow_moving_parts IS
+      SELECT p.part_no,
+             p.description,
+             p.contract,
+             ph.qty_onhand,
+             p.unit_meas,
+             Inventory_Part_Unit_Cost_API.Get_Inventory_Value_By_Config(p.contract, p.part_no, '*') std_price,
+             p.second_commodity
+      FROM inventory_part_period_hist_tab ph,
+           inventory_part p,
+           part_catalog_pub pc
+      WHERE min_value_ < Inventory_Part_Unit_Cost_API.Get_Inventory_Value_By_Config(p.contract, p.part_no, '*') * ph.qty_onhand
+        AND ph.part_no        = p.part_no
+        AND ph.part_no        = pc.part_no
+        AND p.contract        LIKE site_
+        AND ph.contract       = p.contract
+        AND pc.configurable   = 'NOT CONFIGURED'
+        AND ph.stat_year_no   = to_year_
+        AND ph.stat_period_no = to_period_
+        AND p.second_commodity BETWEEN from_commodity_ AND to_commodity_
+        AND (( create_date_ IS NULL) OR ( p.create_date < create_date_ ))
+        AND EXISTS (SELECT 1 FROM user_allowed_site_pub WHERE site = p.contract)
+      ORDER BY p.contract, p.second_commodity, p.part_no;
+
+   CURSOR get_issues (contract_ VARCHAR2, part_no_ VARCHAR2) IS
+      SELECT SUM(ph.mtd_issues + ph.mtd_abnormal_issues)
+      FROM inventory_part_period_hist_tab ph, 
+           part_catalog_pub pc 
+      WHERE ph.part_no        = part_no_
+        AND ph.contract       = contract_
+        AND ph.part_no        = pc.part_no
+        AND pc.configurable   = 'NOT CONFIGURED'
+        AND ((ph.stat_year_no * 1000) + ph.stat_period_no) BETWEEN 
+            ((from_year_   * 1000) + from_period_)   AND 
+            ((to_year_     * 1000) + to_period_);
+      
+   CURSOR min_commodity IS
+      SELECT MIN(commodity_code) 
+      FROM commodity_group
+      WHERE commodity_code LIKE from_commodity_;
+
+   CURSOR max_commodity IS
+      SELECT MAX(commodity_code) 
+      FROM commodity_group
+      WHERE commodity_code LIKE to_commodity_;
+
+   CURSOR min_year IS
+      SELECT MIN(stat_year_no) 
+      FROM inventory_part_period_hist_tab;
+
+   CURSOR min_period IS
+      SELECT MIN(stat_period_no) 
+      FROM inventory_part_period_hist_tab
+      WHERE stat_year_no = from_year_;
+      
+   CURSOR max_year IS
+      SELECT MAX(stat_year_no) 
+      FROM inventory_part_period_hist_tab;
+
+   CURSOR max_period IS
+      SELECT MAX(stat_period_no) 
+      FROM inventory_part_period_hist_tab
+      WHERE stat_year_no = to_year_;
+      
+BEGIN
+   GENERAL_SYS.INIT_METHOD(lu_name_, '&PKG', '&REPMETHOD');
+
+   result_key_       := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Item_Value('RESULT_KEY', report_attr_));
+   site_             := NVL(Client_SYS.Get_Item_Value('QUERY_SITE', parameter_attr_),'%');  
+   from_commodity_   := NVL(Client_SYS.Get_Item_Value('FROM_COMMODITY', parameter_attr_),'%');
+   to_commodity_     := NVL(Client_SYS.GET_Item_Value('TO_COMMODITY', parameter_attr_),'%');
+   issue_limit_      := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Item_Value('ISSUE_LIMIT', parameter_attr_)); 
+   min_value_        := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Item_Value('MIN_VALUE', parameter_attr_)); 
+   from_year_        := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Item_Value('STAT_YEAR_NO', parameter_attr_));
+   from_period_      := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Item_Value('FROM_PERIOD', parameter_attr_));
+   to_year_          := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Item_Value('TO_YEAR', parameter_attr_)); 
+   to_period_        := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Item_Value('TO_PERIOD', parameter_attr_));
+   from_year_period_ := (from_year_ * 1000) + from_period_;
+   to_year_period_   := (to_year_   * 1000) + to_period_;
+   create_date_      := TO_DATE(Client_SYS.Get_Item_Value('CREATE_DATE', parameter_attr_), 'YYYY-MM-DD');
+
+   row_no_ := 0;
+
+   User_Allowed_Site_API.Exist_With_Wildcard(site_);
+
+   IF (issue_limit_ IS NULL) THEN
+     Error_SYS.Record_General(lu_name_, 'NULLISSUELIM: Quantity Issued in % must be specified.');
+   END IF;
+
+   IF (min_value_ IS NULL) THEN
+     Error_SYS.Record_General(lu_name_, 'NULLMINVALUE: Minimum Inventory Value must be specified.');
+   END IF;
+   
+   IF (do_xml_) THEN
+      Xml_Record_Writer_SYS.Create_Report_Header(xml_,'&REPVIEW',package_name_);
+      Xml_Record_Writer_SYS.Start_Element(xml_, 'SLOW_MOVING_HEADERS');
+   END IF;
+
+   OPEN min_commodity;
+   FETCH min_commodity INTO from_commodity_;
+   CLOSE min_commodity;
+
+   OPEN max_commodity;
+   FETCH max_commodity INTO to_commodity_;
+   CLOSE max_commodity;
+
+   IF (issue_limit_ < 0) THEN
+     Error_SYS.Record_General(lu_name_, 'NEGISSUELIM: Quantity Issued may not be negative.');
+   END IF;
+
+   IF (min_value_ < 0) THEN
+     Error_SYS.Record_General(lu_name_, 'NEGMINVALUE: Minimum Inventory Value may not be negative.');
+   END IF;
+
+   IF from_year_ IS NULL THEN
+      OPEN min_year;
+      FETCH min_year INTO from_year_;
+      CLOSE min_year;
+   END IF;
+ 
+   IF from_period_ IS NULL THEN
+      OPEN min_period;
+      FETCH min_period INTO from_period_;
+      CLOSE min_period;
+   END IF;
+
+   IF to_year_ IS NULL THEN
+      OPEN max_year;
+      FETCH max_year INTO to_year_;
+      CLOSE max_year;
+   END IF;
+   
+   IF to_period_ IS NULL THEN
+      OPEN max_period;
+      FETCH max_period INTO to_period_;
+      CLOSE max_period;
+   END IF;
+
+   IF from_year_ < 1000 THEN
+      Error_SYS.Record_Exist(lu_name_,'FROMYEAR: The [From year] must be specified with century');
+   END IF;   
+
+   IF to_year_ < 1000 THEN
+      Error_SYS.Record_Exist(lu_name_,'TOYEAR: The [To year] must be specified with century');
+   END IF;   
+
+   IF from_year_period_ > 
+      to_year_period_ THEN
+      Error_SYS.Record_Exist(lu_name_,'PERIODCHECK: The from Period shall be less or equal to the to Period');
+   END IF;
+
+   IF (do_xml_) THEN
+      Xml_Record_Writer_SYS.Start_Element(xml_, 'SLOW_MOVING_HEADER');
+   END IF;
+
+   site_found_ := FALSE;
+
+   IF (do_xml_) THEN
+      Xml_Record_Writer_SYS.Start_Element(xml_, 'SLOW_MOVING_LINES');
+   END IF;
+
+   IF (site_ = '%') THEN
+      company_name_ := Site_Text_API.Get_Text('companyName');
+      Archive_Variable_API.Set_Variable(result_key_, 'companyName', company_name_);
+      site_found_   := TRUE;
+   END IF;
+   
+   FOR slow_part IN get_slow_moving_parts LOOP
+      Trace_SYS.Message('Contract: '||slow_part.contract||' Part: '||slow_part.part_no||' Commodity: '||slow_part.second_commodity); 
+      IF (site_found_ = FALSE) THEN
+         company_      := Site_API.Get_Company(Upper(slow_part.contract));
+         logotype_     := Company_API.Get_Logotype(company_);  
+         company_name_ := Site_API.Get_Company_Address_Name(slow_part.contract);
+
+         IF (logotype_ IS NOT NULL ) THEN
+            Archive_Variable_API.Set_Object(result_key_, 'rhSysLogo', logotype_);
+            Archive_Variable_API.Set_Variable(result_key_, 'companyName', company_name_);
+            site_found_ := TRUE; 
+         END IF;
+      END IF;     
+
+      OPEN get_issues(slow_part.contract, slow_part.part_no);
+         FETCH get_issues INTO issues_;
+      CLOSE get_issues;
+      qty_onhand_ := Inventory_Part_Period_Hist_API.Get_Total_Qty_Onhand(slow_part.contract, slow_part.part_no, '*', to_year_, to_period_);
+      IF qty_onhand_ IS NULL OR qty_onhand_ = 0 THEN
+         issues_percent_ := issues_ * 100;
+      ELSE
+         issues_percent_ := issues_ / qty_onhand_ * 100;
+      END IF;
+      
+      IF (issue_limit_ >= issues_percent_) THEN      
+         IF (do_xml_) THEN
+            Xml_Record_Writer_SYS.Start_Element(xml_, 'SLOW_MOVING_LINE');
+            IF (previous_site_ IS NULL) OR (previous_site_ != slow_part.contract) THEN
+               Xml_Record_Writer_SYS.Add_Element(xml_,'SITE', slow_part.contract);
+
+               language_code_ := Language_SYS.Get_Language;
+               IF language_code_ IS NOT NULL THEN
+                  IF (do_xml_) THEN
+                     Xml_Record_Writer_SYS.Start_Element(xml_, 'DOC_PHRASES');
+                  END IF;
+                  
+                  phrase_on_document_tab_ := Phrase_On_Document_API.Get_Phrase_Id_Tab( 'PASLMOVR', NULL, slow_part.contract);
+                  
+                  IF (phrase_on_document_tab_.COUNT > 0) THEN
+                     FOR n IN phrase_on_document_tab_.FIRST..phrase_on_document_tab_.LAST LOOP
+                        phrase_ := Mpccom_Phrase_Text_API.Get_Phrase_Text( phrase_on_document_tab_(n), language_code_);
+                        IF (phrase_ IS NOT NULL) THEN
+                           IF (do_xml_) THEN
+                              Xml_Record_Writer_SYS.Start_Element(xml_, 'DOC_PHRASE');
+                              Xml_Record_Writer_SYS.Add_Element(xml_, 'DOCUMENT_PHRASE', phrase_ );
+                              Xml_Record_Writer_SYS.End_Element(xml_, 'DOC_PHRASE');
+                           END IF;
+                           IF (do_rs_) THEN
+                              INSERT INTO &REPTAB(
+                                                  result_key, row_no, parent_row_no, &DOCUMENT_PHRASE )
+                              VALUES(
+                                     result_key_, row_no_, parent_row_no_, phrase_ );
+                           END IF;
+                           row_no_ := row_no_ + 1;
+                        END IF;
+                     END LOOP;
+                  END IF;
+                  IF (do_xml_) THEN
+                     Xml_Record_Writer_SYS.End_Element(xml_, 'DOC_PHRASES');
+                  END IF;
+               END IF;
+            END IF;
+            
+            Xml_Record_Writer_SYS.Add_Element(xml_,'SITE_DESC', Site_API.Get_Description(slow_part.contract));
+            IF (previous_commodity_ IS NULL) OR (previous_commodity_ != slow_part.second_commodity) OR (previous_site_ != slow_part.contract) THEN
+               Xml_Record_Writer_SYS.Add_Element(xml_,'COMMODITY', slow_part.second_commodity);
+            END IF;
+            Xml_Record_Writer_SYS.Add_Element(xml_,'COMMODITY_DESC', Commodity_Group_API.Get_Description(slow_part.second_commodity));
+            Xml_Record_Writer_SYS.Add_Element(xml_,'PART_NO', slow_part.part_no);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'PART_DESC', slow_part.description);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'UNIT_MEAS', slow_part.unit_meas);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'QTY_ONHAND', slow_part.qty_onhand);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'STD_PRICE', slow_part.std_price);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'INVENTORY_VALUE', slow_part.qty_onhand * slow_part.std_price);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'QTY_ISSUED', issues_);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'QTY_ISSUED_PERCENT', issues_percent_);
+         END IF;
+      
+         IF (do_rs_) THEN
+            INSERT INTO &REPTAB(
+               result_key,
+               row_no, 
+               parent_row_no,
+               &SITE,
+               &SITE_DESC,
+               &PART_NO,
+               &PART_DESC,
+               &COMMODITY,
+               &COMMODITY_DESC,
+               &UNIT_MEAS,
+               &QTY_ONHAND,
+               &STD_PRICE,
+               &INVENTORY_VALUE,
+               &QTY_ISSUED,
+               &QTY_ISSUED_PERCENT)
+            VALUES(
+               result_key_,
+               row_no_,
+               0,
+               slow_part.contract,
+               Site_API.Get_Description(slow_part.contract),
+               slow_part.part_no,
+               slow_part.description,
+               slow_part.second_commodity,
+               Commodity_Group_API.Get_Description(slow_part.second_commodity),
+               slow_part.unit_meas,
+               slow_part.qty_onhand,
+               slow_part.std_price,
+               slow_part.qty_onhand * slow_part.std_price,
+               issues_,
+               issues_percent_);
+         END IF;
+
+         parent_row_no_ := row_no_;
+         row_no_ := row_no_ +1;                                                  
+
+         IF (do_xml_) THEN
+            Xml_Record_Writer_SYS.End_Element(xml_, 'SLOW_MOVING_LINE');
+         END IF;
+         previous_site_      := slow_part.contract;
+         previous_commodity_ := slow_part.second_commodity;
+      END IF;
+   END LOOP;
+
+   IF site_found_ = FALSE THEN  
+      to_ := instr(site_, ';', 1);
+      IF (to_ = 0) AND (site_  <> '%') THEN    
+         company_      := Site_API.Get_Company(site_);
+         logotype_     := Company_API.Get_Logotype(company_);  
+         company_name_ := Site_API.Get_Company_Address_Name(site_);
+
+         IF (logotype_ IS NOT NULL ) THEN
+            Archive_Variable_API.Set_Object(result_key_, 'rhSysLogo', logotype_);
+            Archive_Variable_API.Set_Variable(result_key_, 'companyName', company_name_);
+         END IF;
+      END IF;
+   END IF;
+   IF (do_xml_) THEN
+      Xml_Record_Writer_SYS.End_Element(xml_, 'SLOW_MOVING_LINES');
+      Xml_Record_Writer_SYS.End_Element(xml_, 'SLOW_MOVING_HEADER');
+      Xml_Record_Writer_SYS.End_Element(xml_, 'SLOW_MOVING_HEADERS');
+      Xml_Record_Writer_SYS.End_Element(xml_,'&REPVIEW');
+      Report_SYS.Finish_Xml_Report('&REPVIEW',result_key_,xml_);
+   END IF;
+END &REPMETHOD;
+
+PROCEDURE test (
+   report_key_            IN NUMBER,
+   site_                  IN VARCHAR2,
+   from_commodity_        IN VARCHAR2,
+   to_commodity_          IN VARCHAR2,
+   issue_limit_           IN NUMBER,
+   min_value_             IN NUMBER,
+   from_year_             IN NUMBER,
+   from_period_           IN NUMBER,
+   to_year_               IN NUMBER,
+   to_period_             IN NUMBER,
+   create_date_           IN DATE )
+IS
+   reportAttr_    VARCHAR2(200);
+   parameterAttr_ VARCHAR2(200);
+BEGIN
+   General_SYS.Init_Method(lu_name_, '&PKG', 'test');
+   CLIENT_SYS.ADD_TO_ATTR('RESULT_KEY', report_key_, reportAttr_);
+   CLIENT_SYS.ADD_TO_ATTR('QUERY_SITE', site_, parameterAttr_);
+   CLIENT_SYS.ADD_TO_ATTR('FROM_COMMODITY', from_commodity_, parameterAttr_);
+   CLIENT_SYS.ADD_TO_ATTR('TO_COMMODITY', to_commodity_, parameterAttr_);
+   CLIENT_SYS.ADD_TO_ATTR('LIMIT_ISSUE', issue_limit_, parameterAttr_);
+   CLIENT_SYS.ADD_TO_ATTR('MIN_VALUE', min_value_, parameterAttr_);
+   CLIENT_SYS.ADD_TO_ATTR('TO_YEAR', from_year_, parameterAttr_);
+   CLIENT_SYS.ADD_TO_ATTR('TO_PERIOD', to_period_, parameterAttr_);
+   CLIENT_SYS.ADD_TO_ATTR('STAT_YEAR_NO', from_year_, parameterAttr_);
+   CLIENT_SYS.ADD_TO_ATTR('FROM_PERIOD', from_period_, parameterAttr_);
+   Client_SYS.Add_To_Attr('CREATE_DATE', TO_CHAR(create_date_,'YYYY-MM-DD'), parameterAttr_);
+
+   &REPMETHOD(reportAttr_, parameterAttr_);
+END test;
+
+-----------------------------------------------------------------------------
+-------------------- FOUNDATION1 METHODS ------------------------------------
+-----------------------------------------------------------------------------
+-- Init
+--   Dummy procedure that can be called at database startup to ensure that
+--   this package is loaded into memory for performance reasons only.
+-----------------------------------------------------------------------------
+
+PROCEDURE Init
+IS
+BEGIN
+   NULL;
+END Init;
+
+
+END &PKG;
+/
+
+SHOW ERROR
+
+
+UNDEFINE MODULE
+UNDEFINE LU
+UNDEFINE PKG
+UNDEFINE REPTAB
+UNDEFINE REPVIEW
+UNDEFINE REPMETHOD
+UNDEFINE SITE
+UNDEFINE COMMODITY
+UNDEFINE PART_NO
+UNDEFINE PART_DESC
+UNDEFINE UNIT_MEAS
+UNDEFINE SITE_DESC
+UNDEFINE COMMODITY_DESC
+UNDEFINE DOCUMENT_PHRASE
+UNDEFINE QTY_ONHAND
+UNDEFINE STD_PRICE
+UNDEFINE INVENTORY_VALUE
+UNDEFINE QTY_ISSUED
+UNDEFINE QTY_ISSUED_PERCENT
+UNDEFINE VIEW_RPV

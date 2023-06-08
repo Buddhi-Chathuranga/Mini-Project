@@ -1,0 +1,239 @@
+--------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  ---------------------------------------------------------------
+--
+-- DO NOT CHANGE THIS FILE! DO NOT CHANGE THIS FILE! DO NOT CHANGE THIS FILE! DO NOT CHANGE THIS FILE! DO NOT CHANGE THIS FILE!
+-- DO NOT CHANGE THIS FILE! DO NOT CHANGE THIS FILE! DO NOT CHANGE THIS FILE! DO NOT CHANGE THIS FILE! DO NOT CHANGE THIS FILE!
+-- DO NOT CHANGE THIS FILE! DO NOT CHANGE THIS FILE! DO NOT CHANGE THIS FILE! DO NOT CHANGE THIS FILE! DO NOT CHANGE THIS FILE!
+--
+--                  There is a new implementation of this functionality found in the MediaLibraryAttachment* files.
+--                  All changes and fixes should be done in the new files.
+--
+-- DO NOT CHANGE THIS FILE! DO NOT CHANGE THIS FILE! DO NOT CHANGE THIS FILE! DO NOT CHANGE THIS FILE! DO NOT CHANGE THIS FILE!
+-- DO NOT CHANGE THIS FILE! DO NOT CHANGE THIS FILE! DO NOT CHANGE THIS FILE! DO NOT CHANGE THIS FILE! DO NOT CHANGE THIS FILE!
+-- DO NOT CHANGE THIS FILE! DO NOT CHANGE THIS FILE! DO NOT CHANGE THIS FILE! DO NOT CHANGE THIS FILE! DO NOT CHANGE THIS FILE!
+--------------------------------------------------------------------------------------
+
+client MediaPanel;
+component APPSRV;
+layer Core;
+
+-------------------------------- MAIN PAGES ---------------------------------
+
+page MediaPage using MediaLibrarySet {
+   label = "Media Library";
+   list MediaList;
+   command CreateNewMediaCommand;
+   command ManageMediaCommand;
+}
+
+--------------------------------- COMMANDS ----------------------------------
+
+command CreateNewMediaCommand for MediaLibrary {
+
+   label = "Upload Media Item";
+
+   variable EditableLogicalUnit;
+   variable LuNameMediaAware;
+
+   execute {
+
+      // Handle Object Connection Transformation
+
+      call GetEditableLuName(LuName, "MediaLibrary") into EditableLogicalUnit;
+      call GetLuNameMediaAware(EditableLogicalUnit) into LuNameMediaAware;
+
+      if [EditableLogicalUnit = null] {
+         alert("Editable flag of Object Connection Transformation is None. New connections are not allowed.");
+      }
+      else {
+         if [LuNameMediaAware = "FALSE"] {
+            alert("LU ${EditableLogicalUnit} is not media aware.");
+         }
+         else {
+            dialog CreateNewMediaDlg(LuName, KeyRef) {
+               when OK {
+                  refresh;
+                  exit;
+               }
+            }
+         }
+      }
+   }
+}
+
+command ManageMediaCommand for MediaLibrary {
+   label = "Manage Media";
+   variable VarLibraryId Text;
+   variable LuNameMediaAware;
+   variable EditableLogicalUnit;
+   execute {
+      call GetEditableLuName(LuName, "MediaLibrary") into EditableLogicalUnit;
+      call GetLuNameMediaAware(EditableLogicalUnit) into LuNameMediaAware;
+      if [LuNameMediaAware = "FALSE"] {
+         alert("LU ${EditableLogicalUnit} is not media aware.");
+      }
+      else {
+         call GetLibraryId(LuName, KeyRef) into VarLibraryId;
+
+         // Below, KeyRef left out of the navigation URL on purpose,
+         // to handle better scenarios where we use OCT rules. In some
+         // cases, the KeyRef and LU on the page the user comes from
+         // are not the same as where the attachment is really
+         // saved. This happens for OCT rules where Editable = Source.
+
+         navigate "page/MediaLibraryManager/Form?$filter=LibraryId eq $[VarLibraryId]";
+      }
+   }
+}
+command CreateAndConnectMediaCommand for CreateNewMediaStruct {
+
+   label = "Upload";
+   icon = "upload";
+
+   variable SourceLuName;
+   variable SourceLuNameToUse;
+   variable SourceKeyRef;
+   variable SourceKeyRefToUse;
+   variable MediaKeys {
+      type = Structure(MediaKeysStruct);
+   }
+
+   variable SucessMessage;
+
+   enabled = [(not component.UploadQueue.IsEmpty) and(component.UploadQueue.InvalidFileList = "")];
+
+   execute {
+
+      if [component.UploadQueue.Count > 1] {
+         set SucessMessage = "New files have been created and attached.";
+      }
+      else {
+         set SucessMessage = "New file has been created and attached.";
+      }
+
+      call GetEditableLuName(LuName, "MediaLibrary") into SourceLuName;
+
+      if [SourceLuName != LuName] {
+         call GetTransformedKeyRef(LuName, SourceLuName, "MediaLibrary", KeyRef) into SourceKeyRef;
+         set SourceKeyRefToUse = SourceKeyRef;
+         set SourceLuNameToUse = SourceLuName;
+      }
+      else {
+         set SourceLuNameToUse = LuName;
+         set SourceKeyRefToUse = KeyRef;
+      }
+
+      if [SourceKeyRefToUse = null] {
+         alert("Cannot connect media. An Object Connection Transformation rule might be invalid. Original LU = ${LuName}, Source LU to use = ${SourceLuNameToUse}");
+      }
+      else {
+         upload "MediaItemSet(ItemId=$[MediaKeys.ItemId])/MediaObject" {
+            call CreateAndConnectMedia(SourceLuNameToUse, SourceKeyRefToUse, Name, Description) into MediaKeys;
+         }
+         info("${SucessMessage}");
+      }
+
+      exit OK;
+
+   }
+}
+
+command DetachMediaCommand {
+   label = "Detach media item";
+   execute {
+      confirm("Do you want to detach this media item?") {
+         when OK {
+            alert("Delete media logic comes here");
+         }
+      }
+   }
+}
+
+----------------------------- VISUAL COMPONENTS -----------------------------
+
+list MediaList for MediaLibrary {
+   field LuName;
+   field KeyRef;
+   field LibraryId;
+   command DetachMediaCommand;
+}
+
+dialog CreateNewMediaDlg for CreateNewMediaStruct {
+
+   label = "Upload Media Item to Media Library";
+
+   input(LuName, KeyRef);
+
+   fileselector {
+      multifile = [true];
+
+      init command {
+         execute {
+            call GetMediaFileExtList() into component.UploadQueue.AcceptedExtensions;
+         }
+      }
+
+      onfileselect {
+
+         execute {
+
+            if[component.UploadQueue.Count = 1] {
+               // Let's try to get a good value for Name, based on the file name.
+               // Let Description be empty. It will default to the full file name later
+               // on. It would look strange to prefill both with the same value...
+               call ExtractTitleFromFileName(component.UploadQueue.FileList) into Name;
+            }
+
+            // Clear the name since the user will probably not use the name
+            // that came from the first selected file. Keep the Description though
+            // since that might be useful to have the same for all.
+            if[component.UploadQueue.Count > 1] {
+               set Name = "";
+            }
+         }
+      }
+
+      onfiledelete {
+         execute {
+            // If the user first selected multiple files and if he removes all
+            // but one, try to be nice and suggest a new name if it is empty.
+            if[(component.UploadQueue.Count = 1) and(Name = null)] {
+               call ExtractTitleFromFileName(component.UploadQueue.FileList) into Name;
+            }
+         }
+
+      }
+
+
+      label = "Browse";
+
+   }
+
+   group {
+
+      label = "Enter Media Item Information";
+
+      field LuName {
+         visible = [false];
+      }
+      field KeyRef {
+         visible = [false];
+      }
+
+      field Name {
+         label = "Name (Blank = use filename. Not blank = use for all files)";
+         size = FullWidth;
+         maxlength = 250;
+      }
+      field Description {
+         label = "Description (Blank = use filename. Not blank = use for all files)";
+         size = FullWidth;
+         maxlength = 250;
+      }
+
+   }
+
+   command CreateAndConnectMediaCommand;
+   command Cancel;
+}

@@ -1,0 +1,1110 @@
+------------------------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  -------------------------------------------------------------------------------
+-- 2022-01-28  ErFelk  Bug 162143(SC21R2-7321), Revert the correction done by bug 159019.
+-- 2021-06-09  ErFelk  Bug 159019(SCZ-14501), Added validate command for fields NotcRef and IntrastatDirection. Raised appropriate messages.
+-- 2021-03-04  ApWilk  Bug 156696(SCZ-13937), Modified the group TransferIntrastatOptionsGroup to use the PreIntrastatId.
+-- 2021-02-22  WaSalk  SC2020R1-12576,Removed fragment LocalizationControlCenterHandler and InitLocalizationFunctionalitiesCommand to support new LCC concept and
+-- 2021-02-22          controlled visibility of fields and columns where ItalyIntrastat applicable.
+-- 2020-11-16  Aabalk  SC2020R1-9294, Handled true false values for enumeration fields.
+-- 2020-08-31  SBalLK  GESPRING20-537, Added InvoiceDate, ServiceStatisticalCode, ServiceWay, ServicePaymentWay, OppositeCountryCurrCode, OppositeCountryCurrAmount,
+-- 2020-08-31          AdjustToPreviousIntrastat, PrevIntrastatInvoicDate, AdvanceTransaction, PaymentMethod, ReferenceInvoiceSerie, ReferenceInvoiceNumber,
+-- 2020-08-31          ReferenceInvoiceDate, ProtocolNo attribute to enable italy intrastat localization.
+-- 2020-03-27  DiJwlk  Bug 151817(SCZ-8470), Added field to display ConsolidationFlag
+-- 2019-04-30  ErFelk  SCUXXW4-6146, Disable the print command buttons if the ReportViewName is null.
+-- 2019-03-22  ErFelk  SCUXXW4-6146, Implemented an assistant instead of a dialog to handle File transfer logic.
+-- 2019-02-19  Asawlk  SCUXXW4-6146, Performed the corrections related to the Intrastat Line. Implemented command buttons "Cancel" and
+-- 2019-02-19          "Update intrastat Lines".
+-- 2018-11-23  ErFelk  SCUXXW4-6146, Converted from frmIntrastat using MTG Version: 1.32
+------------------------------------------------------------------------------------------------------
+
+client Intrastat;
+component INVENT;
+layer Core;
+projection IntrastatHandling;
+include fragment PersonInfoPublicLovSelector;
+include fragment CustomsInfoPublicSelector;
+include fragment PersonInfoPublicSelector;
+include fragment OrderDeliveryTermLovSelector;
+include fragment CountryNotcLovSelector;
+include fragment SiteCompanyLovSelector;
+
+warningsenabled = SetPrintTransferredButtons;
+warningsenabled = SetPrintTransferred;
+warningsenabled = CreateNewFile;
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+navigator {
+   entry IntrastatNavEntry parent InventNavigator.WarehouseManagementIntrastatReporting at index 100 {
+      label = "Intrastat";
+      page Form home Intrastat;
+   }
+}
+-------------------------------- MAIN PAGES ---------------------------------
+page Form using IntrastatSet {
+   label = "Intrastat";
+   startupmode = search;
+   stateindicator IntrastatStateIndicator;
+   selector IntrastatSelector;
+   group IntrastatGroup;
+
+   group IntrastatRepresentativeInfoGroup;
+
+   group IntrastatPrintedTransferredGroup;
+
+
+   tabs {
+      tab {
+         label = "Intrastat Lines";
+
+         list IntrastatLinesList(IntrastatLineArray) {
+            copyoncruddefault(CountryCode) to(CountryCode);
+         }
+      }
+      tab {
+         label = "Miscellaneous";
+
+         group IntrastatMiscInfoGroup;
+         group IntrastatPolishIntrastatExportGroup;
+         group IntrastatPolishIntrastatImportGroup;
+      }
+
+   }
+
+   commandgroup StatusCmdGroup {
+
+      commandgroup CommandStatusCmdGroup {
+         label = "Status";
+         command ReleaseCommand;
+         command ConfirmCommand;
+         command CancelCommand;
+      }
+   }
+   commandgroup PrintCmdGroup {
+
+      commandgroup CommandPrintCmdGroup {
+         label = "Print";
+         command PrintIntrastatImportCommand;
+         command PrintIntrastatExportCommand;
+
+      }
+   }
+
+   commandgroup TransferCmdGroup {
+
+      commandgroup CommandTransferCmdGroup {
+         label = "Transfer";
+
+         command TransferIntrastattoFileCommand;
+      }
+
+   }
+}
+
+-------------------------------- ASSISTANTS ---------------------------------
+assistant TransferIntrastattoFileAssistant using IntrastatVirtualSet {
+   label = "Transfer Intrastat to File";
+
+   input(IntrastatId, CountryCodeRef, ReportStyle) {
+      command InitCommand;
+   }
+   output(ImportOption, ExportOption, ImportProgressNo, ExportProgressNo);
+
+   steps {
+      step {
+         group TransferIntrastatOptionsGroup;
+         group TransferIntrastatFilePathGroup;
+      }
+      final step {
+
+      }
+      cancelled step {
+
+      }
+   }
+
+   finish command {
+      enabled = [InputFileName != null and FileExtension != null];
+      variable CreateResultStructureVar {
+         type = Structure(CreateResultStructure);
+      }
+      execute {
+         if [ImportOption] {
+            set  Import = "IMPORT";
+         }
+         if [ExportOption] {
+            set Export = "EXPORT";
+         }
+
+         call CreateNewFile(IntrastatId, CountryCodeRef, Import, Export, ReportStyle, PreIntrastatId, TransferFileName) into CreateResultStructureVar;
+         set ImportProgressNo = CreateResultStructureVar.ImportProgressNo;
+         set ExportProgressNo = CreateResultStructureVar.ExportProgressNo;
+         download "IntrastatVirtualSet(Objkey=$[Objkey])/FileData";
+         exit OK;
+      }
+   }
+   cancel command {
+      execute {
+         exit CANCEL;
+      }
+   }
+}
+
+--------------------------------- COMMANDS ----------------------------------
+command ReleaseCommand for Intrastat {
+   label = "Release";
+
+   enabled = [Objstate = "Confirmed"];
+
+   execute {
+      confirm("This will RELEASE the Intrastat.") {
+         when OK {
+            call ChangeToRelease();
+         }
+      }
+   }
+}
+
+command ConfirmCommand for Intrastat {
+   label = "Confirm";
+
+   enabled = [Objstate = "Released"];
+
+   execute {
+      confirm("This will CONFIRM the Intrastat.") {
+         when OK {
+            call Confirm();
+         }
+      }
+   }
+}
+command CancelCommand for Intrastat {
+   label = "Cancel";
+
+   enabled = [Objstate in("Released", "Confirmed")];
+
+   execute {
+      confirm("This will CANCEL the Intrastat.") {
+         when OK {
+            call Cancel();
+         }
+      }
+   }
+}
+command PrintIntrastatImportCommand for Intrastat {
+   label = "Print Intrastat Import";
+
+   enabled = [Objstate = "Confirmed" and ReportViewName != null];
+
+   variable ResultKeyListVar Text;
+
+   execute {
+
+      call GetIntrastatResultKey(IntrastatId, "IMPORT", CountryCodeRef.CountryCode) into ResultKeyListVar;
+      printdialog ResultKeyListVar {
+         when OK {
+            call SetPrintTransferredButtons(IntrastatId, "IMPORT DOC PRINTED");
+
+         }
+      }
+   }
+}
+command PrintIntrastatExportCommand for Intrastat {
+   label = "Print Intrastat Export";
+
+   enabled = [Objstate = "Confirmed" and ReportViewName != null];
+
+   variable ResultKeyListVar Text;
+
+   execute {
+      call GetIntrastatResultKey(IntrastatId, "EXPORT", CountryCodeRef.CountryCode) into ResultKeyListVar;
+
+      printdialog ResultKeyListVar {
+         when OK {
+            call SetPrintTransferredButtons(IntrastatId, "EXPORT DOC PRINTED");
+
+         }
+      }
+   }
+}
+command TransferIntrastattoFileCommand for Intrastat {
+   label = "Transfer Intrastat to File";
+
+   variable ImportVar Boolean;
+   variable ExportVar Boolean;
+   variable RowExistVar Boolean;
+   variable ImportProgressNoVar Number;
+   variable ExportProgressNoVar Number;
+   variable ReportStyleVar Number;
+
+   enabled = [Objstate = "Confirmed"];
+
+   execute {
+      call CheckLineExist(IntrastatId) into RowExistVar;
+      if [CountryCodeRef.CountryCode = "HU" or CountryCodeRef.CountryCode = "SK"] {
+         if [RowExistVar = true] {
+            messagebox("", question, "Create Full Report? (otherwise Simplified Report)") {
+               when "Yes" {
+                  set ReportStyleVar = 0;
+               }
+               when "No" {
+                  set ReportStyleVar = 1;
+               }
+            }
+
+         }
+         else {
+            set ReportStyleVar = 2;
+         }
+      }
+      assistant TransferIntrastattoFileAssistant(IntrastatId, CountryCodeRef.CountryCode, ReportStyleVar) into(ImportVar, ExportVar, ImportProgressNoVar, ExportProgressNoVar) {
+         when OK {
+            if [ImportVar] {
+               call SetPrintTransferred(IntrastatId, "IMPORT FILE PRINTED", ImportProgressNoVar, ExportProgressNoVar);
+            }
+            if[ExportVar] {
+               call SetPrintTransferred(IntrastatId, "EXPORT FILE PRINTED", ImportProgressNoVar, ExportProgressNoVar);
+            }
+         }
+      }
+   }
+}
+
+command CancelCommand for IntrastatLine {
+   label = "Cancel";
+   enabled = [Objstate != "Cancelled"];
+   mode = SelectedRecords;
+
+   bulkexecute {
+      confirm("This will CANCEL the Intrastat Line(s).") {
+         when OK {
+            bulkcall Cancel();
+         }
+      }
+   }
+}
+command UpdateIntrastatLinesCommand for IntrastatLine {
+   label = "Update Intrastat Lines";
+   enabled = [Objstate != "Cancelled"];
+   mode = SelectedRecords;
+
+   variable QuantityVar Number;
+   variable NetUnitWeightVar Number;
+   variable CustomsStatisticNumberVar Text;
+   variable IntrastatAltQuantityVar Number;
+   variable IntrastatAltUnitMeasVar Text;
+   variable NotcVar Text;
+   variable CountryOfOriginVar Text;
+   variable OppositeCountryVar Text;
+   variable OpponentTaxIdVar Text;
+   variable OrderUnitPriceVar Number;
+   variable UnitAddCostAmountVar Number;
+   variable UnitChargeAmountVar Number;
+   variable InvoicedUnitPriceVar Number;
+   variable UnitAddCostAmountInvVar Number;
+   variable UnitChargeAmountInvVar Number;
+   variable UnitStatisticalChargeDiffVar Number;
+   variable ModeOfTransportVar Text;
+   variable DeliveryTermsVar Text;
+   variable RegionPortVar Text;
+   variable StatisticalProcedureVar Text;
+   variable TriangulationVar Boolean;
+   variable RegionOfOriginVar Text;
+   variable SpecialCodeOfMovementVar Text;
+   variable TriangulationLocalVar Text;
+   -- gelr:italy_intrastat, start
+   variable InvoiceDateVar Date;
+   variable ServiceStatisticalCodeVar Text;
+   variable ServiceWayVar Text;
+   variable ServicePaymentWayVar Text;
+   variable AdjustToPrevIntrastatVar Boolean;
+   variable PrevIntrastatInvoicDateVar Date;
+   variable AdvanceTransactionVar Boolean;
+   variable PaymentMethodVar Text;
+   variable ReferenceInvoiceSerieVar Text;
+   variable ReferenceInvoiceNumberVar Text;
+   variable ReferenceInvoiceDateVar Date;
+   variable ProtocolNoVar Number;
+   variable ItalyIntrastatEnabled Boolean;
+   -- gelr:italy_intrastat, end
+
+   bulkexecute {
+      if ["ITALY_INTRASTAT" in EnabledLccParams] {
+         set ItalyIntrastatEnabled = true;
+      }
+      dialog UpdateIntrastatLinesDialog(ItalyIntrastatEnabled) into(QuantityVar,
+      NetUnitWeightVar,
+      CustomsStatisticNumberVar,
+      IntrastatAltQuantityVar,
+      IntrastatAltUnitMeasVar,
+      NotcVar,
+      CountryOfOriginVar,
+      OppositeCountryVar,
+      OpponentTaxIdVar,
+      OrderUnitPriceVar,
+      UnitAddCostAmountVar,
+      UnitChargeAmountVar,
+      InvoicedUnitPriceVar,
+      UnitAddCostAmountInvVar,
+      UnitChargeAmountInvVar,
+      UnitStatisticalChargeDiffVar,
+      ModeOfTransportVar,
+      DeliveryTermsVar,
+      RegionPortVar,
+      StatisticalProcedureVar,
+      TriangulationVar,
+      RegionOfOriginVar,
+      SpecialCodeOfMovementVar,
+      -- gelr:italy_intrastat, start
+      InvoiceDateVar,
+      ServiceStatisticalCodeVar,
+      ServiceWayVar,
+      ServicePaymentWayVar,
+      AdjustToPrevIntrastatVar,
+      PrevIntrastatInvoicDateVar,
+      AdvanceTransactionVar,
+      PaymentMethodVar,
+      ReferenceInvoiceSerieVar,
+      ReferenceInvoiceNumberVar,
+      ReferenceInvoiceDateVar,
+      ProtocolNoVar
+      -- gelr:italy_intrastat, end
+      ) {
+         when CANCEL {
+            exit CANCEL;
+         }
+         when OK {
+            bulkcall ModifyIntrastatLines(Selection,
+            QuantityVar,
+            NetUnitWeightVar,
+            CustomsStatisticNumberVar,
+            IntrastatAltQuantityVar,
+            IntrastatAltUnitMeasVar,
+            NotcVar,
+            CountryOfOriginVar,
+            OppositeCountryVar,
+            OpponentTaxIdVar,
+            OrderUnitPriceVar,
+            UnitAddCostAmountVar,
+            UnitChargeAmountVar,
+            InvoicedUnitPriceVar,
+            UnitAddCostAmountInvVar,
+            UnitChargeAmountInvVar,
+            UnitStatisticalChargeDiffVar,
+            ModeOfTransportVar,
+            DeliveryTermsVar,
+            RegionPortVar,
+            StatisticalProcedureVar,
+            TriangulationVar,
+            RegionOfOriginVar,
+            SpecialCodeOfMovementVar,
+            -- gelr:italy_intrastat, end
+            InvoiceDateVar,
+            ServiceStatisticalCodeVar,
+            ServiceWayVar,
+            ServicePaymentWayVar,
+            AdjustToPrevIntrastatVar,
+            PrevIntrastatInvoicDateVar,
+            AdvanceTransactionVar,
+            PaymentMethodVar,
+            ReferenceInvoiceSerieVar,
+            ReferenceInvoiceNumberVar,
+            ReferenceInvoiceDateVar,
+            ProtocolNoVar,
+            ItalyIntrastatEnabled
+            -- gelr:italy_intrastat, end
+            );
+         }
+      }
+   }
+}
+command InitCommand for IntrastatVirtual {
+   execute {
+      set ExportOption = false;
+      set ImportOption = false;
+   }
+}
+
+--------------------------------- SELECTORS ---------------------------------
+@Override
+selector IntrastatSelector for Intrastat {
+   orderby = IntrastatId desc;
+   label = "${IntrastatId} - ${BeginDate} - ${EndDate} - ${Company} - ${CountryCode}";
+   static IntrastatId;
+   static BeginDate;
+   static EndDate;
+   static Company;
+   static CountryCode;
+   badge  Objstate {
+      style = TextOnly;
+      emphasis Progress1 = [Objstate = "Processing"];
+      emphasis Progress4 = [Objstate = "Released"];
+      emphasis Progress8 = [Objstate = "Confirmed"];
+      emphasis StateCancelled = [Objstate = "Cancelled"];
+
+   }
+
+}
+
+---------------------------------- GROUPS -----------------------------------
+group IntrastatGroup for Intrastat {
+   label = "";
+   field IntrastatId {
+      label = "Intrastat ID";
+   }
+   field BeginDate;
+   field EndDate;
+
+   lov CompanyRef with ReferenceCompanySelector {
+      label = "Company";
+      description = CompanyRef.Name;
+   }
+   lov CountryCodeRef with ReferenceIsoCountrySelector {
+      label = "Country";
+      description = CountryCodeRef.Description;
+   }
+   field ToInvoiceDate;
+   -- gelr:italy_intrastat, start
+   field IntrastatFileNo {
+      visible = ["ITALY_INTRASTAT" in EnabledLccParams and EnabledLccParams != ""];
+   }
+   -- gelr:italy_intrastat, end
+   field ProcessInfoDb;
+   field ConsolidationFlag;
+}
+
+group IntrastatMiscInfoGroup for Intrastat {
+   label = "";
+
+   field CreationDate;
+
+   lov CustomsInfoRef with ReferenceCustomsInfoSelector {
+      label = "Customs ID";
+      contactwidget {
+         enabled = [true];
+         source = Person;
+      }
+      description = CustomsInfoRef.Name;
+
+   }
+   field BranschNo;
+   field RegistrationNo;
+   field IntrastatTaxNo;
+   lov CompanyContactRef with ReferencePersonInfoSelector {
+      label = "Company Contact";
+
+      contactwidget {
+         enabled = [true];
+         source = Person;
+      }
+      description = CompanyContactRef.Name;
+   }
+}
+group IntrastatPrintedTransferredGroup for Intrastat {
+   label = "Printed/Transferred";
+   collapsed = [true];
+   field FilePrintExportDb;
+   field FilePrintImportDb;
+   field DocPrintExportDb;
+   field DocPrintImportDb;
+}
+group IntrastatPolishIntrastatExportGroup for Intrastat {
+
+   label = "Polish Intrastat Export Parameters";
+   visible = [CountryCode = "PL"];
+   collapsed = [true];
+   field DecNumberExport;
+   field VersionExport;
+   field DeclarationExport;
+
+}
+group IntrastatPolishIntrastatImportGroup for Intrastat {
+   label = "Polish Intrastat Import Parameters";
+   visible = [CountryCode = "PL"];
+   collapsed = [true];
+   field DecNumberImport;
+   field VersionImport;
+   field DeclarationImport;
+}
+group IntrastatRepresentativeInfoGroup for Intrastat {
+   label = "Representative Info";
+   collapsed = [true];
+   lov PersonInfo2Ref with ReferencePersonInfoSelector {
+      label = "Representative";
+      contactwidget {
+         enabled = [true];
+         source = Person;
+      }
+      description = PersonInfo2Ref.Name;
+   }
+   lov RepCurrCodeRef with ReferenceIsoCurrencySelector {
+      label = "Currency Code";
+      description = RepCurrCodeRef.Description;
+   }
+   field RepCurrRate;
+   field BranschNoRepr;
+   field ReprTaxNo;
+
+}
+
+group TransferIntrastatOptionsGroup for IntrastatVirtual {
+   label = "Transfer Options";
+   field ImportOption {
+      size = Small;
+   }
+   field ExportOption {
+      size = Small;
+   }
+   field PreIntrastatId {
+      label = "Ref Intrastat Id";
+      visible = [CountryCodeRef = "PL"];
+   }
+
+}
+
+group TransferIntrastatFilePathGroup for IntrastatVirtual {
+   label = "";
+
+   field InputFileName;
+   field FileExtension {
+
+      editable = [InputFileName != null];
+      validate command {
+
+         execute {
+            call CreateFileName(InputFileName, FileExtension) into TransferFileName;
+         }
+      }
+   }
+   field TransferFileName {
+      editable = [false];
+
+   }
+
+}
+
+group IntrastatLineGroup for UpdateIntrastatLinesStructure {
+   label = "";
+   field Quantity;
+   field NetUnitWeight;
+   field CustomsStatisticNumber;
+   field IntrastatAltQuantity;
+   field IntrastatAltUnitMeas;
+   field Notc;
+   field CountryOfOrigin;
+   field OppositeCountry;
+   field OpponentTaxId;
+   field OrderUnitPrice;
+   field UnitAddCostAmount;
+   field UnitChargeAmount;
+   field InvoicedUnitPrice;
+   field UnitAddCostAmountInv;
+   field UnitChargeAmountInv;
+   field UnitStatisticalChargeDiff;
+   field ModeOfTransport;
+   field DeliveryTerms;
+   field RegionPort;
+   field StatisticalProcedure {
+      when [CountryCode != "FR"] use subset Subset1;
+      size = Medium;
+   }
+   field Triangulation {
+      size = Small;
+   }
+   field RegionOfOrigin;
+   field SpecialCodeOfMovement;
+   field SpecialCodeOfMovement;
+   -- gelr:italy_intrastat, start
+   field InvoiceDate {
+      visible = ["ITALY_INTRASTAT" in EnabledLccParams];
+   }
+   field ServiceStatisticalCode {
+      visible = ["ITALY_INTRASTAT" in EnabledLccParams];
+   }
+   field ServiceWay {
+      visible = ["ITALY_INTRASTAT" in EnabledLccParams];
+   }
+   field ServicePaymentWay {
+      visible = ["ITALY_INTRASTAT" in EnabledLccParams];
+   }
+   field AdjustToPrevIntrastat {
+      visible = ["ITALY_INTRASTAT" in EnabledLccParams];
+   }
+   field PrevIntrastatInvoicDate {
+      visible = ["ITALY_INTRASTAT" in EnabledLccParams];
+   }
+   field AdvanceTransaction {
+      visible = ["ITALY_INTRASTAT" in EnabledLccParams];
+   }
+   field PaymentMethod {
+      visible = ["ITALY_INTRASTAT" in EnabledLccParams];
+   }
+   field ReferenceInvoiceSerie {
+      visible = ["ITALY_INTRASTAT" in EnabledLccParams];
+   }
+   field ReferenceInvoiceNumber {
+      visible = ["ITALY_INTRASTAT" in EnabledLccParams];
+   }
+   field ReferenceInvoiceDate {
+      visible = ["ITALY_INTRASTAT" in EnabledLccParams];
+   }
+   field ProtocolNo {
+      visible = ["ITALY_INTRASTAT" in EnabledLccParams];
+   }
+   -- gelr:italy_intrastat, end
+}
+
+
+----------------------------------- LISTS -----------------------------------
+// --- List corresponding to tab 'IntrastatLines' which host the tablewindow 'tbwIntrastatLine'
+// Define List: Following List template can be verified and used to host relevant items that are currently hosted in tablewindow 'tbwIntrastatLine'.
+//   list IntrastatLinesList {
+//     // Move relevant fields from the hosting tablewindow to here...
+//   }
+// -------------
+list IntrastatLinesList for IntrastatLine {
+   field LineNo;
+   badge Objstate {
+      label = "Status";
+      style = TextOnly;
+      emphasis StateCancelled = [Objstate = "Cancelled"];
+      emphasis Progress4 = [Objstate = "Released"];
+   }
+   field TransactionId;
+   field Transaction {
+      size = Small;
+   }
+   field MpccomSystemEventRef.Description {
+      label = "Transaction Description";
+   }
+   field OrderType {
+      size = Small;
+   }
+   lov ContractRef with ReferenceSiteCompanyLovSelector using GetSitesPerCompany(parent.Company) {
+      size = Small;
+      description = ContractRef.Description;
+   }
+   field PartNo {
+      size = Small;
+   }
+   field PartDescription;
+   field ConfigurationId {
+      size = Small;
+   }
+   field LotBatchNo {
+      size = Small;
+   }
+   field SerialNo {
+      size = Small;
+   }
+   field OrderRef1 {
+      size = Small;
+   }
+   field OrderRef2 {
+      size = Small;
+   }
+   field OrderRef3 {
+      size = Small;
+   }
+   field OrderRef4;
+   field InventoryDirection {
+      size = Small;
+   }
+   field Quantity;
+   field QtyReversed;
+   field UnitMeasRef;
+   lov RejectCodeRef with ReferenceScrappingCauseSelector {
+      description = RejectCodeRef.RejectMessage;
+   }
+   @DynamicComponentDependency DISCOM
+   lov ReturnReasonRef with ReferenceReturnCauseSelector {
+      description = ReturnReasonRef.Description;
+   }
+
+   @DynamicComponentDependency ORDER
+   lov ReturnMaterialReasonRef with ReferenceReturnMaterialReasonSelector {
+      description = ReturnMaterialReasonRef.ReturnReasonDescription;
+   }
+
+   field DateApplied;
+   field Userid {
+      size = Small;
+      contactwidget {
+         enabled = [true];
+         source = Person;
+      }
+   }
+   field NetUnitWeight;
+   lov CustomsStatNoRef with ReferenceCustomsStatisticsNumberSelector {
+      description = CustomsStatNoRef.Description;
+      editable = [StatisticalCode = null];
+      validate command {
+         execute {
+            set ServiceWay = null;
+            set ServicePaymentWay = null;
+         }
+      }
+   }
+   field IntrastatAltQty;
+
+   lov IntrastatAltUnitMeasRef with ReferenceIsoUnitSelector {
+      description = IntrastatAltUnitMeasRef.Description;
+   }
+
+   lov NotcRef with ReferenceCountryNotcLovSelector {
+      description = NotcRef.Description;
+   }
+   lov MovementCodeRef with ReferenceSpecialCodeOfMovementSelector {
+      description = MovementCodeRef.Description;
+      editable = [CountryCode = "CZ"];
+      validate command {
+         execute {
+            set MovementCodeRef = MovementCodeRef.MovementCode;
+         }
+      }
+
+   }
+   field IntrastatDirection {
+      size = Small;
+   }
+   lov CountryOfOriginRef with ReferenceIsoCountrySelector {
+      description = CountryOfOriginRef.Description;
+   }
+   lov RegionOfOriginRef with ReferenceCountryRegionSelector {
+      description = RegionOfOriginRef.RegionName;
+   }
+
+   field IntrastatOrigin {
+      size = Small;
+   }
+   lov OppositeCountryRef with ReferenceIsoCountrySelector {
+      description = OppositeCountryRef.Description;
+   }
+   field OpponentNumber {
+      validate command {
+         execute {
+            set OpponentChanged = false;
+            if [OpponentNumber = null] {
+               if [CountryCode = "IT"] {
+                  set OpponentChanged = true;
+                  set OpponentType = null;
+               }
+            }
+         }
+      }
+   }
+
+   field OpponentName;
+   field OpponentType {
+      size = Small;
+      editable = [(CountryCode = "IT") and not(CountryCode = "IT" and not OpponentChanged and OpponentNumber = null)];
+   }
+   field OpponentTaxId {
+      size = Small;
+      label = "Opponent Tax ID";
+   }
+   field OrderUnitPrice {
+      validate command {
+         execute {
+            set OrderUnitPriceCurr = "#{parent.RepCurrRate*OrderUnitPrice}";
+         }
+      }
+   }
+   field UnitAddCostAmount {
+      validate command {
+         execute {
+            set AddCostAmountCurr = "#{parent.RepCurrRate * UnitAddCostAmount}";
+         }
+      }
+   }
+   field UnitChargeAmount {
+      validate command {
+         execute {
+            set UnitChargeAmountCurr = "#{parent.RepCurrRate * UnitChargeAmount}";
+         }
+      }
+   }
+   field InvoicedUnitPrice {
+      validate command {
+         execute {
+            set InvoicedUnitPriceCurr = "#{parent.RepCurrRate * InvoicedUnitPrice}";
+         }
+      }
+   }
+   field UnitAddCostAmountInv {
+      validate command {
+         execute {
+            set UnitAddCostAmountInvCurr = "#{parent.RepCurrRate * UnitAddCostAmountInv}";
+         }
+      }
+   }
+   field UnitChargeAmountInv {
+      validate command {
+         execute {
+            set UnitChargeAmountInvCurr = "#{parent.RepCurrRate * UnitChargeAmountInv}";
+         }
+      }
+   }
+   field UnitStatisticalChargeDiff;
+   field ModeOfTransport {
+      size = Small;
+   }
+   field InvoiceSerie {
+      size = Small;
+   }
+   field InvoiceNumber {
+      size = Small;
+   }
+   computedfield OrderUnitPriceCurr {
+      label = "Net Price";
+      value = "#{parent.RepCurrRate * OrderUnitPrice}";
+   }
+   computedfield AddCostAmountCurr {
+      label = "Add Cost per Unit";
+      value = "#{parent.RepCurrRate * UnitAddCostAmount}";
+   }
+   computedfield UnitChargeAmountCurr {
+      label = "Charge Price";
+      value = "#{parent.RepCurrRate * UnitChargeAmount}";
+   }
+   computedfield InvoicedUnitPriceCurr {
+      label = "Net Invoiced Price";
+      value = "#{parent.RepCurrRate * InvoicedUnitPrice}";
+   }
+   computedfield UnitAddCostAmountInvCurr {
+      label = "Invoiced Add Cost per Unit";
+      value = "#{parent.RepCurrRate * UnitAddCostAmountInv}";
+   }
+   computedfield UnitChargeAmountInvCurr {
+      label = "Invoiced Charge Price";
+      value = "#{parent.RepCurrRate * UnitChargeAmountInv}";
+   }
+   lov DeliveryTermsRef with ReferenceOrderDeliveryTermLovSelector {
+      description = DeliveryTermsRef.Description;
+   }
+
+   field RegionPort {
+      size = Small;
+   }
+   field DelTermsLocation {
+      size = Small;
+   }
+   field PlaceOfDelivery;
+   field StatisticalProcedure {
+      size = Small;
+      when [CountryCode != "FR"] use subset Subset1;
+   }
+   field Triangulation {
+      size = Small;
+      enumerationtrue = "Triangulation";
+      enumerationfalse = "NoTriangulation";
+      truelabel = "Yes";
+      falselabel = "No";
+   }
+   -- gelr:italy_intrastat, start
+   field InvoiceDate {
+      columnexclude = [not "ITALY_INTRASTAT" in parent.EnabledLccParams];
+   }
+   lov StatisticalCodeRef with ReferenceStatisticalCodeSelector using StatisticalCodeFilter(parent.Company) {
+      columnexclude = [not "ITALY_INTRASTAT" in parent.EnabledLccParams];
+      editable = [CustomsStatNo = null];
+      description = StatisticalCodeRef.Description;
+      size = Large;
+   }
+   field ServiceWay {
+      columnexclude = [not "ITALY_INTRASTAT" in parent.EnabledLccParams];
+      editable = [StatisticalCodeRef != null];
+   }
+   field ServicePaymentWay {
+      columnexclude = [not "ITALY_INTRASTAT" in parent.EnabledLccParams];
+      editable = [StatisticalCodeRef != null];
+   }
+   field AdjustToPrevIntrastat {
+      required = ["ITALY_INTRASTAT" in parent.EnabledLccParams];
+      columnexclude = [not "ITALY_INTRASTAT" in parent.EnabledLccParams];
+      editable = [not AdvanceTransaction and PrevIntrastatInvoicDate != null];
+   }
+   field PrevIntrastatInvoicDate {
+      columnexclude = [not "ITALY_INTRASTAT" in parent.EnabledLccParams];
+      editable = [not AdvanceTransaction];
+      validate command {
+         execute {
+            call IsPrevPeriodInvoicDate(Contract, PrevIntrastatInvoicDate) into PrevIntrastatPeriod;
+            if[PrevIntrastatPeriod and not AdjustToPrevIntrastat] {
+               set AdjustToPrevIntrastat = true;
+            }
+            else {
+               set AdjustToPrevIntrastat = false;
+            }
+         }
+      }
+   }
+   field AdvanceTransaction {
+      required = ["ITALY_INTRASTAT" in parent.EnabledLccParams];
+      columnexclude = [not "ITALY_INTRASTAT" in parent.EnabledLccParams];
+      editable = [not AdjustToPrevIntrastat];
+   }
+   field PaymentMethod {
+      columnexclude = [not "ITALY_INTRASTAT" in parent.EnabledLccParams];
+   }
+   field ReferenceInvoiceSerie {
+      columnexclude = [not "ITALY_INTRASTAT" in parent.EnabledLccParams];
+   }
+   field ReferenceInvoiceNumber {
+      columnexclude = [not "ITALY_INTRASTAT" in parent.EnabledLccParams];
+   }
+   field ReferenceInvoiceDate {
+      columnexclude = [not "ITALY_INTRASTAT" in parent.EnabledLccParams];
+   }
+   field ProtocolNo {
+      columnexclude = [not "ITALY_INTRASTAT" in parent.EnabledLccParams];
+      editable = [AdjustToPrevIntrastat];
+   }
+   -- gelr:italy_intrastat, end
+   // fieldranking Quantity, UnitMeasRef, DateApplied, NetUnitWeight, NotcRef, IntrastatDirection, OppositeCountryRef, OrderUnitPrice, StatisticalProcedure, TriangulationDb;
+
+   commandgroup CommandGroupCmdGroup {
+      //! TODO: Uncomment and define the label for the Command Group so it can be shown when running with limited screen size
+      label = "Lines Command";
+      command CancelCommand;
+      command UpdateIntrastatLinesCommand;
+   }
+}
+----------------------------------- CARDS -----------------------------------
+
+---------------------------------- DIALOGS ----------------------------------
+dialog UpdateIntrastatLinesDialog for UpdateIntrastatLinesStructure {
+   label = "Update Intrastat Lines";
+   -- gelr:italy_intrastat, start
+   input(ItalyIntrastatEnabled);
+   -- gelr:italy_intrastat, end
+   output(Quantity,
+   NetUnitWeight,
+   CustomsStatisticNumber,
+   IntrastatAltQuantity,
+   IntrastatAltUnitMeas,
+   Notc,
+   CountryOfOrigin,
+   OppositeCountry,
+   OpponentTaxId,
+   OrderUnitPrice,
+   UnitAddCostAmount,
+   UnitChargeAmount,
+   InvoicedUnitPrice,
+   UnitAddCostAmountInv,
+   UnitChargeAmountInv,
+   UnitStatisticalChargeDiff,
+   ModeOfTransport,
+   DeliveryTerms,
+   RegionPort,
+   StatisticalProcedure,
+   Triangulation,
+   RegionOfOrigin,
+   SpecialCodeOfMovement,
+   -- gelr:italy_intrastat, start
+   InvoiceDate,
+   ServiceStatisticalCode,
+   ServiceWay,
+   ServicePaymentWay,
+   AdjustToPrevIntrastat,
+   PrevIntrastatInvoicDate,
+   AdvanceTransaction,
+   PaymentMethod,
+   ReferenceInvoiceSerie,
+   ReferenceInvoiceNumber,
+   ReferenceInvoiceDate,
+   ProtocolNo
+   -- gelr:italy_intrastat, end
+   );
+
+   group IntrastatLineGroup;
+
+   command Cancel {
+      enabled = [true];
+      execute {
+         exit CANCEL;
+      }
+   }
+   command Ok {
+      enabled = [Quantity != null or
+      NetUnitWeight != null or
+      CustomsStatisticNumber != null or
+      IntrastatAltQuantity != null or
+      IntrastatAltUnitMeas != null or
+      Notc != null or
+      CountryOfOrigin != null or
+      OppositeCountry != null or
+      OpponentTaxId != null or
+      OrderUnitPrice != null or
+      UnitAddCostAmount != null or
+      UnitChargeAmount != null or
+      InvoicedUnitPrice != null or
+      UnitAddCostAmountInv != null or
+      UnitChargeAmountInv != null or
+      UnitStatisticalChargeDiff != null or
+      ModeOfTransport != null or
+      DeliveryTerms != null or
+      RegionPort != null or
+      StatisticalProcedure != null or
+      Triangulation != original.Triangulation or
+      RegionOfOrigin != null or
+      SpecialCodeOfMovement != null or
+      -- gelr:italy_intrastat, start
+      InvoiceDate != null or
+      ServiceStatisticalCode != null or
+      ServiceWay != null or
+      ServicePaymentWay != null or
+      AdjustToPrevIntrastat != null or
+      PrevIntrastatInvoicDate != null or
+      AdvanceTransaction != null or
+      PaymentMethod != null or
+      ReferenceInvoiceSerie != null or
+      ReferenceInvoiceNumber != null or
+      ReferenceInvoiceDate != null or
+      ProtocolNo != null
+      -- gelr:italy_intrastat, end
+      ];
+
+      execute {
+         exit OK;
+      }
+   }
+}
+
+
+
+---------------------------------- CHARTS -----------------------------------
+
+--------------------------------- CALENDARS ---------------------------------
+
+---------------------------------- SHEETS -----------------------------------
+
+----------------------------- STATE INDICATORS ------------------------------
+@Override
+stateindicator IntrastatStateIndicator for Intrastat {
+   state "Processing" {
+      completed = 0%;
+      emphasis Progress1 = [Objstate = "Processing"];
+   }
+   state "Released" {
+      completed = 50%;
+      emphasis Progress4 = [Objstate = "Released"];
+   }
+   state "Confirmed" {
+      completed = 100%;
+      emphasis Progress8 = [Objstate = "Confirmed"];
+   }
+   state "Cancelled" {
+      completed = 100%;
+      emphasis StateCancelled = [Objstate = "Cancelled"];
+   }
+   fieldorder = Processing, Released, Confirmed, Cancelled;
+}
+
+----------------------------------- TREES -----------------------------------
+
+---------------------------------- PLUGINS ----------------------------------
+
+------------------------------- IMAGE VIEWERS -------------------------------
+
+--------------------------------- CHECKLIST ---------------------------------

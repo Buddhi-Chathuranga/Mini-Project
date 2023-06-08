@@ -1,0 +1,433 @@
+-----------------------------------------------------------------------------------------------------
+-- Date        Sign     History
+-- ----------  ------   -----------------------------------------------------------------------------
+-- 2019-11-07  Satglk   SCXTEND-893, Added Received Date.
+-- 2019-05-02  MaEelk   SCUXXW4-18517, Added WHERE Clause to GetIncomingSelfBillingLines.
+-- 2018-11-29  KHVESE   SCUXXW4-9215, Added attributes MatchedItemsExist, PreliminarySbi, InvoicedSbi for enabling/disabling commands.
+-- 2018-11-27  KHVESE   SCUXXW4-919, Added functions GetSalesPartCrossReferences, ValidateBeforeManualMatch.
+-- 2018-11-23  KHVESE   SCUXXW4-919, Added entity set ExtIncSbiItemSet for lines and structure SearchContextStructure, enumeration FilterKeyOptions and functions GetIncomingSelfBillingLines, GetDefaultSearchContext.
+-- 2018-11-23  KHVESE   SCUXXW4-914, Changed entity ExtIncSbiDeliveryInfo to query and removed messageId refrence and renamed query and it's respective array
+-- 2018-11-21  HPETSE   SCUXXW4-919, Converted from tbwIncSbiLines using MTG Version: 1.33
+-- 2018-11-20  HPETSE   SCUXXW4-914, Converted from tbwIncSbiDelNotes using MTG Version: 1.3
+-- 2018-11-20  HPETSE   SCUXXW4-9215, Converted from frmIncSbInvoice using MTG Version: 1.33
+-----------------------------------------------------------------------------------------------------
+projection IncomingSelfBillingInvoiceHandling;
+component ORDER;
+layer Core;
+description "Use this API to view self-billing invoice information sent by the customer. Self-billing invoice information includes deliveries for which the customer has invoiced himself.
+You can use this window to automatically or manually match this information to records in the system. This will form the base for the customer invoices created later. ";
+category Users;
+include fragment NonRentalSalesPartLovSelector;
+include fragment CoChargeJoinSelector;
+include fragment CustomerInfoCustcategoryPubSelector;
+include fragment MatchSelfBillingLineAndDeliveryAssistant;
+
+----------------------------- MAIN ENTRY POINTS -----------------------------
+
+entityset ExtIncSbiHeadSet for ExtIncSbiHead;
+entityset ExtIncSbiItemSet for ExtIncSbiItem;
+
+------------------------------ ENTITY DETAILS -------------------------------
+@Override
+entity ExtIncSbiHead {
+   crud = Read, Update;
+   from = "ext_inc_sbi_head";
+   exec = "EXT_INC_SBI_HEAD_API";
+   keys = MessageId {
+      where = "MESSAGE_ID = :MessageId";
+   }
+   supportwarnings = [true];
+   use attributes = CustomerNo, SenderMessageId, InvoiceNo, InvoiceDate, CreateDate, PaymentDate, Currency, TotInvNetAmount, TotalTaxAmount, TotInvGrossAmount, CustomerReference, ErrorMessage;
+   attribute MessageId Number {
+      fetch = "message_id";
+      label = "Message ID";
+      editable = [false];
+   }
+   attribute CustomerNo Text {
+      fetch = "customer_no";
+      label = "Customer No";
+      maxlength = 20;
+      editable = [ETag != null];
+      format = uppercase;
+   }
+   attribute SenderMessageId Text {
+      fetch = "sender_message_id";
+      label = "Sender's Message ID";
+      maxlength = 255;
+      editable = [false];
+   }
+   attribute InvoiceNo Text {
+      fetch = "invoice_no";
+      label = "Invoice No";
+      maxlength = 2000;
+   }
+   attribute InvoiceDate Date {
+      fetch = "invoice_date";
+      label = "Invoice Date";
+      editable = [ETag = null];
+   }
+   attribute CreateDate Date {
+      fetch = "create_date";
+      label = "Created Date";
+      required = [true];
+      editable = [ETag = null];
+   }
+   attribute PaymentDate Date {
+      fetch = "payment_date";
+      label = "Payment Date";
+      editable = [false];
+   }
+   attribute Currency Text {
+      fetch = "currency";
+      label = "Currency";
+      maxlength = 2000;
+      format = uppercase;
+   }
+   attribute TotInvNetAmount Number {
+      fetch = "tot_inv_net_amount";
+      label = "Total Invoice Net Amt";
+      format = ifscurrency;
+   }
+   attribute TotalTaxAmount Number {
+      fetch = "total_tax_amount";
+      label = "Tax Amount";
+      format = ifscurrency;
+   }
+   attribute TotInvGrossAmount Number {
+      fetch = "tot_inv_gross_amount";
+      label = "Total Invoice Gross Amt";
+      format = ifscurrency;
+   }
+   attribute CustomerReference Text {
+      fetch = "customer_reference";
+      label = "Customer Reference";
+      maxlength = 100;
+      editable = [ETag != null];
+   }
+   attribute ErrorMessage Text {
+      fetch = "error_message";
+      label = "Error Message";
+      maxlength = 2000;
+      editable = [ETag = null];
+   }
+   --ToDo!: Attribute MatchedItemsExist has been added to be used in enableing/disabling command. Remove it when TEUXX-14757 is fixed
+   attribute MatchedItemsExist Text {
+      fetch = "Ext_Inc_Sbi_Head_API.Matched_Items_Exist__(message_id)";
+      label = "Matched Items Exists";
+      maxlength = 2000;
+      editable = [false];
+   }
+   --ToDo!: Attribute PreliminarySbiNo has been added to be used in enableing/disabling command. Remove it when TEUXX-14757 is fixed
+   attribute PreliminarySbiNo Text {
+      fetch = "Self_Billing_Header_API.Get_Preliminary_Sbi_By_Msg(message_id)";
+      label = "Preliminary Sbi No";
+      maxlength = 2000;
+      editable = [false];
+   }
+   --ToDo!: Attribute InvoicedSbiNo has been added to be used in enableing/disabling command. Remove it when TEUXX-14757 is fixed
+   attribute InvoicedSbiNo Text {
+      fetch = "Self_Billing_Header_API.Get_Invoiced_Sbi_By_Msg(message_id)";
+      label = "Invoiced Sbi No";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute ReceivedDate Timestamp {
+      fetch = "In_Message_API.Get_ReceivedTime(message_id)";
+      editable = [false];
+   }
+   array IncomingSelfBillingDeliveryInfoArray(MessageId) to IncomingSelfBillingDeliveryInfo(MessageId);
+
+   reference InMessageRef(MessageId) to InMessage(MessageId);
+   reference CustomerNoRef(CustomerNo) to CustomerInfoCustcategoryPub(CustomerId) {
+      label = "Customer No";
+   }
+}
+
+
+@Override
+entity ExtIncSbiItem {
+   crud = Read, Update;
+   from = "incoming_sbi_lines";
+   exec = "EXT_INC_SBI_ITEM_API";
+   keys = MessageLine, MessageId {
+      where = "MESSAGE_LINE = :MessageLine and MESSAGE_ID = :MessageId";
+   }
+   ludependencies = ExtIncSbiHead;
+   use attributes = DelnoteNo, CatalogNo, CatalogDesc, CustomerPartNo, GtinNo, SalesUnitMeas, SalesUnitPrice, PriceUnitMeas, InvQty, NetAmount, TaxAmount, GrossAmount, OrderNo, AdditionalCost, Discount, PriceInformation, ReferenceId, CustomerPoNo, CustomerPoLineNo, CustomerPoRelNo, ApprovalDate, GoodsReceiptDate, ErrorMessage, CustomerPartDesc;
+   attribute MessageLine Number {
+      fetch = "message_line";
+      label = "Message Line";
+      editable = [false];
+   }
+   attribute DelnoteNo Text {
+      fetch = "delnote_no";
+      label = "Delivery Note No";
+      maxlength = 2000;
+      editable = [ETag != null];
+   }
+   attribute CatalogNo Text {
+      fetch = "catalog_no";
+      label = "Sales Part No";
+      maxlength = 2000;
+      editable = [ETag != null];
+   }
+   attribute CatalogDesc Text {
+      fetch = "catalog_desc";
+      label = "Description";
+      maxlength = 2000;
+      // searchable = false;
+      editable = [ETag != null];
+   }
+   attribute CustomerPartNo Text {
+      fetch = "customer_part_no";
+      label = "Customer's Part No";
+      maxlength = 2000;
+      editable = [ETag != null];
+   }
+   attribute CustomerPartDesc Text {
+      fetch = "customer_part_desc";
+      label = "Customer's Part Description";
+      maxlength = 100;
+      // searchable = false;
+      editable = [false];
+   }
+   attribute GtinNo Text {
+      fetch = "gtin_no";
+      label = "GTIN";
+      maxlength = 14;
+      editable = [ETag = null];
+   }
+   attribute SalesUnitMeas Text {
+      fetch = "sales_unit_meas";
+      label = "Customer's UoM";
+      maxlength = 2000;
+      editable = [ETag != null];
+   }
+   attribute SalesUnitPrice Number {
+      fetch = "sales_unit_price";
+      label = "Self-Billed Price/Curr";
+      editable = [ETag != null];
+   }
+   attribute PriceUnitMeas Text {
+      fetch = "price_unit_meas";
+      label = "Price UoM";
+      maxlength = 2000;
+      editable = [ETag != null];
+   }
+   attribute InvQty Number {
+      fetch = "inv_qty";
+      label = "Invoiced Qty";
+      editable = [ETag != null];
+   }
+   attribute NetAmount Number {
+      fetch = "net_amount";
+      label = "Self-Billed Net Amt/Curr";
+      editable = [ETag != null];
+      format = ifscurrency;
+   }
+   attribute TaxAmount Number {
+      fetch = "tax_amount";
+      label = "Tax Amount/Curr";
+      editable = [ETag != null];
+      format = ifscurrency;
+   }
+   attribute GrossAmount Number {
+      fetch = "gross_amount";
+      label = "Gross Amt/Curr";
+      format = ifscurrency;
+   }
+   attribute OrderNo Text {
+      fetch = "order_no";
+      label = "Order No";
+      maxlength = 2000;
+      editable = [ETag != null];
+   }
+   attribute AdditionalCost Number {
+      fetch = "additional_cost";
+      label = "Additional Cost";
+      editable = [ETag != null];
+   }
+   attribute Discount Number {
+      fetch = "discount";
+      label = "Discount (%)";
+      editable = [ETag != null];
+   }
+   attribute PriceInformation Text {
+      fetch = "price_information";
+      label = "Price Information";
+      maxlength = 2000;
+   }
+   attribute ReferenceId Text {
+      fetch = "reference_id";
+      label = "Reference ID";
+      maxlength = 2000;
+   }
+   attribute CustomerPoNo Text {
+      fetch = "customer_po_no";
+      label = "Customer's PO No";
+      maxlength = 2000;
+   }
+   attribute CustomerPoLineNo Text {
+      fetch = "customer_po_line_no";
+      label = "Customer's PO Line No";
+      maxlength = 2000;
+   }
+   attribute CustomerPoRelNo Text {
+      fetch = "customer_po_rel_no";
+      label = "Customer's PO Rel No";
+      maxlength = 2000;
+   }
+   attribute ApprovalDate Date {
+      fetch = "approval_date";
+      label = "Approved Date";
+      editable = [ETag = null];
+   }
+   attribute GoodsReceiptDate Date {
+      fetch = "goods_receipt_date";
+      label = "Actual Delivery Date";
+      editable = [false];
+   }
+   attribute ErrorMessage Text {
+      fetch = "error_message";
+      label = "Error Text";
+      maxlength = 2000;
+      editable = [ETag = null];
+   }
+   attribute MessageId Number {
+      fetch = "message_id";
+      label = "Message ID";
+      maxlength = 0;
+      required = [true];
+      editable = [ETag = null];
+   }
+   attribute PriceConvFactor Number {
+      fetch = "NVL(Ext_Inc_Sbi_Item_API.Get_Price_Conv_Factor(message_id, message_line), 1)";
+      label = "Price Conv Factor";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute CustomerNo Text {
+      fetch = "null";
+      label = "Customer No";
+   }
+   reference CatalogNoRef(CatalogNo) to SalesPartCrossReference(CatalogNo) {
+      label = "Sales Part No";
+   }
+   reference OrderNoRef(OrderNo) to CustomerOrder(OrderNo) {
+      label = "Order No";
+   }
+}
+
+@Override
+entity CustomerOrder {
+   attribute AuthorizeCode Text {
+      label = "Coordinator";
+   }
+   attribute BillAddrNo Text {
+      label = "Doc Addr";
+   }
+}
+
+---------------------------------- QUERIES ----------------------------------
+
+query IncomingSelfBillingDeliveryInfo {
+   from = "ext_inc_sbi_delivery_info";
+   lu = ExtIncSbiDeliveryInfo;
+   keys = MessageId, MessageLine {
+      where = "MESSAGE_ID = :MessageId and MESSAGE_LINE = :MessageLine";
+   }
+   attribute MessageId Number {
+      fetch = "message_id";
+      label = "Message ID";
+   }
+   attribute MessageLine Number {
+      fetch = "message_line";
+      label = "Message Line";
+   }
+   attribute DelnoteNo Text {
+      fetch = "delnote_no";
+      label = "Delivery Note No";
+   }
+   attribute CustomerPlant Text {
+      fetch = "customer_plant";
+      label = "Customer Plant";
+   }
+   attribute CustomerOrderNo Text {
+      fetch = "customer_order_no";
+      label = "Customer's PO No";
+   }
+   attribute UnloadingPlace Text {
+      fetch = "unloading_place";
+      label = "Unloading Place";
+   }
+   attribute ContactPerson Text {
+      fetch = "contact_person";
+      label = "Customer Contact";
+   }
+   attribute DeliveryDate Text {
+      fetch = "delivery_date";
+      label = "Delivered Date";
+   }
+   attribute ReceiptDate Text {
+      fetch = "receipt_date";
+      label = "Receipt Date";
+   }
+}
+
+-------------------------------- STRUCTURES ---------------------------------
+
+structure SearchContextStructure {
+   attribute FilterKey Enumeration(FilterKeyOptions) {
+      label = "";
+   }
+}
+
+------------------------------- ENUMERATIONS --------------------------------
+
+enumeration FilterKeyOptions {
+   enumerationtype = Custom;
+   value = "ViewAll" {
+      identifier = "ViewAll";
+      label = "View All";
+   }
+   value = "ViewUnmatched" {
+      identifier = "ViewUnmatched";
+      label = "View Unmatched";
+   }
+}
+
+--------------------------------- FUNCTIONS ---------------------------------
+
+function GetIncomingSelfBillingLines List<Entity(ExtIncSbiItem)> {
+   parameter   MessageId         Number;
+   parameter   FilterKey         Enumeration(FilterKeyOptions);
+   parameter   CustomerNo        Text;
+   alterattribute CustomerNo {
+      fetch = ":CustomerNo";
+   }
+   basedon     ExtIncSbiItemSet;
+   where = "message_id = :MessageId
+   AND      (:FilterKey = 'ViewAll' OR (:FilterKey = 'ViewUnmatched' AND objstate NOT IN ('Cancelled', 'Matched')))";
+}
+
+
+function GetDefaultSearchContext Structure(SearchContextStructure);
+
+
+function GetSalesPartCrossReferences List<Entity(SalesPartCrossReference)> {
+   parameter CustomerNo Text;
+   parameter CustomerPartNo Text;
+   where = "(customer_part_no = :CustomerPartNo or :CustomerPartNo is null) and (customer_no = :CustomerNo or :CustomerNo is null)";
+}
+
+function ValidateBeforeManualMatch Text {
+   parameter MessageId     Number;
+   parameter MessageLine   Number;
+}
+
+---------------------------------- ACTIONS ----------------------------------
+
+action RefreshPage {
+   initialcheck none;
+   ludependencies = ExtIncSbiHead, ExtIncSbiItem;
+}

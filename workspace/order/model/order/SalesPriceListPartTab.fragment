@@ -1,0 +1,142 @@
+--------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  ---------------------------------------------------------------
+-- 2021-01-15  MiKulk  SC2020R1-12074, Removed the SalesType from navigation since that
+-- 2021-01-15          value is not used to populate SalesPartBasePrices, instead there's a default where for that.
+-- 2019-04024  MaEelk  SCUXXW4-18532, Added WHERE Clause to FetchSalesPriceListPartLines.
+-- 2019-01-20  MAHPLK  SCUXXW4-1486, Converted from tbwSalesPriceListPart using MTG Version: 1.34
+--------------------------------------------------------------------------------------
+
+fragment SalesPriceListPartTab;
+component ORDER;
+layer Core;
+description "Use this API to enter part based lines for the part based sales price list.";
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+
+--------------------------------- COMMANDS ----------------------------------
+
+@Override
+command SetLinePending for SalesPriceListParts {
+   label = "Set to Pending";
+   mode = SelectedRecords;
+   enabled = [PriceListEditable = "TRUE" and count(*, Objstate != "Planned") = 0];
+   execute {
+      call SetLinePending();
+      refresh;
+   }
+}
+
+@Override
+command Activate for SalesPriceListParts {
+   label = "Set Active";
+   mode = SelectedRecords;
+   enabled = [PriceListEditable = "TRUE" and count(*, Objstate = "Active") = 0];
+   execute {
+      call Activate();
+      refresh;
+   }
+}
+
+@Override
+command Plan for SalesPriceListParts {
+   mode = SelectedRecords;
+   enabled = [Objstate in("Active", "Pending")];
+   execute {
+      call Plan();
+      refresh;
+   }
+}
+
+command SalesPartBasePricesCommand for SalesPriceListParts {
+   label = "Sales Part Base Prices";
+   mode = SelectedRecords;
+   enabled = [true];
+   bulkexecute {
+      bulknavigate "page/SalesPartBasePrices/List?$filter=CatalogNo eq $[CatalogNo] and BasePriceSite eq $[BasePriceSite]";
+   }
+}
+
+command ConfigurationPriceListCommand for SalesPriceListParts {
+   label = "Configuration Price List";
+   mode = SelectedRecords;
+   enabled = [ConfigurableDb = "CONFIGURED"];
+   execute {
+      navigate "page/ConfigurationPriceList/Form?$filter=PriceListNo eq $[PriceListNo] and CatalogNo eq $[CatalogNo] and Contract eq $[BasePriceSite]";
+   }
+}
+----------------------------------- LISTS -----------------------------------
+
+list SalesPriceListPartList clone SalesPriceListPartBaseList {
+   label = "Sales Price List Part";
+
+   field ContrMargin {
+      label = "Contr Margin (%)";
+   }
+   fieldorder {
+      anchor PriceBreakTemplateIdRef;
+      followedby ContrMargin;
+   }
+
+   commandgroup PricesCmdGroup {
+      label = "Prices";
+      command ConfigurationPriceListCommand;
+   }
+}
+
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+
+----------------------------- MAIN ENTRY POINTS -----------------------------
+entityset SalesPriceListPartSet for SalesPriceListParts;
+
+------------------------------ ENTITY DETAILS -------------------------------
+
+
+--------------------------------- FUNCTIONS ---------------------------------
+
+function FetchSalesPriceListPartLines List < Entity(SalesPriceListParts) > {
+   parameter PriceListNo Text;
+   parameter ShowDetails Enumeration(ShowDetails);
+   parameter ValidDate Date;
+   basedon SalesPriceListPartSet;
+   from = "sales_price_list_part_price main";
+   where = "price_list_no = :PriceListNo
+            AND
+            sales_price_type_db = 'SALES PRICES'
+            AND
+            (:ShowDetails = 'ViewAll' OR
+               (:ShowDetails = 'ViewWithValidDate' AND
+                VALID_FROM_DATE = ((SELECT MAX(VALID_FROM_DATE)
+                              FROM SALES_PRICE_LIST_PART a
+                              WHERE main.PRICE_LIST_NO = a.PRICE_LIST_NO
+                              AND main.CATALOG_NO = a.CATALOG_NO
+                              AND main.MIN_QUANTITY = a.MIN_QUANTITY
+                              AND main.MIN_DURATION = a.MIN_DURATION
+                              AND a.VALID_TO_DATE IS NOT NULL
+                              AND a.VALID_FROM_DATE <= :ValidDate
+                              AND a.VALID_TO_DATE >= :ValidDate
+                              GROUP BY a.CATALOG_NO, a.MIN_QUANTITY, a.MIN_DURATION)
+                              UNION ALL
+                              (SELECT MAX(VALID_FROM_DATE)
+                               FROM SALES_PRICE_LIST_PART b
+                               WHERE main.PRICE_LIST_NO = b.PRICE_LIST_NO
+                               AND main.CATALOG_NO = b.CATALOG_NO
+                               AND main.MIN_QUANTITY = b.MIN_QUANTITY
+                               AND main.MIN_DURATION = b.MIN_DURATION
+                               AND b.VALID_TO_DATE IS NULL
+                               AND b.VALID_FROM_DATE <= :ValidDate
+                               AND (b.MIN_QUANTITY, b.CATALOG_NO, b.MIN_DURATION)
+                               NOT IN (SELECT c.MIN_QUANTITY, c.CATALOG_NO, c.MIN_DURATION
+                                       FROM SALES_PRICE_LIST_PART c
+                                       WHERE main.PRICE_LIST_NO = c.PRICE_LIST_NO
+                                       AND main.CATALOG_NO = c.CATALOG_NO
+                                       AND main.MIN_QUANTITY = c.MIN_QUANTITY
+                                       AND main.MIN_DURATION = c.MIN_DURATION
+                                       AND c.VALID_TO_DATE IS NOT NULL
+                                       AND c.VALID_FROM_DATE <= :ValidDate
+                                       AND c.VALID_TO_DATE >= :ValidDate)
+                              GROUP BY b.CATALOG_NO, b.MIN_QUANTITY, b.MIN_DURATION ))
+               )
+            )";
+}

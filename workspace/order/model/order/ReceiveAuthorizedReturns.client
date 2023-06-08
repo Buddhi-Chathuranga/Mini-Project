@@ -1,0 +1,354 @@
+--------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  ---------------------------------------------------------------
+-- 2021-03-02  NiDalk  SC2020R1-12663, Modified to support changes in ReturnMaterialLine
+-- 2020-07-03  WaSalk  GESPRING20-4880, Modified columns added by gelr functionalities to columnvisible = [false].
+-- 2020-03-06  MaRalk  SCXTEND-3466, Improved performance by removing usages of the references SalesPartRef
+-- 2020-03-06          CatalogNoRef, ConditionCodeRef, ReturnUMRef, InventoryPartRef, FeeCodeRef and
+-- 2020-03-06          instead used attributes directly fetching from the entity.
+-- 2020-01-29  Kagalk  GESPRING20-1624, Added modify_date_applied functionality.
+-- 2019-05-17  fgusse  SCUXXW4-20685, Added translatable in DocumentTextCommand
+-- 2018-05-30  IzShlk  SCUXXW4-1349, implemented Document text command.
+-- 2018-05-28  IzShlk  SCUXXW4-1349, Handled enabling of all the Commands for Receive Authorized Returns page.
+-- 2018-05-28  MaEelk  SCUXXW4-8762, Navigation was made to ReturnMaterialLineScrapParts
+-- 2018-05-22  IzShlk  SCUXXW4-1349, Converted from tbwReceivableRMAOverview using MTG Version: 1.18
+--------------------------------------------------------------------------------------
+
+client ReceiveAuthorizedReturns;
+component ORDER;
+layer Core;
+
+include fragment SalesPartGtinNoLovSelector;
+include fragment AllSalesPartActiveLovSelector;
+include fragment CustOrdCust2Selector;
+include fragment MpccomPhraseTextLovSelector;
+include fragment OutputTypeLovSelector;
+include fragment DocumentText;
+include fragment InventoryPartInStockDelivSelector;
+include fragment ReturnMaterialAuthorizationStateIndicator;
+
+
+warningsenabled = ValidateScrap;
+warningsenabled = ValidateReturn;
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+navigator {
+   entry ReceiveAuthorizedReturnsNavEntry parent OrderNavigator.SalesReturns at index 300 {
+      label = "Receive Authorized Returns";
+      page List;
+   }
+}
+
+-------------------------------- MAIN PAGES ---------------------------------
+page List using ReturnMaterialLines {
+   label = "Receive Authorized Returns";
+   startupmode = search;
+   list ReceivableRMAOverviewList;
+}
+
+--------------------------------- COMMANDS ----------------------------------
+command ReceivePartsCommand for ReturnMaterialLine {
+   label = "Receive Parts";
+   -- gelr:modify_date_applied, begin
+   enabled = [((ModifyDateAppliedEnabled and ArrivalDate != null) or not(ModifyDateAppliedEnabled)) and(not((Objstate = "ReturnCompleted" or RentalDb = "TRUE") or substring(Condition, 3, 1) = "*" or(CustomersCompany = Company and CustomersCompany != null and OriginatingRmaNo = null and CatalogTypeDb = "INV")))];
+   -- gelr:modify_date_applied, end
+   execute {
+      navigate "assistant/ReturnMaterialLineReceiveParts/Assistant?$action=InitParameters{RmaNoNum:$[RmaNo], RmaLineNoNum:$[RmaLineNo]}";
+   }
+}
+
+command ReceivePartsOrderDeliveriesCommand for ReturnMaterialLine {
+   label = "Receive Parts against Order Deliveries";
+   mode = SelectedRecords;
+   -- gelr:modify_date_applied, begin
+   enabled = [((ModifyDateAppliedEnabled and ArrivalDate != null) or not(ModifyDateAppliedEnabled)) and(not((substring(Condition, 3, 1) = "*") or OrderNo = null or(CustomersCompany = Company and CustomersCompany != null and OriginatingRmaNo = null and CatalogTypeDb = "INV" and RentalDb = "FALSE") or(Objstate = "Denied" or Objstate = "Planned")))];
+   -- gelr:modify_date_applied, end
+   bulkexecute {
+      navigate "assistant/ReceivePartsAgainstOrderDeliveries/ReceivePartsOrderDeliveriesAssistant?$action=InitParameters{FullSelectionStr:$[Selection]}";
+   }
+}
+
+command ScrapPartsCommand for ReturnMaterialLine {
+   label = "Scrap Parts";
+   -- gelr:modify_date_applied, begin
+   enabled = [((ModifyDateAppliedEnabled and ArrivalDate != null) or not(ModifyDateAppliedEnabled)) and(not((substring(Condition, 3, 1) = "*") or PartNo = null or Objstate = "ReturnCompleted" or(CustomersCompany = Company and CustomersCompany != null and OriginatingRmaNo = null and CatalogTypeDb = "INV") or RentalDb = "TRUE"))];
+   -- gelr:modify_date_applied, end
+   execute {
+      navigate "assistant/ReturnMaterialLineScrapParts/Assistant?$action=InitParameters{
+      RmaNoNum:$[RmaNo], RmaLineNoNum:$[RmaLineNo]}";
+   }
+}
+
+command ReturnPartsfromInternalOrdeCommand for ReturnMaterialLine {
+   label = "Return Parts from Internal Order Transit";
+   -- gelr:modify_date_applied, begin
+   enabled = [((ModifyDateAppliedEnabled and ArrivalDate != null) or not(ModifyDateAppliedEnabled)) and((substring(Condition, 3, 1) != "*") and PartNo != null and(CustomersCompany = Company and CustomersCompany != null and parent.OriginatingRmaNo = null) and RentalDb = "FALSE")];
+   -- gelr:modify_date_applied, end
+   execute {
+      assistant ReturnPartsFromIntOrderTransit.InternalOrderReturnAssistant(RmaNo, RmaLineNo) {
+         when OK {
+            exit OK;
+         }
+      }
+   }
+}
+command ScrapPartsfromInternalOrderCommand for ReturnMaterialLine {
+   label = "Scrap Parts from Internal Order Transit";
+   -- gelr:modify_date_applied, begin
+   enabled = [((ModifyDateAppliedEnabled and ArrivalDate != null) or not(ModifyDateAppliedEnabled)) and((substring(Condition, 3, 1) != "*") and PartNo != null and(CustomersCompany = Company and CustomersCompany != null and parent.OriginatingRmaNo = null) and RentalDb = "FALSE")];
+   -- gelr:modify_date_applied, end
+   execute {
+      assistant ScrapPartsFromIntOrderTransit.InternalOrderScrapAssistant(RmaNo, RmaLineNo) {
+         when OK {
+            exit OK;
+         }
+      }
+   }
+}
+
+command RegisterDirectReturnsCommand for ReturnMaterialLine {
+   label = "Register Direct Returns to Supplier";
+   mode = SingleRecord;
+   enabled = [(substring(Condition, 10, 1) != "*")];
+
+   execute {
+      assistant RegisterDirectReturnsToSupplier.DirectReturnsToSupplierAssistant(RmaNo, RmaLineNo) {
+         when OK {
+            exit OK;
+         }
+      }
+   }
+}
+
+command ReturnMaterialAuthorizationCommand for ReturnMaterialLine {
+   label = "Return Material Authorization";
+   enabled = [true];
+   mode = SelectedRecords;
+
+   bulkexecute {
+      bulknavigate "page/ReturnMaterialAuthorization/Form?$filter=RmaNo eq $[RmaNo]";
+   }
+}
+
+command ResolveShortagesCommand for ReturnMaterialLine {
+   label = "Resolve Shortages";
+   mode = SingleRecord;
+   enabled = [not(ShortageHandlingOn != "Y" or QtyReturnedInv <= 0 or ShortageExist = 0 or ShortageFlag = "No Shortage Notation")];
+   execute {
+      if [ConditionCode != null] {
+         navigate "page/ResolveShortagesForInventoryPart/Form?$filter=Contract eq $[Contract] and PartNo eq $[PartNo] and ConditionCode eq $[ConditionCode]";
+      }
+      navigate "page/ResolveShortagesForInventoryPart/Form?$filter=Contract eq $[Contract] and PartNo eq $[PartNo]";
+   }
+}
+
+command DirectReturntoSupplierfromInternalOrderTransitCommand for ReturnMaterialLine {
+   label = "Direct Return to Supplier from Internal Order Transit";
+   enabled = [(substring(Condition, 11, 1) != "*")];
+
+   execute {
+      assistant ReturnToSupplierFromIntOrderTransit.ReturnToSupplierFromIntOrderAssistant(RmaNo, RmaLineNo, Objstate, Contract, CustomersContract, ReturnReasonCode, ReturnToVendorNo,
+      PartNo, CatalogNo, ConfigurationId, QtyToReturnInv, QtyReceived, InventoryUom, OrderNo, SupplierReturnReason) {
+         when OK {
+            call RefreshPage();
+            exit OK;
+         }
+         when CANCEL {
+            exit OK;
+         }
+      }
+   }
+}
+
+command ViewConfigurationCommand for ReturnMaterialLine {
+   label = "View Configuration";
+   enabled = [CatalogNo != null and ConfigurationId != "*"];
+   mode = SingleRecord;
+   execute {
+      set Usage = "CustomerOrder";
+      set Mode = "View";
+      navigate "assistant/PartConfigurationAssistant/EditConfiguration?$action=InitConfiguration{VarUsage:$[Usage],
+                                                                                                 VarMode:'View',
+                                                                                                 VarIdentity1:$[OrderNo],
+                                                                                                 VarIdentity2:$[LineNo],
+                                                                                                 VarIdentity3:$[RelNo],
+                                                                                                 VarIdentity4:$[LineItemNo]}";
+   }
+}
+
+command DocumentTextCommand for ReturnMaterialLine {
+   label = "Document Text";
+   enabled = [NoteId != null];
+   variable LabelTextVar;
+   execute {
+      set LabelTextVar = "for Return Material Authorization - ${RmaNo} ${RmaLineNo}" {
+         translatable = true;
+      }
+      assistant DocumentText(NoteId, LabelTextVar) {
+         when NO {
+            exit CANCEL;
+         }
+      }
+      refresh;
+   }
+}
+
+----------------------------- VISUAL COMPONENTS -----------------------------
+
+----------------------------------- LISTS -----------------------------------
+list ReceivableRMAOverviewList for ReturnMaterialLine {
+   field RmaNo;
+   field RmaLineNo;
+   field DateRequested;
+   lov CustomerNoRef with ReferenceCustOrdCust2Selector {
+      description = CustomerNoRef.Name;
+      contactwidget {
+         enabled = [CustomerNo != null];
+         source = Customer;
+      }
+   }
+   lov CatalogNoRef with ReferenceAllSalesPartActiveLovSelector {
+      description = CatalogDesc;
+      label = "Sales Part";
+      editable = [false];
+   }
+   field CatalogTypeDb {
+      columnexclude = [true];
+   }
+   lov GtinNoRef with ReferenceSalesPartGtinNoLovSelector using SalesPartGtinNumbers;
+   @DynamicComponentDependency Cfgchr
+   field ConfigurationIdRef {
+      editable = [false];
+   }
+   lov ConditionCodeRef with ReferenceConditionCodeSelector {
+      description = ConditionCodeDesc;
+      editable = [false];
+   }
+   lov ReturnReasonCodeRef with ReferenceReturnMaterialReasonSelector {
+      description = ReturnReasonCodeRef.ReturnReasonDescription;
+   }
+   field InspectionInfo;
+   measure QtyToReturn(ReturnUM) {
+      label = "Qty to Return";
+   }
+   measure QtyReceived(ReturnUM) {
+      label = "Total Received Qty";
+   }
+   measure QtyReturnedInv(InventoryUom) {
+      label = "Returned Inv Qty";
+   }
+   measure QtyScrapped(InventoryUom) {
+      label = "Scrapped Qty";
+   }
+   field OrderNo;
+   field LineNo;
+   field RelNo;
+   field RentalNo;
+   lov FeeCodeRef with ReferenceStatutoryFeeSelector {
+      description = FeeCodeDesc;
+   }
+
+   field DebitInvoiceNo {
+      label = "Debit/Corr Inv No";
+   }
+   field Contract {
+      editable = [false];
+   }
+   fieldset ReturnMaterialStateBadge;
+   field CurrencyCode;
+   field SaleUnitPrice {
+      label = "Price/Curr";
+      preserveprecision = [true];
+   }
+   field BaseSaleUnitPrice {
+      preserveprecision = [true];
+   }
+   field PriceConvFactor;
+   field CurrencyRateFinal;
+   field PurchaseOrderNo {
+      label = "Customer's PO No";
+   }
+   field TotalBase {
+      label = "Net Amount/Base";
+   }
+   field GrossTotalBase {
+      label = "Gross Amt/Base";
+   }
+   field TotalCurrency {
+      label = "Net Amount/Curr";
+   }
+   field GrossTotalCurrency {
+      label = "Gross Amt/Curr";
+   }
+   field CreditApproverIdRef {
+      contactwidget {
+         enabled = [CreditApproverId != null];
+         source = Person;
+      }
+      editable = [false];
+   }
+   field CreditCorrInvoiceNo;
+   field CreditInvoiceItemId {
+      label = "Credit/Corr Invoice Line Pos";
+   }
+   field ReturnApproverId {
+      contactwidget {
+         enabled = [ReturnApproverId != null];
+         source = Person;
+      }
+   }
+   field CustRef;
+   badge HeadState {
+      label = "Header Status";
+      emphasis Progress1 = [HeadState = "Planned"];
+      emphasis Progress4 = [HeadState = "Released"];
+      emphasis Progress7 = [HeadState = "PartiallyReceived"];
+      emphasis Progress9 = [HeadState = "Received"];
+      emphasis Progress12 = [HeadState = "ReturnCompleted"];
+      emphasis StateCancelled = [HeadState = "Cancelled"];
+      emphasis StateBlocked = [HeadState = "Denied"];
+      style = TextOnly;
+   }
+   field Note;
+   field DocumentText;
+   field OriginatingRmaNoRef;
+   field ReceiptRmaNoRef;
+   field NoteText {
+      editable = [true];
+      searchable = false;
+      multiline = true;
+   }
+   -- gelr:modify_date_applied, begin
+   field ArrivalDate {
+      columnvisible = [false];
+   }
+   -- gelr:modify_date_applied, end
+   commandgroup PartsCmdGroup {
+
+      command ReceivePartsCommand;
+      command ReceivePartsOrderDeliveriesCommand;
+      command ScrapPartsCommand;
+      command ReturnPartsfromInternalOrdeCommand;
+      command ScrapPartsfromInternalOrderCommand;
+      command RegisterDirectReturnsCommand;
+      command ReturnMaterialAuthorizationCommand;
+      command ResolveShortagesCommand;
+      command DirectReturntoSupplierfromInternalOrderTransitCommand;
+   }
+
+   commandgroup ViewConfigurationCmdGroup {
+
+      command ViewConfigurationCommand;
+   }
+
+   commandgroup NotesDocumentTextCmdGroup {
+
+      command DocumentTextCommand;
+   }
+}
+
+@Override
+list CustOrdCust2LovList for CustOrdCust2 {
+   static Category {
+      label = "Customer Type";
+   }
+}

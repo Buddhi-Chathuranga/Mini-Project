@@ -1,0 +1,1254 @@
+------------------------------------------------------------------------------------------------------
+-- Date        Sign     History
+-- ----------  ------   ------------------------------------------------------------------------------
+-- 2021-12-23  Skanlk   Bug 161134(SC21R2-6825), Modified command BulkValidateTaxIdNumberCommand by passing the TAX_ID_TYPE to validate Tax ID other than EU countires.
+-- 2021-08-10  Inaklk   SC21R2-2242, Use FreeOfCharge instead of FreeOfChargeDb to correct parameters to actions
+-- 2021-06-29  MiKulk   SC21R2-1693, Added a label to the current filter and make the OrderClosedDate non editable from client.
+-- 2021-06-29  MiKulk   SC21R2-1693, Added currentDataFilter to the page.
+-- 2021-06-15  ApWilk   Bug 159557(SCZ-15213), Added crudactions to the list OverviewCustOrdLineList to prompt a warning message and to handle the replication.
+-- 2021-04-30  cecobr   FI21R2-916, gelr:brazilian_specific_attributes, Add Acquisition Reason to Business Transaction, Sales Part and CO Line
+-- 2020-12-17  MaRalk   SC2020R1-11406, Reflected changes done in the projection for the attributes ConsignmentStock, StagedBilling, CreateSmObjectOption,
+-- 2020-12-17           SmConnection, CtpPlanned as enumerations in the client.
+-- 2020-10-19  MaRalk   SCZ-11659, Modified ValidateTargetdateCommand to correctly set value for PriceEffectivityDate from WantedDeliveryDate.
+-- 2020-03-26  MaRalk   SCXTEND-2206, Added new parameter DuplicateLineVar to the method call GetOrderPrice
+-- 2020-03-26           inside validate command of PriceEffectivityDate.
+-- 2020-02-03  RaVdlk   SCXTEND-3029, Used the FW detail command for navigation instead of command
+-- 2019-10-25  JeLise   SCXTEND-993, Removed the replication functionality.
+-- 2019-07-05  MeAblk   SCUXXW4-18021, Removed some unwanted reference ReferenceConItemCustOrderLovSelector.
+-- 2019-06-18  JeLise   SCUXXW4-8717, Included ReplicateOrderChangesDialog and added ValidateReplicateColumnsCommand
+-- 2019-06-18           and BeforeSaveCommand to handle the replication functionality.
+-- 2019-05-19  LaThlk   SCUXXW4-21144, Added DynamicComponentDependency annotation for ConfigurationL1CmdGroup and RentalL1CmdGroup.
+-- 2019-04-04  Akhalk   SCUXXW4-18736, Added Command "Customer order"
+-- 2018-10-09  HaPulk   SCUXXW4-1084, Converted from tbwOverviewCustOrdLine using MTG Version: 1.30
+-- 2010-01-28  KJohSe   SCUXXW4-9845, Implemented the Customer Order Line Milestones Command
+------------------------------------------------------------------------------------------------------
+
+client CustomerOrderLines;
+component ORDER;
+layer Core;
+projection CustomerOrderLinesHandling;
+
+include fragment CustOrdCust1Selector;
+include fragment UserAllowedSiteLovSelector;
+
+@DynamicComponentDependency PURCH
+include fragment PurchasePartSupplierLovSelector;
+include fragment TaxLiabilityLovSelector;
+include fragment TaxCalcStructureActiveSelector;
+@DynamicComponentDependency EQUIP
+include fragment EquipmentObjCustNoScrappedSelector;
+include fragment CustAddressShipLovSelector;
+include fragment CustomerTemplateLovSelector;
+include fragment OrderDeliveryTermLovSelector;
+@DynamicComponentDependency CONMGT
+include fragment ConItemCustOrderLovSelector;
+include fragment SalesPartGtinNoLovSelector;
+-- Used for command "Update Sales Part Prices"
+include fragment UpdateSalesPartPricesFromLineDialog;
+include fragment ValidCustomerAgreementLovSelector;
+include fragment SupplyChainOrderAnalysisCommand;
+-- Used for Code Parts
+include fragment CodeStringAllBasic;
+-- Used for warranties
+include fragment CustomerOrderLineStateBadge;
+-- Used for CO Line Commands and Validations
+include fragment SalesOrderLineCommonValidationCommands;
+--include fragment CustomerOrderLineBaseList;
+include fragment SalesOrderLineCommonCommands;
+include fragment TaxIdNumbersValidation;
+include fragment SalesInterimOrderCommands;
+include fragment ShipmentTypeSelector;
+-- gelr:acquisition_origin, begin
+include fragment AcquisitionOriginSelector;
+-- gelr:acquisition_origin, end
+-- gelr:good_service_statistical_code, begin
+include fragment StatisticalCodeSelector;
+-- gelr:good_service_statistical_code, end
+-- gelr:brazilian_specific_attributes, begin
+include fragment AcquisitionReasonSelector;
+-- gelr:brazilian_specific_attributes, end
+warningsenabled = CustomerOrderJoin;
+warningsenabled = NewAgreementSalesPartDeal;
+warningsenabled = NewAgreementAndPartDeal;
+warningsenabled = Unpeg;
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+navigator {
+   entry CustomerOrdersNavEntry parent OrderNavigator.SalesOrder at index 300 {
+      label = "Customer Order Lines";
+      page List home CustomerOrderLine;
+   }
+}
+
+-------------------------------- MAIN PAGES ---------------------------------
+page List using CustomerOrderJoinSet {
+   label = "Customer Order Lines";
+   startupmode = search;
+   currentdatafilter {
+      label = "Show only current results";
+      description = "Lines of open customer orders and invoiced closed orders during last 100 days";
+   }
+   list OverviewCustOrdLineList {
+      details = "page/CustomerOrder/Form?$filter=OrderNo eq $[OrderNo]";
+   }
+}
+--------------------------------- COMMANDS ----------------------------------
+
+@Override
+command BulkValidateTaxIdNumberCommand {
+   enabled = [TaxIdNo != null];
+   bulkexecute {
+      stringify(records, "${keyref}TAX_ID_NUMBER=${TaxIdNo}^COUNTRY_CODE=${DeliveryCountryCode}^TAX_ID_TYPE=${TaxIdType}^;") into TaxIdNumberSelectionVar;
+      set ProjectionNameVar = "CustomerOrderLinesHandling";
+      super;
+   }
+}
+
+command ValidateTargetdateCommand {
+   variable UpdatePriceEffectiveDateVar Text;
+   execute {
+      set PlannedDeliveryDate = TargetDate;
+      if[(not isNew) and(ValidatePriceEffectiveDate = true)] {
+         if[WantedDeliveryDate != null] {
+            call UpdatePriceEffectivityDate(Contract) into UpdatePriceEffectiveDateVar;
+
+            if[(UpdatePriceEffectiveDateVar = "TRUE") and(OrderState != "Planned")] {
+               messagebox("", question, "Changing the price effective date may result in a new price on the order line(s). Do you want to apply new price?") {
+                  when "Yes" {
+                     set PriceEffDateValidated = false;
+                     set PriceEffectivityDate = "#{toDate(WantedDeliveryDate)}";
+                  }
+                  when "No" {
+                     set PriceEffDateValidated = true;
+                     exit;
+                  }
+               }
+            }
+         }
+         set ValidatePriceEffectiveDate = false;
+      }
+   }
+}
+command ValidateWantedDeliveryDateCommand clone ValidateTargetdateCommand {
+   execute {
+      set TargetDate = WantedDeliveryDate;
+      set ValidatePriceEffectiveDate = true;
+      super;
+   }
+}
+
+command UpdateSalesPartPricesCommand for CustomerOrderJoin {
+   label = "Update Sales Part Prices";
+   mode = SelectedRecords;
+
+   enabled = [(SupplyCodeDb != "SEO") and(count(*, PriceFreeze = "Frozen") = 0) and
+   (count(*, Objstate = "Invoiced") = 0) and(count(*, Objstate = "Cancelled") = 0) and
+   (count(Contract) = 1) and(count(CatalogNo) = 1) and(count(CurrencyCode) = 1) and(count(CustomerNo) = 1) and(count(UsePriceInclTax) = 1)];
+
+   variable NewPriceVar {
+      type = Number;
+   }
+   variable NewPriceInclTaxVar {
+      type = Number;
+   }
+   variable AgreementFlagVar {
+      type = Text;
+   }
+   variable VarGetPriceSourceInfoStruct {
+      type = GetPriceSourceInfoStruct;
+   }
+
+   bulkexecute {
+
+      call GetPriceSourceInfo(component.OverviewCustOrdLineList.Selection) into VarGetPriceSourceInfoStruct;
+
+      dialog UpdateSalesPartPricesFromLineDialog
+      (VarGetPriceSourceInfoStruct.OrderNo, VarGetPriceSourceInfoStruct.LineNo, VarGetPriceSourceInfoStruct.RelNo, VarGetPriceSourceInfoStruct.LineItemNo,
+      VarGetPriceSourceInfoStruct.CustomerNo, VarGetPriceSourceInfoStruct.Contract, VarGetPriceSourceInfoStruct.CatalogNo,
+      VarGetPriceSourceInfoStruct.CurrencyCode, VarGetPriceSourceInfoStruct.CurrencyCode, VarGetPriceSourceInfoStruct.CustomerPartNo,
+      VarGetPriceSourceInfoStruct.RentalDb, VarGetPriceSourceInfoStruct.UsePriceInclTax, VarGetPriceSourceInfoStruct.PriceSourceId)
+      into(PriceSourceId, NewPriceVar, NewPriceInclTaxVar, AgreementFlagVar)
+         {
+         when OK {
+            if [NewPriceVar != null] {
+
+               call ModifySaleUnitPrice(component.OverviewCustOrdLineList.Selection, VarGetPriceSourceInfoStruct.UsePriceInclTax,
+               NewPriceVar, NewPriceInclTaxVar);
+
+               if [AgreementFlagVar = "Update"] {
+                  call ModifyDealPrice(component.OverviewCustOrdLineList.Selection, PriceSourceId, NewPriceVar, NewPriceInclTaxVar);
+               }
+               if [AgreementFlagVar = "AddExisting"] {
+                  call NewAgreementSalesPartDeal(component.OverviewCustOrdLineList.Selection, PriceSourceId, NewPriceVar, NewPriceInclTaxVar);
+               }
+               if [AgreementFlagVar = "CreateNew"] {
+                  call NewAgreementAndPartDeal(VarGetPriceSourceInfoStruct.CustomerNo, VarGetPriceSourceInfoStruct.Contract, VarGetPriceSourceInfoStruct.CurrencyCode,
+                  VarGetPriceSourceInfoStruct.CatalogNo, NewPriceVar, NewPriceInclTaxVar) into PriceSourceId;
+
+                  if [PriceSourceId != null] {
+                     confirm("Customer Agreement ${PriceSourceId} has been created. Would you like to view the Customer Agreement now ?") {
+                        when OK {
+                           navigate "page/CustomerAgreement/Form?$filter=AgreementId eq $[PriceSourceId]";
+                        }
+                        when CANCEL {
+                           exit CANCEL;
+                        }
+                     }
+                  }
+               }
+            }
+            else {
+               call ModifyProvisionalPrice(component.OverviewCustOrdLineList.Selection);
+            }
+            exit OK;
+         }
+         when CANCEL {
+            exit CANCEL;
+         }
+      }
+   }
+}
+command CommandSupplyChainOrdersAnalysisCommand for CustomerOrderJoin {
+   label = "Supply Chain Orders Analysis";
+   mode = SingleRecord;
+   variable SourceRefVar Structure(SupplyOrderAnalysisSourceRefStructure);
+   enabled = [SupplyCodeDb in("IPT", "IPD", "PD", "PT", "SO", "DOP") or DemandCodeDb in("IPD", "IPT", "IPT_RO", "DO")];
+   execute {
+      call SupplyOrderAnalysisFindSource(OrderNo, LineNo, RelNo, "${LineItemNo}", "CUSTOMER_ORDER") into SourceRefVar;
+      if [SourceRefVar.SourceType = "CUSTOMER_ORDER"] {
+         navigate "tree/SupplyChainCustomerOrderAnalysis/Tree?$filter=OrderNo eq $[SourceRefVar.SourceRef1] and LineNo eq $[SourceRefVar.SourceRef2] and RelNo eq $[SourceRefVar.SourceRef3] and LineItemNo eq $[SourceRefVar.SourceRef4]";
+      }
+      if [SourceRefVar.SourceType = "PURCHASE_ORDER"] {
+         navigate "tree/SupplyChainPurchaseOrderAnalysis/Tree?$filter=OrderNo eq $[SourceRefVar.SourceRef1] and LineNo eq $[SourceRefVar.SourceRef2] and ReleaseNo eq $[SourceRefVar.SourceRef3]";
+      }
+   }
+}
+command ShipmentLinesCommand {
+   mode = SelectedRecords;
+   label = "Shipment Lines";
+   enabled = [ShipmentExist = 1];
+   bulkexecute {
+      bulknavigate "page/ShipmentLines/List?$filter=SourceRef1 eq $[OrderNo] and SourceRef2 eq $[LineNo] and SourceRef3 eq $[RelNo] ";
+
+   }
+}
+command DocumentTextCommand {
+   label = "Document Text";
+   enabled = [NoteId != null];
+   execute {
+      set LabelTextVar = "for Customer Order Line - ${OrderNo},${LineNo}, ${RelNo}";
+      assistant DocumentText.DocumentText(NoteId, LabelTextVar) {
+         when OK {
+            exit OK;
+         }
+      }
+   }
+}
+
+command OrderLineDetailsMilestoneCommand {
+   label = "Order Line Milestones";
+   enabled = [DemandCode != "FieldServiceManagement"];
+   execute {
+      navigate "page/CustomerOrderLineMilestones/List?searchcontext=OrderNo:$[OrderNo],LineNo:$[LineNo],RelNo:$[RelNo],LineItemNo:$[LineItemNo],Contract:$[Contract]";
+   }
+}
+command PerformPartMrpCommand {
+   label = "Perform MRP for Part";
+   enabled = [(RelMtrlPlanning = true) and(SupplyCode = "InventOrder" or SupplyCode = "ProjectInventory") and not(Rental)];
+   variable CatalogNoVar Text;
+   variable PartNoVar Text;
+   variable Title Text;
+   variable StopMrpOnError Boolean;
+   variable PhantomPartDependent Boolean;
+   execute {
+      set StopMrpOnError = true;
+      set PhantomPartDependent = true;
+      if[LineItemNo = -1] {
+         set CatalogNoVar = CatalogNo;
+      }
+      else {
+         set PartNoVar = PartNo;
+      }
+      if[SupplyCode = "ProjectInventory"] {
+         set Title = "Perform Project MRP for Part" {
+            translatable = true;
+         }
+
+         @DynamicComponentDependency PMRP
+         dialog PerformProjectMrpForPartDialog(Contract, PartNoVar, CatalogNoVar, ProjectId, ActivitySeq, StopMrpOnError, false, Title) {
+            when CANCEL {
+               exit;
+            }
+            when OK {
+               exit OK;
+            }
+         }
+      }
+      else {
+         set Title = "Perform MRP for Part" {
+            translatable = true;
+         }
+         @DynamicComponentDependency MRP
+         dialog PerformMrpForPartDialog(Contract, PartNoVar, CatalogNoVar, StopMrpOnError, PhantomPartDependent, false, Title) {
+            when CANCEL {
+               exit;
+            }
+            when OK {
+               exit OK;
+            }
+         }
+      }
+   }
+}
+@DynamicComponentDependency RENTAL
+command RentalWorkbenchCommand {
+   label = "Rental Workbench";
+   mode = SelectedRecords;
+   enabled = [Rental];
+
+   variable RentalNoListVar Text;
+
+   bulkexecute {
+      stringify(records, "${RentalNo}") into RentalNoListVar;
+      navigate "page/RentalWorkbench/Form?searchcontext=RentalNo:$[RentalNoListVar]";
+   }
+}
+
+@DynamicComponentDependency RENTAL
+command ManageOvwRentalsCommand {
+   label = "Manage Rentals";
+   mode = SelectedRecords;
+   enabled = [Rental];
+
+   bulkexecute {
+      bulknavigate "page/ManageRentals/List?$filter=RentalNo eq $[RentalNo]";
+   }
+}
+
+command RecalculatePriceCurrencyCoLineCommand clone RecalculatePriceCurrencyBaseCommand {
+   enabled = [CatalogNo != null and PriceFreeze = "Free" and Objstate != "Invoiced" and Objstate != "Cancelled" and SupplyCode != "ServiceOrder"];
+   variable UsePriceInclTaxVar Boolean;
+   variable CurrencyCodeVar Text;
+   execute {
+      set CurrencyCodeVar = CurrencyCode;
+      set UsePriceInclTaxVar = UsePriceInclTax;
+      set Identity1 = OrderNo;
+      set Identity2 = LineNo;
+      set Identity3 = RelNo;
+      set Identity4 = LineItemNo;
+      set Source = "CUSTOMERORDER";
+
+      super;
+   }
+}
+@DynamicComponentDependency CFGCHR
+command ConfigFindExistingforOrderLineOvwCommand clone ConfigurationFindExistingCommand {
+   execute {
+
+      set LimitSalesToAssortmentsVar = LimitSalesToAssortmentsDb;
+      super;
+   }
+}
+
+
+command OrderLineDetailsOrderLineOvwAddressCommand {
+   label = "Address";
+   enabled = [true];
+   variable OrigCoLangCodeVar {
+      type = Text;
+   }
+   variable LineDetailVar Structure(LineDetailStructure);
+
+   execute {
+      if [OriginatingCoLangCode = null] {
+         set OrigCoLangCodeVar = parent.LanguageCode;
+      }
+      else
+         {
+         set OrigCoLangCodeVar = OriginatingCoLangCode;
+      }
+      call GetLineDetails(OrderNo, LineNo, RelNo, LineItemNo) into LineDetailVar;
+
+      dialog CustomerOrderLineAddressDialog(Company, OrderNo, LineNo, RelNo, LineItemNo, ShipAddrNo, DefaultAddrFlag, AddrFlag, ShipViaCode, ExtTransportCalendarId, LineDetailVar.FreightMapId, LineDetailVar.ZoneId, LineDetailVar.FreightPriceListNo, CustomerNo, DelTermsLocation, DeliveryLeadtime, PickingLeadtime, ForwardAgentId, ShipViaCode, DeliveryTerms, Contract, PartNo, SupplyCode, VendorNo, LineDetailVar.Contact, RouteId, SupplierShipViaTransit, CustCalendarId, ShipmentType, ShipmentCreation, RegionCode, DistrictCode, DockCode, SubDockCode, LineDetailVar.DeliverySequence, LocationNo, DeliverToCustomerNo, LineDetailVar.IntrastatExempt, SupplyCode, Objstate, LineDetailVar.LanguageCode, false, false)
+         {
+         when OK {
+            exit;
+         }
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+
+command BeforeSaveCommand for CustomerOrderJoin {
+   execute {
+      if[not(OrderState in("Planned", "Invoiced", "Cancelled"))] {
+         if[(((SupplyCodeDb in("PT", "PD", "IPT", "IPD", "SO", "DOP")) and QtyOnOrder > 0)or((SupplyCodeDb = "PKG") and(PeggedCompExist = "TRUE")))] {
+            if[not(Objstate in("Delivered", "Invoiced", "Cancelled"))] {
+               if[(PlannedDeliveryDate != original.PlannedDeliveryDate) or(DeliveryLeadtime != original.DeliveryLeadtime) or(PickingLeadtime != original.PickingLeadtime)] {
+                  confirm("Replication will not be handled to the pegged supply. Please consider updating the Customer Order instead") {
+                     when CANCEL {
+                        exit CANCEL;
+                     }
+                  }
+               }
+            }
+         }
+      }
+   }
+}
+
+@DynamicComponentDependency DEFORD
+command DefenseContractFlowdownCommand {
+   label = "Defense Contract Flowdown";
+   enabled = [IsDefordConnected];
+
+   execute {
+      assistant DefenseContractFlowdown.ContractFlowdownAssistant(ProjectId, "customer order", OrderNo, LineNo, RelNo, LineItemNo) {
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+--------------------------------- SELECTORS ---------------------------------
+
+----------------------------------- LISTS -----------------------------------
+
+list OverviewCustOrdLineList for CustomerOrderJoin {
+   crudactions {
+      before command BeforeSaveCommand;
+   }
+   field OrderNo;
+   field LineNo {
+      size = Small;
+   }
+   field RelNo {
+      size = Small;
+   }
+
+   fieldset CustomerOrderLineStateFieldSet;
+
+   field OrderIdRef {
+      size = Small;
+   }
+
+   lov CustomerNoRef with ReferenceCustOrdCust1Selector {
+      contactwidget {
+         enabled = [true];
+         source = Customer;
+      }
+      description = CustomerName;
+      size = Large;
+      label = "Customer";
+   }
+
+   lov ContractRef with ReferenceUserAllowedSiteLovSelector {
+      size = Small;
+   }
+
+   badge HeaderStatus {
+      style = TextOnly;
+      emphasis Progress1 = [OrderState = "Planned"];
+      emphasis Progress3 = [OrderState = "Released"];
+      emphasis Progress5 = [OrderState = "Reserved"];
+      emphasis Progress7 = [OrderState = "Picked"];
+      emphasis Progress8 = [OrderState = "PartiallyDelivered"];
+      emphasis Progress10 = [OrderState = "Delivered"];
+      emphasis Progress12 = [OrderState = "Invoiced"];
+      emphasis StateBlocked = [OrderState = "Blocked"];
+      emphasis StateCancelled = [OrderState = "Cancelled"];
+   }
+
+   field CatalogNoRef;
+   field CatalogDesc;
+
+   field Configurable {
+      size = Small;
+   }
+   field ConfigurationId {
+      size = Small;
+   }
+   field ConditionCode;
+   field ConditionCodeRef.Description {
+      editable = [false];
+   }
+   field InterimOrder {
+      size = Small;
+   }
+
+   field CatalogType;
+   field PartNoRef;
+   @DynamicComponentDependency PURCH
+   field PurchasePartNoRef;
+   field SupplyCode {
+      when [Rental] use subset Subset7;
+      when [not Rental] use subset Subset6;
+   }
+
+   @DynamicComponentDependency PURCH
+   field VendorNo {
+      editable = [SupplyCode = "PurchOrderTrans" or SupplyCode = "PurchOrderDir" or SupplyCode = "IntPurchTrans" or(SupplyCode = "IntPurchDir" and PurchasePartNo != null)];
+      contactwidget {
+         enabled = [VendorNo != null];
+         source = Supplier;
+      }
+      lovswitch {
+         when [SupplyCode = "PurchOrderTrans" or SupplyCode = "PurchOrderDir"] {
+            lov VendorNoRef with ReferencePurchasePartSupplierLovSelector using GetVendorCategoryType("E");
+         }
+         when [SupplyCode = "IntPurchTrans" or SupplyCode = "IntPurchDir"] {
+            lov VendorNoRef with ReferencePurchasePartSupplierLovSelector using GetVendorCategoryType("I");
+         }
+      }
+      validate command {
+         variable SupplySiteReserveTypeStructVar {
+            type = SupplySiteReserveTypeStruct;
+         }
+         execute {
+            call GetSupplySiteReserveType(SupplySite, Contract) into SupplySiteReserveTypeStructVar;
+            set SupplySiteReserveType = SupplySiteReserveTypeStructVar.SupplySiteReserveType;
+         }
+      }
+   }
+   field SupplySite {
+      size = Small;
+   }
+
+   field InvPartSuppSiteUnitMeas {
+      label = "Supply Site Inventory UoM";
+      size = Small;
+   }
+   field SupplySiteReservedQty;
+   field SupplySiteReserveType;
+
+   field BuyQtyDue;
+   field DesiredQty;
+   field ConvFactor;
+   field InvertedConvFactor;
+   field RevisedQtyDue;
+   field AbnormalDemandDb {
+      size = Small;
+   }
+
+   field InputUomGroup {
+      size = Small;
+   }
+   field InputUnitMeas {
+      size = Small;
+   }
+   field InputQty;
+   field InputConvFactor;
+   field InputVariableValues;
+
+   lov PriceListNoRef with ReferenceSalesPriceListSelector {
+      description = PriceListDescription;
+   }
+   field PriceSource;
+   field PriceSourceId;
+
+   field ConsignmentStock {
+      size = Small;
+      enumerationtrue = "ConsignmentStock";
+      enumerationfalse = "NoConsignmentStock";
+      truelabel = "Yes";
+      falselabel = "No";
+   }
+
+   field PartOwnership;
+   lov OwnerRef with ReferenceCustOrdCust1Selector {
+
+      contactwidget {
+         enabled = [true];
+         source {
+            Customer = [PartOwnership = "CustomerOwned"];
+            Supplier = [PartOwnership = "SupplierOwned"];
+         }
+      }
+   }
+   field OwningCustomerName {
+      editable = [false];
+   }
+
+   field ChargedItem {
+      size = Small;
+      enumerationtrue = "ChargedItem";
+      enumerationfalse = "ItemNotCharged";
+      truelabel = "Yes";
+      falselabel = "No";
+      required = [true];
+   }
+   field QtyAssigned;
+   field AvailableQty;
+   field PickedQty;
+   field QtyShort;
+   field QtyOnOrder;
+   field QtyToShip;
+   field DeliveredQty;
+   field QtyShipdiff;
+   field QtyConfirmeddiff;
+   field QtyReturned;
+   field QtyInvoiced;
+   field SalesUnitMeasRef {
+      size = Small;
+   }
+   field PriceConvFactor;
+   field PartPrice {
+      preserveprecision = [true];
+   }
+   field CalcCharPrice {
+      preserveprecision = [true];
+   }
+   field CharPrice {
+      preserveprecision = [true];
+      editable = [false];
+   }
+   field TotalCalcSalesPriceCurr;
+   field SaleUnitPrice {
+      preserveprecision = [true];
+   }
+   field UnitPriceInclTax {
+      preserveprecision = [true];
+   }
+   field CustomsValue;
+   field ProvisionalPriceDb {
+      size = Small;
+   }
+   field PriceFreeze {
+      size = Small;
+      enumerationtrue = "Frozen";
+      enumerationfalse = "Free";
+      truelabel = "Yes";
+      falselabel = "No";
+      required = [true];
+   }
+   field CurrencyCodeRef;
+   field CurrencyRate;
+   field BaseSaleUnitPrice {
+      preserveprecision = [true];
+   }
+   field BaseUnitPriceInclTax {
+      preserveprecision = [true];
+   }
+   field NetAmtBase;
+   field GrossAmtBase;
+   field NetAmountCurr;
+   field GrossAmtCurr;
+   field Cost;
+   field TotalCostBase;
+   field WantedDeliveryDate {
+      validate command ValidateWantedDeliveryDateCommand;
+   }
+   field TargetDate {
+      validate command ValidateTargetdateCommand;
+   }
+   field PlannedDeliveryDate;
+   field PromisedDeliveryDate;
+   field PlannedShipDate;
+
+   field PriceEffectivityDate {
+      validate command {
+         variable UpdatePriceEffectivityDateStructVar {
+            type = ValidatePriceEffectivityDateStruct;
+         }
+         variable ValidationRecVar Structure(CustOrdLineValidation);
+         variable ReturnValidationRecVar Structure(CustOrdLineValidation);
+         variable TaxFromDefaultsVar Text;
+         variable TaxCodeFlagVar Boolean;
+         variable NewLineVar Boolean;
+         variable DuplicateLineVar Boolean;
+         variable CalculateCostVar Boolean;
+
+         execute {
+            set PriceEffDateValidated = false;
+            call ValidatePriceEffecDate(PriceListNo, Contract, CatalogNo, CustomerNo, CurrencyCode, PriceEffectivityDate, PriceEffDateValidated) into UpdatePriceEffectivityDateStructVar {
+               when SUCCESS {
+                  copy this into UpdatePriceEffectivityDateStructVar;
+                  if [BuyQtyDue != null and not Rental] {
+                     copy this into ValidationRecVar;
+                     set TaxFromDefaultsVar = "FALSE";
+
+                     if [TaxCode != original.TaxCode or isNew] {
+                        set TaxCodeFlagVar = true;
+                     }
+                     else {
+                        set TaxCodeFlagVar = false;
+                     }
+
+                     if [TaxCode != original.TaxCode or TaxCalcStructureId != original.TaxCalcStructureId] {
+                        set TaxEditedVar = true;
+                     }
+                     else {
+                        set TaxEditedVar = false;
+                     }
+
+                     if [isNew] {
+                        set NewLineVar = true;
+                     }
+                     else {
+                        set NewLineVar = false;
+                     }
+                     set DuplicateLineVar = false;
+                     set RecalcLineDiscVar = true;
+
+                     call GetOrderPrice(ValidationRecVar, TaxFromDefaultsVar, UsePriceInclTax,
+                     TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar, RecalcLineDiscVar, FreeOfCharge) into ReturnValidationRecVar {
+                        when SUCCESS {
+                           copy ReturnValidationRecVar into this;
+                        }
+                     }
+                     set CalculateCostVar = true;
+                  }
+                  else {
+                     set CalculateCostVar = true;
+                  }
+
+               }
+            }
+         }
+      }
+   }
+   field PlannedShipPeriodRef;
+
+   field Rental {
+      size = Small;
+   }
+   @DynamicComponentDependency RENTAL
+   field PlannedRentalStartDate;
+   @DynamicComponentDependency RENTAL
+   field PlannedRentalStartTime;
+   @DynamicComponentDependency RENTAL
+   field PlannedRentalDuration;
+   @DynamicComponentDependency RENTAL
+   field RentalDurationUom {
+      size = Small;
+   }
+   @DynamicComponentDependency RENTAL
+   field PlannedRentalEndDate;
+   @DynamicComponentDependency RENTAL
+   field PlannedRentalEndTime;
+   @DynamicComponentDependency RENTAL
+   field ChargeableDays;
+   @DynamicComponentDependency RENTAL
+   field PlannedRentalReturnDate;
+   @DynamicComponentDependency RENTAL
+   field ChargeableDaysID {
+      size = Small;
+   }
+   @DynamicComponentDependency RENTAL
+   field DateExceptionID;
+
+   @DynamicComponentDependency RENTAL
+   field PeriodRounding;
+
+   @DynamicComponentDependency RENTAL
+   field ScheduleID;
+   @DynamicComponentDependency RENTAL
+   field ScheduleDescription;
+
+   @DynamicComponentDependency RENTAL
+   field StartRentalOption;
+
+   field UsePriceInclTax;
+   field TaxLiability {
+      size = Small;
+      lovswitch {
+         when [DefaultAddrFlag = "Yes"] {
+            lov TaxLiabilityRef with ReferenceTaxLiabilityLovSelector using GetCustomerOrderAddressCountryCode(OrderNo);
+         }
+         when [AddrFlag = "Yes"] {
+            lov TaxLiabilityRef with ReferenceTaxLiabilityLovSelector using GetDeliveryCountryCode(DeliveryCountryCode);
+         }
+         when [AddrFlag = "No"] {
+            lov TaxLiabilityRef with ReferenceTaxLiabilityLovSelector using GetCustOrdCustomerAddressCountryCode(DeliverToCustNo, ShipAddrNo);
+         }
+      }
+
+      validate command {
+         execute {
+            set DefaultAddrFlag = "No";
+            set TaxLiabilityChanged = true;
+         }
+      }
+   }
+   field TaxLiabilityTypeDb {
+      size = Small;
+      label = "Tax Liability Type";
+   }
+   field Taxable {
+      size = Small;
+      editable = [false];
+      required = [true];
+   }
+
+   lov TaxCodeRef with ReferenceStatutoryFeeSelector;
+
+   field TaxCodeDescription;
+   field TaxClassId;
+   field TaxClassDescription;
+
+   lov TaxCalcStructureIdRef with ReferenceTaxCalcStructureActiveSelector;
+
+   field MultipleTaxLines {
+      size = Small;
+   }
+   field TaxIdNo {
+      validate command {
+         execute {
+            if [(TaxIdNo = null) or(TaxIdNo != TaxIdNoTemp)] {
+               set TaxIdValidatedDate = null;
+            }
+            set TaxIdNoTemp = TaxIdNo;
+            set DefaultAddrFlag = "No";
+         }
+      }
+   }
+   field TaxIdValidatedDate;
+   field TaxAmountBase {
+      editable = [false];
+   }
+   field TaxAmountCurr {
+      editable = [false];
+   }
+   field BlockedForInvoicingDb {
+      size = Small;
+   }
+   field Discount;
+   field OrderDiscount;
+   field AdditionalDiscount;
+   field TotalOrderLineDiscount;
+   field FreeOfCharge {
+      size = Small;
+   }
+   field FreeOfChargeTaxBasis;
+   field CompanyBearingTaxAmountBase;
+   field RebateBuilderDb {
+      editable = [not Rental];
+   }
+   field LineTotalQty;
+   field LineTotalWeightGross;
+   field LineTotalWeight;
+   field RouteIdRef;
+   field RouteDescription;
+
+   field LineDeliveryTypeRef;
+   field CustomerPartNo;
+
+   field CustomerPartConvFactor;
+   field CustPartInvertConvFact;
+   field CustomerPartUnitMeasRef;
+
+   field CustomerPartBuyQty;
+   field DemandCode;
+   field DemandOrderRef1;
+   field DemandOrderRef2;
+   field DemandOrderRef3;
+
+   @DynamicComponentDependency RENTAL
+   field RentalNo;
+   field MilestoneExists {
+      size = Small;
+   }
+   field StagedBilling {
+      size = Small;
+      enumerationtrue = "StagedBilling";
+      enumerationfalse = "NotStagedBilling";
+      truelabel = "Yes";
+      falselabel = "No";
+   }
+   field SelfBilling {
+      size = Small;
+      enumerationtrue = "SelfBilling";
+      enumerationfalse = "NotSelfBilling";
+      truelabel = "Yes";
+      falselabel = "No";
+
+      required = [true];
+   }
+   field NoteText {
+      multiline = true;
+   }
+   field DocumentText;
+   field DopConnection;
+
+   field CustomerWarranty {
+      size = Small;
+   }
+   field CreateSmObjectOption {
+      editable = [not Rental];
+      enumerationtrue = "CreateSMObject";
+      enumerationfalse = "DoNotCreateSMObject";
+      truelabel = "Yes";
+      falselabel = "No";
+   }
+   field SmConnection {
+      size = Small;
+      enumerationtrue = "Connected";
+      enumerationfalse = "NotConnected";
+      truelabel = "Yes";
+      falselabel = "No";
+   }
+   @DynamicComponentDependency EQUIP
+   lov SupSmObjectRef with ReferenceEquipmentObjCustNoScrappedSelector {
+      validate command {
+         execute {
+            call GetSuperiorSmSite(CustomerNo, SupSmObject) into SupSmContract;
+         }
+      }
+   }
+
+   field SupSmContract;
+
+   field DefaultAddrFlag {
+      size = Small;
+      editable = [false];
+      enumerationtrue = "Yes";
+      enumerationfalse = "No";
+   }
+   field AddrFlag {
+      size = Small;
+      editable = [false];
+      enumerationtrue = "Yes";
+      enumerationfalse = "No";
+      validate command {
+         execute {
+            set DefaultAddrFlag = "No";
+         }
+      }
+   }
+   field EndCustomerId {
+      contactwidget {
+         enabled = [EndCustomerId != null];
+         source = Customer;
+      }
+   }
+   field EndCustomerName;
+
+   lov ShipAddrNoRef with ReferenceCustAddressShipLovSelector {
+      editable = [AddrFlag = "No"];
+
+      validate command {
+         variable ValidateAddressNoStructVar {
+            type = ValidateAddressNoStruct;
+         }
+         execute {
+            set DefaultAddrFlag = "No";
+            call ValidateShipAddressNo(ShipAddrNo, CustomerNo, DemandCodeDb, SupplySite, Contract, DeliverToCustomerNo, OrderNo, DeliveryCountryCode) into ValidateAddressNoStructVar;
+            copy ValidateAddressNoStructVar into this;
+         }
+      }
+   }
+   lov DeliverToCustomerNoRef with ReferenceCustomerTemplateLovSelector {
+      contactwidget {
+         enabled = [true];
+         source = Customer;
+      }
+   }
+
+   field DockCode;
+   field SubDockCode;
+   field RefId;
+   field CustomerPoLineNo;
+   field CustomerPoRelNo;
+   field LocationNo;
+   field OriginalPartNo;
+   field Priority;
+   field LatestReleaseDate;
+   field CtpPlanned {
+      size = Small;
+      enumerationtrue = "Yes";
+      enumerationfalse = "No";
+   }
+   field JobId;
+   field CustCalendarId;
+
+   field WorkTimeCalendarRef.Description {
+      label = "Description";
+      editable = [false];
+
+   }
+   field PickingLeadtime {
+      editable = [not(DefaultAddrFlag = "Yes" or(DefaultAddrFlag = "No" and((Objstate = "Picked") or(Objstate = "Delivered") or(Objstate = "Invoiced") or(Objstate.Text = "Cancelled"))))];
+   }
+
+   field ShipViaCodeRef;
+   field ShipViaDescription;
+
+   field SupplierShipViaTransitRef;
+   field SupplierShipViaTransitDesc;
+
+   lov DeliveryTermsRef with ReferenceOrderDeliveryTermLovSelector;
+   field DeliveryTermsDescription;
+   field DelTermsLocation;
+   field DeliveryLeadtime {
+      editable = [DefaultAddrFlag = "No"];
+   }
+
+   field ExtTransportCalendarId;
+
+   field WorkTimeCalendar2Ref.Description {
+      label = "Description";
+      editable = [false];
+
+   }
+   field ConfirmedDate;
+   field ConfirmedQty;
+   field DeliveryConfirmedNetAmtBase;
+   field DeliveryConfirmedDb {
+      size = Small;
+   }
+   field DistrictCodeRef;
+   field RegionCodeRef;
+
+   field OriginatingRelNo;
+
+   field ExchangeItemDb {
+      size = Small;
+   }
+   field LoadIdRef;
+   @DynamicComponentDependency PROJ
+   field ProgramId;
+   @DynamicComponentDependency PROJ
+   field ProgramDescription;
+   field ProjectId;
+   @DynamicComponentDependency PROJ
+   field ProjectName;
+   @DynamicComponentDependency PROJ
+   field SubProjectId;
+   @DynamicComponentDependency PROJ
+   field SubProjectDescription;
+   @DynamicComponentDependency PROJ
+   field ActivityNo;
+   @DynamicComponentDependency PROJ
+   field ActivityDescription;
+   @DynamicComponentDependency PROJ
+   field ActivitySeqRef;
+   field CancelReasonRef {
+      editable = [Objstate = "Cancelled"];
+   }
+
+   field CancellationReasonDescription;
+
+   field SalesContractNo;
+
+   field ClassificationStandard {
+      label = "Classification Standard";
+   }
+   field ClassificationPartNo {
+      label = "Classification Part No";
+   }
+   field ClassificationUnitMeas {
+      label = "Classification UoM";
+      size = Small;
+   }
+
+   lov GTINRef with ReferenceSalesPartGtinNoLovSelector;
+   field FreightFactor;
+   field AdjustedWeightNet;
+   field AdjustedWeightGross;
+   field AdjustedVolume;
+
+   field PickedQtySalesUom;
+   field DeliveredQtySalesUom;
+   field InvPartUnitMeas {
+      label = "Inventory UoM";
+      editable = [false];
+   }
+
+   fieldset CodeStringAllBasicLovNoDescFieldSet;
+
+   field SupplySiteDueDate;
+   field RelMtrlPlanning {
+      size = Medium;
+      validate command {
+         execute {
+            if [RelMtrlPlanning != true] {
+               messagebox("", question, "If this check box is not selected, the customer order line will not be plannable. Are you sure you want to clear this check box?") {
+                  when "Yes" {
+                     exit;
+                  }
+                  when "No" {
+                     set RelMtrlPlanning = true;
+                     exit;
+                  }
+               }
+            }
+         }
+      }
+   }
+   field PlannedDueDate;
+   field FirstActualShipDate;
+   field RealShipDate;
+   field DateEntered;
+   field CloseTolerance;
+   @DynamicComponentDependency EXPCTR
+   badge ExportLicenseStatusForFindAndConnect;
+
+   field OpenShipmentQty;
+   field ShipmentConnectableQty;
+   lov ShipmentTypeRef with ShipmentTypeCoLovSelector {
+      advancedview ShipmentTypeCoLovList;
+      validate command {
+         variable GetShipmentCreationCoStructVar {
+            type = GetShipmentCreationCoStruct;
+         }
+         execute {
+            set DefaultAddrFlag = "No";
+            call GetShipmentCreationCo(ShipmentType) into GetShipmentCreationCoStructVar;
+            set ShipmentCreation = GetShipmentCreationCoStructVar.ShipmentCreation;
+         }
+      }
+   }
+   field ShipmentCreation {
+      validate command {
+         execute {
+            set DefaultAddrFlag = "No";
+         }
+      }
+   }
+   field PackingInstructionId;
+   field CustomerPoNo;
+   -- Used for navigation from the Dynamic Order Processing Lobby
+   field DeliveredLessThanPegged {
+      columnvisible = [False];
+      searchable = false;
+   }
+   -- Used for navigation from the Dynamic Order Processing Lobby
+   field Planner {
+      columnvisible = [False];
+      searchable = false;
+   }
+   -- gelr:localization_control_center, begin
+   field EnabledLccParams {
+      columnexclude = [true];
+      searchable = false;
+   }
+   -- gelr:localization_control_center, end
+   -- gelr:acquisition_origin, begin
+   lov AcquisitionOriginRef with ReferenceAcquisitionOriginSelector {
+      editable = ["ACQUISITION_ORIGIN" in EnabledLccParams];
+      description = AcquisitionOriginRef.Description;
+   }
+   -- gelr:acquisition_origin, end
+   -- gelr:good_service_statistical_code, begin
+   lov StatisticalCodeRef with ReferenceStatisticalCodeSelector {
+      editable = ["GOOD_SERVICE_STATISTICAL_CODE" in EnabledLccParams];
+      description = StatisticalCodeRef.Description;
+   }
+   -- gelr:good_service_statistical_code, end
+   -- gelr:brazilian_specific_attributes, begin
+   lov AcquisitionReasonIdRef with ReferenceAcquisitionReasonSelector {
+      editable = ["BRAZILIAN_SPECIFIC_ATTRIBUTES" in EnabledLccParams];
+      description = AcquisitionReasonIdRef.Description;
+   }
+
+   -- gelr:brazilian_specific_attributes, end
+
+   field OrderClosedDate {
+      editable = [false];
+   }
+
+   fieldranking OrderNo, LineNo, RelNo, Objstate, Rental, CustomerNoRef, ContractRef, HeaderStatus, CatalogNoRef, CatalogDesc, BuyQtyDue, SalesUnitMeasRef, SaleUnitPrice, UnitPriceInclTax, TaxAmountCurr, NetAmountCurr, GrossAmtCurr, TotalOrderLineDiscount, Cost, WantedDeliveryDate, TargetDate, PlannedDeliveryDate, PlannedShipDate, PlannedRentalStartDate, PlannedRentalDuration, PlannedRentalEndDate, RentalDurationUom, ScheduleID, TaxCodeRef, DefaultAddrFlag, AddrFlag, ShipAddrNoRef, SupplyCode, VendorNo, PartOwnership, ShipViaCodeRef, DeliveryTermsRef, QtyAssigned, QtyOnOrder, DeliveredQty;
+   fieldorder = OrderNo, LineNo, RelNo, Objstate, Rental, CustomerNoRef, ContractRef, HeaderStatus, CatalogNoRef, CatalogDesc, BuyQtyDue, SalesUnitMeasRef, SaleUnitPrice, UnitPriceInclTax, TaxAmountCurr, NetAmountCurr, GrossAmtCurr, TotalOrderLineDiscount, Cost, WantedDeliveryDate, TargetDate, PlannedDeliveryDate, PlannedShipDate, PlannedRentalStartDate, PlannedRentalDuration, PlannedRentalEndDate, RentalDurationUom, ScheduleID, TaxCodeRef, DefaultAddrFlag, AddrFlag, ShipAddrNoRef, SupplyCode, VendorNo, PartOwnership, ShipViaCodeRef, DeliveryTermsRef, QtyAssigned, QtyOnOrder, DeliveredQty;
+
+   commandgroup LineDetailsL1CmdGroup {
+
+      commandgroup LineDetailsCmdGroup {
+         label = "Line Details";
+         command OrderLineDetailsOrderLineOvwAddressCommand;
+         command OrderLineDetailsMilestoneCommand;
+         command OrderLineDetailsStagedBillingProfileCommand {
+            enablefunction GetUnConfirmDeliveries(OrderNo);
+         }
+         command InventoryPartAvailabilityPlanCommand {
+            enablefunction CheckEnableForInvPartAvailPlan(SupplySite, Contract, CatalogNo, VendorNo, PartNo, PurchasePartNo, DemandCode);
+         }
+      }
+   }
+   commandgroup OperationsL1CmdGroup {
+
+      commandgroup OperationsCmdGroup {
+         label = "Operations";
+         command RecalculatePriceCurrencyCoLineCommand;
+         command UpdateSalesPartPricesCommand;
+         command BulkValidateTaxIdNumberCommand;
+         command PerformPartMrpCommand;
+      }
+   }
+   commandgroup ReservationsL1CmdGroup {
+
+      commandgroup ReservationsCmdGroup {
+         label = "Reservations";
+         command UnreserveCommand;
+         command ReportReservedQtyAsPickedCommand {
+            enablefunction CheckPickReserveAllowed(OrderNo, LineNo, RelNo, LineItemNo);
+            enabled = [count(Contract) = 1];
+         }
+      }
+   }
+   command ShipmentLinesCommand;
+   command CommandSupplyChainOrdersAnalysisCommand;
+   commandgroup PeggingL1CmdGroup {
+
+      commandgroup PeggingCmdGroup {
+         label = "Pegging";
+         command ManualPeggingCommand;
+         command UnpegCommand;
+      }
+   }
+   commandgroup RMAL1CmdGroup {
+
+      commandgroup RMACmdGroup {
+         label = "RMA";
+         command HandleReturnMaterialAuthorizCreateCommand {
+            enablefunction HandleOvwRmaViewCreateEnable(OrderNo, LineNo, RelNo, LineItemNo, SupplyCode);
+            enabled = [count(CustomerNo) = 1 and count(Contract) = 1 and count(CurrencyCode) = 1 and count(CustomerNoPay) = 1 and count(CustomerNoPayAddrNo) = 1];
+
+         }
+         command HandleReturnMaterialAuthorizViewEditCommand {
+            enablefunction HandleOvwRmaViewEditEnable(OrderNo, LineNo, RelNo, LineItemNo, SupplyCode);
+         }
+      }
+   }
+
+   @DynamicComponentDependency CFGCHR
+   commandgroup ConfigurationL1CmdGroup {
+
+      commandgroup ConfigurationCmdGroup {
+         label = "Configuration";
+         command ConfigurationCreateCommand;
+         command ConfigurationViewCommand;
+         command ConfigurationEditCommand;
+         command ConfigurationEditPricingCommand;
+         command ConfigurationReplaceCharacteristicValueCommand;
+         command ConfigurationCopyFromCommand;
+         command ConfigFindExistingforOrderLineOvwCommand;
+         command ConfigurationReplaceWithStandardPartCommand;
+         @DynamicComponentDependency ORDSTR
+         commandgroup InterimOrderCmdGroup {
+            label = "Interim Order";
+            command ConfigurationInterimOrderCreateCommand;
+            command ConfigurationInterimOrderViewEditCommand;
+            command ConfigurationInterimOrderRecalculateCostCommand;
+            command ConfigurationInterimOrderDeleteCommand;
+         }
+      }
+   }
+
+   @DynamicComponentDependency RENTAL
+   commandgroup RentalL1CmdGroup {
+
+      commandgroup RentalCmdGroup {
+         enabled = [Rental];
+         label = "Rental";
+         command RentalWorkbenchCommand;
+         command ManageOvwRentalsCommand;
+      }
+   }
+
+   command CustomerWarrantyCommand;
+   command DocumentTextCommand;
+   @DynamicComponentDependency DEFORD
+   command DefenseContractFlowdownCommand;
+}

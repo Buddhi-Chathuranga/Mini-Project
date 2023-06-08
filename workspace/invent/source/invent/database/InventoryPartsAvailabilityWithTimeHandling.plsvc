@@ -1,0 +1,192 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: InventoryPartsAvailabilityWithTimeHandling
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  210927  SHWTLK  MF21R2-2388, Added Create_Viz_Session_For_Shop_Orders_Plan___() and Create_Viz_Session_For_Shop_Order_Operation___().
+--  210909  ChWkLk  MF21R2-3045, Added PURCH dynamic dependency to Create_Batch_Balance___() when supply_demand_type_ is PurchOrder.
+--  210421  SHWTLK  MF21R2-801,Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Get_Page_Search_Context_Defaults___ RETURN Page_Search_Context_Structure_Rec
+IS
+   rec_ Page_Search_Context_Structure_Rec;
+BEGIN
+   rec_.time_horizon := 1;
+   rec_.time_horizon_date := TRUNC(SYSDATE) + 1;
+   rec_.include_only_firm_supplies := TRUE;
+   rec_.include_only_firm_demands := TRUE;
+   rec_.include_usable_qty := TRUE;
+   
+   RETURN rec_;
+END Get_Page_Search_Context_Defaults___;
+
+
+-- Adjust_Shop_Order_Need_Date___
+--    Adjust shop order need date to match the first demand where projected on-hand goes negative.
+@DynamicComponentDependency SHPORD
+PROCEDURE Adjust_Shop_Order_Need_Date___ (
+   order_no_           IN  VARCHAR2,
+   release_no_         IN  VARCHAR2,
+   sequence_no_        IN  VARCHAR2,
+   only_firm_supplies_ IN  BOOLEAN,
+   only_firm_demands_  IN  BOOLEAN,
+   include_usable_qty_ IN  BOOLEAN,
+	info$_              OUT VARCHAR2)
+IS
+BEGIN
+   Shop_Ord_Util_API.Adjust_SO_Need_Date_To_Demands(info$_, order_no_, release_no_, sequence_no_, only_firm_supplies_, only_firm_demands_, include_usable_qty_);
+END Adjust_Shop_Order_Need_Date___;
+
+
+
+-- Adjust_Shop_Order_Lot_Size___
+--    Adjust shop order need date to match the first demand where projected on-hand goes negative.
+@DynamicComponentDependency SHPORD
+PROCEDURE Adjust_Shop_Order_Lot_Size___ (
+   order_no_           IN  VARCHAR2,
+   release_no_         IN  VARCHAR2,
+   sequence_no_        IN  VARCHAR2,
+   only_firm_supplies_ IN  BOOLEAN,
+   only_firm_demands_  IN  BOOLEAN,
+   include_usable_qty_ IN  BOOLEAN,
+   stop_analysis_date_ IN  DATE,
+	info$_              OUT VARCHAR2)
+IS
+BEGIN
+   Shop_Ord_Util_API.Adjust_SO_Lot_Size_To_Demands(info$_, order_no_, release_no_, sequence_no_, only_firm_supplies_, only_firm_demands_, include_usable_qty_, stop_analysis_date_);
+END Adjust_Shop_Order_Lot_Size___;
+
+
+@DynamicComponentDependency SHPORD
+FUNCTION Create_Batch_Balance___ (
+   contract_ IN VARCHAR2,
+   part_no_ IN VARCHAR2,
+   order_no_ IN VARCHAR2,
+   release_no_ IN VARCHAR2,
+   sequence_no_ IN VARCHAR2,
+   supply_demand_type_ IN VARCHAR2) RETURN NUMBER
+IS
+   balance_id_ NUMBER;
+BEGIN
+   IF supply_demand_type_ = '5' THEN
+      Shop_Ord_Initial_Check___(order_no_, release_no_, sequence_no_);
+      Batch_Balance_API.New(balance_id_, contract_, part_no_, 'SHOP_ORDER', order_no_, release_no_, sequence_no_);
+   ELSIF supply_demand_type_ = '8' THEN
+      Shop_Order_Prop_Initial_Check___(order_no_);
+      Batch_Balance_API.New(balance_id_, contract_, part_no_, 'SHOP_ORDER_REQ', order_no_, release_no_, sequence_no_);   
+   ELSIF supply_demand_type_ = '4' THEN
+      $IF Component_Purch_SYS.INSTALLED $THEN
+         Purchase_Order_Line_Initial_Check___(order_no_, release_no_, sequence_no_);
+         Batch_Balance_API.New(balance_id_, contract_, part_no_, 'PURCHASE_ORDER', order_no_, release_no_, sequence_no_);
+      $ELSE
+         NULL;
+      $END   
+   END IF;
+
+   RETURN balance_id_;
+END Create_Batch_Balance___;
+
+
+@DynamicComponentDependency MFGVIZ
+FUNCTION Create_Viz_Session_For_Shop_Orders_Plan___ (
+   time_horizon_     IN NUMBER,
+   selection_        IN CLOB) RETURN NUMBER
+IS
+   session_id_       NUMBER; 
+   objid_array_      Visualizer_Query_Row_API.Object_Id_Array;
+   array_            json_array_t;
+   contract_         VARCHAR2(5);
+   part_no_          VARCHAR2(25);
+   configuration_id_ VARCHAR2(50);
+   count_            NUMBER := 0;
+   
+   CURSOR get_objids(contract_ VARCHAR2, part_no_ VARCHAR2, configuration_id_ VARCHAR2) IS
+      SELECT DISTINCT so.objid 
+      FROM  shop_ord so
+      WHERE so.contract          = contract_
+      AND   so.part_no           = part_no_
+      AND   so.configuration_id  = configuration_id_
+      AND   so.project_id        IS NULL
+      AND   TRUNC(so.need_date)  <= TRUNC(Site_API.Get_Site_Date(contract_))+time_horizon_
+      AND   so.objstate          NOT IN ('Closed','Cancelled');
+      
+BEGIN
+   IF selection_ IS NOT NULL THEN
+      array_ := json_array_t.parse(selection_);
+      
+      FOR indx IN 0 .. array_.get_size - 1 LOOP
+         contract_         := Client_SYS.Get_Key_Reference_Value(array_.get_String(indx), 'CONTRACT');
+         part_no_          := Client_SYS.Get_Key_Reference_Value(array_.get_String(indx), 'PART_NO');
+         configuration_id_ := Client_SYS.Get_Key_Reference_Value(array_.get_String(indx), 'CONFIGURATION_ID');
+         
+         FOR rec_ IN get_objids(contract_, part_no_, configuration_id_) LOOP            
+            objid_array_(count_) := rec_.objid;
+            count_ := count_ + 1;
+         END LOOP;
+         
+      END LOOP;
+            Visualizer_Query_Row_API.Insert_Rows(session_id_,objid_array_);
+      RETURN session_id_;
+   ELSE
+      RETURN -9999;
+   END IF;
+   
+END Create_Viz_Session_For_Shop_Orders_Plan___;
+
+
+@DynamicComponentDependency MFGVIZ
+FUNCTION Create_Viz_Session_For_Shop_Order_Operation___ (
+   time_horizon_     IN NUMBER,
+	selection_        IN CLOB) RETURN NUMBER
+IS   
+   session_id_       NUMBER; 
+   objid_array_      Visualizer_Query_Row_API.Object_Id_Array; 
+   array_            json_array_t;
+   contract_         VARCHAR2(5);
+   part_no_          VARCHAR2(25);
+   configuration_id_ VARCHAR2(50);
+   count_            NUMBER := 0;
+   
+   CURSOR get_objids(contract_ VARCHAR2, part_no_ VARCHAR2, configuration_id_ VARCHAR2) IS
+      SELECT DISTINCT soo.objid 
+      FROM  shop_ord so, 
+            shop_order_operation soo
+      WHERE so.contract          = contract_
+      AND   so.part_no           = part_no_
+      AND   so.configuration_id  = configuration_id_
+      AND   so.project_id        IS NULL
+      AND   TRUNC(so.need_date)  <= TRUNC(Site_API.Get_Site_Date(contract_))+time_horizon_
+      AND   so.objstate          NOT IN ('Closed','Cancelled')
+      AND   soo.order_no         = so.order_no
+      AND   soo.release_no       = so.release_no
+      AND   soo.sequence_no      = so.sequence_no;
+
+      
+BEGIN
+   IF selection_ IS NOT NULL THEN
+      array_ := json_array_t.parse(selection_);
+      FOR indx IN 0 .. array_.get_size - 1 LOOP
+         contract_         := Client_SYS.Get_Key_Reference_Value(array_.get_String(indx), 'CONTRACT');
+         part_no_          := Client_SYS.Get_Key_Reference_Value(array_.get_String(indx), 'PART_NO');
+         configuration_id_ := Client_SYS.Get_Key_Reference_Value(array_.get_String(indx), 'CONFIGURATION_ID');
+         
+         FOR rec_ IN get_objids(contract_, part_no_, configuration_id_) LOOP            
+            objid_array_(count_) := rec_.objid;
+            count_ := count_ + 1;
+         END LOOP;
+         
+      END LOOP;
+      Visualizer_Query_Row_API.Insert_Rows(session_id_,objid_array_);
+      RETURN session_id_;
+   ELSE
+      RETURN -9999;
+   END IF;
+
+END Create_Viz_Session_For_Shop_Order_Operation___;

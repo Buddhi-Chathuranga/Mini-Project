@@ -1,0 +1,426 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: DataProcessingPurposeManagementHandling
+--  Component:    ENTERP
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  180518  NikPlk  FIUXXW2-137, Created
+--  180823  NikPlk  FIUXXW2-691, Added Date_To_String___ method
+--  180904  NikPlk  FIUXXW2-744, Changed Data_Processing_Update_History_Details___ method to insert a value to valid_column_name when history records are not available
+--  181119  thjilk  Bug 145282, Removed Check_Erased_Categories___ method and modified Save_All___ method
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Current_Date___ RETURN DATE
+IS
+BEGIN
+   RETURN TRUNC(SYSDATE);
+END Current_Date___;
+
+
+FUNCTION Date_To_String___ (
+   date_ IN DATE ) RETURN VARCHAR2 
+IS
+   string_ VARCHAR2(30);
+BEGIN
+   string_ := TO_CHAR(date_,'YYYYMMDDHH24MISS');
+   RETURN string_;
+END Date_To_String___;
+
+
+PROCEDURE Save_All___ (
+   key_    IN  Personal_Data_Consent_Virtual_Key,
+   action_ IN  VARCHAR2,
+   info$_  OUT VARCHAR2 ) 
+IS
+   parent_rec_         Personal_Data_Consent_Virtual_Rec;
+   history_detail_rec_ Data_Processing_Update_History_Virtual_Rec;
+   history_detail_key_ Data_Processing_Update_History_Virtual_Key;
+   erased_categories_  VARCHAR2(2000);
+   operation_date_     DATE;
+BEGIN 
+   parent_rec_ := Get_Record___(key_);
+   history_detail_rec_  := Last_Updated_Action_Details___(key_.objkey);
+   IF (history_detail_rec_.key_ref IS NULL) THEN
+      FOR rec_ IN Get_Data_Processing_Update_Histories___(key_) LOOP
+         EXIT WHEN Get_Data_Processing_Update_Histories___%NOTFOUND;
+         history_detail_key_.objkey := rec_.objkey;
+      END LOOP; 
+   ELSE
+      history_detail_key_.objkey := history_detail_rec_.objkey;
+   END IF;
+   Data_Subject_Consent_Oper_API.Consent_Action(operation_date_, parent_rec_.key_ref, parent_rec_.data_subject, parent_rec_.update_date, action_, parent_rec_.remark);
+   FOR rec_ IN Get_Data_Processing_Purposes___(history_detail_key_) LOOP
+      EXIT WHEN Get_Data_Processing_Purposes___%NOTFOUND;
+      Data_Subject_Consent_Purp_API.Consent_Action_Purpose(parent_rec_.key_ref, operation_date_, action_, rec_.purpose_id, rec_.valid, rec_.effective_on, rec_.effective_until);
+   END LOOP;
+   Data_Subject_Consent_Oper_API.Erase_Action_Check_Log(erased_categories_, parent_rec_.key_ref, operation_date_, parent_rec_.update_date);
+   Client_SYS.Add_Warning(lu_name_, 'ERASEDCATAGWAR: Updating purposes will result in removal of following personal data: :P1.', erased_categories_);
+   info$_ := Client_SYS.Get_All_Info;
+END Save_All___;
+
+
+FUNCTION Print_All___ (
+   key_               IN Data_Processing_Update_History_Virtual_Key,
+   key_ref_           IN VARCHAR2,
+   data_subject_db_   IN VARCHAR2,
+   operation_date_    IN DATE,
+   action_            IN VARCHAR2,
+   data_subject_id_   IN VARCHAR2,
+   data_subject_name_ IN VARCHAR2,
+   remark_            IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   operation_date_str_  VARCHAR2(100);
+   result_key_          NUMBER;
+   report_attr_         VARCHAR2(100);
+   parameter_values_    VARCHAR2(2000);
+BEGIN
+   operation_date_str_ := Date_To_String___(operation_date_);
+   Client_SYS.Clear_Attr(report_attr_);
+   Client_SYS.Add_To_Attr('REPORT_ID', 'PERSONAL_DATA_REP' , report_attr_); 
+   Client_SYS.Clear_Attr(parameter_values_);
+   Client_SYS.Add_To_Attr('KEY_REF', key_ref_, parameter_values_); 
+   Client_SYS.Add_To_Attr('DATA_SUBJECT_DB', data_subject_db_, parameter_values_); 
+   Client_SYS.Add_To_Attr('OPERATION_DATE', operation_date_str_, parameter_values_); 
+   Client_SYS.Add_To_Attr('ACTION', action_, parameter_values_);
+   Client_SYS.Add_To_Attr('IDENTITY', data_subject_id_, parameter_values_);
+   Client_SYS.Add_To_Attr('NAME', data_subject_name_, parameter_values_);
+   Client_SYS.Add_To_Attr('REMARK', remark_, parameter_values_);
+   result_key_ := Report_Format_API.Create_New_Report(report_attr_, parameter_values_, Fnd_Session_API.Get_Fnd_User);
+   RETURN result_key_;
+END Print_All___;
+
+
+FUNCTION Last_Updated_Action_Details___ (
+   parent_objkey_     IN VARCHAR2 ) RETURN Data_Processing_Update_History_Virtual_Rec
+IS
+   parent_key_rec_             Personal_Data_Consent_Virtual_Key;
+   detail_key_rec_             Data_Processing_Update_History_Virtual_Key;
+   detail_rec_                 Data_Processing_Update_History_Virtual_Rec;
+BEGIN
+   parent_key_rec_.objkey := parent_objkey_; 
+   FOR rec_ IN Get_Data_Processing_Update_Histories___(parent_key_rec_) LOOP
+      EXIT WHEN Get_Data_Processing_Update_Histories___%NOTFOUND;
+      detail_key_rec_.objkey := rec_.objkey;
+      detail_rec_ := Get_Record___(detail_key_rec_);
+      IF (detail_rec_.last_updated_action = TRUE) THEN
+         RETURN detail_rec_;
+      END IF;
+   END LOOP;
+   RETURN NULL;
+END Last_Updated_Action_Details___;
+
+
+PROCEDURE Change_Mode_Type___ (
+   key_              IN Data_Processing_Purposes_Virtual_Key,
+   super_parent_key_ IN VARCHAR2,
+   parent_objkey_    IN VARCHAR2,
+   action_           IN VARCHAR2 )
+IS
+   newrec_              Data_Processing_Purposes_Virtual_Rec;
+   oldrec_              Data_Processing_Purposes_Virtual_Rec;
+   history_detail_key_  Data_Processing_Update_History_Virtual_Key;
+   history_detail_rec_  Data_Processing_Update_History_Virtual_Rec;
+   detail_key_rec_      Data_Processing_Purposes_Virtual_Key;
+BEGIN
+   history_detail_key_.objkey := parent_objkey_;
+   IF (action_ = 'NEW_PURPOSE') THEN
+      FOR rec_ IN Get_Data_Processing_Purposes___(history_detail_key_) LOOP
+         EXIT WHEN Get_Data_Processing_Purposes___%NOTFOUND;
+         detail_key_rec_.objkey := rec_.objkey;
+         oldrec_ := Get_Record___(detail_key_rec_);
+         newrec_ := oldrec_;
+         newrec_.valid := FALSE;
+         newrec_.effective_on := '';
+         newrec_.effective_until := '';
+         CRUD_Update___(oldrec_, newrec_);
+         Update_History_Details___(parent_objkey_);
+      END LOOP;
+   END IF;
+   IF (action_ = 'PURPOSES_WITHDRAWN') THEN
+      FOR rec_ IN Get_Data_Processing_Purposes___(history_detail_key_) LOOP
+         EXIT WHEN Get_Data_Processing_Purposes___%NOTFOUND;
+         detail_key_rec_.objkey := rec_.objkey;
+         oldrec_ := Get_Record___(detail_key_rec_);
+         newrec_ := oldrec_;
+         newrec_.valid := FALSE;
+         newrec_.effective_on := '';
+         newrec_.effective_until := '';
+         CRUD_Update___(oldrec_, newrec_);
+      END LOOP;  
+   END IF;
+   IF (action_ = 'UPDATED_PURPOSES') THEN 
+      history_detail_rec_ := Get_Record___(history_detail_key_);
+      Update_History_Details___(parent_objkey_);
+      Update_Data_Processing_Purpose_Details___(super_parent_key_, parent_objkey_, history_detail_rec_.key_ref, history_detail_rec_.data_subject_db, history_detail_rec_.operation_date, history_detail_rec_.action);
+   END IF;
+   Update_Personal_Data_Consents___(action_, super_parent_key_);
+END Change_Mode_Type___; 
+
+
+PROCEDURE Data_Processing_Purposes_Details___ (
+   data_subject_db_         IN VARCHAR2,
+   master_key_              IN VARCHAR2,
+   super_parent_key_        IN VARCHAR2 ) 
+IS
+   master_key_rec_             Data_Processing_Update_History_Virtual_Key;
+   detail_key_rec_             Data_Processing_Purposes_Virtual_Key;
+   detail_rec_                 Data_Processing_Purposes_Virtual_Rec;
+   CURSOR get_data_processing_purposes_details(data_subject_db_ VARCHAR2) IS
+      SELECT purpose_id,
+             valid,
+             data_subject,
+             data_subject_db,
+             purpose_name,
+             effective_on,
+             effective_until,
+             purpose_personal_data_list,
+             description
+      FROM   pers_data_proc_purpose_assist
+      WHERE  data_subject_db = data_subject_db_
+      AND    key_ref IS NULL
+      ORDER BY purpose_id;
+   
+BEGIN
+   master_key_rec_.objkey := master_key_;
+   FOR rec_ IN Get_Data_Processing_Purposes___(master_key_rec_) LOOP
+      EXIT WHEN Get_Data_Processing_Purposes___%NOTFOUND;
+      detail_key_rec_.objkey := rec_.objkey;
+      CRUD_Delete___(Get_Record___(detail_key_rec_));
+   END LOOP;
+   FOR rec_ IN get_data_processing_purposes_details(data_subject_db_) LOOP
+      detail_rec_.super_parent_key := super_parent_key_;                                                
+      detail_rec_.parent_objkey    := master_key_;                    
+      detail_rec_.purpose_id       := rec_.purpose_id;
+      IF (rec_.valid = 'TRUE') THEN
+         detail_rec_.valid := TRUE;
+      ELSE
+         detail_rec_.valid := FALSE;
+      END IF;
+      detail_rec_.purpose                    := rec_.purpose_name;
+      detail_rec_.data_subject               := rec_.data_subject;
+      detail_rec_.data_subject_db            := rec_.data_subject_db;
+      detail_rec_.effective_on               := rec_.effective_on;
+      detail_rec_.effective_until            := rec_.effective_until;
+      detail_rec_.associated_personal_data   := rec_.purpose_personal_data_list;
+      detail_rec_.description                := rec_.description;
+      New_Detail___(master_key_rec_, detail_rec_);
+   END LOOP;
+END Data_Processing_Purposes_Details___;
+
+
+PROCEDURE Data_Processing_Update_History_Details___ (
+   key_ref_    IN VARCHAR2,
+   master_key_ IN VARCHAR2 ) 
+IS
+   master_key_rec_             Personal_Data_Consent_Virtual_Key;
+   detail_key_rec_             Data_Processing_Update_History_Virtual_Key;
+   detail_rec_                 Data_Processing_Update_History_Virtual_Rec;
+   temp_                       VARCHAR2(50) DEFAULT NULL;
+   CURSOR get_data_processing_update_history_details(key_ref_ IN VARCHAR2) IS
+      SELECT key_ref,
+             Data_Subject_Consent_API.Get_Identity(key_ref, Data_Subject_Consent_API.Get_Data_Subject_Db(key_ref)) data_subject_id,
+             Data_Subject_Consent_API.Get_Data_Subject(key_ref) data_subject,
+             Data_Subject_Consent_API.Get_Data_Subject_Db(key_ref) data_subject_db,
+             operation_date,
+             update_date,
+             action,
+             action_db,
+             remark,
+             performed_by,
+             Data_Subject_Consent_Oper_API.Is_Last_Update_Action(key_ref, operation_date, action_db) last_updated_action
+      FROM   data_subject_consent_oper
+      WHERE  key_ref IN (key_ref_)
+      ORDER BY operation_date DESC, action_db;
+   
+BEGIN
+   master_key_rec_.objkey := master_key_;
+   FOR rec_ IN Get_Data_Processing_Update_Histories___(master_key_rec_) LOOP
+      EXIT WHEN Get_Data_Processing_Update_Histories___%NOTFOUND;
+      detail_key_rec_.objkey := rec_.objkey;
+      CRUD_Delete___(Get_Record___(detail_key_rec_));
+   END LOOP;
+   FOR rec_ IN get_data_processing_update_history_details(key_ref_) LOOP
+      detail_rec_.key_ref         := key_ref_;
+      detail_rec_.data_subject_id := rec_.data_subject_id;
+      detail_rec_.data_subject    := rec_.data_subject;
+      detail_rec_.data_subject_db := rec_.data_subject_db;
+      detail_rec_.operation_date  := rec_.operation_date;
+      detail_rec_.update_date     := rec_.update_date;
+      detail_rec_.action          := Data_Sub_Consent_Action_API.Encode(rec_.action);
+      IF (detail_rec_.action = 'DATA_ERASED') THEN
+         detail_rec_.valid_column_name := 'Withdrawn';
+      ELSE
+         detail_rec_.valid_column_name := 'Valid';
+      END IF;
+      detail_rec_.remark       := rec_.remark;
+      detail_rec_.performed_by := rec_.performed_by;
+      IF (rec_.last_updated_action = 'TRUE') THEN
+         detail_rec_.last_updated_action := TRUE;
+      ELSE
+         detail_rec_.last_updated_action := FALSE;
+      END IF;
+      detail_rec_.purposes_updated := FALSE;
+      New_Detail___(master_key_rec_, detail_rec_);
+      temp_ := 'TRUE';
+      END LOOP;
+   IF (detail_rec_.key_ref IS NULL) THEN
+      detail_rec_.valid_column_name := 'Valid';
+   END IF;
+   IF (temp_ IS NULL) THEN
+      New_Detail___(master_key_rec_, detail_rec_);
+   END IF;
+END Data_Processing_Update_History_Details___;
+
+
+PROCEDURE Update_Data_Processing_Purpose_Details___ (
+   super_parent_key_ VARCHAR2,
+   master_key_       VARCHAR2,
+   key_ref_          VARCHAR2,
+   data_subject_db_  VARCHAR2,
+   operation_date_   DATE,
+   action_db_        VARCHAR2 )
+IS
+   master_key_rec_             Data_Processing_Update_History_Virtual_Key;
+   detail_key_rec_             Data_Processing_Purposes_Virtual_Key;
+   detail_rec_                 Data_Processing_Purposes_Virtual_Rec;
+   CURSOR get_data_processing_purposes_details(
+      data_subject_db_  VARCHAR2,
+      key_ref_          VARCHAR2,
+      operation_date_   TIMESTAMP,
+      action_db_        VARCHAR2)
+   IS
+      SELECT purpose_id,
+             valid,
+             purpose_name,
+             data_subject,
+             data_subject_db,
+             effective_on,
+             effective_until,
+             purpose_personal_data_list,
+             description
+      FROM   pers_data_proc_purpose_assist
+      WHERE  data_subject_db   = data_subject_db_
+      AND    key_ref           = key_ref_
+      AND    operation_date    = operation_date_
+      AND    action            = action_db_
+      ORDER BY purpose_id;
+BEGIN
+   master_key_rec_.objkey := master_key_;
+   FOR rec_ IN Get_Data_Processing_Purposes___(master_key_rec_) LOOP
+      EXIT WHEN Get_Data_Processing_Purposes___%NOTFOUND;
+      detail_key_rec_.objkey := rec_.objkey;
+      CRUD_Delete___(Get_Record___(detail_key_rec_));
+   END LOOP;
+   FOR rec_ IN get_data_processing_purposes_details(data_subject_db_, key_ref_, operation_date_, action_db_) LOOP
+      detail_rec_.super_parent_key := super_parent_key_;                                                
+      detail_rec_.parent_objkey    := master_key_;
+      detail_rec_.key_ref          := key_ref_;
+      detail_rec_.purpose_id       := rec_.purpose_id;
+      IF (rec_.valid = 'TRUE') THEN
+         detail_rec_.valid := TRUE;
+      ELSE
+         detail_rec_.valid := FALSE;
+      END IF;
+      detail_rec_.purpose                  := rec_.purpose_name;
+      detail_rec_.data_subject             := rec_.data_subject;
+      detail_rec_.data_subject_db          := rec_.data_subject_db;
+      detail_rec_.effective_on             := rec_.effective_on;
+      detail_rec_.effective_until          := rec_.effective_until;
+      detail_rec_.associated_personal_data := rec_.purpose_personal_data_list;
+      detail_rec_.description              := rec_.description;
+      New_Detail___(master_key_rec_, detail_rec_);
+   END LOOP;
+END Update_Data_Processing_Purpose_Details___;
+  
+
+PROCEDURE Update_History_Details___ (
+   objkey_         IN VARCHAR2 ) 
+IS
+   key_rec_ Data_Processing_Update_History_Virtual_Key;
+   newrec_  Data_Processing_Update_History_Virtual_Rec;
+   oldrec_  Data_Processing_Update_History_Virtual_Rec;
+BEGIN
+   key_rec_.objkey := objkey_;
+   oldrec_         := Get_Record___(key_rec_);
+   newrec_         := oldrec_;
+   newrec_.purposes_updated := TRUE;
+   CRUD_Update___(oldrec_, newrec_);
+END Update_History_Details___;
+      
+      
+PROCEDURE Update_Personal_Data_Consents___ (
+   action_              IN VARCHAR2,
+   parent_objkey_       IN VARCHAR2 ) 
+IS
+   parent_objkey_rec_   Personal_Data_Consent_Virtual_Key;
+   newrec_              Personal_Data_Consent_Virtual_Rec;
+   oldrec_              Personal_Data_Consent_Virtual_Rec;
+BEGIN
+   parent_objkey_rec_.objkey := parent_objkey_;
+   oldrec_ := Get_Record___(parent_objkey_rec_);
+   newrec_ := oldrec_;
+   IF (action_ = 'NEW_PURPOSE') THEN
+      newrec_.update_date  := Current_Date___();
+      newrec_.remark       := '';
+      newrec_.action       := action_;
+      newrec_.purposes_updated    := TRUE;
+   ELSIF (action_ = 'PURPOSES_WITHDRAWN') THEN
+      newrec_.update_date  := Current_Date___();
+      newrec_.remark       := '';
+      newrec_.action       := action_;
+      newrec_.purposes_updated    := TRUE;
+   ELSIF (action_ = 'UPDATED_PURPOSES') THEN
+      newrec_.action       := action_; 
+      newrec_.purposes_updated    := TRUE;
+   END IF;
+   CRUD_Update___(oldrec_, newrec_);
+END Update_Personal_Data_Consents___;
+
+
+@Override
+PROCEDURE CRUD_Create___ (
+   rec_ IN Personal_Data_Consent_Virtual_Rec )
+IS
+   newrec_               Personal_Data_Consent_Virtual_Rec;
+   oldrec_               Personal_Data_Consent_Virtual_Rec;
+   key_rec_              Personal_Data_Consent_Virtual_Key;
+   history_detail_rec_   Data_Processing_Update_History_Virtual_Rec;
+BEGIN
+   super(rec_);
+   key_rec_.objkey      := rec_.objkey;
+   Data_Processing_Update_History_Details___(rec_.key_ref, rec_.objkey);
+   history_detail_rec_  := Last_Updated_Action_Details___(rec_.objkey);
+   oldrec_              := Get_Record___(key_rec_);
+   newrec_              := oldrec_;
+   IF (history_detail_rec_.key_ref IS NULL) THEN
+      FOR history_rec_ IN Get_Data_Processing_Update_Histories___(key_rec_) LOOP
+         EXIT WHEN Get_Data_Processing_Update_Histories___%NOTFOUND;
+         Data_Processing_Purposes_Details___(rec_.data_subject, history_rec_.objkey, key_rec_.objkey);
+      END LOOP;
+      newrec_.update_date      := Current_Date___();
+      newrec_.action           := 'NEW_PURPOSE';
+      newrec_.remark           := '';
+      newrec_.purposes_updated := FALSE;
+   ELSE
+      FOR data_proc_rec_ IN Get_Data_Processing_Update_Histories___(key_rec_) LOOP
+         EXIT WHEN Get_Data_Processing_Update_Histories___%NOTFOUND;
+         Update_Data_Processing_Purpose_Details___(data_proc_rec_.parent_objkey, 
+                                                   data_proc_rec_.objkey, 
+                                                   data_proc_rec_.key_ref, 
+                                                   data_proc_rec_.data_subject_db, 
+                                                   data_proc_rec_.operation_date, 
+                                                   data_proc_rec_.action);
+      END LOOP;
+      newrec_.update_date      := history_detail_rec_.update_date;
+      newrec_.operation_date   := history_detail_rec_.operation_date;
+      newrec_.action           := history_detail_rec_.action;
+      newrec_.remark           := history_detail_rec_.remark;
+      newrec_.purposes_updated := FALSE;
+   END IF;
+   CRUD_Update___(oldrec_, newrec_);
+END CRUD_Create___;

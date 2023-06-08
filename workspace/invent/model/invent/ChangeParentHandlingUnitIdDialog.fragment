@@ -1,0 +1,223 @@
+----------------------------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  -----------------------------------------------------------------------------------
+-- 2019-07-08  SBalLK  SCUXXW4-22944, Modified LOV where statements to show handling units when selected handling unit have no location connected.
+-- 2019-05-27  ChFolk  SCUXXW4-21153, Modified functions GetHandlingUnits, GetHandlingUnitsWithSscc and GetHandlingUnitsWithAltHandlingUnitLabelId by ncluding where clause.
+-- 2019-05-15  DaZase  SCUXXW4-19607, Added initialcheck to all unbounded actions.
+-- 2019-02-13  fandse  SCUXXW4-6101, Removed ID from Change Parent Handling Unit
+-- 2018-12-11  Chfolk  SCUXXW4-6101, Modified references to avoid errors in populate.
+-- 2018-10-16  fandse  SCUXXW4-5174  Cancel of inquire now takes you back to the dialog.
+-- 2018-10-11  fandse  SCUXXW4-13392 Add handling of info message for GetMaxCapacityExceededInfo
+-- 2018-10-10  fandse  SCUXXW4-5174  Code review feedback -> renamed ChangeParentHandlingUnitDialogInit to InitChangeParentHandlingUnitDialog
+-- 2018-09-27  fandse  SCUXXW4-5174  added dialog-name to avoid conflicts when merged in to client and projections, variable declared and named according to guidelines.
+-- 2018-09-24  fandse  SCUXXW4-5174  added dialog converted from dlgChangeParentHandlingUnit - Change Parent Handling Unit ID
+----------------------------------------------------------------------------------------------------------
+
+fragment ChangeParentHandlingUnitIdDialog;
+component INVENT;
+layer Core;
+description "This dialog is used to change the ID of the parent handling unit.";
+
+include fragment HandlingUnitLovSelector;
+include fragment HandlingUnitExtendedInitialCheck;
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+warningsenabled = GetMaxCapacityExceededInfo;
+
+--------------------------------- COMMANDS ----------------------------------
+command InitChangeParentHandlingUnitDialog {
+   execute {
+      call InitChangeParentHandlingUnitDialog(Selection) into InitChangeParentHandlingUnitDialogStructure;
+      set HandlingUnitIdsToExclude = InitChangeParentHandlingUnitDialogStructure.HandlingUnitIdsToExclude;
+      set Contract = InitChangeParentHandlingUnitDialogStructure.Contract;
+      set LocationNo = InitChangeParentHandlingUnitDialogStructure.LocationNo;
+      set ShipmentId = InitChangeParentHandlingUnitDialogStructure.ShipmentId;
+      set HandlingUnitIdList = InitChangeParentHandlingUnitDialogStructure.HandlingUnitIdList;
+      set HandlingUnitId = InitChangeParentHandlingUnitDialogStructure.ParentHandlingUnitId;
+   }
+}
+
+command ChangeParentHandlingUnitOkCommand {
+   enabled = [HandlingUnitId != null or(HandlingUnitId = null and Sscc = null and AltHandlingUnitLabelId = null)];
+   variable KeepStructureVar {
+      type = Text;
+   }
+   variable RaiseKeepStructureInquireVar {
+      type = Text;
+   }
+   execute {
+      set KeepStructureVar = "TRUE";
+      call HasAnyParentAtAnyLevel(HandlingUnitIdList) into RaiseKeepStructureInquireVar;
+      if [RaiseKeepStructureInquireVar = "TRUE"] {
+         inquire("One or more of the selected Handling Units are contained within another Handling Unit in the selection. How do you want to proceed? Click Yes to keep the internal structure and No to flatten the structure and make all selected handling units have the same new parent.") {
+            when YES {
+               set KeepStructureVar = "TRUE";
+            }
+            when NO {
+               set KeepStructureVar = "FALSE";
+            }
+            when CANCEL {
+               exit;
+            }
+         }
+      }
+      call ModifyParentHandlingUnitId(HandlingUnitIdList, HandlingUnitId, KeepStructureVar);
+      call GetMaxCapacityExceededInfo(HandlingUnitId);
+      exit OK;
+   }
+}
+
+--------------------------------- SELECTORS ---------------------------------
+
+---------------------------------- GROUPS -----------------------------------
+group NewParentHandlingUnitGroup for ChangeParentHandlingUnitStructure {
+   label = "New Parent";
+   lov HandlingUnitIdRef with ReferenceHandlingUnitLovSelector using GetHandlingUnits(Contract, LocationNo, HandlingUnitIdsToExclude, ShipmentId) {
+      validate command {
+         execute {
+            set AltHandlingUnitLabelId = HandlingUnitIdRef.AltHandlingUnitLabelId;
+            set Sscc = HandlingUnitIdRef.Sscc;
+         }
+      }
+   }
+   lov SsccRef with ReferenceHandlingUnitLovSelector using GetHandlingUnitsWithSscc(Contract, LocationNo, HandlingUnitIdsToExclude, ShipmentId) {
+      validate command {
+         execute {
+            set AltHandlingUnitLabelId = SsccRef.AltHandlingUnitLabelId;
+            set HandlingUnitId = SsccRef.HandlingUnitId;
+         }
+      }
+   }
+   lov AltHandlingUnitLabelIdRef with ReferenceHandlingUnitLovSelector using GetHandlingUnitsWithAltHandlingUnitLabelId(Contract, LocationNo, HandlingUnitIdsToExclude, ShipmentId) {
+      validate command {
+         execute {
+            set HandlingUnitId = AltHandlingUnitLabelIdRef.HandlingUnitId;
+            set Sscc = AltHandlingUnitLabelIdRef.Sscc;
+         }
+      }
+   }
+}
+
+---------------------------------- DIALOGS ----------------------------------
+dialog ChangeParentHandlingUnitDialog for ChangeParentHandlingUnitStructure {
+   label = "Change Parent Handling Unit";
+   input(Selection) {
+      command InitChangeParentHandlingUnitDialog;
+   }
+   group NewParentHandlingUnitGroup;
+   commandgroup ButtonCmdGroup {
+      command ChangeParentHandlingUnitOkCommand {
+         label = "OK";
+      }
+      command Cancel;
+   }
+}
+
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+
+--------------------------------- FUNCTIONS ---------------------------------
+function GetHandlingUnits List < Entity(HandlingUnitLov) > {
+   parameter Contract   Text;
+   parameter LocationNo Text;
+   parameter HandlingUnitIdsToExclude Text;
+   parameter ShipmentId Number;
+   where = "((location_no = :LocationNo AND contract = :Contract) OR LOCATION_NO IS NULL OR :LocationNo IS NULL)
+      AND (:ShipmentId = 0 OR shipment_id = :ShipmentId)
+      AND handling_unit_id NOT IN (SELECT REGEXP_SUBSTR(:HandlingUnitIdsToExclude,'[^,]+', 1, LEVEL)
+                                   FROM dual
+                                   CONNECT BY REGEXP_SUBSTR(:HandlingUnitIdsToExclude, '[^,]+', 1, LEVEL) IS NOT NULL)";
+}
+
+function GetHandlingUnitsWithSscc List < Entity(HandlingUnitLov) > {
+   parameter Contract   Text;
+   parameter LocationNo Text;
+   parameter HandlingUnitIdsToExclude Text;
+   parameter ShipmentId Number;
+   where = "((location_no = :LocationNo AND contract = :Contract) OR LOCATION_NO IS NULL OR :LocationNo IS NULL)
+      AND (:ShipmentId = 0 OR shipment_id = :ShipmentId)
+      AND handling_unit_id NOT IN (SELECT REGEXP_SUBSTR(:HandlingUnitIdsToExclude,'[^,]+', 1, LEVEL)
+                                   FROM dual
+                                   CONNECT BY REGEXP_SUBSTR(:HandlingUnitIdsToExclude, '[^,]+', 1, LEVEL) IS NOT NULL)
+      AND SSCC IS NOT NULL";
+}
+
+function GetHandlingUnitsWithAltHandlingUnitLabelId List < Entity(HandlingUnitLov) > {
+   parameter Contract   Text;
+   parameter LocationNo Text;
+   parameter HandlingUnitIdsToExclude Text;
+   parameter ShipmentId Number;
+   where = "((location_no = :LocationNo AND contract = :Contract) OR LOCATION_NO IS NULL OR :LocationNo IS NULL)
+      AND (:ShipmentId = 0 OR shipment_id = :ShipmentId)
+      AND handling_unit_id NOT IN (SELECT REGEXP_SUBSTR(:HandlingUnitIdsToExclude,'[^,]+', 1, LEVEL)
+                                   FROM dual
+                                   CONNECT BY REGEXP_SUBSTR(:HandlingUnitIdsToExclude, '[^,]+', 1, LEVEL) IS NOT NULL)
+      AND ALT_HANDLING_UNIT_LABEL_ID IS NOT NULL";
+}
+
+function InitChangeParentHandlingUnitDialog Structure(InitChangeParentHandlingUnitDialogStructure) {
+   parameter Selection Text;
+}
+
+---------------------------------- ACTIONS ----------------------------------
+action ModifyParentHandlingUnitId {
+   initialcheck implementation;
+   parameter HandlingUnitIdList Text;
+   parameter ParentHandlingUnitId Number;
+   parameter KeepStructure Text;
+   ludependencies = HandlingUnit;
+}
+
+//! TODO: Should be refactored as a function!
+action HasAnyParentAtAnyLevel Text {
+   initialcheck none;
+   parameter HandlingUnitIdList Text;
+}
+
+//! TODO: Should be refactored as a function!
+action GetMaxCapacityExceededInfo {
+   initialcheck none;
+   supportwarnings = [true];
+   parameter HandlingUnitId Number;
+}
+
+-------------------------------- STRUCTURES ---------------------------------
+structure ChangeParentHandlingUnitStructure {
+   attribute Contract Text;
+   attribute LocationNo Text;
+   attribute HandlingUnitIdsToExclude Text;
+   attribute ShipmentId Number;
+   attribute Selection Text;
+   attribute HandlingUnitIdList Text;
+   attribute HandlingUnitId Number {
+      label = "New Parent Handling Unit ID";
+   }
+   attribute Sscc Text {
+      label = "SSCC";
+      maxlength = 100;
+   }
+   attribute AltHandlingUnitLabelId Text {
+      label = "Alt Handling Unit Label ID";
+      maxlength = 100;
+   }
+   reference HandlingUnitIdRef(HandlingUnitId) to HandlingUnitLov(HandlingUnitId) {
+      label = "New Parent Handling Unit ID";
+   }
+   reference SsccRef(HandlingUnitId, Sscc) to HandlingUnitLov(HandlingUnitId, Sscc) {
+      label = "SSCC";
+      where = "Sscc IS NOT NULL";
+   }
+   reference AltHandlingUnitLabelIdRef(HandlingUnitId, AltHandlingUnitLabelId) to HandlingUnitLov(HandlingUnitId, AltHandlingUnitLabelId) {
+      label = "Alt Handling Unit Label ID";
+      where = "ALT_HANDLING_UNIT_LABEL_ID IS NOT NULL";
+   }
+}
+
+structure InitChangeParentHandlingUnitDialogStructure {
+   attribute HandlingUnitIdsToExclude Text;
+   attribute ParentHandlingUnitId Number;
+   attribute Contract Text;
+   attribute LocationNo Text;
+   attribute ShipmentId Number;
+   attribute HandlingUnitIdList Text;
+}

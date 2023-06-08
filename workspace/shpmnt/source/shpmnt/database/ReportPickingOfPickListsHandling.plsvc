@@ -1,0 +1,162 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: ReportPickingOfPickListsHandling
+--  Component:    SHPMNT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date      Sign    History
+--  ------    ------  ---------------------------------------------------------
+--  19-06-20  RoJalk  SCUXXW4-15756, Modified Report_Pick_Main___ and added code to call the server method per each 32000.
+--  19-01-18  RaVdlk  SCUXXW4-4874, Modified the Report_Pick_Main___ method 
+--  19-01-08  RasDlk  SCUXXW4-12769, Handled the dialog dlgShipmentLocation in 'Report Picking' RMB.
+--  18-08-03  RaVdlk  Created 
+-----------------------------------------------------------------------------
+
+layer Core;
+
+PROCEDURE Report_Pick_Main___ (
+   report_pick_selection_   IN CLOB,
+   default_location_no_     IN VARCHAR2)
+IS
+   current_selection_   VARCHAR2(32000);
+   contract_            VARCHAR2(5);
+   order_no_            VARCHAR2(12); 
+   pick_list_no_        VARCHAR2(40);
+   pick_list_type_      VARCHAR2(20);
+   pick_inv_type_db_    VARCHAR2(7);
+   attr_consol_         VARCHAR2(32000);
+   temp_attr_consol_    VARCHAR2(32000);
+   attr_cus_ord_        VARCHAR2(32000);
+   temp_attr_cus_ord_   VARCHAR2(32000);
+   attr_inv_            VARCHAR2(32000); 
+   temp_attr_inv_       VARCHAR2(32000);
+   orders_              json_array_t := json_array_t.parse(report_pick_selection_); 
+
+   CURSOR get_rec IS
+     SELECT contract, pick_list_type, pick_inventory_type_db
+       FROM pick_report_pick_list
+      WHERE pick_list_no = pick_list_no_;
+BEGIN      
+   FOR order_ IN 0 .. orders_.get_size - 1 LOOP 
+      current_selection_   := orders_.get_string(order_);
+      pick_list_no_        := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PICK_LIST_NO');
+
+      OPEN  get_rec;
+      FETCH get_rec INTO contract_, pick_list_type_, pick_inv_type_db_;
+      CLOSE get_rec;
+
+      User_Allowed_SIte_API.Is_Authorized(contract_);
+      
+      IF (pick_list_type_ = 'CUST_ORDER_PICK_LIST')THEN 
+      
+         $IF Component_Order_SYS.INSTALLED $THEN
+            order_no_          := Customer_Order_Pick_List_API.Get_Order_No(pick_list_no_);
+         $END      
+         IF (order_no_ IS NULL)THEN
+            
+            Client_SYS.Add_To_Attr('PICK_LIST_NO',pick_list_no_, temp_attr_consol_);
+            IF (pick_inv_type_db_ = 'SHIPINV') THEN
+               Client_SYS.Add_To_Attr('LOCATION_NO',default_location_no_, temp_attr_consol_);
+            ELSE
+               Client_SYS.Add_To_Attr('LOCATION_NO', '', temp_attr_consol_);
+            END IF;                     
+            Client_SYS.Add_To_Attr('CONTRACT',contract_, temp_attr_consol_); 
+            
+            IF (LENGTH(attr_consol_||temp_attr_consol_ )<= 32000) THEN
+               attr_consol_      := attr_consol_ || temp_attr_consol_;
+               temp_attr_consol_ := NULL;
+            ELSE   
+               IF (attr_consol_ IS NOT NULL) THEN
+                  Report_Pick_Consol_Pl___(attr_consol_);
+                  attr_consol_      := temp_attr_consol_;
+                  temp_attr_consol_ := NULL;
+               END IF;   
+            END IF; 
+            
+         ELSE
+            Client_SYS.Add_To_Attr('START_EVENT',    '85',                 temp_attr_cus_ord_);
+            Client_SYS.Add_To_Attr('ORDER_NO',       order_no_,            temp_attr_cus_ord_);         
+            Client_SYS.Add_To_Attr('PICK_LIST_NO',   pick_list_no_,        temp_attr_cus_ord_);       
+            IF (pick_inv_type_db_ = 'SHIPINV') THEN
+               Client_SYS.Add_To_Attr('LOCATION_NO', default_location_no_, temp_attr_cus_ord_);
+            ELSE
+               Client_SYS.Add_To_Attr('LOCATION_NO', '',                   temp_attr_cus_ord_);
+            END IF;
+            Client_SYS.Add_To_Attr('END',            '',                   temp_attr_cus_ord_);      
+            
+            IF (LENGTH(attr_cus_ord_||temp_attr_cus_ord_ )<= 32000) THEN
+               attr_cus_ord_      := attr_cus_ord_ || temp_attr_cus_ord_;
+               temp_attr_cus_ord_ := NULL;
+            ELSE   
+               IF (attr_cus_ord_ IS NOT NULL) THEN
+                  Report_Pick_Co_Pl___(attr_cus_ord_);  
+                  attr_cus_ord_      := temp_attr_cus_ord_;
+                  temp_attr_cus_ord_ := NULL;
+               END IF;   
+            END IF; 
+            
+         END IF;  
+         
+      ELSE IF (pick_list_type_ = 'INVENTORY_PICK_LIST')THEN 
+         
+         Client_SYS.Add_To_Attr('PICK_LIST_NO',               pick_list_no_,        temp_attr_inv_); 
+         Client_SYS.Add_To_Attr('SHIP_INVENTORY_LOCATION_NO', default_location_no_, temp_attr_inv_);  
+         
+         IF (LENGTH(attr_inv_||temp_attr_inv_ )<= 32000) THEN
+            attr_inv_      := attr_inv_ || temp_attr_inv_;
+            temp_attr_inv_ := NULL;
+         ELSE   
+            IF (attr_inv_ IS NOT NULL )THEN
+               Report_Pick_Inv_Pl___(attr_inv_);  
+               attr_inv_      := temp_attr_inv_;
+               temp_attr_inv_ := NULL;
+            END IF; 
+         END IF; 
+         
+      END IF ;  
+   END IF;
+END LOOP;    
+
+IF (attr_cus_ord_ IS NOT NULL )THEN
+   Report_Pick_Co_Pl___(attr_cus_ord_);  
+END IF;   
+
+IF (attr_consol_ IS NOT NULL )THEN
+   Report_Pick_Consol_Pl___(attr_consol_);  
+END IF;   
+
+IF (attr_inv_ IS NOT NULL )THEN
+   Report_Pick_Inv_Pl___(attr_inv_);  
+END IF; 
+
+END Report_Pick_Main___;
+
+PROCEDURE  Report_Pick_Consol_Pl___ (
+   attr_ IN VARCHAR2 ) 
+IS
+BEGIN 
+   $IF Component_Order_SYS.INSTALLED $THEN
+      Pick_Customer_Order_API.Start_Report_Consol_Pl__(attr_);
+   $ELSE
+      NULL;
+   $END
+END  Report_Pick_Consol_Pl___;
+
+PROCEDURE  Report_Pick_Co_Pl___ (
+   attr_ IN OUT VARCHAR2 ) 
+IS
+BEGIN 
+   $IF Component_Order_SYS.INSTALLED $THEN
+      Customer_Order_Flow_API.Start_Report_Picking__(attr_); 
+   $ELSE
+      NULL;
+   $END
+END  Report_Pick_Co_Pl___;   
+
+PROCEDURE  Report_Pick_Inv_Pl___ (
+   attr_ IN VARCHAR2 ) 
+IS
+BEGIN 
+   Inventory_Pick_List_API.Set_Qty_Reserved_As_Picked(attr_);
+END Report_Pick_Inv_Pl___;

@@ -1,0 +1,474 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     CustomerOrderList
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  210908  ThKrlk  Bug 160717 (SC21R2-2542), Added new procedure Manual_Credit_Check_Hist___().
+--  200717  RoJalk  Bug 154273 (SCZ-10310), Added ship_addr_no_changed_ parameter to the Validate_Address_No___ call.
+--  190729  RuLiLk  SCUXXW4-23255, Removed stage billing condition from Is_Create_Advance_Invoice_Command_Enabled___ method.
+--  190501  AyAmlk  SCUXXW4-17406, Added enablefunction feature to improve performance at populate.
+--  190322  DaZase  SCUXXW4-16379, moved code to fragment.
+--  180903  JeLise  SCUXXW4-1076, Created for the convertion of tbwOverviewCustOrd.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Validate_Address_No___ (
+   delivery_address_          IN BOOLEAN, 
+   customer_no_               IN VARCHAR2,
+   ship_addr_no_              IN VARCHAR2,
+   company_                   IN VARCHAR2,
+   supply_country_db_         IN VARCHAR2,
+   language_code_             IN VARCHAR2,
+   agreement_id_              IN VARCHAR2,
+   contract_                  IN VARCHAR2,
+   addr_flag_db_              IN VARCHAR2,
+   delivery_terms_            IN VARCHAR2,
+   shipment_type_             IN VARCHAR2,
+   vendor_no_                 IN VARCHAR2,
+   ship_via_code_             IN VARCHAR2,
+   del_terms_location_        IN VARCHAR2,
+   order_no_                  IN VARCHAR2,
+   wanted_delivery_date_      IN DATE,
+   use_price_incl_tax_db_     IN BOOLEAN,
+   picking_leadtime_          IN NUMBER,
+   delivery_leadtime_         IN NUMBER,
+   ship_addr_no_changed_      IN BOOLEAN ) RETURN Address_Structure_Rec
+IS
+   address_rec_              Cust_Ord_Customer_Address_API.Public_Rec;
+   attr_                     VARCHAR2(1000);
+   rec_                      Address_Structure_Rec;
+   delivery_time_            DATE;
+   old_wanted_delivery_date_ VARCHAR2(50);
+   date_                     VARCHAR2(50);
+   local_use_price_incl_tax_ VARCHAR2(5);
+BEGIN
+   IF (delivery_address_) THEN 
+      Client_SYS.Add_To_Attr('CONTRACT', contract_, attr_);
+      Client_SYS.Add_To_Attr('ADDR_FLAG_DB', addr_flag_db_, attr_);
+      Client_SYS.Add_To_Attr('DELIVERY_TERMS', delivery_terms_, attr_);
+      Client_SYS.Add_To_Attr('SHIPMENT_TYPE', shipment_type_, attr_);
+      Client_SYS.Add_To_Attr('VENDOR_NO', vendor_no_, attr_);
+      Client_SYS.Add_To_Attr('SHIP_VIA_CODE', ship_via_code_, attr_);
+      Client_SYS.Add_To_Attr('DEL_TERMS_LOCATION', del_terms_location_, attr_);
+      Client_SYS.Add_To_Attr('ORDER_NO', order_no_, attr_);
+      IF ship_addr_no_changed_ THEN
+         Client_SYS.Add_To_Attr('ADDRESS_CHANGED',   'TRUE',             attr_);
+         Client_SYS.Add_To_Attr('PICKING_LEADTIME',  picking_leadtime_,  attr_);
+         Client_SYS.Add_To_Attr('DELIVERY_LEADTIME', delivery_leadtime_, attr_); 
+      END IF;   
+      address_rec_       := Cust_Ord_Customer_Address_API.Get(customer_no_, ship_addr_no_); 
+      rec_.district_code := address_rec_.district_code; 
+      rec_.region_code   := address_rec_.region_code; 
+      delivery_time_     := NVL(address_rec_.delivery_time, TO_DATE('00:00:00', 'HH24:MI:SS'));
+      rec_.tax_liability := Tax_Handling_Util_API.Get_Customer_Tax_Liability(customer_no_, ship_addr_no_, company_, supply_country_db_);
+      Customer_Order_API.Get_Delivery_Information(attr_, language_code_, agreement_id_, customer_no_, ship_addr_no_);
+   END IF;
+   
+   old_wanted_delivery_date_ := TO_CHAR(wanted_delivery_date_, 'YYYY-MM-DD-HH24:MI:SS');
+   
+   IF (delivery_address_) THEN 
+      date_ := TO_CHAR(wanted_delivery_date_, 'YYYY-MM-DD') || '-' || TO_CHAR(delivery_time_, 'HH24:MI:SS');
+      IF (old_wanted_delivery_date_ != date_) THEN
+         rec_.wanted_delivery_date := TO_DATE(date_, 'YYYY-MM-DD-HH24:MI:SS');
+      ELSE
+         rec_.wanted_delivery_date := wanted_delivery_date_;
+      END IF;
+      
+      rec_.ship_via_code             := Client_SYS.Get_Item_Value('SHIP_VIA_CODE', attr_);
+      rec_.deliv_term                := Client_SYS.Get_Item_Value('DELIVERY_TERMS', attr_);
+      rec_.leadtime                  := Client_SYS.Get_Item_Value('DELIVERY_LEADTIME', attr_);
+      rec_.ext_transport_calendar_id := Client_SYS.Get_Item_Value('EXT_TRANSPORT_CALENDAR_ID', attr_);
+      rec_.del_terms_location        := Client_SYS.Get_Item_Value('DEL_TERMS_LOCATION', attr_);
+      rec_.freight_map_id            := Client_SYS.Get_Item_Value('FREIGHT_MAP_ID', attr_);
+      rec_.zone_id                   := Client_SYS.Get_Item_Value('ZONE_ID', attr_);
+      rec_.cust_calendar_id          := Client_SYS.Get_Item_Value('CUST_CALENDAR_ID', attr_);   
+      rec_.route_id                  := Client_SYS.Get_Item_Value('ROUTE_ID', attr_);
+      rec_.forward_agent_id          := Client_SYS.Get_Item_Value('FORWARD_AGENT_ID', attr_);
+      rec_.picking_leadtime          := Client_SYS.Get_Item_Value('PICKING_LEADTIME', attr_);
+      rec_.shipment_type             := Client_SYS.Get_Item_Value('SHIPMENT_TYPE', attr_);
+   END IF;
+
+   IF (use_price_incl_tax_db_) THEN
+      local_use_price_incl_tax_ := 'TRUE';
+   ELSE
+      local_use_price_incl_tax_ := 'FALSE';
+   END IF;
+   
+   IF (vendor_no_ IS NOT NULL) THEN
+      rec_.freight_price_list_no := Freight_Price_List_Direct_API.Get_Active_Freight_List_No(contract_, rec_.ship_via_code, rec_.freight_map_id, rec_.forward_agent_id, local_use_price_incl_tax_, vendor_no_); 
+   ELSE 
+      rec_.freight_price_list_no := Freight_Price_List_Base_API.Get_Active_Freight_List_No(contract_, rec_.ship_via_code, rec_.freight_map_id, rec_.forward_agent_id, local_use_price_incl_tax_);
+   END IF; 
+   
+   RETURN rec_;
+END Validate_Address_No___;
+
+
+FUNCTION Fetch_Delivery_Attributes___(
+   order_no_              IN VARCHAR2,
+   contract_              IN VARCHAR2,
+   customer_no_           IN VARCHAR2,
+   ship_addr_no_          IN VARCHAR2,
+   addr_flag_db_          IN VARCHAR2,
+   ship_via_code_         IN VARCHAR2,
+   vendor_no_             IN VARCHAR2,
+   shipment_type_         IN VARCHAR2,
+   delivery_leadtime_     IN NUMBER,
+   picking_leadtime_      IN NUMBER,
+   forward_agent_id_      IN VARCHAR2,
+   delivery_terms_        IN VARCHAR2,
+   del_terms_location_    IN VARCHAR2,
+   use_price_incl_tax_db_ IN BOOLEAN,
+   ship_via_code_changed_ IN VARCHAR2 ) RETURN Delivery_Structure_Rec
+IS
+   rec_                      Delivery_Structure_Rec;
+   local_use_price_incl_tax_ VARCHAR2(5);
+BEGIN
+   rec_.shipment_type      := shipment_type_;
+   rec_.delivery_leadtime  := delivery_leadtime_;
+   rec_.picking_leadtime   := picking_leadtime_;
+   rec_.forward_agent_id   := forward_agent_id_;
+   rec_.delivery_terms     := delivery_terms_;
+   rec_.del_terms_location := del_terms_location_;  
+   
+   Customer_Order_API.Fetch_Delivery_Attributes(rec_.route_id,
+                                                rec_.delivery_leadtime,
+                                                rec_.ext_transport_calendar_id,
+                                                rec_.freight_map_id,
+                                                rec_.zone_id,
+                                                rec_.picking_leadtime, 
+                                                rec_.shipment_type,
+                                                rec_.forward_agent_id,
+                                                rec_.delivery_terms,
+                                                rec_.del_terms_location,
+                                                order_no_,
+                                                contract_,
+                                                customer_no_,
+                                                ship_addr_no_,
+                                                addr_flag_db_,
+                                                ship_via_code_,
+                                                vendor_no_,
+                                                ship_via_code_changed_);
+
+   IF (use_price_incl_tax_db_) THEN
+      local_use_price_incl_tax_ := 'TRUE';
+   ELSE
+      local_use_price_incl_tax_ := 'FALSE';
+   END IF;
+   
+   IF (vendor_no_ IS NOT NULL) THEN
+      rec_.freight_price_list_no := Freight_Price_List_Direct_API.Get_Active_Freight_List_No(contract_, ship_via_code_, rec_.freight_map_id, rec_.forward_agent_id, local_use_price_incl_tax_, vendor_no_); 
+   ELSE 
+      rec_.freight_price_list_no := Freight_Price_List_Base_API.Get_Active_Freight_List_No(contract_, ship_via_code_, rec_.freight_map_id, rec_.forward_agent_id, local_use_price_incl_tax_);
+   END IF; 
+
+   RETURN rec_;
+END Fetch_Delivery_Attributes___;
+
+
+FUNCTION Validate_Supplier___(
+   order_no_              IN VARCHAR2,
+   contract_              IN VARCHAR2,
+   customer_no_           IN VARCHAR2,
+   ship_addr_no_          IN VARCHAR2,
+   addr_flag_db_          IN VARCHAR2,
+   ship_via_code_         IN VARCHAR2,
+   vendor_no_             IN VARCHAR2,
+   agreement_id_          IN VARCHAR2,
+   delivery_terms_        IN VARCHAR2,
+   del_terms_location_    IN VARCHAR2,
+   use_price_incl_tax_db_ IN BOOLEAN ) RETURN Delivery_Structure_Rec
+IS
+   rec_                      Delivery_Structure_Rec;
+   freight_map_id_           VARCHAR2(15); 
+   forward_agent_id_         VARCHAR2(20); 
+   local_ship_via_code_      VARCHAR2(3);
+   local_use_price_incl_tax_ VARCHAR2(5);
+BEGIN 
+   IF (customer_no_ IS NOT NULL AND contract_ IS NOT NULL) THEN
+      rec_.delivery_terms     := delivery_terms_;
+      rec_.del_terms_location := del_terms_location_;  
+      
+      Customer_Order_API.Fetch_Default_Delivery_Info(forward_agent_id_, 
+                                                     rec_.route_id,
+                                                     freight_map_id_, 
+                                                     rec_.zone_id,
+                                                     rec_.delivery_leadtime,
+                                                     rec_.ext_transport_calendar_id,
+                                                     rec_.picking_leadtime, 
+                                                     rec_.shipment_type,
+                                                     local_ship_via_code_,
+                                                     rec_.delivery_terms,
+                                                     rec_.del_terms_location,
+                                                     order_no_, 
+                                                     contract_, 
+                                                     customer_no_,
+                                                     ship_addr_no_, 
+                                                     addr_flag_db_, 
+                                                     agreement_id_, 
+                                                     vendor_no_);
+      IF (use_price_incl_tax_db_) THEN
+         local_use_price_incl_tax_ := 'TRUE';
+      ELSE
+         local_use_price_incl_tax_ := 'FALSE';
+      END IF;
+      
+      IF (vendor_no_ IS NOT NULL) THEN
+         rec_.freight_price_list_no := Freight_Price_List_Direct_API.Get_Active_Freight_List_No(contract_, ship_via_code_, freight_map_id_, forward_agent_id_, local_use_price_incl_tax_, vendor_no_); 
+         rec_.vendor_name := Supplier_Info_API.Get_Name(vendor_no_);
+      ELSE
+         rec_.freight_price_list_no := Freight_Price_List_Base_API.Get_Active_Freight_List_No(contract_, ship_via_code_, freight_map_id_, forward_agent_id_, local_use_price_incl_tax_);
+      END IF;
+   END IF;
+   
+   RETURN rec_;
+END Validate_Supplier___;
+
+
+FUNCTION Get_Cust_Ref___(
+   customer_no_  IN VARCHAR2,
+   bill_addr_no_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+BEGIN
+   RETURN Cust_Ord_Customer_API.Fetch_Cust_Ref(customer_no_, bill_addr_no_, 'TRUE');
+END Get_Cust_Ref___;
+
+
+FUNCTION Get_Tax_Id_No___(
+   customer_no_             IN VARCHAR2,
+   customer_no_pay_         IN VARCHAR2,
+   customer_no_pay_addr_no_ IN VARCHAR2,
+   bill_addr_no_            IN VARCHAR2,
+   company_                 IN VARCHAR2,
+   supply_country_db_       IN VARCHAR2,
+   delivery_country_code_   IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   local_customer_no_ VARCHAR2(20);
+   local_addr_no_     VARCHAR2(50);
+BEGIN
+   IF (customer_no_pay_ IS NOT NULL) THEN 
+     local_customer_no_ := customer_no_pay_;
+     local_addr_no_     := customer_no_pay_addr_no_;
+   ELSE 
+     local_customer_no_ := customer_no_;
+     local_addr_no_     := bill_addr_no_;
+   END IF;
+   
+   RETURN Customer_Document_Tax_Info_API.Get_Vat_No_Db(local_customer_no_,
+                                                       local_addr_no_,
+                                                       company_,
+                                                       supply_country_db_,
+                                                       delivery_country_code_);
+END Get_Tax_Id_No___;
+
+
+FUNCTION Validate_Bill_Addr_No___(
+   customer_no_             IN VARCHAR2,
+   customer_no_pay_         IN VARCHAR2,
+   customer_no_pay_addr_no_ IN VARCHAR2,
+   bill_addr_no_            IN VARCHAR2,
+   company_                 IN VARCHAR2,
+   supply_country_db_       IN VARCHAR2,
+   delivery_country_code_   IN VARCHAR2 ) RETURN Return_Structure_Rec
+IS
+   rec_ Return_Structure_Rec;
+BEGIN
+   rec_.cust_ref  := Get_Cust_Ref___(customer_no_, bill_addr_no_);
+   rec_.tax_id_no := Get_Tax_Id_No___(customer_no_,
+                                      customer_no_pay_,
+                                      customer_no_pay_addr_no_,
+                                      bill_addr_no_,
+                                      company_,
+                                      supply_country_db_,
+                                      delivery_country_code_);
+
+   RETURN rec_;
+END Validate_Bill_Addr_No___;
+
+FUNCTION Get_Ship_Addr_No___(
+   order_no_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+BEGIN
+   RETURN Customer_Order_API.Get_Ship_Addr_No(order_no_);
+END Get_Ship_Addr_No___;
+
+
+FUNCTION Get_Tax_Info___(
+   customer_no_             IN VARCHAR2,
+   customer_no_pay_         IN VARCHAR2,
+   customer_no_pay_addr_no_ IN VARCHAR2,
+   bill_addr_no_            IN VARCHAR2,
+   company_                 IN VARCHAR2,
+   supply_country_db_       IN VARCHAR2,
+   delivery_country_code_   IN VARCHAR2,
+   ship_addr_no_            IN VARCHAR2 ) RETURN Supply_Country_Structure_Rec
+IS
+   rec_ Supply_Country_Structure_Rec;
+BEGIN
+   rec_.tax_id_no     := Get_Tax_Id_No___(customer_no_,
+                                          customer_no_pay_,
+                                          customer_no_pay_addr_no_,
+                                          bill_addr_no_,
+                                          company_,
+                                          supply_country_db_,
+                                          delivery_country_code_);
+   rec_.tax_liability := Tax_Handling_Util_API.Get_Customer_Tax_Liability(customer_no_, 
+                                                                          ship_addr_no_, 
+                                                                          company_, 
+                                                                          supply_country_db_);
+   RETURN rec_;
+END Get_Tax_Info___;
+
+
+FUNCTION Customer_Po_No_Already_Used___ (
+   customer_po_no_ IN VARCHAR2,
+   customer_no_    IN VARCHAR2 ) RETURN NUMBER
+IS
+   
+BEGIN
+   RETURN Customer_Order_API.Get_Customer_Po_No(customer_po_no_, customer_no_);
+END Customer_Po_No_Already_Used___;
+
+
+FUNCTION Is_Create_Advance_Invoice_Command_Enabled___ (
+	company_           IN VARCHAR2,
+	order_no_          IN VARCHAR2) RETURN BOOLEAN
+IS
+BEGIN
+	RETURN Company_Order_Info_API.Get_Prepayment_Inv_Method_Db(company_) = 'ADVANCE_INVOICE' AND 
+   Customer_Order_API.Self_Billing_Lines_Exist__(order_no_) != 1 AND
+   Customer_Order_API.Rental_Lines_Exist(order_no_) = 'FALSE';
+END Is_Create_Advance_Invoice_Command_Enabled___;
+
+
+FUNCTION Is_Handle_Prepayment_Based_Invoice_Command_Enabled___ (
+	company_  IN VARCHAR2,
+	order_no_ IN VARCHAR2) RETURN BOOLEAN
+IS
+BEGIN
+	RETURN Company_Order_Info_API.Get_Prepayment_Inv_Method_Db(company_) = 'PREPAYMENT_BASED_INVOICE' AND
+   Customer_Order_API.Get_Gross_Amt_Incl_Charges(order_no_) > 0;
+END Is_Handle_Prepayment_Based_Invoice_Command_Enabled___;
+
+
+FUNCTION Is_Invoice_Info_Command_Enabled___ (
+	order_no_ IN VARCHAR2) RETURN BOOLEAN
+IS
+BEGIN
+	RETURN Invoice_Customer_Order_API.Check_Invoice_Exist_For_Co(order_no_) = 'TRUE';
+END Is_Invoice_Info_Command_Enabled___;
+
+
+FUNCTION Is_Handle_Return_Material_Authoriz_View_Edit_Command_Enabled___  (
+	order_no_ IN VARCHAR2) RETURN BOOLEAN
+IS
+BEGIN
+	RETURN Return_Material_API.Check_Exist_Rma_For_Order(order_no_) = 'TRUE';
+END Is_Handle_Return_Material_Authoriz_View_Edit_Command_Enabled___;
+
+
+FUNCTION Is_Manual_Credit_Check_Command_Enabled___ (
+	order_no_ IN VARCHAR2) RETURN BOOLEAN
+IS
+BEGIN
+	RETURN Customer_Order_API.Crdt_Chck_Valid_Lines_Exist__(order_no_) = 1;
+END Is_Manual_Credit_Check_Command_Enabled___;
+
+
+FUNCTION Is_Create_Return_Material_Authorization_Command_Enabled___ (
+	order_no_ IN VARCHAR2) RETURN BOOLEAN
+IS
+BEGIN
+	RETURN Customer_Order_Flow_API.Check_Co_To_Return(order_no_) != 0;
+END Is_Create_Return_Material_Authorization_Command_Enabled___;
+
+
+FUNCTION Manual_Credit_Check___ (
+	key_ IN Customer_Order_Key) RETURN Credit_Check_Structure_Rec
+IS
+   rec_ Credit_Check_Structure_Rec;
+BEGIN
+   Customer_Order_Flow_API.Manual_Credit_Check__(rec_.message, rec_.message_type, rec_.credit_block_reason, key_.order_no);
+   RETURN rec_;
+END Manual_Credit_Check___;
+
+PROCEDURE Set_Order_Blocked___ (
+	key_ IN Customer_Order_Key,
+	credit_block_reason_ IN VARCHAR2)
+IS
+BEGIN
+	Customer_Order_API.Set_Blocked(key_.order_no, credit_block_reason_, NULL);
+END Set_Order_Blocked___;
+
+PROCEDURE Log_Manual_Credit_Check_Hist___ (
+	key_ IN Customer_Order_Key)
+IS
+BEGIN
+	Customer_Order_API.Log_Manual_Credit_Check_Hist__(key_.order_no, 'NO');
+END Log_Manual_Credit_Check_Hist___;
+
+
+FUNCTION Get_Collective_Customer___ (
+	customer_no_ IN VARCHAR2) RETURN VARCHAR2
+IS
+BEGIN
+	RETURN Cust_Ord_Customer_API.Get_Invoice_Sort_Db(customer_no_);
+END Get_Collective_Customer___;
+
+
+FUNCTION Get_Site_Update_Price_Effective_Date___ (
+	contract_ IN VARCHAR2) RETURN VARCHAR2
+IS
+BEGIN
+	RETURN Site_Discom_Info_API.Get_Price_Effective_Date_Db(contract_);
+END Get_Site_Update_Price_Effective_Date___;
+
+
+FUNCTION Get_Non_Ivoiced_Cancelled_Lines_Exist___ (
+	order_no_ IN VARCHAR2) RETURN VARCHAR2
+IS
+BEGIN
+	RETURN Customer_Order_API.Non_Ivc_Cancelled_Lines_Exist(order_no_);
+END Get_Non_Ivoiced_Cancelled_Lines_Exist___;
+
+
+FUNCTION Get_Advance_Invoice_Data___ (
+	company_ IN VARCHAR2,
+	customer_no_ IN VARCHAR2) RETURN Advance_Invoice_Info_Structure_Rec
+IS
+   rec_ Advance_Invoice_Info_Structure_Rec;
+BEGIN
+	rec_.allow_with_deliv_conf_db := Company_Order_Info_API.Get_Allow_With_Deliv_Conf_Db(company_);
+   rec_.base_for_adv_invoice     := Company_Order_Info_API.Get_Base_For_Adv_Invoice_Db(company_);
+   rec_.collective_customer      := Get_Collective_Customer___(customer_no_);
+   RETURN rec_;
+END Get_Advance_Invoice_Data___;
+
+
+FUNCTION Check_Any_Line_Not_Proj_Connected___ (
+	order_no_ IN VARCHAR2) RETURN BOOLEAN
+IS
+BEGIN
+   IF Customer_Order_API.Is_Any_Line_Proj_Conn_Exist__(order_no_) = 0 THEN
+      return TRUE;
+   END IF;
+   return  FALSE; 
+END Check_Any_Line_Not_Proj_Connected___;
+
+PROCEDURE Manual_Credit_Check_Hist___ (
+   key_                          IN Customer_Order_Key,
+   log_reason_                   IN VARCHAR2,
+   released_from_credit_check_   IN VARCHAR2,
+   check_release_                IN VARCHAR2)
+IS
+BEGIN
+	IF (check_release_ = 'TRUE') THEN     
+      Customer_Order_API.Start_Release_Blocked(key_.order_no, released_from_credit_check_);
+   END IF;
+	Customer_Order_API.Log_Manual_Credit_Check_Hist__(key_.order_no, log_reason_);
+END Manual_Credit_Check_Hist___;

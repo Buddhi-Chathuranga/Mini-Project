@@ -1,0 +1,1351 @@
+-----------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  ------------------------------------------------------
+-- 2021-12-23  JaThlk  SC21R2-2942, Added CountReportLineSerialAggregatedList and CountRepLineSerialAggregatedNestedList to support counting serial items without specifying serials.
+-- 2021-12-17  JaThlk  SC21R2-2932, Added CreateCountReportLineAssistant to support adding count per count report lines.
+-- 2021-10-28  DigPlk  SC21R2-2881, Replaced the functionality of IdentifySerialsInLocAssistant with IdentifySerialsInLocRepeatAssistant.
+-- 2019-07-24  ChFolk  SCUXXW4-22798, Included fragment ProjectDetailsFieldSet.
+-- 2019-07-10  ChFolk  SCUXXW4-22798, Modified Project information by using get methods instead of reference to increase performance.
+-- 2019-04-24  DaZase  SCUXXW4-19618, Changed calls to GetResultKey, ConfirmLine and CountLineWithoutDiff since these are now Bound.
+-- 2019-04-17  DaZase  SCUXXW4-14187, Added initcontext to fetch SystemShortageFlag that is used in ResolveShortages Commands.
+-- 2019-03-12  JaThlk  SCUXXW4-17128, Added SessionId as an in parameter in IdentifySerialsInLocationAssistant.
+-- 2019-01-17  DaZase  SCUXXW4-6770, Converted from tbwCountInventory using MTG Version: 1.34
+-- 2018-11-16  DaZase  SCUXXW4-6149, Converted from frmInvCountHandlingUnit using MTG Version: 1.32
+-- 2018-11-08  DaZase  SCUXXW4-6154, Converted from frmInvCountInventory using MTG Version: 1.31
+-----------------------------------------------------------------------------
+client CountPerCountReport;
+component INVENT;
+layer Core;
+projection CountPerCountReport;
+include fragment UserAllowedSiteLovSelector;
+include fragment InventoryPartInStockDelivSelector;
+@DynamicComponentDependency PROJ
+include fragment ProjectLovSelector;
+include fragment InventoryPartInStockLov9Selector;
+include fragment InventoryPartInStockLov10Selector;
+include fragment InventoryPartInStockLov11Selector;
+// Everything needed for the IdentifySerialsInLocationAssistant
+include fragment IdentifySerialsInLocationAssistant;
+include fragment TemporaryPartTrackingSerialSelector;
+include fragment ProjectDetailsFieldSet;
+include fragment InventoryLocation8Selector;
+include fragment HandlingUnitLov9Selector;
+warningsenabled = CountingReport;
+
+// Note: Possible performance issues for the aggregated tab that have many columns not visible but they are still in the select,
+// even thou FW should have fixed that in TEUXX-12416. Using columnexclude dont help either in this case since its not the same
+// as exclude when hidden in IEE client. Maybe its because its a search context solution or maybe the FW dont parse the code correctly
+// when its suppose to not include hidden fields since here we have 3 different list, with a lot of similar named columns, but its only
+// in one of the lists some of these columns are hidden, so maybe FW dont realize which entityset is used for the list. Or maybe this is
+// because some of the hidden but still included fields are used as params in the fetch of other attributes in the projection and some
+// are used in References (not all are used anywhere but are still in the select).
+// There are also some that are removed from the select while hidden, not sure why it works for them.
+// The performance seems to be better now after the project fields where changed and other FW performance fixes.
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+navigator {
+   entry CountperCountReportNavEntry parent InventNavigator.WarehouseManagementCounting at index 400 {
+      label = "Count per Count Report";
+      page Form home CountingReport;
+   }
+}
+
+-------------------------------- MAIN PAGES ---------------------------------
+page Form using CountingReportSet {
+   label = "Count per Count Report";
+   startupmode = search;
+   selector CountingReportSelector;
+   initcontext FetchSystemParamsInitContext;
+   group InvCountInventoryGroup;
+
+   tabs {
+      tab {
+         label = "Details";
+         list CountReportLineDetailsList using GetCountReportLineDetails(DetailsSearchContext.ShowDetails, InvListNo) {
+            searchcontext DetailsSearchContext {
+               defaults = GetDetailsSearchContextDefaults();
+            }
+         }
+      }
+      tab {
+         label = "Details with Aggregated Serials";
+         list CountReportLineSerialAggregatedList using GetCountReportAggregated(DetailsSearchContext.ShowDetails, InvListNo) {
+            searchcontext DetailsSearchContext {
+               defaults = GetDetailsSearchContextDefaults();
+            }
+         }
+         list CountRepLineSerialAggregatedNestedList(SerialAggregatedArray) bind CountReportLineSerialAggregatedList {
+            display = Nested;
+         }
+      }
+      tab {
+         label = "Aggregated on Handling Units/Locations";
+         list CountReportLineAggregatedList using GetCountReportLineAggregated(AggregatedSearchContext.ShowAggregated, InvListNo) {
+            searchcontext AggregatedSearchContext {
+               defaults = GetAggregatedSearchContextDefaults();
+            }
+
+         }
+         list CountInventoryList(CountingReportLineAggregatedArray) bind CountReportLineAggregatedList {
+            display = Nested;
+         }
+      }
+   }
+
+   commandgroup ActionCmdGroup {
+      command CountWithoutDifferencesCommand;
+      command ConfirmCountedLinesCommand;
+      command CancelUncountedLinesCommand;
+   }
+
+   commandgroup PrintingCmdGroup {
+      command PrintDetailedCommand;
+      command PrintAggregatedCommand;
+   }
+}
+
+initcontext FetchSystemParamsInitContext {
+   parameter SystemShortageFlag Text;
+   init command {
+      execute {
+         call GetSystemShortageFlag() into SystemShortageFlag;
+      }
+   }
+}
+-------------------------------- ASSISTANTS ---------------------------------
+assistant CreateCountReportLineAssistant using CountReportHeaderVirtualSet {
+   label = "Add Count Report Line";
+
+   input(InvListNo, Contract);
+
+   steps {
+      step {
+         group CountReportHeaderInfoGroup {
+            showlabel = false;
+         }
+         list CountReportLineList(CountReportArray);
+      }
+      final step {
+      }
+      cancelled step {
+      }
+   }
+   finish command {
+      label = "Finish";
+      enabled = [true];
+      execute {
+         call CreateCountReportLines();
+      }
+   }
+   cancel command {
+      visible = [true];
+   }
+   restart command {
+      visible = [true];
+   }
+}
+--------------------------------- COMMANDS ----------------------------------
+
+-------------------------------- Commands in Header ---------------------------------
+command CountWithoutDifferencesCommand for CountingReport {
+   label = "Count Without Differences";
+   enabled = [not component.CountReportLineDetailsList.IsDirty and NoOfUncountedRows > 0];
+   execute {
+      call CountAllLinesWithoutDif(InvListNo);
+   }
+}
+
+command ConfirmCountedLinesCommand for CountingReport {
+   label = "Confirm Counted Lines";
+   enabled = [not component.CountReportLineDetailsList.IsDirty and NoOfCountedLines > 0];
+   execute {
+      call ConfirmAllCountedLines(InvListNo);
+   }
+}
+
+command CancelUncountedLinesCommand for CountingReport {
+   label = "Cancel Uncounted Lines";
+
+   enabled = [not component.CountReportLineDetailsList.IsDirty and NoOfUncountedRows > 0];
+   execute {
+      call CancelCountingReport(InvListNo);
+   }
+}
+command PrintDetailedCommand for CountingReport {
+   label = "Print Detailed Report";
+   enabled = [true];
+   variable ResultKeyNumber;
+   execute {
+      call GetResultKey("COUNTING_REPORT_PRINT_REP") into ResultKeyNumber;
+      if [ResultKeyNumber != null] {
+         printdialog ResultKeyNumber;
+      }
+   }
+}
+command PrintAggregatedCommand for CountingReport {
+   label = "Print Aggregated on Handling Unit / Location Report";
+   enabled = [true];
+   execute {
+      call GetResultKey("COUNTING_REPORT_HU_REP") into ResultKeyNumber;
+      if [ResultKeyNumber != null] {
+         printdialog ResultKeyNumber;
+      }
+   }
+}
+
+----------------------- Global Commands in tab level -----------------------------
+command AddNewLineCommand for CountingReportLine {
+   mode = Global;
+   label = "New";
+   icon = "new";
+   style = IconOnly;
+
+   execute {
+      assistant CreateCountReportLineAssistant(InvListNo, Contract) {
+         when OK {
+            exit OK;
+         }
+      }
+   }
+}
+
+----------------------- Commands in Details Tab -----------------------------
+command ConfirmCommand for CountingReportLine {
+   label = "Confirm";
+   mode = SelectedRecords;
+   //and not IsDirty  //might be needed if we change the edit mode for this list
+   enabled = [QtyCount1 != null and Confirmed = false];
+   bulkexecute {
+      bulkcall ConfirmLine();
+   }
+}
+
+command CountWithoutDifferencesCommand for CountingReportLine {
+   label = "Count Without Differences";
+   mode = SelectedRecords;
+   //and not IsDirty  //might be needed if we change the edit mode for this list
+   enabled = [QtyCount1 = null and Confirmed = false];
+   bulkexecute {
+      bulkcall CountLineWithoutDiff(InvQtyOnhand, InvCatchQtyOnhand);
+   }
+}
+
+command ResolveShortagesCommand for CountingReportLine {
+   label = "Resolve Shortages";
+   mode = SingleRecord;
+   enabled = [QtyCount1 > InvQtyOnhand and initcontext.SystemShortageFlag = "Y" and PartShortageExist > 0 and PartShortageFlagDb = "Y"];
+   execute {
+      if [ConditionCode != null] {
+         navigate "page/ResolveShortagesForInventoryPart/Form?$filter=Contract eq $[Contract] and PartNo eq $[PartNo] and ConditionCode eq $[ConditionCode]";
+      }
+      else {
+         navigate "page/ResolveShortagesForInventoryPart/Form?$filter=Contract eq $[Contract] and PartNo eq $[PartNo]";
+      }
+   }
+}
+
+
+command LineBeforeSaveChecks for CountingReportLine {
+   variable SessionSelection Text;
+   variable SessionId Number;
+   execute {
+      // GenPartTrackingSessionId start
+      if [(RcptIssuePartTrackingDb = "TRUE" and InvSerialTrackingDb != "SERIAL TRACKING") and
+      QtyCount1 != InvQtyOnhand and QtyCount1 != null and SerialNo = "*"] {
+
+         set SessionIdNum = PartTrackingSessionId;
+         // set the CountingDiffStr aka AssistantContext
+         set CountingDiffStr = "OTHER";
+         if [QtyCount1 < InvQtyOnhand] {
+            set CountingDiffStr = "NEGATIVE_COUNTING_DIFF";
+         }
+         else {
+            if [QtyCount1 > InvQtyOnhand] {
+               set CountingDiffStr = "POSITIVE_COUNTING_DIFF";
+            }
+         }
+         set QtyNum = "#{QtyCount1 - InvQtyOnhand}";
+         // NumberABS
+         if [QtyNum < 0] {
+            set QtyNum = "#{QtyNum * (-1)}";
+         }
+         // Input for assistant (Contract, PartNo, ConfigurationId, LocationNo, LotBatchNo, EngChgLevel, WaivDevRejNo, ActivitySeq, HandlingUnitId, QtyIssue, CatchQtyIssue, AssistantTitle, AssistantContext, SessionId)
+         call GetSessionIdSelection(Contract, PartNo, ConfigurationId, LocationNo, LotBatchNo, EngChgLevel, WaivDevRejNo, ActivitySeq, HandlingUnitId, QtyNum, NULL, NULL, CountingDiffStr, SessionIdNum) into IdentifySerialsRecStructure;
+         assistant IdentifySerialsInLocRepeatAssistant(IdentifySerialsRecStructure.RemainingSelection, IdentifySerialsRecStructure.Total, null, null) into(SessionSelection) {
+            when OK {
+               if [PartTrackingSessionId = null] {
+                  set PartTrackingSessionId = IdentifySerialsRecStructure.SessionId;
+               }
+            }
+            when CANCEL {
+               exit CANCEL;
+            }
+
+         }
+      }
+      // GenPartTrackingSessionId end
+      if [QtyCount1 > QtyOnhand and PartOwnershipDb = "CONSIGNMENT"] {
+         confirm("An increase of consignment stock will increase the Qty Consignment for the latest Purchase Receipt where it is found possible. Still want to save this record?") {
+            when CANCEL {
+               exit CANCEL;
+            }
+         }
+      }
+   }
+}
+
+
+----------------------- Commands in Aggregated Tab --------------------------
+
+command CountWithoutDifferencesCommand for HandlUnitStockSnapshot {
+   label = "Count Without Differences";
+   mode = SelectedRecords;
+   enabled = [Counted = false and Confirmed = false];
+   bulkexecute {
+      call CountWithoutDiff(Selection);
+   }
+}
+
+command ConfirmCommand for HandlUnitStockSnapshot {
+   label = "Confirm";
+   mode = SelectedRecords;
+   enabled = [Counted = true and Confirmed = false];
+   bulkexecute {
+      call ConfirmAggregated(Selection);
+   }
+}
+
+command CountAsZeroCommand for HandlUnitStockSnapshot {
+   label = "Count as Zero";
+   mode = SelectedRecords;
+   enabled = [Counted = false and Confirmed = false];
+   bulkexecute {
+      confirm("Count as Zero will count all stock records to zero.") {
+         when OK {
+            call CountAsZero(Selection);
+         }
+      }
+   }
+}
+
+------------ Commands in Aggregated Tab binded/nested List ------------------
+command ConfirmCommand for CountingReportLineAggregated {
+   label = "Confirm";
+   mode = SelectedRecords;
+   enabled = [QtyCount1 != null and Confirmed = false];
+   bulkexecute {
+      bulkcall ConfirmLine();
+   }
+}
+
+command CountWithoutDifferencesCommand for CountingReportLineAggregated {
+   label = "Count Without Differences";
+   mode = SelectedRecords;
+   enabled = [QtyCount1 = null and Confirmed = false];
+   bulkexecute {
+
+      bulkcall CountLineWithoutDiff(InvQtyOnhand, InvCatchQtyOnhand);
+   }
+}
+
+command ResolveShortagesCommand for CountingReportLineAggregated {
+   label = "Resolve Shortages";
+   mode = SingleRecord;
+   enabled = [QtyCount1 > InvQtyOnhand and initcontext.SystemShortageFlag = "Y" and PartShortageExist > 0 and PartShortageFlagDb = "Y"];
+   execute {
+      if [ConditionCode != null] {
+         navigate "page/ResolveShortagesForInventoryPart/Form?$filter=Contract eq $[Contract] and PartNo eq $[PartNo] and ConditionCode eq $[ConditionCode]";
+      }
+      else {
+         navigate "page/ResolveShortagesForInventoryPart/Form?$filter=Contract eq $[Contract] and PartNo eq $[PartNo]";
+      }
+   }
+}
+
+command AggregatedBeforeSaveChecks for CountingReportLineAggregated {
+   variable SessionSelection Text;
+   execute {
+      // GenPartTrackingSessionId start
+      if [(RcptIssuePartTrackingDb = "TRUE" and InvSerialTrackingDb != "SERIAL TRACKING") and
+      QtyCount1 != InvQtyOnhand and QtyCount1 != null and SerialNo = "*"] {
+         set SessionIdNum = PartTrackingSessionId;
+         // set the CountingDiffStr aka AssistantContext
+         set CountingDiffStr = "OTHER";
+         if [QtyCount1 < InvQtyOnhand] {
+            set CountingDiffStr = "NEGATIVE_COUNTING_DIFF";
+         }
+         else {
+            if [QtyCount1 > InvQtyOnhand] {
+               set CountingDiffStr = "POSITIVE_COUNTING_DIFF";
+            }
+         }
+         set QtyNum = "#{QtyCount1 - InvQtyOnhand}";
+         // NumberABS
+         if [QtyNum < 0] {
+            set QtyNum = "#{QtyNum * (-1)}";
+         }
+         // Input for assistant (Contract, PartNo, ConfigurationId, LocationNo, LotBatchNo, EngChgLevel, WaivDevRejNo, ActivitySeq, HandlingUnitId, QtyIssue, CatchQtyIssue, AssistantTitle, AssistantContext, SessionId)
+         call GetSessionIdSelection(Contract, PartNo, ConfigurationId, LocationNo, LotBatchNo, EngChgLevel, WaivDevRejNo, ActivitySeq, HandlingUnitId, QtyNum, NULL, NULL, CountingDiffStr, SessionIdNum) into IdentifySerialsRecStructure;
+         assistant IdentifySerialsInLocRepeatAssistant(IdentifySerialsRecStructure.RemainingSelection, IdentifySerialsRecStructure.Total, null, null) into(SessionSelection) {
+            when OK {
+               if [PartTrackingSessionId = null] {
+                  set PartTrackingSessionId = IdentifySerialsRecStructure.SessionId;
+               }
+            }
+            when CANCEL {
+               exit CANCEL;
+            }
+
+         }
+      }
+      // GenPartTrackingSessionId end
+      if [QtyCount1 > QtyOnhand and PartOwnershipDb = "CONSIGNMENT"] {
+         confirm("An increase of consignment stock will increase the Qty Consignment for the latest Purchase Receipt where it is found possible. Still want to save this record?") {
+            when CANCEL {
+               exit CANCEL;
+            }
+         }
+      }
+   }
+}
+
+
+--------------------------------- SELECTORS ---------------------------------
+@Override
+selector CountingReportSelector for CountingReport {
+   label = "${InvListNo}";
+   static InvListNo;
+}
+
+@Override
+selector ReferenceHandlingUnitCategorySelector for HandlingUnitCategory {
+   static HandlingUnitCategoryId;
+   static Description;
+}
+
+
+---------------------------------- GROUPS -----------------------------------
+group InvCountInventoryGroup for CountingReport {
+   label = "";
+
+   field InvListNo {
+      size = Small;
+   }
+   lov ContractRef with ReferenceUserAllowedSiteLovSelector {
+      preview = UserAllowedSiteLovCard;
+      size = Small;
+   }
+   field DetailReportPrinted {
+      enumerationtrue = "Yes";
+      enumerationfalse = "No";
+      size = Small;
+   }
+   field AggregatedReportPrinted {
+      enumerationtrue = "Yes";
+      enumerationfalse = "No";
+      size = Small;
+   }
+}
+
+------------------------- Groups in Create Count Report Line Assistant -----------
+group CountReportHeaderInfoGroup for CountReportHeaderVirtual {
+   label = "";
+   field InvListNo;
+   field Contract;
+}
+
+----------------------------------- LISTS -----------------------------------
+------------------------- List in Details Tab -------------------------------
+list CountReportLineDetailsList for CountingReportLine {
+
+   crudactions {
+      before command LineBeforeSaveChecks;
+   }
+
+   field Seq {
+      size = Small;
+   }
+   lov InventoryPartRef with ReferenceInventoryPartSelector {
+      label = "Part";
+      description = InventoryPartRef.DescriptionInUse;
+   }
+   field ConfigurationId {
+      size = Small;
+   }
+   field QtyCount1 {
+      size = Small;
+      validate command {
+         execute {
+            set QtyOnhand = InvQtyOnhand;
+            // This is just an ugly workaround so I can use PartOwnershipDb/RcptIssuePartTrackingDb/InvSerialTrackingDb without having them visible in the client for the checks in BeforeSaveChecks
+            set WorkaroundStr = PartOwnershipDb;
+            set WorkaroundStr = RcptIssuePartTrackingDb;
+            set WorkaroundStr = InvSerialTrackingDb;
+            set WorkaroundNum = PartTrackingSessionId;
+         }
+      }
+   }
+
+   field InvQtyOnhand {
+      size = Small;
+   }
+   field CatchQtyCounted {
+      size = Small;
+   }
+   field InvCatchQtyOnhand {
+      size = Small;
+   }
+   field ApprovalNeeded {
+      size = Small;
+   }
+   field Confirmed {
+      size = Small;
+   }
+   field InventoryPartRef.UnitMeas {
+      size = Small;
+      label = "UoM";
+   }
+   field CatchUom {
+      size = Small;
+   }
+   field LocationNo {
+      size = Small;
+   }
+   lov HandlingUnitIdRef with ReferenceInventoryPartInStockDelivSelector {
+      size = Small;
+   }
+   lov HandlingUnitTypeIdRef with ReferenceHandlingUnitTypeSelector {
+      label = "Handling Unit Type";
+      description = HandlingUnitTypeIdRef.Description;
+   }
+   field HandlingUnitTypeDesc {
+      columnvisible = [false];
+   }
+
+   field Sscc {
+      size = Small;
+   }
+   field AltHandlingUnitLabelId {
+      size = Small;
+   }
+   field OutermostHandlingUnitId {
+      size = Small;
+   }
+   field HandlingUnitRef.HandlingUnitTypeId {
+      size = Small;
+      label = "Outermost Handling Unit Type ID";
+   }
+   field OutermostHandlingUnitTypeDescription {
+      size = Small;
+   }
+   field HandlingUnitRef.Sscc {
+      size = Small;
+      label = "Outermost SSCC";
+   }
+   field HandlingUnitRef.AltHandlingUnitLabelId {
+      size = Small;
+      label = "Outermost Alt. Handling Unit Label ID";
+   }
+   field Warehouse {
+      size = Small;
+   }
+   field Bay {
+      size = Small;
+   }
+   // Changed Row to RowNo since Row seems to be protected word/command in Marble
+   field RowNo {
+      size = Small;
+   }
+   field Tier {
+      size = Small;
+   }
+   field Bin {
+      size = Small;
+   }
+   field LotBatchNo {
+      size = Small;
+   }
+   field SerialNo {
+      size = Small;
+   }
+   lov ConditionCodeRef with ReferenceConditionCodeSelector {
+      label = "Condition Code";
+      description = ConditionCodeRef.Description;
+   }
+   field ConditionCodeDescription {
+      columnvisible = [false];
+   }
+   field WaivDevRejNo {
+      size = Small;
+   }
+   field AvailabilityControlId {
+      size = Small;
+   }
+   field AvailabilityControlDescription {
+      size = Small;
+   }
+   field EngChgLevel {
+      size = Small;
+   }
+   fieldset ProjectDetailsFieldSet;
+   @DynamicComponentDependency PROJ
+   field ActivitySeqRef;
+   field SecondLevelParentHuId {
+      size = Small;
+   }
+   field SecondLevelSscc {
+      size = Small;
+   }
+   field SecondLevelAltHuLabelId {
+      size = Small;
+   }
+   field TopParentHandlingUnitId {
+      size = Small;
+   }
+   field TopParentHuTypeId {
+      size = Small;
+   }
+   field TopParentHuTypeDesc {
+      size = Small;
+   }
+   field TopParentSscc {
+      size = Small;
+   }
+   field TopParentAltHuLabelId {
+      size = Small;
+   }
+   field NoteText {
+      size = Small;
+   }
+   field WarehouseRouteOrder;
+   field BayRouteOrder;
+   field RowRouteOrder;
+   field TierRouteOrder;
+   field BinRouteOrder;
+
+   fieldranking InventoryPartRef, QtyCount1, CatchQtyCounted, InvQtyOnhand, InvCatchQtyOnhand, Seq, ConfigurationId, LocationNo, HandlingUnitIdRef;
+
+   command AddNewLineCommand;
+   commandgroup DetailsCmdGroup {
+      label = "";
+      command ConfirmCommand;
+      command CountWithoutDifferencesCommand;
+      command ResolveShortagesCommand;
+   }
+}
+------------------------ List in Aggregated Tab -----------------------------
+list CountReportLineAggregatedList for HandlUnitStockSnapshot {
+   label = "";
+
+   field LocationNo {
+      size = Small;
+   }
+   field WarehouseId {
+      size = Small;
+   }
+   field BayId {
+      size = Small;
+   }
+   field RowId {
+      size = Small;
+   }
+   field TierId {
+      size = Small;
+   }
+   field BinId {
+      size = Small;
+   }
+   field StructureLevel {
+      size = Small;
+   }
+   //lov HandlingUnitIdRef with ReferenceInventoryPartInStockLov9Selector;
+   field HandlingUnitIdClient {
+      size = Small;
+   }
+   lov SsccRef with ReferenceInventoryPartInStockLov10Selector {
+      size = Small;
+   }
+   lov AltHandlingUnitLabelIdRef with ReferenceInventoryPartInStockLov11Selector {
+      size = Small;
+   }
+   field Counted {
+      size = Small;
+   }
+   field ApprovalNeeded {
+      size = Small;
+   }
+   field Confirmed {
+      size = Small;
+   }
+   field PartNo {
+      size = Small;
+      columnvisible = [false];
+   }
+   field PartDescription {
+      size = Small;
+      columnvisible = [false];
+   }
+   lov HandlingUnitTypeIdRef with  ReferenceHandlingUnitTypeSelector {
+      label = "Handling Unit Type";
+      description = HandlingUnitTypeIdRef.Description;
+   }
+   lov HandlingUnitCategoryRef with ReferenceHandlingUnitCategorySelector {
+      description = HandlingUnitCategoryRef.Description;
+   }
+   field SecondLevelParentHuId {
+      columnvisible = [false];
+   }
+   field HandlingUnitRef.Sscc {
+      size = Small;
+      columnvisible = [false];
+      label = "Level 2 SSCC";
+   }
+   field HandlingUnitRef.AltHandlingUnitLabelId {
+      size = Small;
+      columnvisible = [false];
+      label = "Level 2 Alt Handling Unit Label ID";
+   }
+   field TopParentHandlingUnitId {
+      size = Small;
+   }
+   field TopParentSscc {
+      size = Small;
+   }
+   field TopParentAltHuLabelId {
+      size = Small;
+   }
+   lov TopParentHandlingUnitTypeIdRef with ReferenceHandlingUnitTypeSelector {
+      description = TopParentHandlingUnitTypeIdRef.Description;
+   }
+   field Composition {
+      size = Small;
+   }
+   field Owner {
+      size = Small;
+      columnvisible = [false];
+   }
+   field OwnerName {
+      size = Small;
+      columnvisible = [false];
+   }
+   field PartOwnership {
+      size = Small;
+      columnvisible = [false];
+   }
+   field AvailabilityControlId {
+      size = Small;
+      columnvisible = [false];
+   }
+   field AvailabilityControlDesc {
+      size = Small;
+      columnvisible = [false];
+   }
+   field ConfigurationId {
+      size = Small;
+      columnvisible = [false];
+   }
+   field LotBatchNo {
+      size = Small;
+      columnvisible = [false];
+   }
+   field SerialNo {
+      size = Small;
+      columnvisible = [false];
+   }
+   field EngChgLevel {
+      size = Small;
+      columnvisible = [false];
+   }
+   field WaivDevRejNo {
+      size = Small;
+      columnvisible = [false];
+   }
+   lov ConditionCodeRef with ReferenceConditionCodeSelector {
+      label = "Condition Code";
+      size = Small;
+      columnvisible = [false];
+      description = ConditionCodeRef.Description;
+   }
+   field ConditionCodeRef.Description {
+      size = Small;
+      columnvisible = [false];
+      label = "Condition Code Description";
+   }
+   field ActivitySeq {
+      columnvisible = [false];
+   }
+   @DynamicComponentDependency PROJ
+   lov ProjectIdRef with ReferenceProjectSelector {
+      label = "Project";
+      columnvisible = [false];
+      description = ProjectName;
+   }
+   @DynamicComponentDependency PROJ
+   lov SubProjectIdRef with ReferenceSubProjectSelector {
+      label = "Sub Project";
+      columnvisible = [false];
+      description = SubProjectDescription;
+   }
+   @DynamicComponentDependency PROJ
+   lov ActivityNoRef with ReferenceActivitySelector {
+      label = "Activity";
+      columnvisible = [false];
+      description = ActivityDescription;
+   }
+
+   fieldranking LocationNo, HandlingUnitIdClient, Counted, Confirmed, ApprovalNeeded, WarehouseId, BayId, RowId, TierId, BinId, StructureLevel;
+
+   commandgroup AggregatedCmdGroup {
+      label = "";
+      command CountWithoutDifferencesCommand;
+      command ConfirmCommand;
+      command CountAsZeroCommand;
+   }
+}
+
+
+----------------- Binded/nested List in Aggregated Tab ----------------------
+list CountInventoryList for CountingReportLineAggregated {
+   label = "";
+   orderby = Seq;
+   crudactions {
+      before command AggregatedBeforeSaveChecks;
+   }
+
+   field Seq {
+      size = Small;
+   }
+   lov InventoryPartRef with ReferenceInventoryPartSelector {
+      label = "Part";
+      description = InventoryPartRef.DescriptionInUse;
+   }
+   field ConfigurationId {
+      size = Small;
+   }
+   field QtyCount1 {
+      size = Small;
+      validate command {
+         execute {
+            set QtyOnhand = InvQtyOnhand;
+            // This is just an ugly workaround so I can use PartOwnershipDb/RcptIssuePartTrackingDb/InvSerialTrackingDb without having them visible in the client for the checks in BeforeSaveChecks
+            set WorkaroundStr = PartOwnershipDb;
+            set WorkaroundStr = RcptIssuePartTrackingDb;
+            set WorkaroundStr = InvSerialTrackingDb;
+            set WorkaroundNum = PartTrackingSessionId;
+         }
+      }
+   }
+   field InvQtyOnhand {
+      size = Small;
+   }
+   field CatchQtyCounted {
+      size = Small;
+   }
+   field InvCatchQtyOnhand {
+      size = Small;
+   }
+   field ApprovalNeeded {
+      size = Small;
+   }
+   field Confirmed {
+      size = Small;
+   }
+   field InventoryPartRef.UnitMeas {
+      size = Small;
+      label = "UoM";
+   }
+   field CatchUom {
+      size = Small;
+   }
+   field LocationNo {
+      size = Small;
+   }
+   field HandlingUnitId {
+      size = Small;
+   }
+   lov HandlingUnitTypeIdRef with ReferenceHandlingUnitTypeSelector {
+      label = "Handling Unit Type";
+      description = HandlingUnitTypeIdRef.Description;
+   }
+   field HandlingUnitTypeDesc {
+      columnvisible = [false];
+   }
+   field Sscc {
+      size = Small;
+   }
+   field AltHandlingUnitLabelId {
+      size = Small;
+   }
+   field SerialNo {
+      size = Small;
+   }
+   field LotBatchNo {
+      size = Small;
+   }
+   lov ConditionCodeRef with ReferenceConditionCodeSelector {
+      label = "Condition Code";
+      description = ConditionCodeRef.Description;
+   }
+   field ConditionCodeDescription {
+      columnvisible = [false];
+   }
+   field WaivDevRejNo {
+      size = Small;
+   }
+   field AvailabilityControlId {
+      size = Small;
+   }
+   field AvailabilityControlDescription {
+      size = Small;
+   }
+   field EngChgLevel {
+      size = Small;
+   }
+   field Warehouse {
+      size = Small;
+   }
+   field Bay {
+      size = Small;
+   }
+   field RowId {
+      size = Small;
+   }
+   field Tier {
+      size = Small;
+   }
+   field Bin {
+      size = Small;
+   }
+   @DynamicComponentDependency PROJ
+   lov ProgramIdRef with ReferenceProjectProgramGlobalSelector {
+      label = "Program";
+      description = ProgramDescription;
+   }
+   @DynamicComponentDependency PROJ
+   lov ProjectIdRef with ReferenceProjectSelector {
+      label = "Project";
+      description = ProjectName;
+   }
+   @DynamicComponentDependency PROJ
+   lov SubProjectIdRef with ReferenceSubProjectSelector {
+      label = "Sub Project";
+      description = SubProjectDescription;
+   }
+   @DynamicComponentDependency PROJ
+   lov ActivityNoRef with ReferenceActivitySelector {
+      label = "Activity";
+      description = ActivityDescription;
+   }
+   @DynamicComponentDependency PROJ
+   field ActivitySeqRef {
+      size = Small;
+   }
+   field SecondLevelParentHuId {
+      size = Small;
+   }
+   field SecondLevelSscc {
+      size = Small;
+   }
+   field SecondLevelAltHuLabelId {
+      size = Small;
+   }
+   field TopParentHandlingUnitId {
+      size = Small;
+   }
+   field TopParentHuTypeId {
+      size = Small;
+   }
+   field TopParentHuTypeDesc {
+      size = Small;
+   }
+   field TopParentSscc {
+      size = Small;
+   }
+   field TopParentAltHuLabelId {
+      size = Small;
+   }
+   field NoteText {
+      size = Small;
+      multiline = true;
+   }
+
+   fieldranking InventoryPartRef, QtyCount1, CatchQtyCounted, InvQtyOnhand, InvCatchQtyOnhand, Seq, ConfigurationId, LocationNo, HandlingUnitIdRef;
+
+   commandgroup CommandGroupCmdGroup {
+      command ConfirmCommand;
+      command CountWithoutDifferencesCommand;
+      command ResolveShortagesCommand;
+   }
+}
+
+---------------------- List in Create Count Report Line Assistant ----------------------
+list CountReportLineList for CountReportLineVirtual {
+   label = "";
+   field InvListNo {
+      columnvisible = [false];
+   }
+   field Contract {
+      columnvisible = [false];
+   }
+   field Seq;
+   lov InventoryPartRef with ReferenceInventoryPartSelector {
+      label = "Part";
+      description = InventoryPartRef.DescriptionInUse;
+   }
+   lov LocationNoRef with ReferenceInventoryLocation8Selector {
+      validate command {
+
+         execute {
+            call GetRouteOrderInfo(parent.Contract, LocationNo) into RouteOrderStructure;
+            set WarehouseRouteOrder = RouteOrderStructure.WarehouseRouteOrder;
+            set BayRouteOrder = RouteOrderStructure.BayRouteOrder;
+            set RowRouteOrder = RouteOrderStructure.RowRouteOrder;
+            set TierRouteOrder = RouteOrderStructure.TierRouteOrder;
+            set BinRouteOrder = RouteOrderStructure.BinRouteOrder;
+         }
+
+      }
+
+   }
+   field ConfigurationId;
+   field SerialNo {
+      validate command {
+         execute {
+            if [PartNo != null and SerialNo != "*" and LocationNo != null] {
+               call GetExistingStockRecordInfo(Contract, PartNo, ConfigurationId, LocationNo, LotBatchNo, SerialNo, EngChgLevel, WaivDevRejNo, ActivitySeq, HandlingUnitId) into ExistingStockRecordInfoStructure;
+               set ExpirationDate = ExistingStockRecordInfoStructure.ExpirationDate;
+               set ReceiptDate = ExistingStockRecordInfoStructure.ReceiptDate;
+               set AvailabilityControlId = ExistingStockRecordInfoStructure.AvailabilityControlId;
+               set RotablePartPoolId = ExistingStockRecordInfoStructure.RotablePartPoolId;
+               set CatchQtyOnhand = ExistingStockRecordInfoStructure.CatchQtyOnhand;
+               set PartOwnership = ExistingStockRecordInfoStructure.PartOwnership;
+               set OwningCustomerNo = ExistingStockRecordInfoStructure.OwningCustomerNo;
+               set OwningVendorNo = ExistingStockRecordInfoStructure.OwningVendorNo;
+               set AvailabilityControlId = ExistingStockRecordInfoStructure.AvailabilityControlId;
+            }
+         }
+      }
+   }
+   lov HandlingUnitRef with ReferenceHandlingUnitLov9Selector using SetLovWhereForHandlingUnit(LocationNo, parent.Contract) {
+      label = "Handling Unit ID";
+   }
+   field LotBatchNo;
+   field ActivitySeq;
+   field WaivDevRejNo;
+   field EngChgLevel;
+   field InvQtyOnhand {
+      columnexclude = [true];
+   }
+   field ExpirationDate;
+   field ReceiptDate;
+   field AvailabilityControlId;
+   field RotablePartPoolId;
+   field CatchQtyOnhand;
+   field PartOwnership;
+   field OwningCustomerNo;
+   field OwningVendorNo;
+   field AvailabilityControlId;
+}
+
+-------------------- Lists in Details Aggregated Serials Tab ---------------------------
+list CountReportLineSerialAggregatedList for CountRepLineSerialAggregated {
+   label = "";
+   crudactions {
+      update action = UpdateCountedQty;
+   }
+   field LocationNo {
+      size = Small;
+   }
+   field PartNo {
+      size = Small;
+   }
+   field PartDescription {
+      size = Small;
+   }
+   field Seq;
+   field AggregatedCountedQty;
+   field AggregatedInvQtyOnhand {
+      columnexclude = [true];
+   }
+   field ConfigurationId {
+      size = Small;
+   }
+   field LotBatchNo {
+      size = Small;
+   }
+   field EngChgLevel;
+   field WaivDevRejNo;
+   field ActivitySeq;
+   field HandlingUnitId {
+      size = Small;
+   }
+}
+
+list CountRepLineSerialAggregatedNestedList for CountingReportLine {
+   label = "";
+   crudactions {
+      before command LineBeforeSaveChecks;
+   }
+
+   field Seq {
+      size = Small;
+   }
+   lov InventoryPartRef with ReferenceInventoryPartSelector {
+      label = "Part";
+      description = InventoryPartRef.DescriptionInUse;
+   }
+   field ConfigurationId {
+      size = Small;
+   }
+   field QtyCount1 {
+      size = Small;
+      validate command {
+         execute {
+            set QtyOnhand = InvQtyOnhand;
+         }
+      }
+   }
+   field InvQtyOnhand {
+      size = Small;
+   }
+   field CatchQtyCounted {
+      size = Small;
+   }
+   field InvCatchQtyOnhand {
+      size = Small;
+   }
+   field ApprovalNeeded {
+      size = Small;
+   }
+   field Confirmed {
+      size = Small;
+   }
+   field InventoryPartRef.UnitMeas {
+      size = Small;
+      label = "UoM";
+   }
+   field CatchUom {
+      size = Small;
+   }
+   field LocationNo {
+      size = Small;
+   }
+   lov HandlingUnitIdRef with ReferenceInventoryPartInStockDelivSelector {
+      size = Small;
+   }
+   lov HandlingUnitTypeIdRef with ReferenceHandlingUnitTypeSelector {
+      label = "Handling Unit Type";
+      description = HandlingUnitTypeIdRef.Description;
+   }
+   field HandlingUnitTypeDesc {
+      columnvisible = [false];
+   }
+
+   field Sscc {
+      size = Small;
+   }
+   field AltHandlingUnitLabelId {
+      size = Small;
+   }
+   field OutermostHandlingUnitId {
+      size = Small;
+   }
+   field HandlingUnitRef.HandlingUnitTypeId {
+      size = Small;
+      label = "Outermost Handling Unit Type ID";
+   }
+   field OutermostHandlingUnitTypeDescription {
+      size = Small;
+   }
+   field HandlingUnitRef.Sscc {
+      size = Small;
+      label = "Outermost SSCC";
+   }
+   field HandlingUnitRef.AltHandlingUnitLabelId {
+      size = Small;
+      label = "Outermost Alt. Handling Unit Label ID";
+   }
+   field Warehouse {
+      size = Small;
+   }
+   field Bay {
+      size = Small;
+   }
+   field RowNo {
+      size = Small;
+   }
+   field Tier {
+      size = Small;
+   }
+   field Bin {
+      size = Small;
+   }
+   field LotBatchNo {
+      size = Small;
+   }
+   field SerialNo {
+      size = Small;
+   }
+   lov ConditionCodeRef with ReferenceConditionCodeSelector {
+      label = "Condition Code";
+      description = ConditionCodeRef.Description;
+   }
+   field ConditionCodeDescription {
+      columnvisible = [false];
+   }
+   field WaivDevRejNo {
+      size = Small;
+   }
+   field AvailabilityControlId {
+      size = Small;
+   }
+   field AvailabilityControlDescription {
+      size = Small;
+   }
+   field EngChgLevel {
+      size = Small;
+   }
+   fieldset ProjectDetailsFieldSet;
+   field ActivitySeq;
+   field SecondLevelParentHuId {
+      size = Small;
+   }
+   field SecondLevelSscc {
+      size = Small;
+   }
+   field SecondLevelAltHuLabelId {
+      size = Small;
+   }
+   field TopParentHandlingUnitId {
+      size = Small;
+   }
+   field TopParentHuTypeId {
+      size = Small;
+   }
+   field TopParentHuTypeDesc {
+      size = Small;
+   }
+   field TopParentSscc {
+      size = Small;
+   }
+   field TopParentAltHuLabelId {
+      size = Small;
+   }
+   field NoteText {
+      size = Small;
+   }
+   field WarehouseRouteOrder;
+   field BayRouteOrder;
+   field RowRouteOrder;
+   field TierRouteOrder;
+   field BinRouteOrder;
+
+   fieldranking InventoryPartRef, QtyCount1, CatchQtyCounted, InvQtyOnhand, InvCatchQtyOnhand, Seq, ConfigurationId, LocationNo, HandlingUnitIdRef;
+
+   commandgroup DetailsCmdGroup {
+      label = "";
+      command ConfirmCommand;
+      command CountWithoutDifferencesCommand;
+      command ResolveShortagesCommand;
+   }
+}
+----------------------------------- CARDS -----------------------------------
+
+---------------------------------- DIALOGS ----------------------------------
+
+---------------------------------- CHARTS -----------------------------------
+
+--------------------------------- CALENDARS ---------------------------------
+
+------------------------------ SEARCH CONTEXTS ------------------------------
+---------------- Search Structures for Details Tab --------------------------
+searchcontext DetailsSearchContext for DetailsSearchContextStructure {
+   label = "";
+   radiogroup ShowDetails {
+      // This will make it remember what context was choosen after you have done a save or command (its profiled now)
+      defaulttoprevious = [true];
+   }
+}
+---------------- Search Structures for Aggregated Tab -----------------------
+searchcontext AggregatedSearchContext for AggregatedSearchContextStructure {
+   label = "";
+   radiogroup ShowAggregated {
+      // This will make it remember what context was choosen after you have done a save or command (its profiled now)
+      defaulttoprevious = [true];
+   }
+}
+---------------------------------- SHEETS -----------------------------------
+
+----------------------------- STATE INDICATORS ------------------------------
+
+----------------------------------- TREES -----------------------------------
+
+---------------------------------- PLUGINS ----------------------------------
+
+------------------------------- IMAGE VIEWERS -------------------------------
+
+--------------------------------- CHECKLIST ---------------------------------
+
+// Checklist for frmInvCountInventory
+
+// colPartLocQtyOnhand -> InvQtyOnhand
+// colCountQtyOnhand -> QtyOnhand
+
+//! TODO: Take necessary steps to handle following construct(s) found in 'frmInvCountInventory'
+
+// --- Late Bind Methods ---
+// 1. vrtFrameShutdownUser
+//    Action: Investigate method content and reimplement logic
+// Profile saving here, it saves the current selected tab in this window on the user profile
+// How do we handle this here, there is some kind of profile saving possible I think, also maybe transport task had something similar.
+// But hopefully this will be handled by framework like remembering which tab or group was active/open.
+
+// 2. vrtActivate
+//    Action: Investigate method content and reimplement logic
+// Profile reading here, it reads what the saved last selected tab in this window from profile and then its sets that tab the selected tab..
+// See comments above how possible this is
+
+
+// Checklist for frmInvCountHandlingUnit
+
+// Checklist for tbwCountInventory
+// colPartLocQtyOnhand -> InvQtyOnhand
+// colCountQtyOnhand -> QtyOnhand
+// --- Late Bind Methods ---
+
+
+
+// --- Methods ---
+
+// 2. DataRecordExecuteModify
+//    Action: Investigate method content and reimplement logic
+//    Hint: Handle following Message Boxes
+//        1. Confirm Message Box
+//            confirm("An increase of consignment stock will increase the Qty Consignment for the latest Purchase Receipt where it is found possible. Still want to save this record?"){
+//                when OK{
+//                    info("Not implemented!");
+//                }
+//                when CANCEL{
+//                    info("Not implemented!");
+//                }
+//            }
+// Checks during modify similar to details tab. First calls GenPartTrackingSessionId and then does Consignmentcheck that end up with an alertbox,
+// needs to be handled in marble
+
+// 3. DataSourceFormatSqlSelect
+//    Action: Investigate method content and reimplement logic
+// adds extra where statement to this view/client with a call to Counting_Result_API.Check_Exist if showunconfirmed checkbox is checked,
+// but since that checkbox is now incorporated into the search context radio buttons instead I dont think we can handle this extra filtering
+// since in the binded list we probably cannot access and see what search context is used and especially not incorporate that into the
+// the binded lists array-where statement which is fixed and cannot be changed in runtime, that search context check and use of this Check_Exist method
+// must then be inside the array-where statement which i dont think is possible with current fw. Hopefully this is something we can live with in Marble
+// that this filtering isnt exactly what it was in IEE.
+
+
+// 5. GenPartTrackingSessionId
+//    Action: Investigate method content and reimplement logic
+// probably similar handling that we havent build yet from details tab (and other clients), but that needs investigation when we build this part,
+// needs to be handled in marble
+
+
+

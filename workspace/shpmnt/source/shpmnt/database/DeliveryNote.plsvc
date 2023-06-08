@@ -1,0 +1,111 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     ShipmentDeliveryNote
+--  Component:    SHPMNT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign    History
+--  ------     ------  ---------------------------------------------------------
+-- 2022-06-20  RasDlk  SCDEV-10342, Modified Get_Shipment_Result_Keys___ by adding receiver_addr_id_, sender_id_, sender_type_ and
+-- 2022-06-20          calling Shipment_Flow_API.Create_Report_Settings() to get the PDF parameters.
+-- 2020-12-03  WaSalk  GESPRING20-6039, Modified Get_Shipment_Result_Keys___() to not to create new delivery note when 
+-- 2020-12-03          delivery note state Invalid and Italy gelr functionality applicable.
+-- 2020-01-23  Dipelk  GESPRING20-1774, Modified GetShipmentResultKeys to support modify_date_applied functionality.
+-- 2020-01-14  MeAblk  SCSPRING20-1740, Modified Get_Shipment_Result_Keys___() to correctly make the default value
+-- 2020-01-14          for copies as 1 when the receiver type is not customer.
+-- 2018-09-13  RaVdlk  SCUXXW4-4749, Created
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Get_Shipment_Result_Keys___ (   
+   contract_         IN VARCHAR2,
+   shipment_id_      IN NUMBER,
+   customer_no_      IN VARCHAR2,
+   receiver_id_      IN VARCHAR2,
+   receiver_type_db_ IN VARCHAR2,
+   delnote_no_       IN VARCHAR2,
+   receiver_addr_id_ IN VARCHAR2,
+   sender_id_        IN VARCHAR2,
+   sender_type_      IN VARCHAR2) RETURN VARCHAR2
+IS   
+   parameter_attr_       VARCHAR2(32000);
+   report_attr_          VARCHAR2(2000);
+   result_key_           NUMBER;
+   result_key_list_      VARCHAR2(5000);
+   shipment_delnote_     VARCHAR2(15);
+   copies_               NUMBER := 0;
+   print_                NUMBER;
+   pdf_param_            VARCHAR2(32000);
+   -- gelr:modify_date_applied Begin
+   source_ref_types_db_  VARCHAR2(4000);
+   source_ref_type_db_   VARCHAR2(20);
+   old_del_note_state_   VARCHAR2(20);
+   del_note_state_       VARCHAR2(20);
+   -- gelr:modify_date_applied End 
+    
+BEGIN 
+   -- gelr:alt_delnote_no_chronologic Begin
+   IF ((Company_Localization_Info_API.Get_Parameter_Val_From_Site_Db(contract_, 'ALT_DELNOTE_NO_CHRONOLOGIC') = Fnd_Boolean_API.DB_TRUE) AND (Delivery_Note_API.Get_Objstate(delnote_no_) = 'Invalid'))THEN
+      shipment_delnote_ := delnote_no_;
+   -- gelr:alt_delnote_no_chronologic End
+   ELSE 
+      Create_Delivery_Note_API.Create_Shipment_Deliv_Note (shipment_delnote_,shipment_id_);      
+   END IF;   
+   IF (receiver_type_db_ = 'CUSTOMER' )THEN
+      $IF Component_Order_SYS.INSTALLED $THEN
+      IF (customer_no_!= '')THEN
+         copies_ := NVL(Cust_Ord_Customer_API.Get_No_Delnote_Copies(customer_no_),0); 
+      ELSE
+         copies_ := NVL(Cust_Ord_Customer_API.Get_No_Delnote_Copies(receiver_id_),0); 
+      END IF; 
+      $ELSE
+      NULL;
+      $END
+   END IF;  
+   -- gelr:modify_date_applied Begin  
+   old_del_note_state_ := Delivery_Note_API.Get_Objstate(shipment_delnote_);
+   -- gelr:modify_date_applied End 
+   print_ := 0;
+   copies_ := copies_ +1;  
+   WHILE (print_<= copies_) LOOP
+      Client_SYS.Clear_Attr(parameter_attr_);
+      Client_SYS.Add_To_Attr('SHIPMENT_ID', shipment_id_, parameter_attr_);   
+      Client_SYS.Add_To_Attr('DELNOTE_NO',shipment_delnote_, parameter_attr_);
+      Client_SYS.Add_To_Attr('DELNOTE_COPY_NO',print_, parameter_attr_);      
+      Client_SYS.Clear_Attr(report_attr_);
+      Client_SYS.Add_To_Attr('REPORT_ID', 'SHIPMENT_DELIVERY_NOTE_REP', report_attr_);
+      Client_SYS.Add_To_Attr('LU_NAME', 'Shipment', report_attr_);
+      Client_SYS.Clear_Attr(pdf_param_);
+      Shipment_Flow_API.Create_Report_Settings (pdf_param_, shipment_id_, contract_, receiver_id_, receiver_type_db_, receiver_addr_id_, 'SHIPMENT_DELIVERY_NOTE_REP', sender_id_, sender_type_);
+      Client_SYS.Add_To_Attr('SETTINGS', pdf_param_, parameter_attr_);
+      print_ := print_ +1;
+   END LOOP;       
+   result_key_ := Report_Format_API.Create_New_Report(report_attr_, parameter_attr_, Fnd_Session_API.Get_Fnd_User);
+   IF (result_key_list_ IS NULL) THEN
+      result_key_list_  := result_key_;
+   ELSE
+      result_key_list_  := result_key_list_ || ',' || result_key_;
+   END IF;
+   $IF Component_Order_SYS.INSTALLED $THEN
+      -- gelr:modify_date_applied,warehouse_journal Begin
+      IF ((Company_Localization_Info_API.Get_Parameter_Val_From_Site_Db(contract_, 'MODIFY_DATE_APPLIED') = Fnd_Boolean_API.DB_TRUE)OR
+          Company_Localization_Info_API.Get_Parameter_Val_From_Site_Db(contract_, 'WAREHOUSE_JOURNAL') = Fnd_Boolean_API.DB_TRUE ) THEN
+         source_ref_types_db_ := Shipment_API.Get_Source_Ref_Type_Db(shipment_id_);
+         source_ref_type_db_  := Logistics_Source_Ref_Type_API.DB_CUSTOMER_ORDER;
+         del_note_state_      := Delivery_Note_API.Get_Objstate(shipment_delnote_);
+
+         IF( source_ref_types_db_ LIKE '%^'||source_ref_type_db_||'^%') THEN
+            Shipment_Order_Utility_API.After_Print_Shpmnt_Del_Note (contract_ ,
+                                                                     shipment_id_ ,
+                                                                     source_ref_type_db_ ,
+                                                                     shipment_delnote_,
+                                                                     old_del_note_state_,
+                                                                     del_note_state_);
+         END IF;      
+      END IF;
+      -- gelr:modify_date_applied,warehouse_journal End
+   $END
+   RETURN result_key_list_;
+END Get_Shipment_Result_Keys___;

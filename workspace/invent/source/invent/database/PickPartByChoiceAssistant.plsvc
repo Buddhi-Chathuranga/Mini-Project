@@ -1,0 +1,478 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     PickPartByChoiceAssistant
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  211018  SaLelk  SC21R2-3083, Modified Source_Reference_Info___ by adding owner & owner_name to the shipment component_.
+--  210427  KETKLK  PJ21R2-448, Removed PDMPRO references.
+--  210408  Asawlk  Bug 158337 (SCZ-14073), Modified Inv_Part_In_Stock_Lov_Ownership_Conditions___() to consider the PART_OWNERSHIP_DB correctly.
+--  201105  ErRalk  SC2020R1-10472, Renamed method Shipment_Order_Reference_Info___ into Shipment_Reference_Info___ and Shipment_Location_Conditions___ into Shipment_Location_Conditions___
+--  201105          and fetched values from ShipmentSourceUtility to make code generic for both Shipment Order and Project Deliverables.
+--  200903  ErRalk  SC2020R1-7302, Added method Shipment_Order_Location_Conditions___ and modified Inventory_Part_In_Stock_Lov___  to add location
+--  200903          filteration for Shipment Order. Modified Shipment_Order_Reference_Info___() to include Part Ownership.        
+--  200802  ErRalk  SC2020R1-1033, Added method Shipment_Order_Reference_Info___ and modified methods CRUD_Create___ 
+--          and Source_Reference_Info___ to support Pick By Choice command for shipment Order.
+--  190531  SBalLK  SCUXXW4-21990, Resolved.
+--  190327  KHVESE  SCUXXW4-5659, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Pick_Part_By_Choice_Virtual_Rec )
+IS 
+   new_rec_          Pick_Part_By_Choice_Virtual_Rec;
+   source_info_rec_  Source_Info_Structure_Rec; 
+BEGIN
+   new_rec_ := rec_;
+   new_rec_.order_supply_demand_type   := Order_Supply_Demand_Type_API.Decode(rec_.order_supply_demand_type);
+   new_rec_.input_unit_meas_group_id   := Inventory_Part_API.Get_Input_Unit_Meas_Group_Id(rec_.contract, rec_.part_no);
+   new_rec_.input_unit_meas            := FALSE;
+   IF new_rec_.Input_Unit_Meas_Group_Id IS NOT NULL THEN
+      new_rec_.input_unit_meas         := CASE Input_Unit_meas_Group_API.Is_Usage_Allowed(new_rec_.Input_Unit_Meas_Group_Id, new_rec_.component) WHEN 'FALSE' THEN FALSE ELSE TRUE END;
+   END IF;
+   new_rec_.receipt_issue_serial_track := Part_Catalog_API.Get_Rcpt_Issue_Serial_Track_Db(rec_.part_no);
+   new_rec_.is_serial_tracked_in_inv   := Part_Catalog_API.Is_Serial_Tracked_In_Inventory(rec_.part_no);
+   
+   source_info_rec_ := Source_Reference_Info___(rec_.source_ref1, rec_.source_ref2, rec_.source_ref3, rec_.source_ref4, rec_.component, rec_.order_supply_demand_type);
+
+   new_rec_.source_ref_status          := source_info_rec_.source_ref_status;
+   new_rec_.project_id                 := source_info_rec_.project_id;
+   new_rec_.project_name               := source_info_rec_.project_name;
+   new_rec_.condition_code             := source_info_rec_.condition_code;
+   new_rec_.condition_code_desc        := source_info_rec_.condition_code_desc; 
+   new_rec_.part_ownership             := source_info_rec_.part_ownership;
+   new_rec_.owner                      := source_info_rec_.owner;
+   new_rec_.owner_name                 := source_info_rec_.owner_name; 
+   new_rec_.shipment_id_visible        := source_info_rec_.shipment_id_visible; 
+   new_rec_.input_unit_meas_visible    := source_info_rec_.input_unit_meas_visible; 
+   new_rec_.rental_db                  := source_info_rec_.rental_db;
+   new_rec_.supply_code_db             := source_info_rec_.supply_code_db;
+   new_rec_.pick_list_type             := source_info_rec_.pick_list_type;
+   new_rec_.close                      := source_info_rec_.close;
+   new_rec_.close_editable             := source_info_rec_.close_editable;
+ 
+   IF (new_rec_.component = 'SHPMNT')THEN
+      new_rec_.sender_type             := source_info_rec_.sender_type;
+      new_rec_.sender_id               := source_info_rec_.sender_id;
+   ELSE 
+      $IF Component_Discom_SYS.INSTALLED $THEN
+         new_rec_.sender_type          := Sender_Receiver_Type_API.DB_SITE;
+      $END
+      new_rec_.sender_id               := new_rec_.contract;
+   END IF;
+   Super(new_rec_);
+END  CRUD_Create___;  
+
+
+@Override
+PROCEDURE CRUD_Default___ (
+   rec_  IN OUT Inventory_Part_In_Stock_Virtual_Rec )
+IS
+   header_key_             Pick_Part_By_Choice_Virtual_Key;
+   header_rec_             Pick_Part_By_Choice_Virtual_Rec;
+BEGIN
+   header_key_.Objkey := rec_.parent_objkey;
+   header_rec_ := Get_Record___(header_key_);
+   IF header_rec_.is_serial_tracked_in_inv = 'TRUE' THEN 
+      rec_.qty_to_pick := 1;
+   END IF;
+   Super(rec_);
+END CRUD_Default___;
+
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Inventory_Part_In_Stock_Virtual_Rec )
+IS
+   dummy_ NUMBER;
+   
+   CURSOR check_exist IS
+   SELECT 1 FROM ${PROJECTION}_INVENTORY_PART_IN_STOCK_VIRTUAL_VRT 
+   WHERE parent_objkey = rec_.parent_objkey
+   AND   location_no = rec_.location_no
+   AND   lot_batch_no = rec_.lot_batch_no
+   AND   serial_no = rec_.serial_no
+   AND   eng_chg_level = rec_.eng_chg_level
+   AND   waiv_dev_rej_no = rec_.waiv_dev_rej_no
+   AND   activity_seq = rec_.activity_seq
+   AND   handling_unit_id = rec_.handling_unit_id;
+BEGIN
+   OPEN check_exist;
+   FETCH check_exist INTO dummy_;
+   IF check_exist%FOUND THEN
+      Error_SYS.Record_General(lu_name_, 'DUPLICATERECORDS: Duplicate records with same information exist, please remove duplicate(s).');
+   END IF;
+   CLOSE check_exist;
+   Super(rec_);
+END CRUD_Create___;
+
+
+FUNCTION Inv_Part_In_Stock_Key_Validation___ (
+   contract_         IN VARCHAR2,
+	location_no_      IN VARCHAR2,
+	handling_unit_id_ IN NUMBER,
+	activity_seq_     IN NUMBER) RETURN Inv_Part_In_Stock_Key_Validation_Structure_Rec
+IS
+   handle_unit_rec_              Handling_Unit_API.Public_Rec;
+   handling_unit_structure_rec_  Inv_Part_In_Stock_Key_Validation_Structure_Rec;
+BEGIN
+   IF handling_unit_id_ IS NOT NULL THEN 
+      handle_unit_rec_ := Handling_Unit_API.Get(handling_unit_id_);
+      handling_unit_structure_rec_.handling_unit_type_id := handle_unit_rec_.handling_unit_type_id;
+      handling_unit_structure_rec_.sscc := handle_unit_rec_.sscc;
+      handling_unit_structure_rec_.alt_handling_unit_label_id := handle_unit_rec_.alt_handling_unit_label_id;
+      handling_unit_structure_rec_.handling_unit_type_desc := Handling_Unit_Type_API.Get_Description(handle_unit_rec_.handling_unit_type_id);
+   END IF;
+   IF location_no_ IS NOT NULL THEN 
+      handling_unit_structure_rec_.location_desc := Inventory_Location_API.Get_Location_Name(contract_, location_no_);
+   END IF;
+   $IF Component_Proj_SYS.INSTALLED $THEN
+   IF activity_seq_ IS NOT NULL THEN 
+      handling_unit_structure_rec_.activity_desc := Activity_API.Get_Description(activity_seq_);
+      handling_unit_structure_rec_.activity_id := Activity_API.Get_Activity_No(activity_seq_); 
+   END IF;
+   $END
+   RETURN handling_unit_structure_rec_;
+END Inv_Part_In_Stock_Key_Validation___;
+
+
+FUNCTION Source_Reference_Info___(
+   source_ref1_        IN     VARCHAR2,
+   source_ref2_        IN     VARCHAR2,
+   source_ref3_        IN     VARCHAR2,
+   source_ref4_        IN     VARCHAR2,
+   component_          IN     VARCHAR2,
+   source_ref_type_db_ IN     VARCHAR2)  RETURN Source_Info_Structure_Rec
+IS
+   source_info_rec_   Source_Info_Structure_Rec; 
+BEGIN
+   source_info_rec_.shipment_id_visible        := FALSE;
+   source_info_rec_.input_unit_meas_visible    := FALSE;
+   source_info_rec_.close                      := FALSE;
+   source_info_rec_.rental_db                  := 'FALSE';
+
+   IF component_ = 'ORDER' THEN 
+      source_info_rec_.pick_list_type     := 'CUST_ORDER_PICK_LIST';
+      source_info_rec_.shipment_id_visible        := TRUE;
+      source_info_rec_.input_unit_meas_visible    := TRUE;
+      source_info_rec_.close_editable             := TRUE;
+      $IF Component_Order_SYS.INSTALLED $THEN
+      Customer_Order_Line_API.Get_Order_Reference_Info(source_info_rec_.source_ref_status,
+                                                       source_info_rec_.condition_code,
+                                                       source_info_rec_.condition_code_desc,
+                                                       source_info_rec_.project_id,
+                                                       source_info_rec_.project_name,
+                                                       source_info_rec_.supply_code_db,
+                                                       source_info_rec_.rental_db,
+                                                       source_info_rec_.part_ownership,
+                                                       source_info_rec_.owner,
+                                                       source_info_rec_.owner_name,                                                              
+                                                       source_ref1_,
+                                                       source_ref2_,
+                                                       source_ref3_,
+                                                       source_ref4_);
+      $ELSE                                                                         
+         Error_SYS.Component_Not_Exist('ORDER');
+      $END  
+   ELSIF component_ = 'MANUF' THEN 
+      source_info_rec_.close_editable     := false;
+      $IF Component_Shpord_SYS.INSTALLED $THEN   
+         Shop_Material_Alloc_API.Get_Shop_Order_Reference_Info(source_info_rec_.source_ref_status,
+                                                               source_info_rec_.condition_code,
+                                                               source_info_rec_.condition_code_desc,
+                                                               source_info_rec_.project_id,
+                                                               source_info_rec_.project_name, 
+                                                               source_info_rec_.supply_code_db,
+                                                               source_info_rec_.part_ownership,
+                                                               source_info_rec_.owner,
+                                                               source_info_rec_.owner_name,
+                                                               source_info_rec_.close,
+                                                               source_ref1_,
+                                                               source_ref2_,
+                                                               source_ref3_,
+                                                               source_ref4_);
+      $ELSE                                                                         
+         Error_SYS.Component_Not_Exist('SHPORD');
+      $END                                                           
+   ELSIF component_ = 'SHPMNT' THEN   
+      source_info_rec_.pick_list_type          := 'INVENTORY_PICK_LIST';
+      source_info_rec_.shipment_id_visible     := TRUE;
+      source_info_rec_.input_unit_meas_visible := TRUE;
+      source_info_rec_.close_editable          := TRUE;
+      $IF Component_Shpmnt_SYS.INSTALLED $THEN
+         Shipment_Source_Utility_API.Get_Shipment_Reference_Info(source_info_rec_.sender_id,
+                                                                 source_info_rec_.sender_type,
+                                                                 source_info_rec_.source_ref_status,
+                                                                 source_info_rec_.condition_code,
+                                                                 source_info_rec_.condition_code_desc,
+                                                                 source_info_rec_.part_ownership,
+                                                                 source_info_rec_.owner,
+                                                                 source_info_rec_.owner_name,
+                                                                 source_ref1_,
+                                                                 source_ref2_,
+                                                                 source_ref3_,
+                                                                 source_ref4_,
+                                                                 source_ref_type_db_);
+      $ELSE                                                                         
+         Error_SYS.Component_Not_Exist('SHPMNT');
+      $END
+   END IF;  
+   RETURN source_info_rec_;
+END Source_Reference_Info___;
+
+
+FUNCTION Pick_Part_By_Choice_Uses_Ship_Inv___ (
+	pick_list_no_        IN VARCHAR2 ) RETURN BOOLEAN
+IS
+   use_shipment_inv_    BOOLEAN := FALSE;
+BEGIN 
+   $IF Component_Shpmnt_SYS.INSTALLED $THEN
+      use_shipment_inv_ := Handle_Ship_Invent_Utility_API.Uses_Shipment_Inventory(pick_list_no_) = 1;
+   $END
+   RETURN use_shipment_inv_;
+END Pick_Part_By_Choice_Uses_Ship_Inv___;
+
+
+FUNCTION Inv_Part_In_Stock_Lov_Ownership_Conditions___(
+   owner_               IN VARCHAR2,
+   part_ownership_db_   IN VARCHAR2,
+   rental_db_           IN VARCHAR2,
+   component_           IN VARCHAR2 ) RETURN VARCHAR2
+IS
+BEGIN 
+   IF part_ownership_db_ = 'COMPANY OWNED' THEN 
+      RETURN 'PART_OWNERSHIP_DB IN (''COMPANY OWNED'', ''CONSIGNMENT'')';
+   ELSIF part_ownership_db_ = 'CUSTOMER OWNED' THEN 
+      RETURN CONCAT('PART_OWNERSHIP_DB = ''CUSTOMER OWNED'' AND ', Decode___('OWNING_CUSTOMER_NO', owner_, 'STRING'));
+   ELSIF part_ownership_db_ = 'SUPPLIER LOANED' THEN 
+      RETURN CONCAT('PART_OWNERSHIP_DB = ''SUPPLIER LOANED'' AND ', Decode___('OWNING_VENDOR_NO', owner_, 'STRING') );
+   END IF;
+   
+   IF component_ = 'ORDER' THEN 
+      IF part_ownership_db_ = 'SUPPLIER RENTED' THEN 
+         RETURN 'PART_OWNERSHIP_DB = ''SUPPLIER RENTED''';
+      ELSIF part_ownership_db_ = 'COMPANY RENTAL ASSET' THEN 
+         IF rental_db_ = 'TRUE' THEN 
+            RETURN 'PART_OWNERSHIP_DB IN (''SUPPLIER RENTED'', ''COMPANY RENTAL ASSET'')';
+         ELSE 
+            RETURN 'PART_OWNERSHIP_DB = ''COMPANY RENTAL ASSET''';
+         END IF;
+      END IF;
+   ELSE 
+      RETURN NULL;
+   END IF;
+   
+END Inv_Part_In_Stock_Lov_Ownership_Conditions___;
+
+
+FUNCTION Inv_Part_In_Stock_Lov_Project_Conditions___(
+   project_id_       IN VARCHAR2,
+   supply_code_db_   IN VARCHAR2,
+   component_        IN VARCHAR2 ) RETURN VARCHAR2
+IS
+BEGIN 
+   IF project_id_ IS NOT NULL THEN 
+      IF supply_code_db_ IS NOT NULL AND 
+         (component_ = 'ORDER' AND supply_code_db_ IN ('PI') OR  
+          component_ = 'MANUF' AND supply_code_db_ != 'IO') THEN
+         RETURN Decode___('PROJECT_ID', project_id_, 'STRING');
+      ELSE 
+         RETURN NULL;
+      END IF;
+   ELSE
+      RETURN 'PROJECT_ID IS NULL';
+   END IF;
+END Inv_Part_In_Stock_Lov_Project_Conditions___;
+
+FUNCTION Shipment_Location_Conditions___(
+   sender_id_        IN VARCHAR2,
+   sender_type_db_   IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   warehouse_rec_    Warehouse_API.Public_Rec;
+   warehouse_id_     VARCHAR2(30) := NULL;
+BEGIN
+   $IF Component_Discom_SYS.INSTALLED $THEN
+      IF (sender_type_db_ = Sender_Receiver_Type_API.DB_REMOTE_WAREHOUSE) THEN
+         warehouse_rec_ := Warehouse_API.Get(sender_id_);
+         warehouse_id_:=  'WAREHOUSE = '|| ''''|| warehouse_rec_.warehouse_id || '''';      
+      END IF;
+   $ELSE
+       NULL;
+   $END
+   RETURN warehouse_id_;
+END Shipment_Location_Conditions___;
+
+
+FUNCTION Inventory_Part_In_Stock_Lov___ (
+	header_objkey_ IN VARCHAR2) RETURN Objid_Arr
+IS
+   header_key_                Pick_Part_By_Choice_Virtual_Key;
+   header_rec_                Pick_Part_By_Choice_Virtual_Rec;
+   base_collection_           Objid_Arr:= Objid_Arr(); 
+   part_ownership_db_         VARCHAR2(100);
+   where_clause_              VARCHAR2(32000);
+   stmt_                      VARCHAR2(32000);
+   ownership_where_           VARCHAR2(32000);
+   project_where_             VARCHAR2(32000);
+   location_where_            VARCHAR2(32000);
+BEGIN 
+   header_key_.Objkey := header_objkey_;
+   header_rec_ := Get_Record___(header_key_);
+   
+   part_ownership_db_      := header_rec_.part_ownership;
+   -- *********** This statement is asrt safe for SQL Injection **********
+   project_where_          := Inv_Part_In_Stock_Lov_Project_Conditions___(header_rec_.project_id, header_rec_.supply_code_db, header_rec_.component);
+   -- *********** This statement is asrt safe for SQL Injection **********
+   ownership_where_        := Inv_Part_In_Stock_Lov_Ownership_Conditions___(header_rec_.owner, part_ownership_db_, header_rec_.rental_db, header_rec_.component);
+
+   stmt_ := 'SELECT OBJID FROM inventory_part_in_stock_lov28 ip
+             WHERE  CONTRACT           = :contract
+             AND    PART_NO            = :part_no
+             AND    CONFIGURATION_ID   = :configuration_id
+             AND    Inventory_Picking_Manager_API.Pick_By_Choice_Allowed(:pick_list_no,
+                                                                         :source_ref1,
+                                                                         :source_ref2,
+                                                                         :source_ref3,
+                                                                         :source_ref4,
+                                                                         :order_supply_demand_type_db,
+                                                                         :location_no,
+                                                                         :lot_batch_no,
+                                                                         :serial_no,
+                                                                         :eng_chg_level,
+                                                                         :waiv_dev_rej_no,
+                                                                         :activity_seq,
+                                                                         :handling_unit_id,
+                                                                         CONTRACT, PART_NO, CONFIGURATION_ID, LOCATION_NO, 
+                                                                         LOT_BATCH_NO, SERIAL_NO, ENG_CHG_LEVEL, WAIV_DEV_REJ_NO, 
+                                                                         ACTIVITY_SEQ, HANDLING_UNIT_ID) = ''TRUE''
+             AND ((:Component IN (''ORDER'', ''SHPMNT'') AND LOCATION_TYPE_DB = ''PICKING'') OR
+                  (:Component = ''MANUF'' AND LOCATION_TYPE_DB IN (''PICKING'', ''F'')) OR
+                  (:Component NOT IN (''ORDER'', ''MANUF'', ''SHPMNT'')))
+             AND ((:ConditionCode IS NOT NULL AND CONDITION_CODE = :ConditionCode) OR
+                   (:ConditionCode IS NULL AND CONDITION_CODE IS NULL))';
+
+   where_clause_ := CONCAT(where_clause_, CASE NVL(project_where_       , ' ') WHEN ' ' THEN '' ELSE CONCAT(' AND ', project_where_) END);
+   where_clause_ := CONCAT(where_clause_, CASE NVL(ownership_where_     , ' ') WHEN ' ' THEN '' ELSE CONCAT(' AND ', ownership_where_) END);
+
+   IF (header_rec_.component = 'SHPMNT') THEN
+      location_where_   := Shipment_Location_Conditions___(header_rec_.sender_id, header_rec_.sender_type);
+      where_clause_     := CONCAT(where_clause_, CASE NVL(location_where_      , ' ') WHEN ' ' THEN '' ELSE CONCAT(' AND ', location_where_) END);
+   END IF;
+   
+
+   stmt_ := CONCAT(stmt_, where_clause_);
+
+   Log_SYS.Fnd_Trace_(Log_SYS.debug_, '------ stmt__-----' || stmt_);
+   Log_SYS.Fnd_Trace_(Log_SYS.debug_, '------ where_clause_-----' || where_clause_);
+
+   @ApproveDynamicStatement(2019-03-20, khvese)
+   EXECUTE IMMEDIATE stmt_ BULK COLLECT INTO base_collection_ USING
+                           IN header_rec_.contract,
+                           IN header_rec_.part_no,
+                           IN header_rec_.configuration_id,
+                           IN header_rec_.pick_list_no,
+                           IN header_rec_.source_ref1,
+                           IN header_rec_.source_ref2,
+                           IN header_rec_.source_ref3,
+                           IN header_rec_.source_ref4,
+                           IN Order_Supply_Demand_Type_API.Encode(header_rec_.order_supply_demand_type),
+                           IN header_rec_.location_no,
+                           IN header_rec_.lot_batch_no,
+                           IN header_rec_.serial_no,
+                           IN header_rec_.eng_chg_level,
+                           IN header_rec_.waiv_dev_rej_no,
+                           IN header_rec_.activity_seq,
+                           IN header_rec_.handling_unit_id,
+                           IN header_rec_.component,
+                           IN header_rec_.component,
+                           IN header_rec_.component,
+                           IN header_rec_.condition_code,
+                           IN header_rec_.condition_code,
+                           IN header_rec_.condition_code;
+
+   RETURN base_collection_;   
+END Inventory_Part_In_Stock_Lov___;
+
+
+PROCEDURE Pick_Part_By_Choice___ (
+	objkey_                 IN VARCHAR2,
+	ship_inv_location_no_   IN VARCHAR2)
+IS
+   header_key_             Pick_Part_By_Choice_Virtual_Key;
+   header_rec_             Pick_Part_By_Choice_Virtual_Rec;
+   clob_message_           CLOB;
+
+   CURSOR Get_Inventory_Part_In_Stock IS
+   SELECT * FROM ${PROJECTION}_INVENTORY_PART_IN_STOCK_VIRTUAL_VRT 
+   WHERE parent_objkey = objkey_
+   AND   qty_to_pick > 0;
+BEGIN 
+   
+   header_key_.Objkey := objkey_;
+   header_rec_ := Get_Record___(header_key_);
+   -- Security
+   User_Allowed_Site_API.Is_Authorized(header_rec_.contract); 
+   
+   clob_message_ := Message_SYS.Construct_Clob_Message('PICKPARTBYCHOICE');
+   FOR line_rec_ IN Get_Inventory_Part_In_Stock LOOP
+      Message_SYS.Add_Attribute(clob_message_, 'PART_TRACKING_SESSION_ID', line_rec_.part_tracking_session_id);
+      Message_SYS.Add_Attribute(clob_message_, 'INPUT_QUANTITY', line_rec_.input_qty);
+      Message_SYS.Add_Attribute(clob_message_, 'INPUT_CONV_FACTOR', line_rec_.input_conversion);
+      Message_SYS.Add_Attribute(clob_message_, 'INPUT_UNIT_MEAS', line_rec_.input_uom);
+      Message_SYS.Add_Attribute(clob_message_, 'INPUT_VARIABLE_VALUES', line_rec_.input_value);
+      Message_SYS.Add_Attribute(clob_message_, 'CATCH_QTY_TO_PICK', line_rec_.catch_qty_to_pick);
+      Message_SYS.Add_Attribute(clob_message_, 'QTY_TO_PICK', line_rec_.qty_to_pick);
+      Message_SYS.Add_Attribute(clob_message_, 'LOCATION_NO', line_rec_.location_no);
+      Message_SYS.Add_Attribute(clob_message_, 'LOT_BATCH_NO', line_rec_.lot_batch_no);
+      Message_SYS.Add_Attribute(clob_message_, 'SERIAL_NO', line_rec_.serial_no);
+      Message_SYS.Add_Attribute(clob_message_, 'ENG_CHG_LEVEL', line_rec_.eng_chg_level);
+      Message_SYS.Add_Attribute(clob_message_, 'WAIV_DEV_REJ_NO', line_rec_.waiv_dev_rej_no);
+      Message_SYS.Add_Attribute(clob_message_, 'ACTIVITY_SEQ', line_rec_.activity_seq);
+      Message_SYS.Add_Attribute(clob_message_, 'HANDLING_UNIT_ID', line_rec_.handling_unit_id);
+   END LOOP;   
+   
+   Inventory_Picking_Manager_API.Pick_By_Choice(clob_message_,
+                                                header_rec_.source_ref1,
+                                                header_rec_.source_ref2,
+                                                header_rec_.source_ref3,
+                                                header_rec_.source_ref4,
+                                                Order_Supply_Demand_Type_API.Encode(header_rec_.order_supply_demand_type),
+                                                header_rec_.contract,
+                                                header_rec_.part_no,
+                                                header_rec_.configuration_id,
+                                                header_rec_.location_no,
+                                                header_rec_.lot_batch_no,
+                                                header_rec_.serial_no,
+                                                header_rec_.eng_chg_level,
+                                                header_rec_.waiv_dev_rej_no,
+                                                header_rec_.activity_seq,
+                                                header_rec_.handling_unit_id,
+                                                header_rec_.pick_list_no,
+                                                header_rec_.shipment_id,
+                                                ship_inv_location_no_,
+                                                header_rec_.qty_to_pick,
+                                                CASE header_rec_.close WHEN TRUE THEN 'TRUE' ELSE 'FALSE' END);
+END Pick_Part_By_Choice___;
+
+
+FUNCTION Decode___(
+   column_name_   IN VARCHAR2,
+   value_         IN VARCHAR2,
+   data_type_     IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   parameter_string_       VARCHAR2(2000);
+   return_stmt_            VARCHAR2(4000);
+BEGIN
+   IF value_ IS NOT NULL THEN
+      Client_SYS.Clear_Attr(parameter_string_);
+      Client_SYS.Add_To_Attr(column_name_, value_|| Client_SYS.field_separator_ || data_type_, parameter_string_);
+      return_stmt_ := Report_SYS.Parse_Where_Expression(parameter_string_); 
+   END IF;
+   RETURN return_stmt_;
+END Decode___;

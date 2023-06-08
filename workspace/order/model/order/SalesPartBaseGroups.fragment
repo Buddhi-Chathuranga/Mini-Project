@@ -1,0 +1,163 @@
+--------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  ---------------------------------------------------------------
+-- 2020-02-17  MaEelk  SCXTEND-2223, Made Duplicate functionality work
+-- 2018-12-17  IzShlk  SCUXXW4-14968, Added common groups.
+--------------------------------------------------------------------------------------
+
+fragment SalesPartBaseGroups;
+component ORDER;
+layer Core;
+description "This API is used as a base fragment to include all the common codes of Sales Part/Package Part/Non- Inventory sales part";
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+group Grouping for SalesPart {
+   label = "Grouping";
+   lov SalesPriceGroupIdRef with ReferenceSalesPriceGroupSelector {
+      label = "Sales Price Group";
+      description = SalesPriceGroupIdRef.Description;
+
+      validate command {
+         variable SourceVar;
+         variable OriginalPriceGroupVar;
+
+         execute {
+            set OriginalPriceGroupVar = original.SalesPriceGroupId;
+            if [OriginalPriceGroupVar != null] {
+               if [SalesPriceGroupId != original.SalesPriceGroupId] {
+                  call CheckPriceGroup(Contract, CatalogNo, SalesPriceGroupId) into SourceVar;
+                  warning("Sales price group is changed. Sales part base prices, sales part rental base prices and price lists attached to the sales price group ${OriginalPriceGroupVar} will not be valid for the ${SourceVar} ${CatalogNo}.");
+               }
+            }
+         }
+      }
+   }
+   lov CatalogGroupRef with ReferenceSalesGroupSelector {
+      description = CatalogGroupRef.Description;
+   }
+   lov DiscountGroupRef with ReferenceSalesDiscountGroupSelector {
+      description = DiscountGroupRef.Description;
+   }
+   lov SalesPartRebateGroupRef with ReferenceSalesPartRebateGroupSelector {
+      description = SalesPartRebateGroupRef.Description;
+   }
+}
+
+group GTINGroup for SalesPart {
+   label = "GTIN";
+   field Gtin;
+   field GtinSeries;
+}
+
+group ReplacementPartGroup for SalesPart {
+   label = "Replacement Part";
+   lov ReplacementPartNoRef with ReferenceSalesPartPriceTaxLovSelector using ReplacementPartFilter(CatalogNo, Contract) {
+      description = ReplacementPartNoRef.CatalogDesc;
+   }
+   field DateOfReplacement {
+      label = "Replacement Date";
+   }
+}
+
+group TaxGroup for SalesPart {
+   label = "Tax";
+   field TaxCode {
+
+      editable = [TaxClassId = null];
+
+      lovswitch {
+         when [Taxable] {
+            lov TaxCodeRef with ReferenceTaxCodeRestrictedSelector using TaxCodeRestrictedFetchValidTaxCodes(CurrDate) {
+               description = TaxCodeRef.Description;
+            }
+         }
+         when [not(Taxable)] {
+            lov TaxCodeExemptRef with ReferenceTaxCodeExemptRestrictedSelector using TaxCodeExemptRestrictedFetchValidTaxCodes(CurrDate) {
+               description = TaxCodeExemptRef.Description;
+            }
+         }
+      }
+   }
+   lov TaxClassIdRef with ReferenceTaxClassSelector {
+      description = TaxClassIdRef.Description;
+      editable = [TaxCode = null];
+   }
+   lov DeliveryTypeRef with ReferenceDeliveryTypeSelector {
+      description = DeliveryTypeRef.Description;
+   }
+   field Taxable {
+      size = Small;
+   }
+   field UsePriceInclTax {
+      size = Small;
+      validate command {
+         variable ExternalTaxCalMethodVar;
+
+         execute {
+            if [UsePriceInclTax] {
+               call GetExternalTaxCalMethod(Company) into ExternalTaxCalMethodVar;
+               if [ExternalTaxCalMethodVar != "NOT_USED"] {
+                  set UsePriceInclTax = false;
+                  error("Price including tax cannot be used when using an external tax system.");
+               }
+            }
+         }
+      }
+   }
+   field CurrDate {
+      visible = [false];
+   }
+}
+
+group PricingGroup for SalesPart {
+   label = "Pricing";
+   currency ListPrice(CurrencyCode) {
+      label = "Price";
+      editable = [not(UsePriceInclTax)];
+      preserveprecision = [true];
+
+   }
+   currency ListPriceInclTax(CurrencyCode) {
+      label = "Price Including Tax";
+      editable = [UsePriceInclTax];
+      preserveprecision = [true];
+
+   }
+   currency ExpectedAveragePrice(CurrencyCode) {
+      label = "Expected Average Price";
+      preserveprecision = [true];
+   }
+}
+
+--------------------------------- COMMANDS ----------------------------------
+command CustomerWarrantyCreateEditCommand for SalesPart {
+   label = "Customer Warranty";
+   enabled = [true];
+
+   execute {
+      assistant CustomerWarranty.CustomerWarrantyAssistant(CatalogNo, null, CustWarrantyId) into(CustWarrantyId) {
+         when CANCEL {
+            exit CANCEL;
+         }
+      }
+   }
+}
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+--------------------------------- FUNCTIONS ---------------------------------
+function ReplacementPartFilter List < Entity(SalesPartPriceTaxLov) > {
+   parameter CatelogNo Text;
+   parameter Contract Text;
+   where = "CATALOG_NO != :CatelogNo AND  CATALOG_NO NOT IN (select PARENT_PART from sales_part_package WHERE CONTRACT = :Contract AND CATALOG_NO  = :CatelogNo)";
+}
+
+function CheckPriceGroup Text {
+   parameter Contract Text;
+   parameter CatelogNo Text;
+   parameter SalesPriceGroup Text;
+}
+
+function GetExternalTaxCalMethod Text {
+   parameter Company Text;
+}
+
+

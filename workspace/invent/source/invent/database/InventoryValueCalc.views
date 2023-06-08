@@ -1,0 +1,985 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: InventoryValueCalc
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+-----------------------------------------------------------------------------
+
+layer Core;
+
+-------------------- COMMON COLUMN DEFINITIONS ------------------------------
+
+-------------------- PUBLIC VIEW DEFINITIONS --------------------------------
+
+
+-------------------- PRIVATE VIEW DEFINITIONS -------------------------------
+
+VIEW Inventory_Value_Calc_Local_1 IS
+SELECT ipuc.contract             contract,
+          ipuc.part_no              part_no,
+          ipuc.configuration_id     configuration_id,
+          CASE ipuc.serial_no
+             WHEN '*' THEN
+                CASE ipuc.lot_batch_no
+                   WHEN '*' THEN '*' ELSE NVL(lbm.condition_code,'*') END
+             ELSE NVL(psc.condition_code,'*') END condition_code,
+          ipuc.lot_batch_no         lot_batch_no,
+          ipuc.serial_no            serial_no,
+          SUM(ipuc.inventory_value) unit_cost
+FROM inventory_part_unit_cost_tab ipuc,
+        part_serial_catalog_pub      psc,
+        lot_batch_master_pub         lbm
+  WHERE ipuc.part_no      = psc.part_no (+)
+    AND ipuc.serial_no    = psc.serial_no (+)
+    AND ipuc.part_no      = lbm.part_no (+)
+    AND ipuc.lot_batch_no = lbm.lot_batch_no (+)
+   GROUP BY ipuc.contract,
+            ipuc.part_no,
+            ipuc.configuration_id,
+            CASE ipuc.serial_no
+               WHEN '*' THEN
+                  CASE ipuc.lot_batch_no
+                     WHEN '*' THEN '*' ELSE NVL(lbm.condition_code,'*') END
+               ELSE NVL(psc.condition_code,'*') END,
+            ipuc.lot_batch_no,
+            ipuc.serial_no;
+
+VIEW Inventory_Value_Calc_Local_9 IS
+SELECT contract                      contract,
+          part_no                       part_no,
+          sequence_no                   sequence_no,
+          SUM(unit_cost)                unit_cost
+FROM inventory_part_fifo_detail_tab
+   GROUP BY contract, part_no, sequence_no;
+
+VIEW Inventory_Value_Calc_Local_2 IS
+SELECT unit_cost.contract          contract,
+          unit_cost.part_no           part_no,
+          unit_cost.configuration_id  configuration_id,
+          unit_cost.condition_code    condition_code,
+          unit_cost.lot_batch_no      lot_batch_no,
+          unit_cost.serial_no         serial_no,
+          unit_cost.unit_cost         unit_cost
+FROM inventory_value_calc_local_1 unit_cost,
+         inventory_part_tab           ip
+   WHERE unit_cost.contract           = ip.contract
+     AND unit_cost.part_no            = ip.part_no
+     AND ip.inventory_part_cost_level = 'COST PER PART'
+     AND ip.inventory_valuation_method IN ('ST','AV')
+     AND unit_cost.configuration_id   = '*'
+   UNION ALL
+   SELECT ipfd.contract                       contract,
+          ipfd.part_no                        part_no,
+          '*'                                 configuration_id,
+          '*'                                 condition_code,
+          '*'                                 lot_batch_no,
+          '*'                                 serial_no,
+          SUM(ipfd.unit_cost * ipcf.quantity) /
+          CASE SUM(ipcf.quantity)
+             WHEN 0 THEN 1
+             ELSE SUM(ipcf.quantity) END      unit_cost
+   FROM inventory_value_calc_local_9   ipfd,
+        inventory_part_cost_fifo_pub   ipcf,
+        inventory_part_tab             ip
+   WHERE ipfd.contract    = ip.contract
+     AND ipfd.part_no     = ip.part_no
+     AND ipfd.contract    = ipcf.contract
+     AND ipfd.part_no     = ipcf.part_no
+     AND ipfd.sequence_no = ipcf.sequence_no
+     AND ip.inventory_valuation_method IN ('FIFO','LIFO')
+   GROUP BY ipfd.contract, ipfd.part_no
+   UNION ALL
+   SELECT unit_cost.contract          contract,
+          unit_cost.part_no           part_no,
+          unit_cost.configuration_id  configuration_id,
+          unit_cost.condition_code    condition_code,
+          unit_cost.lot_batch_no      lot_batch_no,
+          unit_cost.serial_no         serial_no,
+          unit_cost.unit_cost         unit_cost
+    FROM inventory_value_calc_local_1 unit_cost,
+         inventory_part_tab           ip
+   WHERE unit_cost.contract           = ip.contract
+     AND unit_cost.part_no            = ip.part_no
+     AND ip.inventory_part_cost_level = 'COST PER CONFIGURATION'
+     AND unit_cost.configuration_id  != '*'
+   UNION ALL
+   SELECT unit_cost.contract          contract,
+          unit_cost.part_no           part_no,
+          unit_cost.configuration_id  configuration_id,
+          unit_cost.condition_code    condition_code,
+          unit_cost.lot_batch_no      lot_batch_no,
+          unit_cost.serial_no         serial_no,
+          unit_cost.unit_cost         unit_cost
+    FROM inventory_value_calc_local_1 unit_cost,
+         inventory_part_tab           ip
+   WHERE unit_cost.contract           = ip.contract
+     AND unit_cost.part_no            = ip.part_no
+     AND ip.inventory_part_cost_level = 'COST PER SERIAL'
+     AND unit_cost.serial_no         != '*'
+   UNION ALL
+   SELECT DISTINCT unit_cost.contract               contract,
+                   unit_cost.part_no                part_no,
+                   unit_cost.configuration_id       configuration_id,
+                   CASE unit_cost.serial_no 
+                      WHEN '*' THEN unit_cost.condition_code
+                      ELSE '*' END                  condition_code,
+                   unit_cost.lot_batch_no           lot_batch_no,
+                   '*'                              serial_no,
+                   unit_cost.unit_cost              unit_cost
+    FROM inventory_value_calc_local_1 unit_cost,
+         inventory_part_tab           ip
+   WHERE unit_cost.contract           = ip.contract
+     AND unit_cost.part_no            = ip.part_no
+     AND ip.inventory_part_cost_level = 'COST PER LOT BATCH'
+     AND unit_cost.lot_batch_no      != '*'
+   UNION ALL
+   SELECT DISTINCT unit_cost.contract               contract,
+                   unit_cost.part_no                part_no,
+                   unit_cost.configuration_id       configuration_id,
+                   unit_cost.condition_code         condition_code,
+                   '*'                              lot_batch_no,
+                   '*'                              serial_no,
+                   unit_cost.unit_cost              unit_cost
+    FROM inventory_value_calc_local_1 unit_cost,
+         inventory_part_tab           ip
+   WHERE unit_cost.contract           = ip.contract
+     AND unit_cost.part_no            = ip.part_no
+     AND ip.inventory_part_cost_level = 'COST PER CONDITION'
+     AND (unit_cost.lot_batch_no != '*' OR unit_cost.serial_no != '*');
+
+VIEW Inventory_Value_Calc_Local_5 IS
+SELECT ipuc.contract             contract,
+          ipuc.part_no              part_no,
+          ipuc.configuration_id     configuration_id,
+          CASE ipuc.serial_no
+             WHEN '*' THEN
+                CASE ipuc.lot_batch_no
+                   WHEN '*' THEN '*' ELSE NVL(lbm.condition_code,'*') END
+             ELSE NVL(psc.condition_code,'*') END condition_code,
+          ipuc.lot_batch_no         lot_batch_no,
+          ipuc.serial_no            serial_no,
+          ipuc.accounting_year      accounting_year,
+          ipuc.cost_bucket_id       cost_bucket_id,
+          ipuc.company              company,
+          ipuc.cost_source_id       cost_source_id,
+          ipuc.inventory_value      unit_cost,
+          ipuc.rowkey                   objkey
+FROM inventory_part_unit_cost_tab ipuc,
+        part_serial_catalog_pub      psc,
+        lot_batch_master_pub         lbm
+  WHERE ipuc.part_no      = psc.part_no (+)
+    AND ipuc.serial_no    = psc.serial_no (+)
+    AND ipuc.part_no      = lbm.part_no (+)
+    AND ipuc.lot_batch_no = lbm.lot_batch_no (+);
+
+VIEW Inventory_Value_Calc_Local_6 IS
+SELECT unit_cost.contract          contract,
+          unit_cost.part_no           part_no,
+          unit_cost.configuration_id  configuration_id,
+          unit_cost.condition_code    condition_code,
+          unit_cost.lot_batch_no      lot_batch_no,
+          unit_cost.serial_no         serial_no,
+          unit_cost.accounting_year   accounting_year,
+          unit_cost.cost_bucket_id    cost_bucket_id,
+          unit_cost.company           company,
+          unit_cost.cost_source_id    cost_source_id,
+          unit_cost.unit_cost         unit_cost
+FROM inventory_value_calc_local_5 unit_cost,
+         inventory_part_tab           ip
+   WHERE unit_cost.contract           = ip.contract
+     AND unit_cost.part_no            = ip.part_no
+     AND ip.inventory_part_cost_level = 'COST PER PART'
+     AND ip.inventory_valuation_method IN ('ST','AV')
+     AND unit_cost.configuration_id   = '*'
+   UNION ALL
+   SELECT ipfd.contract                       contract,
+          ipfd.part_no                        part_no,
+          '*'                                 configuration_id,
+          '*'                                 condition_code,
+          '*'                                 lot_batch_no,
+          '*'                                 serial_no,
+          ipfd.accounting_year                accounting_year,
+          ipfd.cost_bucket_id                 cost_bucket_id,
+          ipfd.company                        company,
+          ipfd.cost_source_id                 cost_source_id,
+          SUM(ipfd.unit_cost * ipcf.quantity) /
+          (SELECT CASE SUM(ipcf2.quantity)
+                     WHEN 0 THEN 1
+                     ELSE SUM(ipcf2.quantity) END
+              FROM inventory_part_cost_fifo_pub ipcf2
+              WHERE ipcf2.part_no  = ipfd.part_no
+              AND ipcf2.contract = ipfd.contract)     unit_cost
+   FROM inventory_part_fifo_detail_tab ipfd,
+        inventory_part_cost_fifo_pub   ipcf,
+        inventory_part_tab             ip
+   WHERE ipfd.contract    = ip.contract
+     AND ipfd.part_no     = ip.part_no
+     AND ipfd.contract    = ipcf.contract
+     AND ipfd.part_no     = ipcf.part_no
+     AND ipfd.sequence_no = ipcf.sequence_no
+     AND ip.inventory_valuation_method IN ('FIFO','LIFO')
+   GROUP BY ipfd.contract, ipfd.part_no, ipfd.accounting_year,
+            ipfd.cost_bucket_id , ipfd.company , ipfd.cost_source_id
+   UNION ALL
+   SELECT unit_cost.contract          contract,
+          unit_cost.part_no           part_no,
+          unit_cost.configuration_id  configuration_id,
+          unit_cost.condition_code    condition_code,
+          unit_cost.lot_batch_no      lot_batch_no,
+          unit_cost.serial_no         serial_no,
+          unit_cost.accounting_year   accounting_year,
+          unit_cost.cost_bucket_id    cost_bucket_id,
+          unit_cost.company           company,
+          unit_cost.cost_source_id    cost_source_id,
+          unit_cost.unit_cost         unit_cost
+    FROM inventory_value_calc_local_5 unit_cost,
+         inventory_part_tab           ip
+   WHERE unit_cost.contract           = ip.contract
+     AND unit_cost.part_no            = ip.part_no
+     AND ip.inventory_part_cost_level = 'COST PER CONFIGURATION'
+     AND unit_cost.configuration_id  != '*'
+   UNION ALL
+   SELECT unit_cost.contract          contract,
+          unit_cost.part_no           part_no,
+          unit_cost.configuration_id  configuration_id,
+          unit_cost.condition_code    condition_code,
+          unit_cost.lot_batch_no      lot_batch_no,
+          unit_cost.serial_no         serial_no,
+          unit_cost.accounting_year   accounting_year,
+          unit_cost.cost_bucket_id    cost_bucket_id,
+          unit_cost.company           company,
+          unit_cost.cost_source_id    cost_source_id,
+          unit_cost.unit_cost         unit_cost
+    FROM inventory_value_calc_local_5 unit_cost,
+         inventory_part_tab           ip
+   WHERE unit_cost.contract           = ip.contract
+     AND unit_cost.part_no            = ip.part_no
+     AND ip.inventory_part_cost_level = 'COST PER SERIAL'
+     AND unit_cost.serial_no         != '*'
+   UNION ALL
+   SELECT DISTINCT unit_cost.contract               contract,
+                   unit_cost.part_no                part_no,
+                   unit_cost.configuration_id       configuration_id,
+                   CASE unit_cost.serial_no 
+                      WHEN '*' THEN unit_cost.condition_code
+                      ELSE '*' END                  condition_code,
+                   unit_cost.lot_batch_no           lot_batch_no,
+                   '*'                              serial_no,
+                   unit_cost.accounting_year        accounting_year,
+                   unit_cost.cost_bucket_id         cost_bucket_id,
+                   unit_cost.company                company,
+                   unit_cost.cost_source_id         cost_source_id,
+                   unit_cost.unit_cost              unit_cost
+    FROM inventory_value_calc_local_5 unit_cost,
+         inventory_part_tab           ip
+   WHERE unit_cost.contract           = ip.contract
+     AND unit_cost.part_no            = ip.part_no
+     AND ip.inventory_part_cost_level = 'COST PER LOT BATCH'
+     AND unit_cost.lot_batch_no      != '*'
+   UNION ALL
+   SELECT DISTINCT unit_cost.contract               contract,
+                   unit_cost.part_no                part_no,
+                   unit_cost.configuration_id       configuration_id,
+                   unit_cost.condition_code         condition_code,
+                   '*'                              lot_batch_no,
+                   '*'                              serial_no,
+                   unit_cost.accounting_year        accounting_year,
+                   unit_cost.cost_bucket_id         cost_bucket_id,
+                   unit_cost.company                company,
+                   unit_cost.cost_source_id         cost_source_id,
+                   unit_cost.unit_cost              unit_cost
+    FROM inventory_value_calc_local_5 unit_cost,
+         inventory_part_tab           ip
+   WHERE unit_cost.contract           = ip.contract
+     AND unit_cost.part_no            = ip.part_no
+     AND ip.inventory_part_cost_level = 'COST PER CONDITION'
+     AND (unit_cost.lot_batch_no != '*' OR unit_cost.serial_no != '*');
+
+VIEW Inventory_Value_Calc_Local_7 IS
+SELECT ipis.contract                                                      contract,
+       ipis.part_no                                                       part_no,
+       ipis.configuration_id                                              configuration_id,
+       CASE ip.inventory_part_cost_level
+          WHEN 'COST PER CONDITION' THEN
+             CASE ipis.serial_no
+                WHEN '*' THEN
+                   CASE ipis.lot_batch_no
+                      WHEN '*' THEN '*' ELSE NVL(lbm.condition_code,'*') END
+                ELSE NVL(psc.condition_code,'*') END
+          WHEN 'COST PER LOT BATCH' THEN NVL(lbm.condition_code,'*')
+          WHEN 'COST PER SERIAL'    THEN NVL(psc.condition_code,'*')
+                                                           ELSE '*' END condition_code,
+       ipis.lot_batch_no                                                  lot_batch_no,
+       ipis.serial_no                                                     serial_no,
+       SUM(CASE waiv_dev_rej_no WHEN '*' THEN ipis.qty_onhand ELSE 0 END) quantity,
+       SUM(qty_in_transit)                                                qty_in_transit,
+       SUM(CASE waiv_dev_rej_no WHEN '*' THEN 0 ELSE ipis.qty_onhand END) qty_waiv_dev_rej
+FROM inventory_part_in_stock_tab    ipis,
+       inventory_part_tab             ip,
+       part_serial_catalog_pub        psc,
+       lot_batch_master_pub           lbm,
+       rotable_part_pool_tab          rpp
+ WHERE ipis.contract                                      = ip.contract
+   AND ipis.part_no                                       = ip.part_no
+   AND ipis.part_no                                       = psc.part_no (+)
+   AND ipis.serial_no                                     = psc.serial_no (+)
+   AND ipis.part_no                                       = lbm.part_no (+)
+   AND ipis.lot_batch_no                                  = lbm.lot_batch_no (+)
+   AND NVL(ipis.part_ownership, 'COMPANY OWNED' ) = 'COMPANY OWNED'
+   AND ipis.rotable_part_pool_id                          = rpp.rotable_part_pool_id (+)
+   AND NVL(rpp.rotable_pool_asset_type,'INVENTORY ASSET') = 'INVENTORY ASSET'
+ GROUP BY ipis.contract,
+          ipis.part_no,
+          ipis.configuration_id,
+       CASE ip.inventory_part_cost_level
+          WHEN 'COST PER CONDITION' THEN
+             CASE ipis.serial_no
+                WHEN '*' THEN
+                   CASE ipis.lot_batch_no
+                      WHEN '*' THEN '*' ELSE NVL(lbm.condition_code,'*') END
+                ELSE NVL(psc.condition_code,'*') END
+          WHEN 'COST PER LOT BATCH' THEN NVL(lbm.condition_code,'*')
+          WHEN 'COST PER SERIAL'    THEN NVL(psc.condition_code,'*')
+                                                           ELSE '*' END,
+          ipis.lot_batch_no,
+          ipis.serial_no;
+
+VIEW Inventory_Value_Calc_Local_3 IS
+SELECT in_stock.contract              contract,
+          in_stock.part_no               part_no,
+          '*'                            configuration_id,
+          '*'                            condition_code,
+          '*'                            lot_batch_no,
+          '*'                            serial_no,
+          SUM(in_stock.quantity)         quantity,
+          SUM(in_stock.qty_in_transit)   qty_in_transit,
+          SUM(in_stock.qty_waiv_dev_rej) qty_waiv_dev_rej
+FROM inventory_value_calc_local_7 in_stock,
+         inventory_part_tab           ip
+   WHERE in_stock.contract            = ip.contract
+     AND in_stock.part_no             = ip.part_no
+     AND ip.inventory_part_cost_level = 'COST PER PART'
+   GROUP BY in_stock.contract, in_stock.part_no
+   UNION ALL
+   SELECT in_stock.contract         contract,
+          in_stock.part_no          part_no,
+          in_stock.configuration_id configuration_id,
+          '*'                       condition_code,
+          '*'                       lot_batch_no,
+          '*'                       serial_no,
+          SUM(in_stock.quantity)         quantity,
+          SUM(in_stock.qty_in_transit)   qty_in_transit,
+          SUM(in_stock.qty_waiv_dev_rej) qty_waiv_dev_rej
+    FROM inventory_value_calc_local_7 in_stock,
+         inventory_part_tab           ip
+   WHERE in_stock.contract           = ip.contract
+     AND in_stock.part_no            = ip.part_no
+     AND ip.inventory_part_cost_level = 'COST PER CONFIGURATION'
+   GROUP BY in_stock.contract, in_stock.part_no, in_stock.configuration_id
+   UNION ALL
+   SELECT in_stock.contract          contract,
+          in_stock.part_no           part_no,
+          in_stock.configuration_id  configuration_id,
+          in_stock.condition_code    condition_code,
+          in_stock.lot_batch_no      lot_batch_no,
+          in_stock.serial_no         serial_no,
+          SUM(in_stock.quantity)         quantity,
+          SUM(in_stock.qty_in_transit)   qty_in_transit,
+          SUM(in_stock.qty_waiv_dev_rej) qty_waiv_dev_rej
+    FROM inventory_value_calc_local_7 in_stock,
+         inventory_part_tab           ip
+   WHERE in_stock.contract           = ip.contract
+     AND in_stock.part_no            = ip.part_no
+     AND ip.inventory_part_cost_level = 'COST PER SERIAL'
+   GROUP BY in_stock.contract, in_stock.part_no, in_stock.configuration_id,
+            in_stock.condition_code, in_stock.lot_batch_no, in_stock.serial_no 
+   UNION ALL
+   SELECT in_stock.contract          contract,
+          in_stock.part_no           part_no,
+          in_stock.configuration_id  configuration_id,
+          in_stock.condition_code    condition_code,
+          in_stock.lot_batch_no      lot_batch_no,
+          '*'                        serial_no,
+          SUM(in_stock.quantity)         quantity,
+          SUM(in_stock.qty_in_transit)   qty_in_transit,
+          SUM(in_stock.qty_waiv_dev_rej) qty_waiv_dev_rej
+    FROM inventory_value_calc_local_7 in_stock,
+         inventory_part_tab           ip
+   WHERE in_stock.contract           = ip.contract
+     AND in_stock.part_no            = ip.part_no
+     AND ip.inventory_part_cost_level = 'COST PER LOT BATCH'
+   GROUP BY in_stock.contract, in_stock.part_no, in_stock.configuration_id,
+            in_stock.condition_code, in_stock.lot_batch_no
+   UNION ALL
+   SELECT in_stock.contract               contract,
+          in_stock.part_no                part_no,
+          in_stock.configuration_id       configuration_id,
+          in_stock.condition_code         condition_code,
+          '*'                              lot_batch_no,
+          '*'                              serial_no,
+          SUM(in_stock.quantity)         quantity,
+          SUM(in_stock.qty_in_transit)   qty_in_transit,
+          SUM(in_stock.qty_waiv_dev_rej) qty_waiv_dev_rej
+    FROM inventory_value_calc_local_7 in_stock,
+         inventory_part_tab           ip
+   WHERE in_stock.contract           = ip.contract
+     AND in_stock.part_no            = ip.part_no
+     AND ip.inventory_part_cost_level = 'COST PER CONDITION'
+   GROUP BY in_stock.contract, in_stock.part_no, in_stock.configuration_id,
+            in_stock.condition_code;
+
+VIEW Inventory_Value_Calc_Local_4 IS
+SELECT ipit.contract                                                   contract,
+       ipit.part_no                                                    part_no,
+       ipit.configuration_id                                           configuration_id,
+       CASE ip.inventory_part_cost_level
+          WHEN 'COST PER CONDITION' THEN
+             CASE ipit.serial_no
+                WHEN '*' THEN
+                   CASE ipit.lot_batch_no
+                      WHEN '*' THEN '*' ELSE NVL(lbm.condition_code,'*') END
+                ELSE NVL(psc.condition_code,'*') END
+          WHEN 'COST PER LOT BATCH' THEN NVL(lbm.condition_code,'*')
+          WHEN 'COST PER SERIAL'    THEN NVL(psc.condition_code,'*')
+                                                           ELSE '*' END condition_code,
+       ipit.lot_batch_no                                                lot_batch_no,
+       ipit.serial_no                                                   serial_no,
+       SUM(quantity)                                                    quantity
+FROM inventory_part_in_transit_tab ipit,
+       inventory_part_tab            ip,
+       part_serial_catalog_pub       psc,
+       lot_batch_master_pub          lbm
+ WHERE ipit.contract     = ip.contract
+   AND ipit.part_no      = ip.part_no
+   AND ipit.part_no      = psc.part_no (+)
+   AND ipit.serial_no    = psc.serial_no (+)
+   AND ipit.part_no      = lbm.part_no (+)
+   AND ipit.lot_batch_no = lbm.lot_batch_no (+)
+ GROUP BY ipit.contract,
+          ipit.part_no,
+          ipit.configuration_id,
+          CASE ip.inventory_part_cost_level
+             WHEN 'COST PER CONDITION' THEN
+                CASE ipit.serial_no
+                   WHEN '*' THEN
+                      CASE ipit.lot_batch_no
+                         WHEN '*' THEN '*' ELSE NVL(lbm.condition_code,'*') END
+                   ELSE NVL(psc.condition_code,'*') END
+             WHEN 'COST PER LOT BATCH' THEN NVL(lbm.condition_code,'*')
+             WHEN 'COST PER SERIAL'    THEN NVL(psc.condition_code,'*')
+                                                              ELSE '*' END,
+          ipit.lot_batch_no,
+          ipit.serial_no;
+
+VIEW Inventory_Value_Calc_Local_8 IS
+SELECT in_transit.contract              contract,
+          in_transit.part_no               part_no,
+          '*'                              configuration_id,
+          '*'                              condition_code,
+          '*'                              lot_batch_no,
+          '*'                              serial_no,
+          SUM(in_transit.quantity)         qty_in_transit
+FROM inventory_value_calc_local_4 in_transit,
+         inventory_part_tab           ip
+   WHERE in_transit.contract            = ip.contract
+     AND in_transit.part_no             = ip.part_no
+     AND ip.inventory_part_cost_level = 'COST PER PART'
+   GROUP BY in_transit.contract, in_transit.part_no
+   UNION ALL
+   SELECT in_transit.contract         contract,
+          in_transit.part_no          part_no,
+          in_transit.configuration_id configuration_id,
+          '*'                         condition_code,
+          '*'                         lot_batch_no,
+          '*'                         serial_no,
+          SUM(in_transit.quantity)    qty_in_transit
+    FROM inventory_value_calc_local_4 in_transit,
+         inventory_part_tab           ip
+   WHERE in_transit.contract           = ip.contract
+     AND in_transit.part_no            = ip.part_no
+     AND ip.inventory_part_cost_level = 'COST PER CONFIGURATION'
+   GROUP BY in_transit.contract, in_transit.part_no, in_transit.configuration_id
+   UNION ALL
+   SELECT in_transit.contract          contract,
+          in_transit.part_no           part_no,
+          in_transit.configuration_id  configuration_id,
+          in_transit.condition_code    condition_code,
+          in_transit.lot_batch_no      lot_batch_no,
+          in_transit.serial_no         serial_no,
+          SUM(in_transit.quantity)     qty_in_transit
+    FROM inventory_value_calc_local_4 in_transit,
+         inventory_part_tab           ip
+   WHERE in_transit.contract           = ip.contract
+     AND in_transit.part_no            = ip.part_no
+     AND ip.inventory_part_cost_level = 'COST PER SERIAL'
+   GROUP BY in_transit.contract, in_transit.part_no, in_transit.configuration_id,
+            in_transit.condition_code, in_transit.lot_batch_no, in_transit.serial_no 
+   UNION ALL
+   SELECT in_transit.contract          contract,
+          in_transit.part_no           part_no,
+          in_transit.configuration_id  configuration_id,
+          in_transit.condition_code    condition_code,
+          in_transit.lot_batch_no      lot_batch_no,
+          '*'                          serial_no,
+          SUM(in_transit.quantity)     qty_in_transit
+    FROM inventory_value_calc_local_4 in_transit,
+         inventory_part_tab           ip
+   WHERE in_transit.contract           = ip.contract
+     AND in_transit.part_no            = ip.part_no
+     AND ip.inventory_part_cost_level = 'COST PER LOT BATCH'
+   GROUP BY in_transit.contract, in_transit.part_no, in_transit.configuration_id,
+            in_transit.condition_code, in_transit.lot_batch_no
+   UNION ALL
+   SELECT in_transit.contract               contract,
+          in_transit.part_no                part_no,
+          in_transit.configuration_id       configuration_id,
+          in_transit.condition_code         condition_code,
+          '*'                               lot_batch_no,
+          '*'                               serial_no,
+          SUM(in_transit.quantity)          qty_in_transit
+    FROM inventory_value_calc_local_4 in_transit,
+         inventory_part_tab           ip
+   WHERE in_transit.contract           = ip.contract
+     AND in_transit.part_no            = ip.part_no
+     AND ip.inventory_part_cost_level = 'COST PER CONDITION'
+   GROUP BY in_transit.contract, in_transit.part_no, in_transit.configuration_id,
+            in_transit.condition_code;
+
+VIEW Inventory_Value_Calc_Local_10 IS
+SELECT ipac.contract                                                   contract,
+       ipac.part_no                                                    part_no,
+       ipac.configuration_id                                           configuration_id,
+       CASE ip.inventory_part_cost_level
+          WHEN 'COST PER CONDITION' THEN
+             CASE ipac.serial_no
+                WHEN '*' THEN
+                   CASE ipac.lot_batch_no
+                      WHEN '*' THEN 
+                         '*' 
+                      ELSE 
+                         NVL(lbm.condition_code,'*') END
+                ELSE NVL(psc.condition_code,'*') END
+          WHEN 'COST PER LOT BATCH' THEN 
+             NVL(lbm.condition_code,'*')
+          WHEN 'COST PER SERIAL' THEN 
+             NVL(psc.condition_code,'*')
+          ELSE 
+             '*' END                                                    condition_code,
+       ipac.lot_batch_no                                                lot_batch_no,
+       ipac.serial_no                                                   serial_no,
+       SUM(quantity)                                                    quantity
+FROM   inventory_part_at_customer_tab ipac,
+       inventory_part_tab             ip,
+       part_serial_catalog_pub        psc,
+       lot_batch_master_pub           lbm
+ WHERE ipac.contract     = ip.contract
+   AND ipac.part_no      = ip.part_no
+   AND ipac.part_no      = psc.part_no (+)
+   AND ipac.serial_no    = psc.serial_no (+)
+   AND ipac.part_no      = lbm.part_no (+)
+   AND ipac.lot_batch_no = lbm.lot_batch_no (+)
+ GROUP BY ipac.contract,
+          ipac.part_no,
+          ipac.configuration_id,
+          CASE ip.inventory_part_cost_level
+             WHEN 'COST PER CONDITION' THEN
+                CASE ipac.serial_no
+                   WHEN '*' THEN
+                      CASE ipac.lot_batch_no
+                         WHEN '*' THEN 
+                            '*' 
+                         ELSE 
+                            NVL(lbm.condition_code,'*') END
+                   ELSE 
+                      NVL(psc.condition_code,'*') END
+             WHEN 'COST PER LOT BATCH' THEN 
+                NVL(lbm.condition_code,'*')
+             WHEN 'COST PER SERIAL'    THEN 
+                NVL(psc.condition_code,'*')
+             ELSE 
+                '*' END,
+          ipac.lot_batch_no,
+          ipac.serial_no;
+
+VIEW Inventory_Value_Calc_Local_11 IS
+SELECT at_customer.contract              contract,
+          at_customer.part_no               part_no,
+          '*'                               configuration_id,
+          '*'                               condition_code,
+          '*'                               lot_batch_no,
+          '*'                               serial_no,
+          SUM(at_customer.quantity)         qty_at_customer
+     FROM inventory_value_calc_local_10 at_customer,
+          inventory_part_tab            ip
+    WHERE at_customer.contract            = ip.contract
+      AND at_customer.part_no             = ip.part_no
+      AND ip.inventory_part_cost_level    = 'COST PER PART'
+ GROUP BY at_customer.contract, at_customer.part_no
+UNION ALL
+   SELECT at_customer.contract               contract,
+          at_customer.part_no                part_no,
+          at_customer.configuration_id       configuration_id,
+          '*'                                condition_code,
+          '*'                                lot_batch_no,
+          '*'                                serial_no,
+          SUM(at_customer.quantity)          qty_at_customer
+     FROM inventory_value_calc_local_10 at_customer,
+          inventory_part_tab            ip
+    WHERE at_customer.contract           = ip.contract
+      AND at_customer.part_no            = ip.part_no
+      AND ip.inventory_part_cost_level   = 'COST PER CONFIGURATION'
+ GROUP BY at_customer.contract, at_customer.part_no, at_customer.configuration_id
+UNION ALL
+   SELECT at_customer.contract               contract,
+          at_customer.part_no                part_no,
+          at_customer.configuration_id       configuration_id,
+          at_customer.condition_code         condition_code,
+          at_customer.lot_batch_no           lot_batch_no,
+          at_customer.serial_no              serial_no,
+          SUM(at_customer.quantity)          qty_at_customer
+     FROM inventory_value_calc_local_10 at_customer,
+          inventory_part_tab            ip
+    WHERE at_customer.contract           = ip.contract
+      AND at_customer.part_no            = ip.part_no
+      AND ip.inventory_part_cost_level   = 'COST PER SERIAL'
+ GROUP BY at_customer.contract, at_customer.part_no, at_customer.configuration_id,
+          at_customer.condition_code, at_customer.lot_batch_no, at_customer.serial_no 
+UNION ALL
+   SELECT at_customer.contract               contract,
+          at_customer.part_no                part_no,
+          at_customer.configuration_id       configuration_id,
+          at_customer.condition_code         condition_code,
+          at_customer.lot_batch_no           lot_batch_no,
+          '*'                                serial_no,
+          SUM(at_customer.quantity)          qty_at_customer
+     FROM inventory_value_calc_local_10 at_customer,
+          inventory_part_tab            ip
+    WHERE at_customer.contract           = ip.contract
+      AND at_customer.part_no            = ip.part_no
+      AND ip.inventory_part_cost_level   = 'COST PER LOT BATCH'
+ GROUP BY at_customer.contract, at_customer.part_no, at_customer.configuration_id,
+          at_customer.condition_code, at_customer.lot_batch_no
+UNION ALL
+   SELECT at_customer.contract               contract,
+          at_customer.part_no                part_no,
+          at_customer.configuration_id       configuration_id,
+          at_customer.condition_code         condition_code,
+          '*'                                lot_batch_no,
+          '*'                                serial_no,
+          SUM(at_customer.quantity)          qty_at_customer
+     FROM inventory_value_calc_local_10 at_customer,
+          inventory_part_tab            ip
+    WHERE at_customer.contract           = ip.contract
+      AND at_customer.part_no            = ip.part_no
+      AND ip.inventory_part_cost_level   = 'COST PER CONDITION'
+ GROUP BY at_customer.contract, at_customer.part_no, at_customer.configuration_id,
+          at_customer.condition_code;
+
+VIEW Inventory_Part_Value_Snapshot IS
+   Prompt = 'Inventory Value Part'
+   Contract.Flags = 'K----'
+   Contract.Datatype = 'STRING(5)/UPPERCASE'
+   Contract.Prompt = 'Site'
+   Part_No.Flags = 'K----'
+   Part_No.Datatype = 'STRING(25)/UPPERCASE'
+   Part_No.Prompt = 'Part No'
+   Configuration_Id.Flags = 'K----'
+   Configuration_Id.Datatype = 'STRING(50)'
+   Configuration_Id.Prompt = 'Configuration ID'
+   Lot_Batch_No.Flags = 'K----'
+   Lot_Batch_No.Datatype = 'STRING(20)/UPPERCASE'
+   Lot_Batch_No.Prompt = 'Lot Batch No'
+   Serial_No.Flags = 'K----'
+   Serial_No.Datatype = 'STRING(50)/UPPERCASE'
+   Serial_No.Prompt = 'Serial No'
+   Condition_Code.Flags = 'K----'
+   Condition_Code.Datatype = 'STRING(10)/UPPERCASE'
+   Condition_Code.Prompt = 'Condition Code'
+   Qty_Waiv_Dev_Rej.Flags = 'A----'
+   Qty_Waiv_Dev_Rej.Datatype = 'NUMBER'
+   Qty_Waiv_Dev_Rej.Prompt = 'Qty Waiv Dev Rej'
+   Quantity.Flags = 'A----'
+   Quantity.Datatype = 'NUMBER'
+   Quantity.Prompt = 'Quantity'
+   Qty_In_Transit.Flags = 'A----'
+   Qty_In_Transit.Datatype = 'NUMBER'
+   Qty_In_Transit.Prompt = 'Qty In Transit'
+   Qty_At_Customer.Flags = 'A----'
+   Qty_At_Customer.Datatype = 'NUMBER'
+   Qty_At_Customer.Prompt = 'Qty At Customer'
+   Total_Value.Flags = 'A----'
+   Total_Value.Datatype = 'NUMBER'
+   Total_Value.Prompt = 'Total Value'
+   Unit_Cost.Flags = 'A----'
+   Unit_Cost.Datatype = 'NUMBER'
+   Unit_Cost.Prompt = 'Unit Cost'
+   Description.Flags = 'A----'
+   Description.Datatype = 'STRING(200)'
+   Description.Prompt = 'Description'
+   Unit_Meas.Flags = 'A----'
+   Unit_Meas.Datatype = 'STRING(10)'
+   Unit_Meas.Prompt = 'Unit Meas'
+   Unit_Meas.Ref = 'IsoUnit/NOCHECK'
+   Abc_Class.Flags = 'A----'
+   Abc_Class.Datatype = 'STRING(1)'
+   Abc_Class.Prompt = 'Abc Class'
+   Abc_Class.Ref = 'AbcClass/NOCHECK'
+   Planner_Buyer.Flags = 'A----'
+   Planner_Buyer.Datatype = 'STRING(20)/UPPERCASE'
+   Planner_Buyer.Prompt = 'Planner Buyer'
+   Planner_Buyer.Ref = 'InventoryPartPlanner/NOCHECK'
+   Accounting_Group.Flags = 'A----'
+   Accounting_Group.Datatype = 'STRING(5)'
+   Accounting_Group.Prompt = 'Accounting Group'
+   Accounting_Group.Ref = 'AccountingGroup/NOCHECK'
+   Part_Product_Family.Flags = 'A----'
+   Part_Product_Family.Datatype = 'STRING(5)'
+   Part_Product_Family.Prompt = 'Part Product Family'
+   Part_Product_Family.Ref = 'InventoryProductFamily/NOCHECK'
+   Part_Product_Code.Flags = 'A----'
+   Part_Product_Code.Datatype = 'STRING(5)'
+   Part_Product_Code.Prompt = 'Part Product Code'
+   Part_Product_Code.Ref = 'InventoryProductCode/NOCHECK'
+   Type_Code.Flags = 'A----'
+   Type_Code.Datatype = 'STRING(200)'
+   Type_Code.Prompt = 'Part Type'
+   Type_Code.Ref = 'InventoryPartType/NOCHECK'
+   Type_Code_Db.Flags = 'A----'
+   Type_Code_Db.Datatype = 'STRING(20)'
+   Type_Code_Db.Prompt = 'Part Type'
+   Prime_Commodity.Flags = 'A----'
+   Prime_Commodity.Datatype = 'STRING(5)'
+   Prime_Commodity.Prompt = 'Prime commodity'
+   Prime_Commodity.Ref = 'CommodityGroup/NOCHECK'
+   Second_Commodity.Flags = 'A----'
+   Second_Commodity.Datatype = 'STRING(5)'
+   Second_Commodity.Prompt = 'Second commodity'
+   Second_Commodity.Ref = 'CommodityGroup/NOCHECK'
+   Asset_Class.Flags = 'A----'
+   Asset_Class.Datatype = 'STRING(2)/UPPERCASE'
+   Asset_Class.Prompt = 'Asset Class'
+   Asset_Class.Ref = 'AssetClass/NOCHECK'
+SELECT level_cost.contract                                       contract,
+       level_cost.part_no                                        part_no,
+       level_cost.configuration_id                               configuration_id,
+       level_cost.condition_code                                 condition_code,
+       level_cost.lot_batch_no                                   lot_batch_no,
+       level_cost.serial_no                                      serial_no,
+       NVL(in_stock.quantity,0)                                  quantity,
+       NVL(in_stock.qty_in_transit,0) + 
+                           NVL(in_transit.qty_in_transit,0)      qty_in_transit,
+       NVL(in_stock.qty_waiv_dev_rej,0)                          qty_waiv_dev_rej,
+       NVL(at_customer.qty_at_customer, 0)                       qty_at_customer,
+       NVL(level_cost.unit_cost,0)                               unit_cost,
+       NVL(level_cost.unit_cost,0) * 
+                           (NVL(in_stock.quantity,0)         + 
+                            NVL(in_stock.qty_in_transit,0)   + 
+                            NVL(in_transit.qty_in_transit,0) +
+                            NVL(in_stock.qty_waiv_dev_rej,0) +
+                            NVL(at_customer.qty_at_customer,0))  total_value,
+       Inventory_Part_API.Get_Description(level_cost.contract,
+                                          level_cost.part_no)    description,
+       ip.unit_meas                                              unit_meas,
+       ip.abc_class                                              abc_class,
+       ip.planner_buyer                                          planner_buyer,
+       ip.accounting_group                                       accounting_group,
+       ip.part_product_family                                    part_product_family,
+       ip.part_product_code                                      part_product_code,
+       Inventory_Part_Type_API.Decode(ip.type_code)              type_code,
+       ip.type_code                                              type_code_db,
+       ip.prime_commodity                                        prime_commodity,
+       ip.second_commodity                                       second_commodity,
+       ip.asset_class                                            asset_class,
+       level_cost.contract        ||
+       level_cost.part_no         ||
+       level_cost.configuration_id||
+       level_cost.condition_code  ||
+       level_cost.lot_batch_no    ||
+       level_cost.serial_no                                      objid,
+       ltrim(lpad(to_char(SYSDATE,'YYYYMMDDHH24MISS'),2000))     objversion,
+       ip.rowkey                                                objkey
+FROM   inventory_value_calc_local_2  level_cost,
+       inventory_value_calc_local_3  in_stock,
+       inventory_value_calc_local_8  in_transit,
+       inventory_value_calc_local_11 at_customer,
+       inventory_part_tab            ip
+ WHERE EXISTS (SELECT 1 FROM user_allowed_site_pub WHERE site = level_cost.contract)
+   AND level_cost.contract         = ip.contract
+   AND level_cost.part_no          = ip.part_no
+   AND level_cost.contract         = in_stock.contract (+)
+   AND level_cost.part_no          = in_stock.part_no (+)
+   AND level_cost.configuration_id = in_stock.configuration_id (+)
+   AND level_cost.condition_code   = in_stock.condition_code (+)
+   AND level_cost.lot_batch_no     = in_stock.lot_batch_no (+)
+   AND level_cost.serial_no        = in_stock.serial_no (+)
+   AND level_cost.contract         = in_transit.contract (+)
+   AND level_cost.part_no          = in_transit.part_no (+)
+   AND level_cost.configuration_id = in_transit.configuration_id (+)
+   AND level_cost.condition_code   = in_transit.condition_code (+)
+   AND level_cost.lot_batch_no     = in_transit.lot_batch_no (+)
+   AND level_cost.serial_no        = in_transit.serial_no (+)
+   AND level_cost.contract         = at_customer.contract (+)
+   AND level_cost.part_no          = at_customer.part_no (+)
+   AND level_cost.configuration_id = at_customer.configuration_id (+)
+   AND level_cost.condition_code   = at_customer.condition_code (+)
+   AND level_cost.lot_batch_no     = at_customer.lot_batch_no (+)
+   AND level_cost.serial_no        = at_customer.serial_no (+);
+
+VIEW Invepart_Value_Detail_Snapshot IS
+   Prompt = 'Inventory Value Part'
+   Company.Flags = 'P----'
+   Company.Datatype = 'STRING(20)/UPPERCASE'
+   Company.Prompt = 'Company'
+   Contract.Flags = 'P----'
+   Contract.Datatype = 'STRING(5)/UPPERCASE'
+   Contract.Prompt = 'Site'
+   Part_No.Flags = 'K----'
+   Part_No.Datatype = 'STRING(25)/UPPERCASE'
+   Part_No.Prompt = 'Part No'
+   Configuration_Id.Flags = 'K----'
+   Configuration_Id.Datatype = 'STRING(50)'
+   Configuration_Id.Prompt = 'Configuration ID'
+   Lot_Batch_No.Flags = 'K----'
+   Lot_Batch_No.Datatype = 'STRING(20)/UPPERCASE'
+   Lot_Batch_No.Prompt = 'Lot Batch No'
+   Serial_No.Flags = 'K----'
+   Serial_No.Datatype = 'STRING(50)/UPPERCASE'
+   Serial_No.Prompt = 'Serial No'
+   Condition_Code.Flags = 'K----'
+   Condition_Code.Datatype = 'STRING(10)/UPPERCASE'
+   Condition_Code.Prompt = 'Condition Code'
+   Accounting_Year.Flags = 'K----'
+   Accounting_Year.Datatype = 'STRING(4)'
+   Accounting_Year.Prompt = 'OH Accounting Year'
+   Cost_Bucket_Id.Flags = 'K----'
+   Cost_Bucket_Id.Datatype = 'STRING(5)/UPPERCASE'
+   Cost_Bucket_Id.Prompt = 'Cost Bucket ID'
+   Cost_Bucket_Id.Ref = 'CostBucket(contract)/NOCHECK'
+   Cost_Source_Id.Flags = 'K----'
+   Cost_Source_Id.Datatype = 'STRING(20)/UPPERCASE'
+   Cost_Source_Id.Prompt = 'Cost Source ID'
+   Cost_Source_Id.Ref = 'CostSource(company)/NOCHECK'
+   Unit_Cost.Flags = 'A----'
+   Unit_Cost.Datatype = 'NUMBER'
+   Unit_Cost.Prompt = 'Unit Cost'
+   Total_Value.Flags = 'A----'
+   Total_Value.Datatype = 'NUMBER'
+   Total_Value.Prompt = 'Total Value'
+   Description.Flags = 'A----'
+   Description.Datatype = 'STRING(200)'
+   Description.Prompt = 'Description'
+   Unit_Meas.Flags = 'A----'
+   Unit_Meas.Datatype = 'STRING(10)'
+   Unit_Meas.Prompt = 'Unit Meas'
+   Unit_Meas.Ref = 'IsoUnit/NOCHECK'
+   Abc_Class.Flags = 'A----'
+   Abc_Class.Datatype = 'STRING(1)'
+   Abc_Class.Prompt = 'Abc Class'
+   Abc_Class.Ref = 'AbcClass/NOCHECK'
+   Planner_Buyer.Flags = 'A----'
+   Planner_Buyer.Datatype = 'STRING(20)/UPPERCASE'
+   Planner_Buyer.Prompt = 'Planner Buyer'
+   Planner_Buyer.Ref = 'InventoryPartPlanner/NOCHECK'
+   Accounting_Group.Flags = 'A----'
+   Accounting_Group.Datatype = 'STRING(5)'
+   Accounting_Group.Prompt = 'Accounting Group'
+   Accounting_Group.Ref = 'AccountingGroup/NOCHECK'
+   Part_Product_Family.Flags = 'A----'
+   Part_Product_Family.Datatype = 'STRING(5)'
+   Part_Product_Family.Prompt = 'Part Product Family'
+   Part_Product_Family.Ref = 'InventoryProductFamily/NOCHECK'
+   Part_Product_Code.Flags = 'A----'
+   Part_Product_Code.Datatype = 'STRING(5)'
+   Part_Product_Code.Prompt = 'Part Product Code'
+   Part_Product_Code.Ref = 'InventoryProductCode/NOCHECK'
+   Type_Code.Flags = 'A----'
+   Type_Code.Datatype = 'STRING(200)'
+   Type_Code.Prompt = 'Part Type'
+   Type_Code.Ref = 'InventoryPartType/NOCHECK'
+   Type_Code_Db.Flags = 'A----'
+   Type_Code_Db.Datatype = 'STRING(20)'
+   Type_Code_Db.Prompt = 'Part Type'
+   Prime_Commodity.Flags = 'A----'
+   Prime_Commodity.Datatype = 'STRING(5)'
+   Prime_Commodity.Prompt = 'Prime commodity'
+   Prime_Commodity.Ref = 'CommodityGroup/NOCHECK'
+   Second_Commodity.Flags = 'A----'
+   Second_Commodity.Datatype = 'STRING(5)'
+   Second_Commodity.Prompt = 'Second commodity'
+   Second_Commodity.Ref = 'CommodityGroup/NOCHECK'
+   Asset_Class.Flags = 'A----'
+   Asset_Class.Datatype = 'STRING(2)/UPPERCASE'
+   Asset_Class.Prompt = 'Asset Class'
+   Asset_Class.Ref = 'AssetClass/NOCHECK'
+SELECT detail_cost.company                                       company,
+       detail_cost.contract                                      contract,
+       detail_cost.part_no                                       part_no,
+       detail_cost.configuration_id                              configuration_id,
+       detail_cost.condition_code                                condition_code,
+       detail_cost.lot_batch_no                                  lot_batch_no,
+       detail_cost.serial_no                                     serial_no,
+       detail_cost.accounting_year                               accounting_year,
+       detail_cost.cost_bucket_id                                cost_bucket_id,
+       detail_cost.cost_source_id                                cost_source_id,
+       NVL(detail_cost.unit_cost,0)                              unit_cost,
+       NVL(detail_cost.unit_cost,0) * 
+                           (NVL(in_stock.quantity,0)         + 
+                            NVL(in_stock.qty_in_transit,0)   + 
+                            NVL(in_transit.qty_in_transit,0) +
+                            NVL(in_stock.qty_waiv_dev_rej,0) +
+                            NVL(at_customer.qty_at_customer,0))  total_value,
+       Inventory_Part_API.Get_Description(detail_cost.contract,
+                                          detail_cost.part_no)   description,
+       ip.unit_meas                                              unit_meas,
+       ip.abc_class                                              abc_class,
+       ip.planner_buyer                                          planner_buyer,
+       ip.accounting_group                                       accounting_group,
+       ip.part_product_family                                    part_product_family,
+       ip.part_product_code                                      part_product_code,
+       Inventory_Part_Type_API.Decode(ip.type_code)              type_code,
+       ip.type_code                                              type_code_db,
+       ip.prime_commodity                                        prime_commodity,
+       ip.second_commodity                                       second_commodity,
+       ip.asset_class                                            asset_class,
+       detail_cost.contract        ||
+       detail_cost.part_no         ||
+       detail_cost.configuration_id||
+       detail_cost.condition_code  ||
+       detail_cost.lot_batch_no    ||
+       detail_cost.serial_no       ||
+       detail_cost.accounting_year ||
+       detail_cost.cost_bucket_id  ||
+       detail_cost.cost_source_id                                objid,
+       ltrim(lpad(to_char(SYSDATE,'YYYYMMDDHH24MISS'),2000))     objversion,
+       rowkey                                                   objkey
+FROM   inventory_value_calc_local_6  detail_cost,
+       inventory_value_calc_local_3  in_stock,
+       inventory_value_calc_local_8  in_transit,
+       inventory_value_calc_local_11 at_customer,
+       inventory_part_tab            ip
+ WHERE EXISTS (SELECT 1 FROM user_allowed_site_pub WHERE site = detail_cost.contract)
+   AND detail_cost.contract         = ip.contract
+   AND detail_cost.part_no          = ip.part_no
+   AND detail_cost.contract         = in_stock.contract (+)
+   AND detail_cost.part_no          = in_stock.part_no (+)
+   AND detail_cost.configuration_id = in_stock.configuration_id (+)
+   AND detail_cost.condition_code   = in_stock.condition_code (+)
+   AND detail_cost.lot_batch_no     = in_stock.lot_batch_no (+)
+   AND detail_cost.serial_no        = in_stock.serial_no (+)
+   AND detail_cost.contract         = in_transit.contract (+)
+   AND detail_cost.part_no          = in_transit.part_no (+)
+   AND detail_cost.configuration_id = in_transit.configuration_id (+)
+   AND detail_cost.condition_code   = in_transit.condition_code (+)
+   AND detail_cost.lot_batch_no     = in_transit.lot_batch_no (+)
+   AND detail_cost.serial_no        = in_transit.serial_no (+)
+   AND detail_cost.contract         = at_customer.contract (+)
+   AND detail_cost.part_no          = at_customer.part_no (+)
+   AND detail_cost.configuration_id = at_customer.configuration_id (+)
+   AND detail_cost.condition_code   = at_customer.condition_code (+)
+   AND detail_cost.lot_batch_no     = at_customer.lot_batch_no (+)
+   AND detail_cost.serial_no        = at_customer.serial_no (+);
+

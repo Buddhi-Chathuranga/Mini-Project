@@ -1,0 +1,1467 @@
+---------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  ----------------------------------------------------------
+-- 2019-07-23  ChFolk  SCUXXW4-22440, Replaced fragment TransportTaskLineBaseList with new fragment TransportTaskLineCommands.
+-- 2019-07-19  ChFolk  SCUXXW4-22440, Removed AggregatedHandlingUnitsReadOnlyList as the frame supported for parent attribute access when the list is from a function.
+-- 2019-06-27  ChFolk  SCUXXW4-21753, Added TransportTaskStatus into AggregatedHandlingUnitsList.
+-- 2019-06-26  ChFolk  SCUXXW4-16615, Added new list AggregatedHandlingUnitsReadOnlyList which is used as a readonly list when transport Task is Executed.
+-- 2019-06-20  ChFolk  SCUXXW4-22440, included fragment TransportTaskLineBaseList which contains the common commands.
+-- 2019-06-11  ChFolk  SCUXXW4-20645, Concatenated some fields and added references to support concatenation.
+-- 2019-05-29  JaThlk  SCUXXW4-19302, Fixed the issue in the where condition of AggregateHandlingUnitsArray.
+-- 2019-05-21  ChFolk  SCUXXW4-20397, Modified AggHuExecuteCommand to use call for ExecuteAggregatedHandlingUnits instead of bulk call as single execution needs to be done.
+-- 2019-05-09  DaZase  SCUXXW4-19709, Added initialcheck to all unbounded actions.
+-- 2019-04-26  Chfolk  SCUXXW4-16439, Added attribute TempHandlingUnitId with visible false to avoid error in edit.
+-- 2019-04-26          Changed the ludependencies of the actions.
+-- 2019-03-18  ChFolk  SCUXXW4-14910, Created to move tabs in transport Task to seperate fragments.
+---------------------------------------------------------------------------------
+fragment TransportTaskLineAggregatedTab;
+component INVENT;
+layer Core;
+description "Aggregated tab in Transport Task which uses to add, modify, and delete handling units in the transport task. This tab is also used to perform activities like pick and execute transport task lines, aggregated either per handling unit or per location. By performing an activity on an aggregated level, all the content for that line is affected.
+In the upper pane of the page the aggregated lines are displayed. The outermost handling units are shown by default. If an activity should be performed for a sub-level of a handling unit structure it is possible to view all handling units included on the transport task by clicking Show All.
+In the lower part of the page the content of the selected records in the upper part is displayed. It is possible to perform the same activities for those records in the lower pane of the page as in the upper pane of the page.";
+
+include fragment HandlingUnitLov3Selector;
+include fragment HandlingUnitLov2Selector;
+include fragment HandlingUnitLov1Selector;
+include fragment InventoryLocation17Selector;
+include fragment UserAllowedSiteLovSelector;
+include fragment NewTransportTaskDialog;
+include fragment HandlingUnitsSearchContext;
+include fragment TransportTaskHandlingUnitInitialCheck;
+include fragment TransportTaskLineCommands;
+include fragment ProjectDetailsFieldSet;
+//warningsenabled = AggregatedHandlingUnitsApplyDropOffLocation;
+//warningsenabled = ConvertAggregatedHandlingUnitsToDirectTransportTask;
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+--------------------------------- COMMANDS ----------------------------------
+command AggHuPickCommand for AggregatedHandlingUnit {
+   label = "Pick";
+   mode = SelectedRecords;
+   enabled = [count(*, LinesHasStatusCreated = "TRUE") > 0];
+   bulkexecute {
+      bulkcall PickAggregatedHandlingUnits(Selection);
+   }
+}
+
+command AggHuUnpickCommand for AggregatedHandlingUnit {
+   label = "Unpick";
+   mode = SelectedRecords;
+   enabled = [count(*, LinesHasStatusPicked = "TRUE") > 0];
+   bulkexecute {
+      bulkcall UnpickAggregatedHandlingUnits(Selection);
+   }
+}
+
+command AggHuExecuteCommand for AggregatedHandlingUnit {
+   label = "Execute";
+   mode = SelectedRecords;
+   enabled = [count(*, LinesHasStatusCreated = "TRUE" or LinesHasStatusPicked = "TRUE") > 0];
+   bulkexecute {
+      call ExecuteAggregatedHandlingUnits(Selection);
+   }
+}
+
+command AggHuMoveToNewTrasportTaskCommand for AggregatedHandlingUnit {
+   label = "Move to New Transport Task";
+   mode = SelectedRecords;
+   enabled = [count(*, LinesHasStatusCreated = "TRUE") > 0];
+   variable NewTransportTaskIdNum {
+      type = Number;
+   }
+   bulkexecute {
+      call GetNewTransportTaskId() into NewTransportTaskIdNum;
+      if [NewTransportTaskIdNum != null] {
+         ifany [TransportTaskStatusDb != "CREATED"] {
+            info("Line/Lines with other status than 'Created' will not be processed");
+         }
+         dialog MoveToNewTransportTaskDialog(NewTransportTaskIdNum) into(SetToFixed, PrintTransportTask, OpenTransportTask) {
+            when OK {
+               call MoveAggregatedHandlingUnitsToNewTransportTask(NewTransportTaskIdNum, SetToFixed, PrintTransportTask, Selection) into ResultKeysStr;
+               if [PrintTransportTask] {
+                  printdialog ResultKeysStr;
+               }
+               if [OpenTransportTask] {
+                  navigate "page/TransportTask/Form?$filter=TransportTaskId eq ${NewTransportTaskIdNum}";
+               }
+            }
+         }
+      }
+   }
+}
+
+command AggHuApplyDropOffLocationCommand for AggregatedHandlingUnit {
+   label = "Apply Drop-Off Location";
+   mode = SelectedRecords;
+   enabled = [not isDirty and count(*, LinesHasNoFwdToLocation = "TRUE" and LinesHasStatusCreated = "TRUE") > 0];
+
+   bulkexecute {
+      call AggregatedHandlingUnitsApplyDropOffLocation(Selection);
+   }
+}
+
+command AggHuConvertToDirectTransportTaskCommand for AggregatedHandlingUnit {
+   label = "Convert to Direct Transport Task";
+   mode = SelectedRecords;
+   enabled = [not isDirty and count(*, LinesHasFwdToLocation = "TRUE" and LinesHasStatusCreated = "TRUE") > 0];
+
+   bulkexecute {
+      call ConvertAggregatedHandlingUnitsToDirectTransportTask(Selection);
+   }
+}
+
+--------------------------------- SELECTORS ---------------------------------
+@Override
+selector ToLocationNoLoc17RefSelector for InventoryLocation17 {
+   static LocationType;
+}
+----------------------------------- LISTS -----------------------------------
+list AggregatedHandlingUnitsList for AggregatedHandlingUnit {
+   orderby = FromLocationNo, TopParentHandlingUnitId, StructureLevel, HandlingUnitId;
+   crudactions {
+      delete {
+         enabled = [not(selection.TransportTaskSelector.CompletelyExecuted)];
+      }
+      new {
+         enabled = [not(selection.TransportTaskSelector.CompletelyExecuted)];
+      }
+      edit {
+         enabled = [not(selection.TransportTaskSelector.CompletelyExecuted)];
+      }
+   }
+   field TempHandlingUnitId {
+      columnexclude = [true];
+      columnvisible = [true];
+   }
+
+   lov HandlingUnitId2Ref with ReferenceHandlingUnitLov1Selector using GetAggHandlingUnitWhere(FromContract, FromLocationNo) {
+      validate command {
+         variable AggHandlingUnitDataStructureVar {
+            type = Structure(AggregatedHandlingUnitDataStructure);
+         }
+         execute {
+            set HandlingUnitId = TempHandlingUnitId;
+            if [HandlingUnitId != null and HandlingUnitId != 0] {
+               set Sscc = null;
+               set AltHandlingUnitLabelId = null;
+               call GetAggHandlingUnitData(HandlingUnitId, Sscc, AltHandlingUnitLabelId) into AggHandlingUnitDataStructureVar;
+               set HandlingUnitId = AggHandlingUnitDataStructureVar.HandlingUnitId;
+               set Sscc = AggHandlingUnitDataStructureVar.Sscc;
+               set HandlingUnitTypeId = AggHandlingUnitDataStructureVar.HandlingUnitTypeId;
+               set AltHandlingUnitLabelId = AggHandlingUnitDataStructureVar.AltHandlingUnitLabelId;
+               set FromContract = AggHandlingUnitDataStructureVar.Contract;
+               set FromLocationNo = AggHandlingUnitDataStructureVar.LocationNo;
+               if [HandlingUnitTypeId = null] {
+                  alert("The entered value does not correlate to any existing Handling Unit.");
+               }
+            }
+            else {
+               if [HandlingUnitId = 0] {
+                  set HandlingUnitId = 0;
+               }
+               else {
+                  set HandlingUnitId = null;
+               }
+               set Sscc = null;
+               set AltHandlingUnitLabelId = null;
+               set HandlingUnitTypeId = null;
+               set HandlingUnitTypeDescription = null;
+            }
+         }
+      }
+   }
+   lov FromContractRef with ReferenceUserAllowedSiteLovSelector {
+      size = Small;
+   }
+   lov FromLocationNoRef with ReferenceInventoryLocation17Selector {
+      size = Small;
+   }
+   lov ToContractRef with ReferenceUserAllowedSiteLovSelector {
+      size = Small;
+   }
+   lov ToLocationNoRef with ReferenceInventoryLocation17Selector;
+   lov ForwardToLocationNoRef with ReferenceInventoryLocation17Selector;
+   field Destination {
+      size = Small;
+   }
+   lov HandlingUnitTypeIdRef with ReferenceHandlingUnitTypeSelector {
+      label = "Handling Unit Type";
+      description = HandlingUnitTypeIdRef.Description;
+      editable = [false];
+   }
+   lov Sscc2Ref with ReferenceHandlingUnitLov2Selector using GetAggSsccWhere(FromContract, FromLocationNo) {
+      validate command {
+         variable AggHandlingUnitDataStructureVar {
+            type = Structure(AggregatedHandlingUnitDataStructure);
+         }
+         execute {
+            if [Sscc != null] {
+               set HandlingUnitId = null;
+               set AltHandlingUnitLabelId = null;
+               call GetAggHandlingUnitData(HandlingUnitId, Sscc, AltHandlingUnitLabelId) into AggHandlingUnitDataStructureVar;
+               set HandlingUnitId = AggHandlingUnitDataStructureVar.HandlingUnitId;
+               set Sscc = AggHandlingUnitDataStructureVar.Sscc;
+               set HandlingUnitTypeId = AggHandlingUnitDataStructureVar.HandlingUnitTypeId;
+               set AltHandlingUnitLabelId = AggHandlingUnitDataStructureVar.AltHandlingUnitLabelId;
+               set FromContract = AggHandlingUnitDataStructureVar.Contract;
+               set FromLocationNo = AggHandlingUnitDataStructureVar.LocationNo;
+               if [HandlingUnitTypeId = null] {
+                  alert("The entered value does not correlate to any existing Handling Unit.");
+               }
+            }
+            else {
+               if [HandlingUnitId = 0] {
+                  set HandlingUnitId = 0;
+               }
+               else {
+                  set HandlingUnitId = null;
+               }
+               set Sscc = null;
+               set AltHandlingUnitLabelId = null;
+               set HandlingUnitTypeId = null;
+               set HandlingUnitTypeDescription = null;
+            }
+         }
+      }
+   }
+
+   lov AltHandlingUnitLabelId2Ref with ReferenceHandlingUnitLov3Selector using GetAggAltHandlingUnitLabelIdWhere(FromContract, FromLocationNo) {
+      validate command {
+         variable AggHandlingUnitDataStructureVar {
+            type = Structure(AggregatedHandlingUnitDataStructure);
+         }
+         execute {
+            if [AltHandlingUnitLabelId != null] {
+               set HandlingUnitId = null;
+               set Sscc = null;
+               call GetAggHandlingUnitData(HandlingUnitId, Sscc, AltHandlingUnitLabelId) into AggHandlingUnitDataStructureVar;
+               set HandlingUnitId = AggHandlingUnitDataStructureVar.HandlingUnitId;
+               set Sscc = AggHandlingUnitDataStructureVar.Sscc;
+               set HandlingUnitTypeId = AggHandlingUnitDataStructureVar.HandlingUnitTypeId;
+               set AltHandlingUnitLabelId = AggHandlingUnitDataStructureVar.AltHandlingUnitLabelId;
+               set FromContract = AggHandlingUnitDataStructureVar.Contract;
+               set FromLocationNo = AggHandlingUnitDataStructureVar.LocationNo;
+               if [HandlingUnitTypeId = null] {
+                  alert("The entered value does not correlate to any existing Handling Unit.");
+               }
+            }
+            else {
+               if [HandlingUnitId = 0] {
+                  set HandlingUnitId = 0;
+               }
+               else {
+                  set HandlingUnitId = null;
+               }
+               set Sscc = null;
+               set AltHandlingUnitLabelId = null;
+               set HandlingUnitTypeId = null;
+               set HandlingUnitTypeDescription = null;
+            }
+         }
+      }
+   }
+   field FromLocationGroup {
+      size = Small;
+   }
+   field FromWarehouse {
+      size = Small;
+   }
+   field FromBay {
+      size = Small;
+   }
+   field FromRow {
+      size = Small;
+   }
+   field FromTier {
+      size = Small;
+   }
+   field FromBin {
+      size = Small;
+   }
+   field ToWarehouse {
+      size = Small;
+   }
+   field ToBay {
+      size = Small;
+   }
+   field ToRow {
+      size = Small;
+   }
+   field ToTier {
+      size = Small;
+   }
+   field ToBin {
+      size = Small;
+   }
+   field CreateDate;
+   lov HandlingUnitCategoryRef with ReferenceHandlingUnitCategorySelector {
+      description = HandlingUnitCategoryDesc;
+      label = "Handling Unit Category";
+      editable = [false];
+   }
+   field TopParentHandlingUnitId;
+   lov TopParentHuTypeRef with ReferenceHandlingUnitTypeSelector {
+      description = TopParentHuTypeRef.Description;
+      label = "Top Parent Handling Unit Type";
+      editable = [false];
+   }
+   field TopParentSscc {
+      size = Small;
+   }
+   field TopParentAltHandlingUnitLabelId {
+      size = Small;
+   }
+   field StructureLevel;
+   field Composition {
+      size = Small;
+   }
+   field Width;
+   field Height;
+   field Depth;
+   lov UomForLengthRef with ReferenceIsoUnitSelector {
+      size = Small;
+   }
+   measure OperativeGrossWeight(UomForWeight);
+   measure OperativeVolume(UomForVolume);
+   field MaxVolumeCapacity;
+   field MaxWeightCapacity;
+   badge TransportTaskStatus {
+      label = "Transport Task Status";
+      style = TextOnly;
+      size = Small;
+      emphasis Progress1 = [TransportTaskStatus = "Created"];
+      emphasis Progress7 = [TransportTaskStatus = "Picked"];
+      emphasis Progress10 = [TransportTaskStatus = "Executed"];
+   }
+   field StackableDb {
+      size = Small;
+   }
+   lov PartNoRef with ReferenceInventoryPartSelector {
+      description = PartNoRef.DescriptionInUse;
+      label = "Part";
+   }
+   field ConfigurationId {
+      size = Small;
+   }
+   field LotBatchNo {
+      size = Small;
+   }
+   field SerialNo {
+      size = Small;
+   }
+   lov ConditionCodeRef with ReferenceConditionCodeSelector {
+      description = ConditionCodeRef.Description;
+      label = "Condition Code";
+   }
+   field PartOwnership {
+      size = Small;
+   }
+   field Owner {
+      size = Small;
+   }
+   field OwnerName {
+      size = Small;
+   }
+   field EngChgLevel {
+      size = Small;
+   }
+   field WaivDevRejNo {
+      size = Small;
+   }
+   lov AvailabilityControlIdRef with ReferencePartAvailabilityControlSelector {
+      label = "Availablity Control";
+      description = AvailabilityControlDesc;
+   }
+   fieldset ProjectDetailsFieldSet;
+   @DynamicComponentDependency PROJ
+   field ActivitySeqRef;
+   lov Level2HandlingUnitRef with ReferenceHandlingUnitSelector;
+   field Level2Sscc;
+   field Level2AltHuLabelId;
+
+   command AggHuPickCommand;
+   command AggHuUnpickCommand;
+   command AggHuExecuteCommand;
+   command AggHuMoveToNewTrasportTaskCommand;
+   command AggHuApplyDropOffLocationCommand;
+   command AggHuConvertToDirectTransportTaskCommand;
+
+}
+
+list AggregatedTransportTaskLineList for AggregatedTransportTaskLines {
+   orderby = LineNo;
+   field TransportTaskId {
+      columnvisible = [false];
+   }
+   field LineNo;
+   field HandlingUnitIdRef;
+   lov InventoryPartRef with ReferenceInventoryPartSelector {
+      description = InventoryPartRef.DescriptionInUse;
+      label = "Part";
+   }
+   field ConfigurationIdRef;
+   field ToContractRef;
+   lov ToLocationNoRef with InventoryLocationSelector;
+   lov ForwardToLocationNoRef with InventoryLocationSelector;
+   lov HandlingUnitTypeIdRef with ReferenceHandlingUnitTypeSelector {
+      description = HandlingUnitTypeIdRef.Description;
+      label = "Handling Unit Type";
+   }
+   field SsccRef;
+   field AltHandlingUnitLabelIdRef;
+   field LotBatchNo;
+   field SerialNo;
+   lov ConditionCodeRef with ReferenceConditionCodeSelector {
+      description = ConditionCodeRef.Description;
+      label = "Condition Code";
+   }
+   field EngChgLevel;
+   field WaivDevRejNo;
+   measure Quantity(InventoryPartRef.UnitMeas);
+   measure CatchQty(CatchUoM);
+   field CatchQuantityRequired;
+   field OrderType;
+   field OrderRef1;
+   field OrderRef2;
+   field OrderRef3;
+   field OrderRef4;
+   field PickListNo;
+   field ShipmentId;
+   field Destination;
+   field ToWarehouse;
+   field ToBay;
+   field ToRow;
+   field ToTier;
+   field ToBin;
+   field TopParentHandlingUnitId;
+   lov TopParentHuTypeIdRef with ReferenceHandlingUnitTypeSelector {
+      description = TopParentHandlingUnitTypeDesc;
+      label = "Top Parent Handling Unit Type";
+   }
+   field TopParentSscc;
+   field TopParentAltHandlingUnitLabelId;
+   field Level2HandlingUnitId;
+   field Level2Sscc;
+   field Level2AltHandlingUnitLabelId;
+   fieldset ProjectDetailsFieldSet;
+   @DynamicComponentDependency PROJ
+   field ActivitySeqRef;
+   field PartOwnership;
+   field Owner;
+   field OwnerName;
+   badge TransportTaskStatus {
+      label = "Transport Task Status";
+      style = TextOnly;
+      size = Small;
+      emphasis StateCreated = [TransportTaskStatus = "Created"];
+      emphasis StateExecuted = [TransportTaskStatus = "Executed"];
+      emphasis StatePicked = [TransportTaskStatus = "Picked"];
+   }
+   field TransportTaskStatusDb {
+      columnvisible = [false];
+   }
+   field WarehouseTaskStarted;
+   field FromContract {
+      columnvisible = [false];
+   }
+   field FromLocationNo {
+      columnvisible = [false];
+   }
+   field OutermostHandlingUnitId;
+   field AvailableToReserve;
+
+   command PickTransportTaskLineCommand;
+   command UnpickTransportTaskLineCommand;
+   command ExecuteTransportTaskLineCommand;
+   command ExecuteTransportTaskLineforSerialsCommand;
+   command MoveToNewTrasportTaskCommand;
+   command ApplyDropOffLocationCommand;
+   command ConvertToDirectTransportTaskCommand;
+}
+
+--------------------------------- SELECTORS ---------------------------------
+@Override
+selector ReferenceInventoryLocation17Selector for InventoryLocation17 {
+   orderby = LocationNo, Contract;
+   static Contract;
+   static LocationNo;
+}
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+----------------------------- MAIN ENTRY POINTS -----------------------------
+entityset AggregatedHandlingUnits for AggregatedHandlingUnit;
+
+------------------------------ ENTITY DETAILS -------------------------------
+@Override
+entity AggregatedHandlingUnit using HandlUnitStockSnapshot {
+   from = "TRANSPORT_TASK_HANDLING_UNIT";
+   exec = "TRANSPORT_TASK_HANDL_UNIT_API";
+   keys = TransportTaskId, HandlingUnitId, FromContract, FromLocationNo;
+
+   exclude attributes = Contract;
+   exclude attributes = LocationNo;
+   exclude attributes = SourceRef1;
+   exclude attributes = SourceRef2;
+   exclude attributes = SourceRef3;
+   exclude attributes = SourceRef4;
+   exclude attributes = SourceRef5;
+   exclude attributes = SourceRefType;
+   exclude attributes = ProcessControl;
+
+   attribute TransportTaskId Number {
+      fetch = "TRANSPORT_TASK_ID";
+      label = "Transport Task ID";
+   }
+   attribute HandlingUnitId Number {
+      fetch = "HANDLING_UNIT_ID";
+      label = "Handling Unit ID";
+      editable = [false];
+      required = [true];
+   }
+   attribute TempHandlingUnitId Number {
+      fetch = "DECODE(HANDLING_UNIT_ID,0,NULL,HANDLING_UNIT_ID)";
+      label = "Handling Unit ID";
+      editable = [ETag = null];
+   }
+   attribute FromContract Text {
+      fetch = "FROM_CONTRACT";
+      label = "From Site";
+      maxlength = 5;
+      required = [true];
+      editable = [ETag = null];
+      format = uppercase;
+   }
+   attribute FromLocationNo Text {
+      fetch = "FROM_LOCATION_NO";
+      label = "From Location No";
+      maxlength = 35;
+      required = [true];
+      editable = [ETag = null];
+      format = uppercase;
+   }
+   attribute ToContract Text {
+      fetch = "TO_CONTRACT";
+      label = "To Site";
+      maxlength = 5;
+      required = [true];
+      format = uppercase;
+   }
+   attribute ToLocationNo Text {
+      fetch = "TO_LOCATION_NO";
+      label = "To Location No";
+      maxlength = 35;
+      required = [true];
+      format = uppercase;
+   }
+   attribute ForwardToLocationNo Text {
+      fetch = "FORWARD_TO_LOCATION_NO";
+      label = "Forward To Location No";
+      maxlength = 35;
+      format = uppercase;
+      editable = [true];
+   }
+   attribute Destination Enumeration(InventoryPartDestination) {
+      fetch = "DESTINATION_DB";
+      label = "Destination";
+      required = [true];
+   }
+   attribute HandlingUnitTypeId Text {
+      fetch = "HANDLING_UNIT_TYPE_ID";
+      label = "Handling Unit Type ID";
+      maxlength = 25;
+      required = [false];
+      format = uppercase;
+   }
+   attribute Sscc Text {
+      fetch = "Sscc";
+      label = "SSCC";
+      maxlength = 18;
+      editable = [ETag = null];
+   }
+   attribute AltHandlingUnitLabelId Text {
+      fetch = "ALT_HANDLING_UNIT_LABEL_ID";
+      label = "Alt Handling Unit Label ID";
+      maxlength = 25;
+      editable = [ETag = null];
+   }
+   attribute FromLocationGroup Text {
+      fetch = "INVENTORY_LOCATION_API.Get_Location_Group(FROM_CONTRACT, FROM_LOCATION_NO)";
+      label = "From Location Group";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute FromWarehouse Text {
+      fetch = "INVENTORY_LOCATION_API.Get_Warehouse(FROM_CONTRACT, FROM_LOCATION_NO)";
+      label = "From Warehouse";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute FromBay Text {
+      fetch = "INVENTORY_LOCATION_API.Get_Bay_No(FROM_CONTRACT, FROM_LOCATION_NO)";
+      label = "From Bay";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute FromRow Text {
+      fetch = "INVENTORY_LOCATION_API.Get_Row_No(FROM_CONTRACT, FROM_LOCATION_NO)";
+      label = "From Row";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute FromTier Text {
+      fetch = "INVENTORY_LOCATION_API.Get_Tier_No(FROM_CONTRACT, FROM_LOCATION_NO)";
+      label = "From Tier";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute FromBin Text {
+      fetch = "INVENTORY_LOCATION_API.Get_Bin_No(FROM_CONTRACT, FROM_LOCATION_NO)";
+      label = "From Bin";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute ToWarehouse Text {
+      fetch = "INVENTORY_LOCATION_API.Get_Warehouse(TO_CONTRACT, TO_LOCATION_NO)";
+      label = "To Warehouse";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute ToBay Text {
+      fetch = "INVENTORY_LOCATION_API.Get_Bay_No(TO_CONTRACT, TO_LOCATION_NO)";
+      label = "To Bay";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute ToRow Text {
+      fetch = "INVENTORY_LOCATION_API.Get_Row_No(TO_CONTRACT, TO_LOCATION_NO)";
+      label = "To Row";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute ToTier Text {
+      fetch = "INVENTORY_LOCATION_API.Get_Tier_No(TO_CONTRACT, TO_LOCATION_NO)";
+      label = "To Tier";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute ToBin Text {
+      fetch = "INVENTORY_LOCATION_API.Get_Bin_No(TO_CONTRACT, TO_LOCATION_NO)";
+      label = "To Bin";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute CreateDate Date {
+      fetch = "CREATE_DATE";
+      label = "Create Date";
+      editable = [false];
+   }
+   attribute HandlingUnitCategoryId Text {
+      fetch = "HANDLING_UNIT_TYPE_API.Get_Handling_Unit_Category_Id(HANDLING_UNIT_TYPE_ID)";
+   }
+   attribute HandlingUnitCategoryDesc Text {
+      fetch = "HANDLING_UNIT_TYPE_API.Get_Handl_Unit_Category_Desc(HANDLING_UNIT_TYPE_ID)";
+   }
+   attribute ParentHandlingUnitId Number {
+      fetch = "PARENT_HANDLING_UNIT_ID";
+      editable = [false];
+   }
+   attribute TopParentHandlingUnitId Number {
+      fetch = "TOP_PARENT_HANDLING_UNIT_ID";
+      label = "Top Parent Handling Unit ID";
+      editable = [false];
+   }
+   attribute TopParentHandlingUnitTypeId Text {
+      fetch = "Handling_Unit_API.Get_Top_Parent_Hu_Type_Id(HANDLING_UNIT_ID)";
+      label = "Top Parent Handling Unit Type ID";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TopParentSscc Text {
+      fetch = "Handling_Unit_API.Get_Top_Parent_Sscc(HANDLING_UNIT_ID)";
+      label = "Top Parent SSCC";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TopParentAltHandlingUnitLabelId Text {
+      fetch = "Handling_Unit_API.Get_Top_Parent_Alt_Hu_Label_Id(HANDLING_UNIT_ID)";
+      label = "Top Parent Alt Handling Unit Label ID";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute StructureLevel Number {
+      fetch = "STRUCTURE_LEVEL";
+      label = "Structure Level";
+      editable = [false];
+   }
+   attribute Composition Text {
+      fetch = "Handling_Unit_API.Get_Composition(HANDLING_UNIT_ID)";
+      label = "Composition";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute Width Number {
+      fetch = "WIDTH";
+      label = "Width";
+      editable = [false];
+   }
+   attribute Height Number {
+      fetch = "HEIGHT";
+      label = "Height";
+      editable = [false];
+   }
+   attribute Depth Number {
+      fetch = "DEPTH";
+      label = "Depth";
+      editable = [false];
+   }
+   attribute UomForLength Text {
+      fetch = "UOM_FOR_LENGTH";
+      label = "Uom For Length";
+      maxlength = 30;
+      editable = [false];
+   }
+   attribute OperativeGrossWeight Number {
+      fetch = "OPERATIVE_GROSS_WEIGHT";
+      label = "Operative Gross Weight";
+      editable = [false];
+   }
+   attribute UomForWeight Text {
+      fetch = "UOM_FOR_WEIGHT";
+      label = "Uom For Weight";
+      maxlength = 30;
+      editable = [false];
+   }
+   attribute OperativeVolume Number {
+      fetch = "OPERATIVE_VOLUME";
+      label = "Operative Volume";
+      editable = [false];
+   }
+   attribute UomForVolume Text {
+      fetch = "UOM_FOR_VOLUME";
+      label = "Uom For Volume";
+      maxlength = 30;
+      editable = [false];
+   }
+   attribute MaxVolumeCapacity Number {
+      fetch = "MAX_VOLUME_CAPACITY";
+      label = "Max Volume Capacity";
+      editable = [false];
+   }
+   attribute MaxWeightCapacity Number {
+      fetch = "MAX_WEIGHT_CAPACITY";
+      label = "Max Weight Capacity";
+      editable = [false];
+   }
+   attribute TransportTaskStatus Enumeration(TransportTaskStatus) {
+      fetch = "TRANSPORT_TASK_STATUS_DB";
+      label = "Transport Task Status";
+      editable = [false];
+   }
+   attribute StackableDb Boolean("TRUE", "FALSE") {
+      fetch = "STACKABLE_DB";
+      label = "Stackable";
+      editable = [false];
+   }
+   attribute IsInStock Text {
+      fetch = "IS_IN_STOCK";
+      label = "Is In Stock";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute TransportTaskStatusDb Text {
+      fetch = "TRANSPORT_TASK_STATUS_DB";
+      label = "Transport Task Status";
+      maxlength = 20;
+      editable = [false];
+   }
+   attribute OutermostHuId Number {
+      fetch = "OUTERMOST_HU_ID";
+      label = "(Untitled)";
+      editable = [false];
+   }
+   attribute PartNo Text {
+      fetch = "PART_NO";
+      label = "Part No";
+      maxlength = 25;
+      editable = [false];
+   }
+   attribute ConfigurationId Text {
+      fetch = "CONFIGURATION_ID";
+      label = "Configuration ID";
+      maxlength = 50;
+      editable = [false];
+   }
+   attribute LotBatchNo Text {
+      fetch = "LOT_BATCH_NO";
+      label = "Lot/Batch No";
+      maxlength = 20;
+      editable = [false];
+   }
+   attribute SerialNo Text {
+      fetch = "SERIAL_NO";
+      label = "Serial No";
+      maxlength = 50;
+      editable = [false];
+   }
+   attribute ConditionCode Text {
+      fetch = "CONDITION_CODE";
+      label = "Condition Code";
+      maxlength = 10;
+      editable = [false];
+   }
+   attribute PartOwnership Text {
+      fetch = "PART_OWNERSHIP";
+      label = "Ownership";
+      maxlength = 200;
+      editable = [false];
+   }
+   attribute Owner Text {
+      fetch = "OWNER";
+      label = "Owner";
+      maxlength = 20;
+      editable = [false];
+   }
+   attribute OwnerName Text {
+      fetch = "OWNER_NAME";
+      label = "Owner Name";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute EngChgLevel Text {
+      fetch = "ENG_CHG_LEVEL";
+      label = "Revision No";
+      maxlength = 6;
+      editable = [false];
+   }
+   attribute WaivDevRejNo Text {
+      fetch = "WAIV_DEV_REJ_NO";
+      label = "W/D/R No";
+      maxlength = 15;
+      editable = [false];
+   }
+   attribute AvailabilityControlId Text {
+      fetch = "AVAILABILITY_CONTROL_ID";
+      label = "Availability Control ID";
+      maxlength = 25;
+      editable = [false];
+   }
+   attribute AvailabilityControlDesc Text {
+      fetch = "AVAILABILITY_CONTROL_DESC";
+      label = "Availability Control Description";
+      maxlength = 50;
+      editable = [false];
+   }
+   attribute ProgramId Text {
+      fetch = "PROGRAM_ID";
+      label = "Program ID";
+      maxlength = 10;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ProgramDescription Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Program_Description(ACTIVITY_SEQ))";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute ProjectId Text {
+      fetch = "PROJECT_ID";
+      label = "Project ID";
+      maxlength = 10;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ProjectName Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Project_Name(ACTIVITY_SEQ))";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute SubProjectId Text {
+      fetch = "SUB_PROJECT_ID";
+      label = "Sub Project ID";
+      maxlength = 10;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute SubProjectDescription Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Sub_Project_Description(ACTIVITY_SEQ))";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute ActivityNo Text {
+      fetch = "ACTIVITY_NO";
+      label = "Activity ID";
+      maxlength = 10;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ActivityDescription Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Description(ACTIVITY_SEQ))";
+      maxlength = 200;
+      editable = [false];
+   }
+   attribute ActivitySeq Number {
+      fetch = "ACTIVITY_SEQ";
+      label = "Activity Seq";
+      editable = [false];
+   }
+   attribute SecondLevelParentHuId Number {
+      fetch = "SECOND_LEVEL_PARENT_HU_ID";
+      label = "Level 2 Handling Unit ID";
+      editable = [false];
+   }
+   attribute Level2Sscc Text {
+      fetch = "Handling_Unit_API.Get_Sscc(SECOND_LEVEL_PARENT_HU_ID)";
+      label = "Level 2 SSCC";
+   }
+   attribute Level2AltHuLabelId Text {
+      fetch = "Handling_Unit_API.Get_Alt_Handling_Unit_Label_Id(SECOND_LEVEL_PARENT_HU_ID)";
+      label = "Level 2 Alt Handling Unit Label ID";
+   }
+   attribute LinesHasStatusCreated Text {
+      fetch = "Transport_Task_Handl_Unit_API.Line_With_Status_Exist(TRANSPORT_TASK_ID, HANDLING_UNIT_ID, FROM_CONTRACT, FROM_LOCATION_NO, 'CREATED')";
+      label = "WithStatusCreated";
+      editable = [false];
+   }
+   attribute LinesHasStatusPicked Text {
+      fetch = "Transport_Task_Handl_Unit_API.Line_With_Status_Exist(TRANSPORT_TASK_ID, HANDLING_UNIT_ID, FROM_CONTRACT, FROM_LOCATION_NO, 'PICKED')";
+      label = "WithStatusCreated";
+      editable = [false];
+   }
+   attribute LinesHasNoFwdToLocation Text {
+      fetch = "Transport_Task_Handl_Unit_API.Line_With_No_Fwd_To_Loc_Exist(TRANSPORT_TASK_ID, HANDLING_UNIT_ID, FROM_CONTRACT, FROM_LOCATION_NO)";
+      label = "WithStatusCreated";
+      editable = [false];
+   }
+   attribute LinesHasFwdToLocation Text {
+      fetch = "Transport_Task_Handl_Unit_API.Line_With_Fwd_To_Loc_Exist(TRANSPORT_TASK_ID, HANDLING_UNIT_ID, FROM_CONTRACT, FROM_LOCATION_NO)";
+      label = "WithStatusCreated";
+      editable = [false];
+   }
+   array AggregateHandlingUnitsArray()to AggregatedTransportTaskLines() {
+      where = " (:parent.TransportTaskId = :child.TransportTaskId AND
+                 :child.TransportTaskStatusDb IN ('CREATED', 'PICKED') AND
+      ((:parent.HandlingUnitId = 0 AND :parent.FromLocationNo = :child.FromLocationNo AND :child.OutermostHandlingUnitId IS NULL) OR
+      (:child.HandlingUnitId IN (SELECT HU.HANDLING_UNIT_ID
+                                           FROM HANDLING_UNIT HU
+                                           CONNECT BY PRIOR HANDLING_UNIT_ID = PARENT_HANDLING_UNIT_ID
+                                           START WITH HU.HANDLING_UNIT_ID IN (:parent.HandlingUnitId)))))";
+   }
+
+   reference HandlingUnitTypeIdRef(HandlingUnitTypeId) to HandlingUnitType(HandlingUnitTypeId);
+   reference HandlingUnitCategoryRef(HandlingUnitCategoryId) to HandlingUnitCategory(HandlingUnitCategoryId);
+   reference TopParentHuTypeRef(TopParentHandlingUnitTypeId) to HandlingUnitType(HandlingUnitTypeId);
+   reference ConditionCodeRef(ConditionCode) to ConditionCode(ConditionCode);
+   @DynamicComponentDependency PROJ
+   reference ProjectIdRef(ProjectId) to Project(ProjectId);
+   @DynamicComponentDependency PROJ
+   reference ProgramIdRef(ProgramId) to ProjectProgramGlobal(ProgramId);
+   @DynamicComponentDependency PROJ
+   reference SubProjectIdRef(ProjectId, SubProjectId) to SubProject(ProjectId, SubProjectId);
+   @DynamicComponentDependency PROJ
+   reference ActivityNoRef(ActivitySeq, ActivityNo) to Activity(ActivitySeq, ActivityNo);
+   @DynamicComponentDependency PROJ
+   reference ActivitySeqRef(ActivitySeq) to Activity(ActivitySeq);
+   reference PartNoRef(FromContract, PartNo) to InventoryPart(Contract, PartNo);
+   reference Level2HandlingUnitRef(SecondLevelParentHuId) to HandlingUnit(HandlingUnitId) {
+      label = "Level 2 Handling Unit ID";
+   }
+   reference HandlingUnitId2Ref(FromContract, FromLocationNo, TempHandlingUnitId) to HandlingUnitLov1(Contract, LocationNo, HandlingUnitId) {
+      label = "Handling Unit ID";
+   }
+   reference FromContractRef(FromContract) to UserAllowedSiteLov(Contract) {
+      label = "From Site";
+   }
+   reference FromLocationNoRef(FromContract, FromLocationNo) to InventoryLocation17(Contract, LocationNo) {
+      label = "From Location No";
+   }
+   reference ToContractRef(ToContract) to UserAllowedSiteLov(Contract) {
+      label = "To Site";
+   }
+   reference ToLocationNoRef(ToContract, ToLocationNo) to InventoryLocation17(Contract, LocationNo) {
+      label = "To Location No";
+   }
+   reference ForwardToLocationNoRef(ToContract, ForwardToLocationNo) to InventoryLocation17(Contract, LocationNo) {
+      label = "Forward To Location No";
+   }
+   reference Sscc2Ref(FromContract, FromLocationNo, Sscc) to HandlingUnitLov2(Contract, LocationNo, Sscc) {
+      label = "SSCC";
+   }
+   reference AltHandlingUnitLabelIdRef(FromContract, AltHandlingUnitLabelId) to HandlingUnitLov3(Contract, AltHandlingUnitLabelId) {
+      label = "Alt Handling Unit Label ID";
+   }
+   reference AltHandlingUnitLabelId2Ref(FromContract, FromLocationNo, AltHandlingUnitLabelId) to HandlingUnitLov3(Contract, LocationNo, AltHandlingUnitLabelId) {
+      label = "Alt Handling Unit Label ID";
+   }
+   reference UomForLengthRef(UomForLength) to IsoUnit(UnitCode) {
+      label = "Uom For Length";
+   }
+   reference UomForWeightRef(UomForWeight) to IsoUnit(UnitCode) {
+      label = "Uom For Weight";
+   }
+   reference OperativeVolumeRef(OperativeVolume) to IsoUnit(UnitCode) {
+      label = "Operative Volume";
+   }
+   reference AvailabilityControlIdRef(AvailabilityControlId) to PartAvailabilityControl(AvailabilityControlId);
+}
+
+@Override
+entity AggregatedTransportTaskLines using TransportTaskLine {
+   crud = Read, Update;
+   from = "Transport_Task_Line ttl, Inventory_location_API.Get_Location_Details(ttl.TO_CONTRACT, ttl.TO_LOCATION_NO) tl, Transport_Task_Line_API.Get_Trans_Task_Line_Details(ttl.TRANSPORT_TASK_ID, ttl.LINE_NO) ttld, Handling_Unit_API.Get_Handling_Unit_Details(ttl.HANDLING_UNIT_ID) hu";
+   keys = TransportTaskId, LineNo;
+
+   attribute TransportTaskId Number {
+      fetch = "ttl.TRANSPORT_TASK_ID";
+      editable = [false];
+   }
+   attribute LineNo Number {
+      fetch = "ttl.LINE_NO";
+      editable = [false];
+   }
+   attribute HandlingUnitId Number {
+      fetch = "ttl.HANDLING_UNIT_ID";
+      editable = [false];
+   }
+   attribute PartNo Text {
+      fetch = "ttl.PART_NO";
+      editable = [false];
+   }
+   attribute ConfigurationId Text {
+      fetch = "ttl.CONFIGURATION_ID";
+      editable = [false];
+   }
+   attribute ToContract Text {
+      label = "To Site";
+      editable = [false];
+   }
+   attribute ToLocationNo Text {
+      fetch = "ttl.TO_LOCATION_NO";
+      editable = [true];
+   }
+   attribute ForwardToLocationNo Text {
+      fetch = "ttl.FORWARD_TO_LOCATION_NO";
+      editable = [true];
+   }
+   attribute HandlingUnitTypeId Text {
+      fetch = "hu.hu_type_id";
+      editable = [false];
+   }
+   attribute HandlingUnitTypeDescription Text {
+      fetch = "hu.hu_type_desc";
+      editable = [false];
+      editable = [false];
+   }
+   attribute Sscc Text {
+      fetch = "hu.sscc";
+      editable = [false];
+   }
+   attribute AltHandlingUnitLabelId Text {
+      fetch = "hu.alt_hu_label_id";
+      editable = [false];
+   }
+   attribute LotBatchNo Text {
+      label = "Lot/Batch No";
+      fetch = "ttl.LOT_BATCH_NO";
+      editable = [false];
+   }
+   attribute SerilNo Text {
+      label = "Serial No";
+      fetch = "ttl.SERIAL_NO";
+      editable = [false];
+   }
+   attribute ConditionCode Text {
+      fetch = "CONDITION_CODE_MANAGER_API.Get_Condition_Code(PART_NO, SERIAL_NO, LOT_BATCH_NO)";
+      label = "Condition Code";
+      maxlength = 10;
+      editable = [false];
+      format = uppercase;
+   }
+   attribute EngChgLevel Text {
+      label = "Revision No";
+      fetch = "ttl.ENG_CHG_LEVEL";
+      editable = [false];
+   }
+   attribute WaivDevRejNo Text {
+      label = "W/D/R No";
+      fetch = "ttl.WAIV_DEV_REJ_NO";
+      editable = [false];
+   }
+   attribute Quantity Number {
+      fetch = "ttl.QUANTITY";
+      label = "Quantity";
+      editable = [true];
+   }
+   attribute CatchQty Number {
+      fetch = "ttl.CATCH_QUANTITY";
+      label = "Catch Quantity";
+      editable = [true];
+   }
+   attribute CatchUoM Text {
+      fetch = "ttld.catch_unit_meas";
+      label = "Catch UoM";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute CatchQuantityRequired Number {
+      fetch = "ttld.catch_qty_required";
+      label = "Catch Quantity Required1";
+      editable = [false];
+   }
+   attribute OrderType Enumeration(OrderType) {
+      fetch = "ttl.ORDER_TYPE";
+      editable = [false];
+   }
+   attribute OrderTypeDb Text {
+      fetch = "ttl.ORDER_TYPE_DB";
+      editable = [false];
+   }
+   attribute OrderRef1 Text {
+      fetch = "ttl.ORDER_REF1";
+      label = "Ord Ref 1";
+      editable = [false];
+   }
+   attribute OrderRef2 Text {
+      fetch = "ttl.ORDER_REF2";
+      label = "Ord Ref 2";
+      editable = [false];
+   }
+   attribute OrderRef3 Text {
+      fetch = "ttl.ORDER_REF3";
+      label = "Ord Ref 3";
+      editable = [false];
+   }
+   attribute OrderRef4 Number {
+      fetch = "ttl.ORDER_REF4";
+      label = "Ord Ref 4";
+      editable = [false];
+   }
+   attribute PickListNo Text {
+      fetch = "ttl.PICK_LIST_NO";
+      editable = [false];
+   }
+   attribute ShipmentId Number {
+      fetch = "ttl.SHIPMENT_ID";
+      label = "Shipment ID";
+      editable = [false];
+   }
+   attribute Destination Text {
+      fetch = "ttl.DESTINATION";
+      editable = [true];
+   }
+   attribute ToWarehouse Text {
+      fetch = "tl.warehouse";
+      label = "To Warehouse";
+      editable = [false];
+   }
+   attribute ToBay Text {
+      fetch = "tl.bay_no";
+      label = "To Bay";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute ToRow Text {
+      fetch = "tl.row_no";
+      label = "To Row";
+      editable = [false];
+   }
+   attribute ToTier Text {
+      fetch = "tl.tier_no";
+      label = "To Tier";
+      editable = [false];
+   }
+   attribute ToBin Text {
+      fetch = "tl.bin_no";
+      label = "To Bin";
+      editable = [false];
+   }
+   attribute TopParentHandlingUnitId Number {
+      fetch = "hu.top_parent_hu_id";
+      label = "Top Parent Handling Unit ID";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TopParentHandlingUnitTypeId Text {
+      fetch = "hu.top_parent_hu_type_id";
+      label = "Top Parent Handling Unit Type ID";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TopParentHandlingUnitTypeDesc Text {
+      fetch = "hu.top_parent_hu_type_desc";
+      label = "Top Parent Handling Unit Type Desc";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TopParentSscc Text {
+      fetch = "hu.top_parent_sscc";
+      label = "Top Parent SSCC";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TopParentAltHandlingUnitLabelId Text {
+      fetch = "hu.top_parent_alt_hu_label_id";
+      label = "Top Parent Alt Handling Unit Label ID";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute Level2HandlingUnitId Text {
+      fetch = "hu.level2_hu_id";
+      label = "Level 2 Handling Unit ID";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute Level2Sscc Text {
+      fetch = "hu.level2_sscc";
+      label = "Level 2 SSCC";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute Level2AltHandlingUnitLabelId Text {
+      fetch = "hu.level2_alt_hu_label_id";
+      label = "Level 2 Alt Handling Unit Label ID";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute ProjectId Text {
+      fetch = "ttl.PROJECT_ID";
+      format = uppercase;
+      editable = [false];
+   }
+   attribute ActivitySeq Number {
+      fetch = "ttl.ACTIVITY_SEQ";
+      label = "Activity Sequence";
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ProgramId Text {
+      fetch = "DECODE(ttl.ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Program_Id(ttl.ACTIVITY_SEQ))";
+      maxlength = 10;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ProgramDescription Text {
+      fetch = "DECODE(ttl.ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Program_Description(ttl.ACTIVITY_SEQ))";
+      maxlength = 2000;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ProjectName Text {
+      fetch = "DECODE(ttl.ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Project_Name(ttl.ACTIVITY_SEQ))";
+      maxlength = 2000;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute SubProjectId Text {
+      fetch = "DECODE(ttl.ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Sub_Project_Id(ttl.ACTIVITY_SEQ))";
+      maxlength = 10;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute SubProjectDescription Text {
+      fetch = "DECODE(ttl.ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Sub_Project_Description(ttl.ACTIVITY_SEQ))";
+      maxlength = 2000;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ActivityNo Text {
+      fetch = "DECODE(ttl.ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Activity_No(ttl.ACTIVITY_SEQ))";
+      maxlength = 10;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ActivityDescription Text {
+      fetch = "DECODE(ttl.ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Description(ttl.ACTIVITY_SEQ))";
+      maxlength = 200;
+      editable = [false];
+   }
+   attribute PartOwnership Text {
+      fetch = "Inventory_Part_In_Stock_API.Get_Part_Ownership(FROM_CONTRACT, PART_NO, CONFIGURATION_ID, FROM_LOCATION_NO, LOT_BATCH_NO, SERIAL_NO, ENG_CHG_LEVEL, WAIV_DEV_REJ_NO, ACTIVITY_SEQ, HANDLING_UNIT_ID)";
+      label = "Ownership";
+      editable = [false];
+   }
+   attribute Owner Text {
+      fetch = "Inventory_Part_In_Stock_API.Get_Owner(FROM_CONTRACT, PART_NO, CONFIGURATION_ID, FROM_LOCATION_NO, LOT_BATCH_NO, SERIAL_NO, ENG_CHG_LEVEL, WAIV_DEV_REJ_NO, ACTIVITY_SEQ, HANDLING_UNIT_ID)";
+      label = "Owner";
+      editable = [false];
+   }
+   attribute OwnerName Text {
+      fetch = "Inventory_Part_In_Stock_API.Get_Owner_Name(FROM_CONTRACT, PART_NO, CONFIGURATION_ID, FROM_LOCATION_NO, LOT_BATCH_NO, SERIAL_NO, ENG_CHG_LEVEL, WAIV_DEV_REJ_NO, ACTIVITY_SEQ, HANDLING_UNIT_ID)";
+      label = "Owner Name";
+      editable = [false];
+   }
+   attribute TransportTaskStatusDb Text {
+      fetch = "ttl.TRANSPORT_TASK_STATUS_DB";
+      label = "Transport Task Status";
+      maxlength = 20;
+      editable = [false];
+   }
+   attribute TransportTaskStatus Enumeration(TransportTaskStatus) {
+      editable = [false];
+   }
+   attribute WarehouseTaskStarted Boolean("TRUE", "FALSE") {
+      fetch = "ttld.warehouse_task_started";
+      label = "Warehouse Task Started";
+      editable = [false];
+   }
+   attribute FromContract Text {
+      fetch = "ttl.FROM_CONTRACT";
+      label = "From Site";
+      editable = [false];
+   }
+   attribute FromLocationNo Text {
+      fetch = "ttl.FROM_LOCATION_NO";
+      editable = [false];
+   }
+   attribute OutermostHandlingUnitId Number {
+      label = "Outermost Handling Unit ID";
+      fetch = "ttld.outermost_hu_id";
+      editable = [false];
+   }
+   attribute AvailableToReserve Boolean("TRUE", "FALSE") {
+      fetch = "ttld.available_to_reserve";
+      label = "Available to Reserve";
+      editable = [false];
+   }
+   reference HandlingUnitIdRef(HandlingUnitId) to HandlingUnitLov1(HandlingUnitId) {
+      label = "Handling Unit ID";
+   }
+   reference InventoryPartRef(FromContract, PartNo) to InventoryPart(Contract, PartNo);
+   reference ConfigurationIdRef(FromContract, PartNo, ConfigurationId) to InventoryPartConfig(Contract, PartNo, ConfigurationId) {
+      label = "Configuration ID";
+   }
+   reference ToContractRef(ToContract) to UserAllowedSiteLov(Contract) {
+      label = "To Site";
+   }
+   reference ToLocationNoRef(ToContract, ToLocationNo) to InventoryLocation(Contract, LocationNo) {
+      label = "To Location No";
+   }
+   reference ForwardToLocationNoRef(ToContract, ForwardToLocationNo) to InventoryLocation(Contract, LocationNo) {
+      label = "Forward to Location No";
+   }
+   reference HandlingUnitTypeIdRef(HandlingUnitTypeId) to HandlingUnitType(HandlingUnitTypeId);
+   reference ConditionCodeRef(ConditionCode) to ConditionCode(ConditionCode);
+   reference TopParentHuTypeIdRef(TopParentHandlingUnitTypeId) to HandlingUnitType(HandlingUnitTypeId);
+   reference SsccRef(FromContract, FromLocationNo, Sscc) to HandlingUnitLov2(Contract, LocationNo, Sscc) {
+      label = "SSCC";
+   }
+   @DynamicComponentDependency PROJ
+   reference ProjectIdRef(ProjectId) to Project(ProjectId);
+   @DynamicComponentDependency PROJ
+   reference ProgramIdRef(ProgramId) to ProjectProgramGlobal(ProgramId);
+   @DynamicComponentDependency PROJ
+   reference SubProjectIdRef(ProjectId, SubProjectId) to SubProject(ProjectId, SubProjectId);
+   @DynamicComponentDependency PROJ
+   reference ActivityNoRef(ActivitySeq, ActivityNo) to Activity(ActivitySeq, ActivityNo);
+   @DynamicComponentDependency PROJ
+   reference ActivitySeqRef(ActivitySeq) to Activity(ActivitySeq);
+   reference AltHandlingUnitLabelIdRef(FromContract, AltHandlingUnitLabelId) to HandlingUnitLov3(Contract, AltHandlingUnitLabelId) {
+      label = "Alt Handling Unit Label ID";
+   }
+
+}
+
+---------------------------------- QUERIES ----------------------------------
+query InventoryLocation {
+   from = "INVENTORY_LOCATION";
+   lu = InventoryLocation;
+   keys = Contract, LocationNo;
+   attribute Contract Text;
+   attribute LocationNo Text;
+   attribute LocationGroup Text;
+   attribute Warehouse Text;
+   attribute BayNo Text;
+   attribute RowNo Text;
+   attribute TierNo Text;
+   attribute LocationName Text;
+}
+
+---------------------------------- ACTIONS ----------------------------------
+action PickAggregatedHandlingUnits {
+   initialcheck implementation;
+   parameter Selection Text;
+   ludependencies = HandlUnitStockSnapshot, TransportTask, TransportTaskLine;
+}
+
+action UnpickAggregatedHandlingUnits {
+   initialcheck implementation;
+   parameter Selection Text;
+   ludependencies = HandlUnitStockSnapshot, TransportTask, TransportTaskLine;
+}
+
+action ExecuteAggregatedHandlingUnits {
+   initialcheck implementation;
+   parameter Selection Text;
+   ludependencies = HandlUnitStockSnapshot, TransportTask, TransportTaskLine;
+}
+
+action MoveAggregatedHandlingUnitsToNewTransportTask Text {
+   initialcheck implementation;
+   parameter NewTransportTaskId Number;
+   parameter SetToFixed Boolean;
+   parameter PrintTransportTask Boolean;
+   parameter Selection Text;
+   ludependencies = HandlUnitStockSnapshot, TransportTask, TransportTaskLine;
+}
+
+action AggregatedHandlingUnitsApplyDropOffLocation {
+   initialcheck implementation;
+   supportwarnings = [true];
+   parameter Selection Text;
+   ludependencies = HandlUnitStockSnapshot, TransportTask, TransportTaskLine;
+}
+
+action ConvertAggregatedHandlingUnitsToDirectTransportTask {
+   initialcheck implementation;
+   supportwarnings = [true];
+   parameter Selection Text;
+   ludependencies = HandlUnitStockSnapshot, TransportTask, TransportTaskLine;
+}
+
+--------------------------------- FUNCTIONS ---------------------------------
+function GetAggregatedHandlingUnitsOnTransportTask List < Entity(AggregatedHandlingUnit) > {
+   parameter ShowHuLevel Enumeration(ShowHuLevels);
+   parameter ParentTransportTaskId Number;
+   basedon AggregatedHandlingUnits;
+}
+
+function GetAggHandlingUnitData Structure(AggregatedHandlingUnitDataStructure) {
+   parameter HandlingUnitId Number;
+   parameter Sscc Text;
+   parameter AltHandlingUnitLabelId Text;
+}
+
+function GetAggHandlingUnitWhere List < Entity(HandlingUnitLov1) > {
+   parameter Contract Text;
+   parameter LocationNo Text;
+   where = "((CONTRACT = :Contract OR :Contract IS NULL)
+            AND (LOCATION_NO = :LocationNo OR :LocationNo IS NULL)
+            AND (HANDLING_UNIT_ID != 0))";
+}
+
+function GetAggSsccWhere List < Entity(HandlingUnitLov2) > {
+   parameter Contract Text;
+   parameter LocationNo Text;
+   where = "((CONTRACT = :Contract OR :Contract IS NULL)
+            AND (LOCATION_NO = :LocationNo OR :LocationNo IS NULL)
+            AND (HANDLING_UNIT_ID != 0))";
+}
+
+function GetAggAltHandlingUnitLabelIdWhere List < Entity(HandlingUnitLov3) > {
+   parameter Contract Text;
+   parameter LocationNo Text;
+   where = "((CONTRACT = :Contract OR :Contract IS NULL)
+            AND (LOCATION_NO = :LocationNo OR :LocationNo IS NULL)
+            AND (HANDLING_UNIT_ID != 0))";
+}
+
+-------------------------------- STRUCTURES ---------------------------------
+structure AggregatedHandlingUnitDataStructure {
+   attribute HandlingUnitId Number;
+   attribute Sscc Text;
+   attribute AltHandlingUnitLabelId Text;
+   attribute HandlingUnitTypeId Text;
+   attribute HandlingUnitTypeDesc Text;
+   attribute Contract Text;
+   attribute LocationNo Text;
+}

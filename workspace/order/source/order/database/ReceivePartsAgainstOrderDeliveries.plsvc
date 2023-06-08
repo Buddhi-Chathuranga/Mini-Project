@@ -1,0 +1,555 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: ReceivePartsAgainstOrderDeliveries
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign    History
+--  ------     ------  ---------------------------------------------------------
+-- 2021-06-28  ApWilk  Bug 159820 (SCZ-15326), Modified Validate_Ok___() to retrieve the correct part serial condition code and to trigger the validation message.
+-- 2021-06-15  KiSalk  Bug 159757(SCZ-15206), Added Clear_Defaults___.
+-- 2021-02-02  ThKrlk  Bug 157106 (SCZ-13272), Removed Return_All_Details___() method and places used Return_All.
+-- 2020-11-27  ThKrlk  Bug 156485 (SCZ-12652), Modified CRUD_Create___(), by passing new parameter handling unit id to Return_Material_Line_API.Get_Net_Total_Qty_To_Return() 
+-- 2020-11-27          and Return_Material_Line_API.Get_Net_Tot_Inv_Qty_To_Return() to get the correct returned qty.
+-- 2020-03-04  Kagalk  GESPRING20-1798, Added warehouse_journal functionality.
+-- 2020-01-31  Kagalk  GESPRING20-1624, Added modify_date_applied functionality.
+-- 2019-06-20  MaEelk  SCUXXW4-13507, Merged LCS Bugs 143062 and 147914.
+-- 2018-06-01  IzShlk  SCUXXW4-8697, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Receive_Parts_Order_Deliveries_Virtual_Rec )
+IS
+   selection_in_         VARCHAR2(32000) := CONCAT(rec_.full_selection, ';');
+   current_selection_    VARCHAR2(32000);
+   rma_no_               NUMBER;
+   rma_line_no_          NUMBER;
+   line_rec_   Receive_Parts_Virtual_Rec;
+   
+   CURSOR get_receive_parts_order_deliveries_lines(rma_no_ IN NUMBER, rma_line_no_ IN NUMBER ) IS
+      SELECT rma_no, rma_line_no, contract, part_no, catalog_no, configuration_id, condition_code, lot_batch_no, serial_no, eng_chg_level, waiv_dev_rej_no, part_ownership_db, owning_vendor_no, qty_delivered, handling_unit_id, part_ownership, activity_seq, order_no, line_no, rel_no, line_item_no, arrival_date
+      FROM   received_parts_order_del t
+      WHERE  rma_no = rma_no_ AND rma_line_no = rma_line_no_ AND Return_Material_Line_API.Get_Net_Total_Qty_To_Return(RMA_NO, RMA_LINE_NO, LOT_BATCH_NO, SERIAL_NO, ENG_CHG_LEVEL, WAIV_DEV_REJ_NO,PART_OWNERSHIP_DB, OWNING_VENDOR_NO, QTY_DELIVERED, HANDLING_UNIT_ID) > 0;
+BEGIN  
+   super(rec_);
+    
+   WHILE (INSTR(selection_in_, ';') > 0) LOOP
+      
+      current_selection_    := substr(selection_in_, 0, INSTR(selection_in_, ';'));
+      rma_no_               := Client_SYS.Get_Key_Reference_Value(current_selection_, 'RMA_NO');
+      rma_line_no_          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'RMA_LINE_NO');
+
+ 
+   FOR trans_rec_ IN get_receive_parts_order_deliveries_lines(rma_no_, rma_line_no_) LOOP
+      line_rec_.objkey                       := sys_guid();
+      line_rec_.parent_objkey                := rec_.objkey;      
+      line_rec_.rma_no                       := trans_rec_.rma_no;
+      line_rec_.rma_line_no                  := trans_rec_.rma_line_no;
+      line_rec_.contract                     := trans_rec_.contract;
+      line_rec_.part_no                      := trans_rec_.part_no;
+      line_rec_.catalog_no                   := trans_rec_.catalog_no;
+      line_rec_.configuration_id             := trans_rec_.configuration_id;
+      line_rec_.condition_code               := trans_rec_.condition_code;
+      line_rec_.sales_qty_to_Return          := Return_Material_Line_API.Get_Net_Total_Qty_To_Return(trans_rec_.RMA_NO, trans_rec_.RMA_LINE_NO, trans_rec_.LOT_BATCH_NO, trans_rec_.SERIAL_NO, trans_rec_.ENG_CHG_LEVEL, trans_rec_.WAIV_DEV_REJ_NO,trans_rec_.PART_OWNERSHIP_DB, trans_rec_.OWNING_VENDOR_NO, trans_rec_.QTY_DELIVERED, trans_rec_.HANDLING_UNIT_ID);
+      
+      IF line_rec_.sales_qty_to_Return < 0 THEN
+         line_rec_.sales_qty_to_Return       := 0;
+      END IF;
+      
+      line_rec_.sales_uom                    := Return_Material_Line_Api.Get_Sales_Unit_Meas(trans_rec_.RMA_NO, trans_rec_.RMA_LINE_NO);
+      
+      IF line_rec_.part_no IS NULL THEN
+         line_rec_.inv_qty_to_return         := NULL;
+      ELSE
+         line_rec_.inv_qty_to_return         := Return_Material_Line_API.Get_Net_Tot_Inv_Qty_To_Return(trans_rec_.RMA_NO, trans_rec_.RMA_LINE_NO, trans_rec_.LOT_BATCH_NO, trans_rec_.SERIAL_NO, trans_rec_.ENG_CHG_LEVEL, trans_rec_.WAIV_DEV_REJ_NO,trans_rec_.PART_OWNERSHIP_DB, trans_rec_.OWNING_VENDOR_NO, trans_rec_.QTY_DELIVERED, trans_rec_.HANDLING_UNIT_ID);
+         IF line_rec_.inv_qty_to_return < 0 THEN
+         line_rec_.inv_qty_to_return         := 0;   
+         END IF;
+      END IF;
+     
+      line_rec_.inv_uom                      := Sales_Part_API.Get_Unit_Meas(trans_rec_.CONTRACT, trans_rec_.CATALOG_NO);
+      line_rec_.catch_uom                    := Inventory_Part_API.Get_Enabled_Catch_Unit_Meas(trans_rec_.CONTRACT, trans_rec_.PART_NO);
+      line_rec_.qty_delivered                := trans_rec_.QTY_DELIVERED;
+      line_rec_.handling_unit_id             := trans_rec_.HANDLING_UNIT_ID;
+      line_rec_.sscc                        := Handling_Unit_API.Get_Sscc(line_rec_.handling_unit_id);
+      line_rec_.alt_handling_unit_label_id   := Handling_Unit_API.Get_Alt_Handling_Unit_Label_Id(line_rec_.handling_unit_id);
+      line_rec_.lot_batch_no                 := trans_rec_.LOT_BATCH_NO;
+      line_rec_.serial_no                    := trans_rec_.SERIAL_NO;
+      line_rec_.waiv_dev_rej_no              := trans_rec_.WAIV_DEV_REJ_NO;
+      line_rec_.eng_chg_level                := trans_rec_.ENG_CHG_LEVEL;
+      line_rec_.part_ownership               := trans_rec_.PART_OWNERSHIP;
+      line_rec_.part_ownership_db            := trans_rec_.PART_OWNERSHIP_DB;
+      line_rec_.activity_seq                 := trans_rec_.ACTIVITY_SEQ;
+      line_rec_.owning_vendor_no             := trans_rec_.OWNING_VENDOR_NO;
+      line_rec_.order_no                     := trans_rec_.ORDER_NO;
+      line_rec_.line_no                      := trans_rec_.LINE_NO;
+      line_rec_.rel_no                       := trans_rec_.REL_NO;
+      line_rec_.line_item_no                 := trans_rec_.LINE_ITEM_NO;
+      line_rec_.credited1                    := Return_Material_Line_API.Get_Credit_Invoice_No(trans_rec_.RMA_NO, trans_rec_.RMA_LINE_NO);
+      line_rec_.total_returned               := Return_Material_Line_API.Get_Tot_Returned_Scrapped_Qty(trans_rec_.RMA_NO, trans_rec_.RMA_LINE_NO, trans_rec_.LOT_BATCH_NO, trans_rec_.SERIAL_NO, trans_rec_.ENG_CHG_LEVEL, trans_rec_.WAIV_DEV_REJ_NO, trans_rec_.PART_OWNERSHIP_DB, trans_rec_.OWNING_VENDOR_NO);
+      line_rec_.inv_conv_factor              := Sales_Part_API.Get_Conv_Factor(trans_rec_.CONTRACT, trans_rec_.CATALOG_NO);
+      line_rec_.inverted_conv_factor         := Return_Material_Line_API.Get_Inverted_Conv_Factor(trans_rec_.RMA_NO, trans_rec_.RMA_LINE_NO);
+      line_rec_.durability_days              := Inventory_Part_API.Get_Durability_Day(trans_rec_.CONTRACT, trans_rec_.PART_NO);
+      -- gelr:modify_date_applied, begin
+      line_rec_.arrival_date                 := trans_rec_.arrival_date;
+      -- gelr:modify_date_applied, end
+      CRUD_Create___(line_rec_);
+   END LOOP; 
+   
+       selection_in_          := substr(selection_in_, INSTR(selection_in_, ';')+1);  
+      
+   END LOOP;
+   
+END CRUD_Create___;
+
+FUNCTION Warehouse_Details___(
+   contract_    IN VARCHAR2,
+   location_no_ IN VARCHAR2 ) RETURN Warehouse_Info_Rec
+IS
+   warehouse_info_rec_      Warehouse_Info_Rec := NULL;
+BEGIN
+   warehouse_info_rec_.warehouse := Inventory_Location_API.Get_Warehouse(contract_, location_no_);
+   warehouse_info_rec_.bay_no    := Inventory_Location_API.Get_Bay_No(contract_, location_no_);
+   warehouse_info_rec_.row_no    := Inventory_Location_API.Get_Row_No(contract_, location_no_);
+   warehouse_info_rec_.tier_no   := Inventory_Location_API.Get_Tier_No(contract_, location_no_);
+   warehouse_info_rec_.bin_no    := Inventory_Location_API.Get_Bin_No(contract_, location_no_);
+   RETURN warehouse_info_rec_;
+END Warehouse_Details___;
+
+FUNCTION Fetch_Rma_Line_Details___(
+   rma_no_      IN NUMBER,
+   rma_line_no_ IN NUMBER) RETURN Rma_Line_Details_Struc_Rec
+IS
+   rec_           Rma_Line_Details_Struc_Rec;
+   CURSOR get_rma_line_info IS
+      SELECT order_no, rel_no, line_no, part_no, contract, catalog_no
+      FROM return_material_line_tab
+      WHERE rma_no = rma_no_
+      AND   rma_line_no = rma_line_no_;
+   
+BEGIN
+   OPEN get_rma_line_info;
+   FETCH get_rma_line_info INTO rec_.order_no, rec_.rel_no, rec_.line_no, rec_.part_no, rec_.contract, rec_.catalog_no;
+   rec_.latest_return_date := Return_Material_API.Get_Latest_Return_Date(rma_no_);
+   rec_.receipt_date       := Site_API.Get_Site_Date(rec_.contract);
+   CLOSE get_rma_line_info;
+   
+   RETURN rec_;
+END Fetch_Rma_Line_Details___;
+
+FUNCTION Check_Valid_Dates___(
+   full_selection_ IN VARCHAR2 )  RETURN BOOLEAN
+IS
+   rec_           Rma_Line_Details_Struc_Rec;
+   selection_in_         VARCHAR2(32000) := CONCAT(full_selection_, ';');
+   current_selection_    VARCHAR2(32000);
+   rma_no_               NUMBER;
+   rma_line_no_          NUMBER;
+   valid_date_eror_flag_ BOOLEAN := FALSE; 
+BEGIN
+   -- Make sure latest return date is not less than receipt date for all the selected lines 
+   WHILE (INSTR(selection_in_, ';') > 0) LOOP
+      current_selection_    := substr(selection_in_, 0, INSTR(selection_in_, ';'));
+      rma_no_               := Client_SYS.Get_Key_Reference_Value(current_selection_, 'RMA_NO');
+      rma_line_no_          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'RMA_LINE_NO');
+      rec_ := Fetch_Rma_Line_Details___(rma_no_, rma_line_no_);
+
+      IF rec_.latest_return_date IS NOT NULL THEN
+         IF rec_.latest_return_date < rec_.receipt_date THEN
+            valid_date_eror_flag_ := TRUE;
+            EXIT;
+         END IF;
+      END IF;
+   selection_in_          := substr(selection_in_, INSTR(selection_in_, ';')+1);     
+   END LOOP;
+   RETURN valid_date_eror_flag_;
+END Check_Valid_Dates___;
+
+PROCEDURE Execute_Ok___ (
+   parent_objkey_ IN VARCHAR2 ) 
+IS
+   parent_rec_  Receive_Parts_Order_Deliveries_Virtual_Rec;
+   parent_key_  Receive_Parts_Order_Deliveries_Virtual_Key;
+   
+   child_rec_   Receive_Parts_Virtual_Rec;
+   child_key_   Receive_Parts_Virtual_Key;
+   msg_         CLOB;
+   
+BEGIN
+   parent_key_.objkey := parent_objkey_;
+   parent_rec_   := Get_Record___(parent_key_);
+   Message_SYS.Add_Attribute(msg_,'PACK_START', 'TRUE');
+   
+   FOR parts_order_delivery_rec_ IN Get_Rec_Parts_Order_Del_Array___(parent_key_) LOOP  
+      child_key_.objkey := parts_order_delivery_rec_.objkey;
+      child_rec_        := Get_Record___(child_key_);
+      
+      IF child_rec_.sales_qty_to_return IS NOT NULL AND child_rec_.sales_qty_to_return > 0 THEN
+         Message_SYS.Add_Attribute(msg_,'RMA_NO', child_rec_.rma_no);
+         Message_SYS.Add_Attribute(msg_,'RMA_LINE_NO', child_rec_.rma_line_no);
+         Message_SYS.Add_Attribute(msg_,'PART_NO', child_rec_.part_no);
+         Message_SYS.Add_Attribute(msg_,'CONTRACT', child_rec_.contract);
+         Message_SYS.Add_Attribute(msg_,'CONFIGURATION_ID', child_rec_.configuration_id);
+         Message_SYS.Add_Attribute(msg_,'EXPIRATION_DATE', child_rec_.expiration_date);
+         Message_SYS.Add_Attribute(msg_,'LOCATION_NO', child_rec_.location_no);
+         Message_SYS.Add_Attribute(msg_,'LOT_BATCH_NO', child_rec_.lot_batch_no);
+         Message_SYS.Add_Attribute(msg_,'SERIAL_NO', child_rec_.serial_no);
+         Message_SYS.Add_Attribute(msg_,'ENG_CHG_LEVEL', child_rec_.eng_chg_level);
+         Message_SYS.Add_Attribute(msg_,'WAIV_DEV_REJ_NO', child_rec_.waiv_dev_rej_no);
+         Message_SYS.Add_Attribute(msg_,'HANDLING_UNIT_ID', child_rec_.handling_unit_id);
+         Message_SYS.Add_Attribute(msg_,'PART_OWNERSHIP', child_rec_.part_ownership_db);
+         Message_SYS.Add_Attribute(msg_,'OWNING_VENDOR_NO', child_rec_.owning_vendor_no);
+         Message_SYS.Add_Attribute(msg_,'QTY_RECEIPT', child_rec_.sales_qty_to_return);
+         Message_SYS.Add_Attribute(msg_,'QTY_RECEIPT_INV', child_rec_.inv_qty_to_return);
+         Message_SYS.Add_Attribute(msg_,'CATCH_QTY_RECEIPT', child_rec_.catch_qty_to_return);
+         -- gelr:modify_date_applied, begin
+         Message_SYS.Add_Attribute(msg_,'DATE_APPLIED', child_rec_.arrival_date);
+         -- gelr:modify_date_applied, end 
+         -- gelr:warehouse_journal, begin
+         Message_SYS.Add_Attribute(msg_,'EXTERNAL_DELNOTE_REF', child_rec_.external_delivery_note_ref);
+         Message_SYS.Add_Attribute(msg_,'EXTERNAL_DELNOTE_DATE', child_rec_.external_delivery_note_date);
+         Message_SYS.Add_Attribute(msg_,'DELIV_REASON_ID', child_rec_.delivery_reason_id);         
+         -- gelr:warehouse_journal, end
+         Message_SYS.Add_Attribute(msg_,'RECEIPT_ALL', 'FALSE');                    
+      END IF;     
+      Return_Material_Line_Initial_Check___(child_rec_.rma_no, child_rec_.rma_line_no);   
+   END LOOP;
+   Message_SYS.Add_Attribute(msg_,'PACK_COMPLETE', 'TRUE');
+   Return_Material_Line_API.Unpack_Cust_Receipt(msg_, 'RETURN');
+
+END Execute_Ok___;
+
+-- Sets all the quantities to return as null
+PROCEDURE Clear_Defaults___ (
+   objkey_ IN VARCHAR2)
+IS
+   parent_rec_  Receive_Parts_Order_Deliveries_Virtual_Rec;
+   parent_key_  Receive_Parts_Order_Deliveries_Virtual_Key;
+   
+   child_rec_   Receive_Parts_Virtual_Rec;
+   child_key_   Receive_Parts_Virtual_Key;
+   msg_         CLOB;
+   
+BEGIN
+   parent_key_.objkey := objkey_;
+   parent_rec_   := Get_Record___(parent_key_);
+
+   FOR parts_order_delivery_rec_ IN Get_Rec_Parts_Order_Del_Array___(parent_key_) LOOP  
+      child_key_.objkey := parts_order_delivery_rec_.objkey;
+      child_rec_        := Get_Record___(child_key_);
+      child_rec_.sales_qty_to_Return := NULL;
+      child_rec_.inv_qty_to_return := NULL;
+      child_rec_.catch_qty_to_return := NULL;
+      
+      CRUD_Update___(child_rec_, child_rec_);
+   END LOOP;
+
+END Clear_Defaults___;
+
+FUNCTION Check_Source_Order_Comsumption___(
+   parent_objkey_ IN VARCHAR2 ) RETURN NUMBER
+IS
+   $IF (Component_Expctr_SYS.INSTALLED) $THEN
+   parent_rec_  Receive_Parts_Order_Deliveries_Virtual_Rec;
+   parent_key_  Receive_Parts_Order_Deliveries_Virtual_Key;
+   
+   selection_in_        VARCHAR2(32000);
+   current_selection_   VARCHAR2(32000);
+   rma_no_              NUMBER;
+   rma_line_no_         NUMBER;
+   rma_line_details_rec_ Rma_Line_Details_Struc_Rec;
+   license_enabled_     VARCHAR2(10);
+   demand_code_         VARCHAR2(20);
+   demand_order_ref1_   VARCHAR2(15);
+   demand_order_ref2_   VARCHAR2(10);
+   demand_order_ref3_   VARCHAR2(4);
+   demand_order_ref4_   NUMBER;
+   $END
+   source_consumption_  NUMBER := 0;
+
+BEGIN 
+   $IF (Component_Expctr_SYS.INSTALLED) $THEN
+   parent_key_.objkey := parent_objkey_;
+   parent_rec_        := Get_Record___(parent_key_);
+   selection_in_      := CONCAT(parent_rec_.full_selection, ';');
+   
+   -- Check source order consumption for all the lines
+   WHILE (INSTR(selection_in_, ';') > 0) LOOP
+      current_selection_    := substr(selection_in_, 0, INSTR(selection_in_, ';'));
+      rma_no_               := Client_SYS.Get_Key_Reference_Value(current_selection_, 'RMA_NO');
+      rma_line_no_          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'RMA_LINE_NO');
+      rma_line_details_rec_ := Fetch_Rma_Line_Details___(rma_no_, rma_line_no_);
+      
+      license_enabled_   := Customer_Order_Flow_API.Get_License_Enabled(rma_no_, 'INTERACT_RMA'); 
+         
+      IF (license_enabled_ = 'TRUE') THEN
+         demand_code_ := Customer_Order_Line_API.Get_Demand_Code_Db(rma_line_details_rec_.order_no, rma_line_details_rec_.line_no, rma_line_details_rec_.rel_no, 0);
+         IF demand_code_ = 'PO' THEN
+            Customer_Order_Line_API.Get_Demand_Order_Info(demand_order_ref1_, demand_order_ref2_, demand_order_ref3_, demand_order_ref4_, rma_line_details_rec_.order_no, rma_line_details_rec_.line_no, rma_line_details_rec_.rel_no, 0);
+         END IF;
+         source_consumption_ := Exp_License_Connect_Util_API.Check_Source_Consumption(rma_line_details_rec_.order_no, rma_line_details_rec_.line_no, rma_line_details_rec_.rel_no, 
+                                                                                      Customer_Order_Line_API.Get_Expctr_License_Order_Type(demand_code_, demand_order_ref1_, demand_order_ref2_, demand_order_ref3_));
+      END IF;
+      
+      -- Exist the loop if source_consumption_ = 1 atleast for 1 record.
+      IF source_consumption_ = 1 THEN
+         EXIT;
+      END IF;
+   
+      selection_in_          := substr(selection_in_, INSTR(selection_in_, ';')+1);  
+   END LOOP;
+
+   RETURN source_consumption_;  
+   $ELSE
+      RETURN source_consumption_; 
+   $END
+END Check_Source_Order_Comsumption___;
+
+PROCEDURE Update_Coverage_Quantities___ (
+   parent_objkey_ IN VARCHAR2 ) 
+IS
+   $IF (Component_Expctr_SYS.INSTALLED) $THEN
+   parent_rec_  Receive_Parts_Order_Deliveries_Virtual_Rec;
+   parent_key_  Receive_Parts_Order_Deliveries_Virtual_Key;
+   
+   child_rec_   Receive_Parts_Virtual_Rec;
+   child_key_   Receive_Parts_Virtual_Key;
+   selection_in_        VARCHAR2(32000);
+   current_selection_   VARCHAR2(32000);
+   rma_no_              NUMBER;
+   rma_line_no_         NUMBER;
+   rma_line_details_rec_ Rma_Line_Details_Struc_Rec;
+   license_enabled_     VARCHAR2(10);
+   demand_code_         VARCHAR2(20);
+   demand_order_ref1_   VARCHAR2(15);
+   demand_order_ref2_   VARCHAR2(10);
+   demand_order_ref3_   VARCHAR2(4);
+   demand_order_ref4_   NUMBER;
+   source_consumption_  NUMBER := 0;
+   $END
+BEGIN
+   $IF (Component_Expctr_SYS.INSTALLED) $THEN
+   parent_key_.objkey   := parent_objkey_;
+   parent_rec_          := Get_Record___(parent_key_);  
+   selection_in_        := CONCAT(parent_rec_.full_selection, ';');
+    
+   WHILE (INSTR(selection_in_, ';') > 0) LOOP
+      current_selection_    := substr(selection_in_, 0, INSTR(selection_in_, ';'));
+      rma_no_               := Client_SYS.Get_Key_Reference_Value(current_selection_, 'RMA_NO');
+      rma_line_no_          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'RMA_LINE_NO');
+      rma_line_details_rec_ := Fetch_Rma_Line_Details___(rma_no_, rma_line_no_);
+   
+      license_enabled_       := Customer_Order_Flow_API.Get_License_Enabled(rma_no_, 'INTERACT_RMA'); 
+         
+      IF (license_enabled_ = 'TRUE') THEN
+         demand_code_ := Customer_Order_Line_API.Get_Demand_Code_Db(rma_line_details_rec_.order_no, rma_line_details_rec_.line_no, rma_line_details_rec_.rel_no, 0);
+         IF demand_code_ = 'PO' THEN
+            Customer_Order_Line_API.Get_Demand_Order_Info(demand_order_ref1_, demand_order_ref2_, demand_order_ref3_, demand_order_ref4_, rma_line_details_rec_.order_no, rma_line_details_rec_.line_no, rma_line_details_rec_.rel_no, 0);
+         END IF;
+         source_consumption_ := Exp_License_Connect_Util_API.Check_Source_Consumption(rma_line_details_rec_.order_no, rma_line_details_rec_.line_no, rma_line_details_rec_.rel_no, 
+                                                                                      Customer_Order_Line_API.Get_Expctr_License_Order_Type(demand_code_, demand_order_ref1_, demand_order_ref2_, demand_order_ref3_));
+      END IF;
+      
+      IF source_consumption_ = 1 THEN
+         FOR parts_order_delivery_rec_ IN Get_Rec_Parts_Order_Del_Array___(parent_key_) LOOP  
+            child_key_.objkey := parts_order_delivery_rec_.objkey;
+            child_rec_        := Get_Record___(child_key_);
+
+            IF (child_rec_.sales_qty_to_return IS NOT NULL AND child_rec_.sales_qty_to_return > 0) OR 
+               (child_rec_.inv_qty_to_return IS NOT NULL AND child_rec_.inv_qty_to_return > 0 ) THEN
+
+               Return_Material_Line_Initial_Check___(rma_no_, rma_line_no_);   
+
+               Exp_License_Connect_Util_API.Update_Coverage_Quantities('Return', 
+                                                                     rma_line_details_rec_.order_no, 
+                                                                     rma_line_details_rec_.line_no, 
+                                                                     rma_line_details_rec_.rel_no, 
+                                                                     0, 
+                                                                     NVL(child_rec_.inv_qty_to_return, child_rec_.sales_qty_to_return));
+            END IF;
+         END LOOP;
+      END IF;
+
+      selection_in_          := substr(selection_in_, INSTR(selection_in_, ';')+1);  
+   END LOOP;
+   $ELSE
+      NULL; 
+   $END
+END Update_Coverage_Quantities___;
+
+FUNCTION Check_Shortage_Exist___(
+   contract_           IN VARCHAR2,
+   part_no_            IN VARCHAR2) RETURN NUMBER
+IS
+   shortage_flag_      VARCHAR2(10) := Mpccom_System_Parameter_API.Get_Parameter_Value1('SHORTAGE_HANDLING');
+   part_shortage_flag_ VARCHAR2(100) := INVENTORY_PART_API.Get_Shortage_Flag(contract_, part_no_);
+BEGIN
+   IF shortage_flag_ = 'Y' THEN
+      IF part_shortage_flag_ = Inventory_Part_Shortage_API.Decode('Y') THEN
+         RETURN Shortage_Demand_API.Shortage_Exists(contract_, part_no_);
+      END IF;    
+   END IF;
+   
+   RETURN 0;
+END Check_Shortage_Exist___;
+
+FUNCTION Validate_Ok___(
+   parent_objkey_ IN VARCHAR2 ) RETURN Validate_Ok_Struc_Rec
+IS
+   parent_rec_  Receive_Parts_Order_Deliveries_Virtual_Rec;
+   parent_key_  Receive_Parts_Order_Deliveries_Virtual_Key;
+   
+   child_rec_   Receive_Parts_Virtual_Rec;
+   child_key_   Receive_Parts_Virtual_Key;
+   
+   validate_rec_  Validate_Ok_Struc_Rec;
+   lot_serial_qty_allowed_ VARCHAR2(5);
+   qty_can_return_on_lot_  NUMBER;
+   wo_exist_               VARCHAR2(5);
+   rma_cond_code_          VARCHAR2(10);
+   ser_cond_code_          VARCHAR2(10);
+BEGIN
+   parent_key_.objkey := parent_objkey_;
+   parent_rec_   := Get_Record___(parent_key_);
+
+   FOR parts_order_delivery_rec_ IN Get_Rec_Parts_Order_Del_Array___(parent_key_) LOOP  
+      child_key_.objkey := parts_order_delivery_rec_.objkey;
+      child_rec_        := Get_Record___(child_key_);
+
+      IF (child_rec_.catch_qty_to_return IS NOT NULL AND child_rec_.inv_qty_to_return IS NULL) THEN
+          validate_rec_.qty_to_return_null_err := TRUE;
+          EXIT;
+      END IF;
+
+      IF child_rec_.condition_code IS NOT NULL THEN
+         rma_cond_code_ := Return_Material_Line_API.Get_Condition_Code(child_rec_.rma_no, child_rec_.rma_line_no);
+         ser_cond_code_ := Part_Serial_Catalog_API.Get_Condition_Code(child_rec_.part_no, child_rec_.serial_no);
+         
+         IF (ser_cond_code_ != rma_cond_code_ AND child_rec_.sales_qty_to_Return > 0 ) THEN
+            validate_rec_.condition_code := rma_cond_code_;
+            IF child_rec_.serial_no != '*' THEN
+               validate_rec_.serial_condition_code_diff := TRUE;
+            END IF;
+         END IF;
+      END IF;
+
+      IF child_rec_.part_no IS NOT NULL THEN
+         Return_Material_Line_API.Return_Lot_Serial_Allowed(  lot_serial_qty_allowed_, 
+                                                              qty_can_return_on_lot_, 
+                                                              child_rec_.rma_no, 
+                                                              child_rec_.rma_line_no, 
+                                                              child_rec_.lot_batch_no, 
+                                                              child_rec_.serial_no, 
+                                                              child_rec_.eng_chg_level, 
+                                                              child_rec_.inv_qty_to_return);
+
+         IF (lot_serial_qty_allowed_ = 'FALSE' AND child_rec_.sales_qty_to_Return > 0) THEN
+            validate_rec_.lot_batch_no          := child_rec_.lot_batch_no;
+            validate_rec_.qty_can_return_on_lot := TRUNC(qty_can_return_on_lot_, Count_Decimals___(qty_can_return_on_lot_));
+            validate_rec_.qty_to_return         := TRUNC(child_rec_.inv_qty_to_return, Count_Decimals___(child_rec_.inv_qty_to_return));
+            validate_rec_.return_unit_meas      := child_rec_.inv_uom;
+            validate_rec_.serial_no             := child_rec_.serial_no;
+            validate_rec_.eng_chg_level         := child_rec_.eng_chg_level;  
+            IF (Return_Material_Line_API.Get_Rental_Db(child_rec_.rma_no, child_rec_.rma_line_no) = 'FALSE') THEN
+               validate_rec_.diff_l_s_r_no := TRUE;
+            END IF;
+         ELSE IF (child_rec_.sales_qty_to_Return IS NOT NULL AND child_rec_.sales_qty_to_Return = 0) THEN   
+            validate_rec_.return_zero_quantity := TRUE;
+            EXIT;
+         END IF;
+         END IF;
+
+         $IF (Component_Wo_SYS.INSTALLED) $THEN 
+            IF child_rec_.serial_no != '*' THEN
+               wo_exist_ := Active_Separate_API.Exist_Wo_For_Rma_Obj(child_rec_.rma_no, 
+                                                              child_rec_.rma_line_no, 
+                                                              child_rec_.contract, 
+                                                              child_rec_.part_no, 
+                                                              child_rec_.serial_no); 
+
+               IF (wo_exist_ = 'TRUE') THEN
+                  validate_rec_.wo_exist_for_serial_object  := TRUE;
+                  validate_rec_.serial_no                   := child_rec_.serial_no;
+                  validate_rec_.part_no                     := child_rec_.part_no;
+               END IF;                                              
+            END IF; 
+         $ELSE
+            validate_rec_.wo_exist_for_serial_object  := FALSE;
+            validate_rec_.serial_no                   := null;
+            validate_rec_.part_no                     := null;
+         $END   
+      END IF;
+
+      IF ((child_rec_.expiration_date IS NULL)  AND (child_rec_.durability_days IS NOT NULL) AND 
+         NOT(Inventory_Part_In_Stock_API.Exists(child_rec_.contract, child_rec_.part_no, child_rec_.configuration_id, child_rec_.location_no, child_rec_.lot_batch_no, child_rec_.serial_no, child_rec_.eng_chg_level, child_rec_.waiv_dev_rej_no, child_rec_.activity_seq, child_rec_.handling_unit_id))) THEN
+         validate_rec_.expiration_date_null := TRUE;
+         validate_rec_.rma_no := child_rec_.rma_no;
+         validate_rec_.rma_line_no := child_rec_.rma_line_no;
+         EXIT;
+      END IF;
+      -- gelr:warehouse_journal, begin
+      IF (Company_Localization_Info_API.Get_Parameter_Val_From_Site_Db(child_rec_.contract, 'WAREHOUSE_JOURNAL') = Fnd_Boolean_API.DB_TRUE ) THEN
+         IF (Sales_Part_API.Get_Non_Inv_Part_Type_Db(child_rec_.contract, child_rec_.catalog_no) != 'SERVICE') THEN
+            IF (child_rec_.external_delivery_note_ref IS NULL) THEN
+               Error_SYS.Check_Not_Null(lu_name_, 'External Delivery Note Reference', child_rec_.external_delivery_note_ref);               
+            END IF;            
+            IF (child_rec_.external_delivery_note_date IS NULL) THEN
+               Error_SYS.Check_Not_Null(lu_name_, 'External Delivery Note Date', child_rec_.external_delivery_note_date);
+            END IF;
+            IF (child_rec_.delivery_reason_id IS NULL) THEN
+               Error_SYS.Check_Not_Null(lu_name_, 'Delivery Reason ID', child_rec_.delivery_reason_id);
+            END IF;               
+         END IF;            
+      END IF;
+      -- gelr:warehouse_journal, end
+   END LOOP;
+   RETURN validate_rec_;
+   
+END Validate_Ok___;
+
+FUNCTION Count_Decimals___ (
+   number_  NUMBER) RETURN NUMBER
+IS
+   decimal_ NUMBER := 0;
+   counter_ NUMBER := 0;
+BEGIN
+   decimal_ := number_;
+   counter_ := 0;
+   WHILE (mod(decimal_, 1) != 0) 
+   LOOP
+      decimal_ := decimal_ * 10;
+      counter_ := counter_ + 1;
+   END LOOP;
+   RETURN counter_;   
+END Count_Decimals___;
+
+FUNCTION Fetch_Expiration_Date___(
+   contract_         IN VARCHAR2,
+   part_no_          IN VARCHAR2,
+   configuration_id_ IN VARCHAR2,
+   location_no_      IN VARCHAR2,
+   lot_batch_no_     IN VARCHAR2,
+   serial_no_        IN VARCHAR2,
+   eng_chg_level_    IN VARCHAR2,
+   waiv_dev_rej_no_  IN VARCHAR2,
+   activity_seq_     IN NUMBER,
+   handling_unit_id_ IN NUMBER,
+   expiration_date_  IN DATE)  RETURN DATE
+IS
+   
+BEGIN
+   RETURN NVL(Inventory_Part_In_Stock_API.Get_Expiration_Date(contract_, 
+                                                          part_no_, 
+                                                          configuration_id_, 
+                                                          location_no_, 
+                                                          lot_batch_no_, 
+                                                          serial_no_, 
+                                                          eng_chg_level_, 
+                                                          waiv_dev_rej_no_, 
+                                                          activity_seq_, 
+                                                          handling_unit_id_), expiration_date_);
+END Fetch_Expiration_Date___;

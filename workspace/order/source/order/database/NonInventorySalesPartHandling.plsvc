@@ -1,0 +1,198 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: NonInventorySalesPartHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign    History
+--  ------     ------  ---------------------------------------------------------
+-- 2021-05-24  ChFolk  SCZ-14841(Bug 159133), Modified Validate_Catalog_No___ to use new method Get_Desc_For_New_Sales_Part to get the Catalog_Desc.
+-- 2021-02-22  WaSalk  SC2020R1-12577, Modified Validate_Contract___() by adding enabled_lcc_params to contract_info_rec_.
+-- 2020-02-19  MaEelk  SCXTEND-2225, Modified CRUD_Default_Copy___ to work duplicate correctly.
+-- 2019-08-28  KHVESE  SCUXXW4-16326, Modified method CRUD_Default___ to validate Tax_CODE against TAX_CLASS_ID.
+-- 2019-01-18  IzShlk  SCUXXW4-9427, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Calculate_Price_Incl_Tax___(
+   price_    IN NUMBER,
+   taxable_  IN BOOLEAN,
+   tax_code_ IN VARCHAR2,
+   company_  IN VARCHAR2 )  RETURN NUMBER
+IS
+   price_including_tax_ NUMBER;
+   tax_percentage_      NUMBER;
+BEGIN
+   IF taxable_ THEN
+      IF tax_code_ IS NOT NULL THEN
+         tax_percentage_ := Statutory_Fee_API.Get_Fee_Rate(company_, tax_code_);
+         price_including_tax_ := price_ *((tax_percentage_ / 100) + 1);
+      ELSE
+         price_including_tax_ := price_;
+      END IF;
+   ELSE
+      price_including_tax_ := price_;
+   END IF;
+   RETURN price_including_tax_;
+END Calculate_Price_Incl_Tax___;
+
+FUNCTION Calculate_Price___(
+   price_incl_tax_ IN NUMBER,
+   taxable_        IN BOOLEAN,
+   tax_code_       IN VARCHAR2,
+   company_        IN VARCHAR2 )  RETURN NUMBER
+IS
+   price_           NUMBER;
+   tax_percentage_  NUMBER;
+BEGIN
+   IF taxable_ THEN
+      IF tax_code_ IS NOT NULL THEN
+         tax_percentage_ := Statutory_Fee_API.Get_Fee_Rate(company_, tax_code_);
+         price_ := price_incl_tax_ /((tax_percentage_ / 100) + 1);
+      ELSE
+         price_ := price_incl_tax_;
+      END IF;
+   ELSE
+      price_ := price_incl_tax_;
+   END IF;
+   RETURN price_;
+END Calculate_Price___;
+
+FUNCTION Calculate_Prices___(
+   use_price_incl_tax_     IN BOOLEAN,
+   price_                  IN NUMBER,
+   price_incl_tax_         IN NUMBER,
+   rental_price_           IN NUMBER,
+   reantal_price_incl_tax_ IN NUMBER,
+   taxable_                IN BOOLEAN,
+   tax_code_               IN VARCHAR2,
+   company_                IN VARCHAR2 )  RETURN Calculate_Prices_Structure_Rec
+IS
+   calculate_prices_structure_rec_ Calculate_Prices_Structure_Rec;
+BEGIN
+   IF use_price_incl_tax_ THEN
+      calculate_prices_structure_rec_.price        := Calculate_Price___(price_incl_tax_, taxable_, tax_code_, company_);
+      calculate_prices_structure_rec_.rental_price := Calculate_Price___(reantal_price_incl_tax_, taxable_, tax_code_, company_);
+   ELSE
+      calculate_prices_structure_rec_.price_incl_tax        := Calculate_Price_Incl_Tax___(price_, taxable_, tax_code_, company_);
+      calculate_prices_structure_rec_.rental_price_incl_tax := Calculate_Price_Incl_Tax___(rental_price_, taxable_, tax_code_, company_);
+   END IF;
+   RETURN calculate_prices_structure_rec_;
+END Calculate_Prices___;
+
+FUNCTION Validate_Contract___(
+   contract_ IN VARCHAR2 )  RETURN Contract_Info_Rec
+IS
+   contract_info_rec_  Contract_Info_Rec;
+   company_            VARCHAR2(20);
+   taxable_            VARCHAR2(10);
+   tax_code_           VARCHAR2(20);
+BEGIN
+   company_                              := Site_API.Get_Company(contract_);
+   contract_info_rec_.currency           := Company_Finance_API.Get_Currency_Code(company_);
+   contract_info_rec_.use_price_incl_tax := (Site_Discom_Info_API.Get_Use_Price_Incl_Tax_Ord_Db(contract_) = 'TRUE');
+   contract_info_rec_.company            := company_;
+   
+   Tax_Handling_Order_Util_API.Get_Tax_Info_For_Sales_Object(tax_code_, taxable_, company_);
+   
+   contract_info_rec_.taxable            := (taxable_ = 'TRUE');
+   contract_info_rec_.tax_code           := tax_code_;
+   -- gelr:localization_control_center, begin
+   contract_info_rec_.enabled_lcc_params := Company_Localization_Info_API.Get_Enabled_Params_per_Company(company_);
+   -- gelr:localization_control_center, end   
+   RETURN contract_info_rec_;
+END Validate_Contract___;
+
+FUNCTION Get_Price_Conv_Factor___(
+   sales_unit_meas_ IN VARCHAR2,
+   price_unit_meas_ IN VARCHAR2 )  RETURN NUMBER
+IS
+BEGIN
+   RETURN Technical_Unit_Conv_API.Get_Valid_Conv_Factor(sales_unit_meas_, price_unit_meas_);
+END Get_Price_Conv_Factor___;
+
+FUNCTION Unit_Measure_Exist___ (
+   sales_unit_meas_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   
+BEGIN
+   Iso_Unit_API.Exist(sales_unit_meas_);
+   RETURN NULL;
+END Unit_Measure_Exist___;
+
+FUNCTION Validate_Catalog_No___(
+   catalog_no_ IN VARCHAR2,
+   contract_   IN VARCHAR2 )  RETURN Catalog_Info_Rec
+IS
+   sales_part_catalog_desc_ VARCHAR2(200);
+   catalog_desc_            VARCHAR2(200);
+   unit_code_               VARCHAR2(10);
+   use_part_catalog_desc_   VARCHAR2(20);
+   info_message_            VARCHAR2(30) := NULL;
+   configurable_            BOOLEAN := FALSE;
+   catalog_info_rec_        Catalog_Info_Rec;
+BEGIN
+   sales_part_catalog_desc_ := Sales_Part_API.Get_Catalog_Desc(contract_, catalog_no_);
+   unit_code_               := Part_Catalog_API.Get_Unit_Code(catalog_no_);
+   use_part_catalog_desc_   := Site_Discom_Info_API.Get_Use_Partca_Desc_Order_Db(contract_);
+   configurable_            := CASE Part_Catalog_API.Get_Configurable_Db(catalog_no_) WHEN 'CONFIGURED' THEN TRUE ELSE FALSE END;
+
+   IF sales_part_catalog_desc_ IS NOT NULL AND use_part_catalog_desc_ = 'FLASE' THEN
+      info_message_ := 'This part already exists';
+      catalog_info_rec_.info_message := info_message_;
+      RETURN catalog_info_rec_;
+   END IF;
+   catalog_info_rec_.catalog_desc := Sales_Part_API.Get_Desc_For_New_Sales_Part(contract_, catalog_no_);
+   catalog_info_rec_.unit_code    := unit_code_;
+   catalog_info_rec_.configurable := configurable_;
+
+   RETURN catalog_info_rec_;
+END Validate_Catalog_No___;
+
+@Override
+PROCEDURE CRUD_Default___ (
+   key_  IN  Sales_Part_Key,
+   attr_ IN OUT VARCHAR2,
+   info_ OUT VARCHAR2 )
+IS
+BEGIN
+   Client_SYS.Add_To_Attr('CATALOG_TYPE_DB', 'NON', attr_);
+   super(key_, attr_, info_);
+   Client_SYS.Add_To_Attr('LIST_PRICE', 0, attr_);
+   Client_SYS.Add_To_Attr('LIST_PRICE_INCL_TAX', 0, attr_);
+   IF Client_SYS.Get_Item_Value('TAX_CLASS_ID', attr_) IS NOT NULL THEN 
+      Client_SYS.Set_Item_Value('TAX_CODE', '', attr_);
+   END IF;
+END CRUD_Default___;
+
+FUNCTION Check_Characteristic_Code_Exist___(
+   objkey_              IN VARCHAR2,
+   part_no_             IN VARCHAR2,
+   characteristic_code_ IN VARCHAR2 )  RETURN BOOLEAN
+IS
+   CURSOR getCharacteristics IS
+   SELECT 1
+   FROM non_inventory_sales_part_handling_copy_characteristics_template_virtual_vrt t
+   WHERE t.parent_objkey = objkey_ AND t.characteristic_code = characteristic_code_ AND t.catalog_no = part_no_;
+   
+   dummy_ NUMBER;
+   exist_ BOOLEAN;
+BEGIN                            
+      OPEN getCharacteristics;
+      FETCH getCharacteristics INTO dummy_;
+      exist_ := getCharacteristics%FOUND;
+      CLOSE getCharacteristics;
+
+   RETURN exist_;
+END Check_Characteristic_Code_Exist___;
+
+@Override
+PROCEDURE CRUD_Default_Copy___ (
+   rec_  IN OUT Sales_Part_Rec )
+IS
+BEGIN
+   super(rec_);   
+   rec_.eng_attribute := NULL;
+END CRUD_Default_Copy___;

@@ -1,0 +1,382 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: QuickCustomerOrderRegistration
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+-- Date        Sign     History
+-- ----------  ------   -----------------------------------------------------
+-- 2022-02-02  NiDalk   SC21R2-7473, Added Validate_Supply_Code___.
+-- 2022-01-28  ChBnlk   SC21R2-7345, Corrected issues identified through system testing.
+-- 2022-01-24  ChBnlk   SC21R2-7331, Modified Create_Order___ to fetch default authorizer if the authorizer is not available in the rec_.
+-- 2022-01-17  ChBnlk   SC21R2-1083, Modifed Get_Catalog_No_Defaults___ by adding method call Customer_Order_Line_API.Handle_Replacement_Part
+-- 2022-01-17           to fetch the replacement part.
+-- 2021-11-11  DhAplk   SC21R2-1085, Added Add_Quick_Cust_Ord_Line___ procedure. 
+-- 2021-10-22  ChBnlk   SC21R2-1083, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+@IgnoreUnitTest TrivialFunction
+FUNCTION Get_Customer_Defaults___ (
+   customer_no_          IN VARCHAR2,
+   contract_             IN VARCHAR2,   
+   wanted_delivery_date_ IN DATE,
+   currency_code_        IN VARCHAR2,
+   order_id_             IN VARCHAR2,
+   ship_addr_no_         IN VARCHAR2 ) RETURN Customer_Defaults_Structure_Rec
+IS
+    attr_               VARCHAR2(32000);
+    rec_                Customer_Defaults_Structure_Rec;
+    bill_addr_no_       VARCHAR2(50);
+BEGIN
+	Client_SYS.Clear_Attr(attr_); 
+   IF (customer_no_ IS NOT NULL)  THEN
+      Client_SYS.Add_To_Attr('CUSTOMER_NO', customer_no_, attr_);
+   END IF;   
+   IF (contract_ IS NOT NULL) THEN 
+      Client_SYS.Add_To_Attr('CONTRACT', contract_, attr_); 
+   END IF;
+   IF (wanted_delivery_date_ IS NOT NULL) THEN
+      Client_SYS.Add_To_Attr('WANTED_DELIVERY_DATE', wanted_delivery_date_, attr_);  
+   END IF;
+   IF (currency_code_ IS NOT NULL) THEN
+      Client_SYS.Add_To_Attr('CURRENCY_CODE', currency_code_, attr_);  
+   END IF;
+   IF (order_id_ IS NOT NULL) THEN 
+      Client_SYS.Add_To_Attr('ORDER_ID', order_id_, attr_);
+   END IF; 
+   IF (ship_addr_no_ IS NOT NULL) THEN 
+      Client_SYS.Add_To_Attr('SHIP_ADDR_NO', ship_addr_no_, attr_);
+   END IF;
+   
+   Customer_Order_API.Get_Customer_Defaults__(attr_);
+   
+    rec_.ship_addr_no := Client_SYS.Get_Item_Value('SHIP_ADDR_NO', attr_);
+    rec_.currency_code := Client_SYS.Get_Item_Value('CURRENCY_CODE', attr_);
+    rec_.order_id := Client_SYS.Get_Item_Value('ORDER_ID', attr_);   
+    rec_.wanted_delivery_date := to_date(Client_SYS.Get_Item_Value('WANTED_DELIVERY_DATE', attr_), 'YYYY-MM-DD-HH24.MI.SS');
+    rec_.cust_ref := Client_SYS.Get_Item_Value('CUST_REF', attr_);  
+    bill_addr_no_ :=  Client_SYS.Get_Item_Value('BILL_ADDR_NO', attr_); 
+   IF (Site_Discom_Info_API.Get_Create_Ord_In_Rel_State_Db(contract_) = 'TRUE' )THEN
+      rec_.released_order_creation := true;
+   ELSE
+      rec_.released_order_creation := false;
+   END IF;
+   
+   IF (Cust_Ord_customer_API.Get_Order_Conf_Flag_Db(customer_no_) = 'Y' )THEN
+      rec_.print_order_confirmation := true;
+   ELSE
+      rec_.print_order_confirmation := false;
+   END IF;
+    
+    IF (Cust_Ord_customer_API.Get_Email_Order_Conf_Db(customer_no_)= 'TRUE' )THEN
+      rec_.email_order_confirmation := true;
+   ELSE
+      rec_.email_order_confirmation := false;
+   END IF;
+   rec_.email_address := Cust_Ord_Customer_Address_API.Get_Email(customer_no_, rec_.cust_ref, bill_addr_no_);
+   rec_.limit_sales_to_assort_exist := Quick_Cust_Ord_Reg_Util_API.Check_Limit_Sales_Assortments(customer_no_);
+   
+   RETURN rec_;
+END Get_Customer_Defaults___;
+
+@IgnoreUnitTest TrivialFunction
+FUNCTION Get_User_Defaults___ RETURN User_Default_Structure_Rec
+IS
+rec_  User_Default_Structure_Rec;
+buyer_  VARCHAR2(4000);
+BEGIN
+   User_Default_API.Get_Defaults(rec_.contract, buyer_, rec_.authorize_code);
+   rec_.company := Fetch_Company___(rec_.contract);
+   RETURN rec_;
+END Get_User_Defaults___;
+
+@IgnoreUnitTest TrivialFunction
+FUNCTION Create_Order_Internal___ (
+    parent_objkey_ IN VARCHAR2,
+    released_order_creation_ IN BOOLEAN,
+    print_order_confirmation_ IN BOOLEAN,
+    email_order_confirmation_ IN BOOLEAN,
+    email_address_            IN VARCHAR2,
+	info$_ OUT VARCHAR2) RETURN VARCHAR2
+IS
+   parent_key_           Create_Customer_Order_Virtual_Key;
+   parent_rec_           Create_Customer_Order_Virtual_Rec; 
+   part_key_             Create_Customer_Order_Lines_Virtual_Key;
+   part_rec_             Create_Customer_Order_Lines_Virtual_Rec;
+   order_no_             VARCHAR2(2000);
+   order_struct_rec_     Quick_Cust_Ord_Reg_Util_API.Quick_Cust_Ord_Struct_Rec;
+   temp_release_order_   BOOLEAN;
+     
+BEGIN
+	parent_key_.objkey   := parent_objkey_;   
+   parent_rec_          := Get_Record___(parent_key_);
+ 
+   order_struct_rec_.contract := parent_rec_.contract;
+   order_struct_rec_.authorize_code := parent_rec_.authorize_code;
+   order_struct_rec_.currency_code := parent_rec_.currency_code;
+   order_struct_rec_.customer_no := parent_rec_.customer_no;
+   order_struct_rec_.order_id := parent_rec_.order_id;
+   order_struct_rec_.ship_addr_no := parent_rec_.ship_addr_no;
+   order_struct_rec_.wanted_delivery_date := parent_rec_.wanted_delivery_date;
+   order_struct_rec_.cust_ref := parent_rec_.cust_ref;
+  
+   order_struct_rec_.order_lines := Quick_Cust_Ord_Reg_Util_API.Quick_Cust_Ord_Struct_Customer_Order_Line_Arr();
+   FOR lines_ in Get_Customer_Order_Lines___(parent_key_) LOOP  
+      part_key_.objkey := lines_.objkey;
+      part_rec_        := Get_Record___(part_key_);
+      order_struct_rec_.order_lines.extend();
+      order_struct_rec_.order_lines(order_struct_rec_.order_lines.last).contract := parent_rec_.contract;      
+      order_struct_rec_.order_lines(order_struct_rec_.order_lines.last).catalog_no := part_rec_.catalog_no;
+      order_struct_rec_.order_lines(order_struct_rec_.order_lines.last).catalog_desc := part_rec_.catalog_description;
+      order_struct_rec_.order_lines(order_struct_rec_.order_lines.last).buy_qty_due := part_rec_.buy_qty_due;
+      order_struct_rec_.order_lines(order_struct_rec_.order_lines.last).supply_code := part_rec_.supply_code;
+      order_struct_rec_.order_lines(order_struct_rec_.order_lines.last).vendor_no := part_rec_.vendor_no;
+      order_struct_rec_.order_lines(order_struct_rec_.order_lines.last).condition_code := part_rec_.condition_code;
+      order_struct_rec_.order_lines(order_struct_rec_.order_lines.last).blocked_for_invoicing := part_rec_.blocked_for_invoicing;
+      order_struct_rec_.order_lines(order_struct_rec_.order_lines.last).wanted_delivery_date := parent_rec_.wanted_delivery_date;
+      order_struct_rec_.order_lines(order_struct_rec_.order_lines.last).ship_addr_no := parent_rec_.ship_addr_no;
+   END LOOP;   
+   
+   temp_release_order_ :=  released_order_creation_;
+   
+   IF temp_release_order_ = TRUE THEN
+      temp_release_order_ := Reset_Release_Order_Creation___(parent_objkey_, released_order_creation_);
+   END IF;
+   
+  
+   order_no_ := Create_Order___(order_struct_rec_, temp_release_order_, print_order_confirmation_,
+                   email_order_confirmation_, email_address_, info$_);
+   
+   RETURN order_no_;
+   
+END Create_Order_Internal___;
+
+
+@IgnoreUnitTest TrivialFunction
+FUNCTION Get_Catalog_No_Defaults___ (
+      catalog_no_    IN VARCHAR2,
+      contract_      IN VARCHAR2,
+      language_code_ IN VARCHAR2,
+      customer_no_   IN VARCHAR2 ) RETURN Catalog_No_Defautls_Structure_Rec
+IS
+   sales_part_rec_  Sales_Part_API.Public_Rec;
+   rec_             Catalog_No_Defautls_Structure_Rec; 
+   supply_code_client_ VARCHAR2(200);
+   configured_db_  VARCHAR2(20);
+   org_catalog_no_   Customer_Order_Line_Tab.catalog_no%TYPE;    
+BEGIN
+	sales_part_rec_  := Sales_Part_API.Get(contract_, catalog_no_);
+   rec_.catalog_no := catalog_no_;
+   rec_.sales_unit_meas := sales_part_rec_.sales_unit_meas;
+   rec_.purchase_part_no := sales_part_rec_.purchase_part_no;
+   configured_db_ := Part_Catalog_API.Get_Configurable_Db(nvl(sales_part_rec_.part_no, catalog_no_));
+   
+   Customer_Order_Line_API.Handle_Replacement_Part(rec_.catalog_no,
+                               org_catalog_no_,
+                               contract_,
+                               FALSE);
+                                 
+	Customer_Order_Line_API.Validate_Cust_Ord_Lin_Defaults( rec_.catalog_no, rec_.catalog_description,
+            rec_.supply_code, rec_.vendor_no,rec_.supply_site, rec_.condition_code,
+            supply_code_client_, contract_, language_code_, customer_no_, null,
+            rec_.purchase_part_no, configured_db_, sales_part_rec_.part_no, sales_part_rec_.sourcing_option);
+  
+   IF (configured_db_ = 'CONFIGURED') THEN
+      rec_.configurable := true;
+   ELSIF (configured_db_ = 'NOT CONFIGURED') THEN
+      rec_.configurable := false;
+   END IF;
+    
+   RETURN rec_;
+END Get_Catalog_No_Defaults___;
+
+
+@IgnoreUnitTest TrivialFunction
+FUNCTION Create_Order___ (
+   order_struct_              IN Quick_Cust_Ord_Reg_Util_API.Quick_Cust_Ord_Struct_Rec,
+   released_order_creation_   IN BOOLEAN,
+   print_order_confirmation_  IN BOOLEAN,
+   email_order_confirmation_  IN BOOLEAN,
+   email_address_             IN VARCHAR2,
+	info$_                     OUT VARCHAR2) RETURN VARCHAR2
+IS
+   order_struct1_  Quick_Cust_Ord_Reg_Util_API.Quick_Cust_Ord_Struct_Rec;
+   buyer_  VARCHAR2(4000);
+BEGIN
+   order_struct1_ := order_struct_;
+   IF order_struct1_.authorize_code IS NULL  THEN
+      User_Default_API.Get_Defaults(order_struct1_.contract, buyer_, order_struct1_.authorize_code);
+   END IF;
+   IF order_struct1_.order_lines.count > 0 THEN
+      Quick_Cust_Ord_Reg_Util_API.Create_Quick_Cust_Order(order_struct1_, info$_, released_order_creation_, print_order_confirmation_,
+         email_order_confirmation_, email_address_);
+   END IF;
+   
+   RETURN order_struct1_.order_no;
+END Create_Order___;
+
+@IgnoreUnitTest NoOutParams
+PROCEDURE Add_Quick_Cust_Ord_Line___ (
+   parent_objkey_ IN VARCHAR2,
+   source_objkey_ IN VARCHAR2,
+   language_code_ IN VARCHAR2,
+   customer_no_   IN VARCHAR2,
+   source_ IN VARCHAR2)
+IS
+   part_parent_key_      Add_Multiple_Parts_Virtual_Key;
+   template_parent_key_  Add_From_Template_Virtual_Key;
+   child_part_rec_       Create_Customer_Order_Lines_Virtual_Rec;
+   order_parent_key_     Add_From_Order_Virtual_Key;
+   
+   CURSOR Get_Part_Lines___ (master_ IN Add_Multiple_Parts_Virtual_Key) IS
+   SELECT * FROM ${PROJECTION}_ADD_PARTS_TEMP_VIRTUAL_VRT WHERE parent_objkey = master_.objkey;
+BEGIN
+   
+	IF (source_ = 'PARTS') THEN
+      part_parent_key_.objkey := source_objkey_;
+      FOR line_rec_ IN Get_Part_Lines___(part_parent_key_) LOOP
+         child_part_rec_.objkey           := sys_guid();
+         child_part_rec_.parent_objkey    := parent_objkey_;
+         child_part_rec_.contract         := line_rec_.contract;
+         child_part_rec_.catalog_no       := line_rec_.catalog_no;
+         child_part_rec_.buy_qty_due      := line_rec_.quantity;
+         child_part_rec_.sales_unit_meas  := line_rec_.sales_unit_meas;
+         child_part_rec_.configurable     := CASE line_rec_.configurable WHEN 'TRUE' THEN TRUE WHEN 'FALSE' THEN FALSE ELSE NULL END;
+         Add_To_Co_Line_Rec___(child_part_rec_, language_code_, customer_no_);
+         CRUD_Create___(child_part_rec_);
+      END LOOP;
+   END IF; 
+
+   IF (source_ = 'TEMPLATE') THEN
+      template_parent_key_.objkey := source_objkey_;
+      FOR line_rec_ IN Get_Co_Template_Lines___(template_parent_key_) LOOP
+         IF line_rec_.quantity > 0 THEN
+            child_part_rec_.objkey           := sys_guid();
+            child_part_rec_.parent_objkey    := parent_objkey_;
+            child_part_rec_.contract         := line_rec_.contract;
+            child_part_rec_.catalog_no       := line_rec_.catalog_no;
+            child_part_rec_.buy_qty_due      := line_rec_.quantity;
+            child_part_rec_.sales_unit_meas  := line_rec_.sales_unit_meas;
+            Add_To_Co_Line_Rec___(child_part_rec_, language_code_, customer_no_);
+            CRUD_Create___(child_part_rec_);
+         END IF;
+      END LOOP;
+   END IF;
+
+   IF (source_ = 'ORDER') THEN
+      order_parent_key_.objkey := source_objkey_;
+      FOR line_rec_ IN Get_Order_Lines___(order_parent_key_) LOOP
+         IF line_rec_.buy_qty_due > 0 THEN
+            child_part_rec_.objkey           := sys_guid();
+            child_part_rec_.parent_objkey    := parent_objkey_;
+            child_part_rec_.contract         := line_rec_.contract;
+            child_part_rec_.catalog_no       := line_rec_.catalog_no;
+            child_part_rec_.buy_qty_due      := line_rec_.buy_qty_due;
+            child_part_rec_.sales_unit_meas  := line_rec_.sales_unit_meas;
+            child_part_rec_.condition_code   := line_rec_.condition_code;
+            Add_To_Co_Line_Rec___(child_part_rec_, language_code_, customer_no_);
+            CRUD_Create___(child_part_rec_); 
+         END IF;         
+      END LOOP;
+   END IF; 
+   
+END Add_Quick_Cust_Ord_Line___;
+
+@IgnoreUnitTest TrivialFunction
+PROCEDURE Add_To_Co_Line_Rec___ (
+   newrec_  IN OUT Create_Customer_Order_Lines_Virtual_Rec,
+   language_code_ IN VARCHAR2,
+   customer_no_   IN VARCHAR2)
+IS
+   default_info_rec_    Catalog_No_Defautls_Structure_Rec;
+BEGIN
+   default_info_rec_ := Get_Catalog_No_Defaults___( newrec_.catalog_no, newrec_.contract, language_code_, customer_no_ );
+   
+   newrec_.catalog_description  := default_info_rec_.catalog_description;
+   newrec_.configurable         := default_info_rec_.configurable;
+   newrec_.supply_code          := default_info_rec_.supply_code;
+   newrec_.supply_site          := default_info_rec_.supply_site;
+   newrec_.condition_code       := default_info_rec_.condition_code;
+   newrec_.vendor_no            := default_info_rec_.vendor_no;
+   newrec_.purchase_part_no     := default_info_rec_.purchase_part_no;
+   newrec_.blocked_for_invoicing   := false;
+
+END Add_To_Co_Line_Rec___;    
+
+@IgnoreUnitTest TrivialFunction
+FUNCTION Fetch_Company___ (
+   contract_ IN VARCHAR2) RETURN VARCHAR2
+IS
+   company_  VARCHAR2(20);
+BEGIN
+   company_ := Site_API.Get_Company(contract_);
+	RETURN company_;
+END Fetch_Company___;
+
+@IgnoreUnitTest TrivialFunction
+FUNCTION Reset_Release_Order_Creation___ (
+   parent_objkey_             IN VARCHAR2,
+   released_order_creation_   IN BOOLEAN) RETURN BOOLEAN
+IS
+   new_released_order_creation_ BOOLEAN;
+   part_rec_             Create_Customer_Order_Lines_Virtual_Rec;
+   part_key_             Create_Customer_Order_Lines_Virtual_Key;
+   parent_key_           Create_Customer_Order_Virtual_Key;
+BEGIN
+   new_released_order_creation_ := released_order_creation_;
+   parent_key_.objkey   := parent_objkey_;       
+   FOR lines_ in Get_Customer_Order_Lines___(parent_key_) LOOP        
+      part_key_.objkey := lines_.objkey;
+      part_rec_        := Get_Record___(part_key_);
+       
+      IF (new_released_order_creation_ = TRUE) AND (part_rec_.configurable = TRUE) THEN
+         new_released_order_creation_ := FALSE;
+         EXIT;
+      END IF;
+   END LOOP;
+   RETURN new_released_order_creation_;
+END Reset_Release_Order_Creation___;
+
+
+@IgnoreUnitTest TrivialFunction
+FUNCTION Get_Supply_Site___ (
+   vendor_no_ IN VARCHAR2) RETURN VARCHAR2
+IS
+   supply_site_  VARCHAR2(5);
+BEGIN
+   $IF (Component_Purch_SYS.INSTALLED) $THEN
+      supply_site_ := Supplier_API.Get_Acquisition_Site(vendor_no_);
+   $END
+   RETURN supply_site_;
+END Get_Supply_Site___;
+
+@IgnoreUnitTest TrivialFunction
+FUNCTION Validate_Supply_Code___ (
+   validation_rec_ IN Cust_Ord_Line_Validation_Structure_Rec) RETURN Cust_Ord_Line_Validation_Structure_Rec
+IS
+   vendor_no_	         VARCHAR2(80);
+   temp_validation_rec_ Cust_Ord_Line_Validation_Structure_Rec;
+BEGIN
+   temp_validation_rec_ := validation_rec_;
+   
+   IF (temp_validation_rec_.supply_code IN ( 'PT', 'PD', 'IPT', 'IPD')) THEN
+      IF (temp_validation_rec_.vendor_no IS NULL ) THEN
+         vendor_no_ := Customer_Order_Line_API.Retrieve_Default_Vendor__(temp_validation_rec_.contract, temp_validation_rec_.purchase_part_no, temp_validation_rec_.supply_code, 'FALSE');
+         
+         IF vendor_no_ IS NOT NULL THEN
+            Customer_Order_Line_API.Validate_Vendor_No__(vendor_no_, temp_validation_rec_.supply_code);
+         END IF;
+         
+         temp_validation_rec_.vendor_no := vendor_no_;
+      END IF;
+      temp_validation_rec_.supply_site := Get_Supply_Site___(temp_validation_rec_.vendor_no);
+   ELSE 
+      temp_validation_rec_.vendor_no := NULL;
+      temp_validation_rec_.supply_site := NULL;
+   END IF; 
+   
+	RETURN temp_validation_rec_;
+END Validate_Supply_Code___;

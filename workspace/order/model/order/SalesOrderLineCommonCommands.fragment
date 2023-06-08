@@ -1,0 +1,1286 @@
+--  Date        Sign    History
+--  ---------   ------  ---------------------------------------------------------
+--  2021-07-18  MiKulk  SC21R2-1881,Removed Duplicate FreightPriceListNo, from input list of CustomerOrderLineAddressDialog
+--  2021-02-03  MaRalk  SC2020R1-12088, Used the parameter SuppCodeDb instead of SupplyCodeDb in the stringify call inside InventoryPartAvailabilityPlanCommand
+--  2021-02-03          in order to preserve CO  line duplicate functionality because we need to keep SupplyCode attribute as an enumeration defined in the CustomerOrderLine entity.
+--  2020-12-02  PamPlk  Bug 154128(SCZ-12746), Removed the function GetSupplySitePartNo.
+--  2020-03-17  RasDlk  SCSPRING20-1238, Modified ReportReservedQtyAsPickedCommand by passing the relevant parameters for MovePartsIntoShipmentInventoryDialog.
+--  2020-03-11  RasDlk  SCSPRING20-689, Modified ReportReservedQtyAsPickedCommand by passing the relevant parameters for MovePartsIntoShipmentInventoryDialog.
+--  2020-02-10  RasDlk  SCSPRING20-170, Modified the command ManualReservationsCommand by adding initcontext to show the title correctly
+--  2020-02-10          when navigating to the manual reservations page.
+--  2020-01-29  RasDlk  SCSPRING20-689, Replaced the function name CheckDialogFive with CheckReportResQtyAsPickedForManRes.
+--  2019-10-29  JaThlk  SCXTEND-535, Added the enable function GenerateSerialNumbersEnable.
+--  2019-07-02  RuLiLk   SCUXXW4-22890, Modified command OrderLineDetailsStagedBillingProfileCommand to enable stage billing when advace invoice is created.
+--  2019-05-23  MiKulk  SCUXXW4-21047 revert passing the LineItemNoText to LineItemNo in ConfigurationCreateCommand Command.
+--  2019-05-23          also modified the ManualReservationsCommand to pass the text version of LineitemNo
+--  2019-04-05  MiKulk  Created to handle the common commands for sales order line objects.
+-----------------------------------------------------------------------------
+
+fragment SalesOrderLineCommonCommands;
+component ORDER;
+layer Core;
+description "This fragment will hold all the common command implementations to sales order line objects (CustomerOrderLine, Package Structure line and CustomerOrderLines. etc).";
+
+//include fragment CustomerOrderLineAddressDialog;
+include fragment SupplyChainOrderAnalysisCommand;
+@DynamicComponentDependency CFGCHR
+include fragment ReplaceCharacteristicValueDialog;
+include fragment CustomerOrderLineInitialCheck;
+include fragment ConfiguredLinePriceInitialCheck;
+include fragment ShipmentInitialCheck;
+include fragment MovePartsIntoShipmentInventoryDialog;
+--Temp Fragment
+include fragment LimitToAssortSalesPartLovSelector;
+--Temp Fragment
+include fragment SalesPartActiveLovSelector;
+--Temp Fragment
+@DynamicComponentDependency CFGCHR
+include fragment ConfigPartCatalogLovSelector;
+--Temp Fragment
+@DynamicComponentDependency CFGCHR
+include fragment BasePartOptionValueLov3Selector;
+--Temp Fragment
+include fragment UserAllowedSiteLovSelector;
+--Temp Fragment
+include fragment CustomerOrderLineAddressDialog;
+include fragment CustInfoContactLovPubSelector;
+@DynamicComponentDependency MRP
+include fragment PerformMrpForPartDialog;
+@DynamicComponentDependency PMRP
+include fragment PerformProjectMrpForPartDialog;
+//warningsenabled = ProcessUnreserve, UnreserveCustOrderLines;
+//warningsenabled = Unpeg;
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+
+-------------------------------- ASSISTANTS ---------------------------------
+assistant UnreserveLineWarningsAssistant using UnreserveOrderLineVirtualSet {
+   label = "${AssistantTitle}";
+   savemode = OnLostFocus;
+
+   input(OrderSelection, Source, AssistantTitle);
+   singlestep {
+      list UnreserveWarningList(MessageArray);
+   }
+
+   command OkCommand;
+   command Cancel {
+      label = "Discard";
+   }
+}
+
+--------------------------------- COMMANDS ----------------------------------
+command SupplyChainOrdersAnalysisCommand {
+   label = "Supply Chain Orders Analysis";
+   mode = SingleRecord;
+   variable SourceRefVar Structure(SupplyOrderAnalysisSourceRefStructure);
+   enabled = [SupplyCode in("IntPurchTrans", "IntPurchDir", "PurchOrderDir", "PurchOrderTrans", "ShopOrder", "DOPOrder") or DemandCode in("IntPurchTrans", "IntPurchDir", "IntPurchReplacementOrder", "DistributionOrder")];
+   execute {
+      call SupplyOrderAnalysisFindSource(OrderNo, LineNo, RelNo, "${LineItemNo}", "CUSTOMER_ORDER") into SourceRefVar;
+      if [SourceRefVar.SourceType = "CUSTOMER_ORDER"] {
+         navigate "tree/SupplyChainCustomerOrderAnalysis/Tree?$filter=OrderNo eq $[SourceRefVar.SourceRef1] and LineNo eq $[SourceRefVar.SourceRef2] and RelNo eq $[SourceRefVar.SourceRef3] and LineItemNo eq $[SourceRefVar.SourceRef4]";
+      }
+      if [SourceRefVar.SourceType = "PURCHASE_ORDER"] {
+         navigate "tree/SupplyChainPurchaseOrderAnalysis/Tree?$filter=OrderNo eq $[SourceRefVar.SourceRef1] and LineNo eq $[SourceRefVar.SourceRef2] and ReleaseNo eq $[SourceRefVar.SourceRef3]";
+      }
+   }
+}
+
+command InventoryPartAvailabilityPlanCommand {
+   label = "Inventory Part Availability Planning";
+   mode = SelectedRecords;
+   variable AvailPlanningVar Text;
+   variable OrderLineSelectionVar Text;
+   bulkexecute {
+      stringify(records, "${keyref}PART_NO=${PartNo}^SUPPLY_SITE=${SupplySite}^CONTRACT=${Contract}^CATALOG_NO=${CatalogNo}^VENDOR_NO=${VendorNo}^CONFIGURATION_ID=${ConfigurationId}^PROJECT_ID=${ProjectId}^SUPPLY_CODE=${SuppCodeDb}^", JSON) into OrderLineSelectionVar;
+
+      call GetSupplySitePartNoVar(OrderLineSelectionVar) into AvailPlanningVar;
+      navigate "page/InventoryPartAvailabilityPlanning/Form?$filter=(${AvailPlanningVar})";
+   }
+}
+
+command ManualReservationsCommand {
+   label = "Manual Reservations";
+   mode = SelectedRecords;
+   enabled = [PartNo != null and LineItemNo >= 0 and not(Objstate in("Delivered", "Invoiced", "Cancelled")) and not(SupplyCode in("PurchOrderDir", "IntPurchDir")) and not(OrderState = "Planned" and SupplyCode in("PurchOrderTrans", "IntPurchTrans"))];
+
+   bulkexecute {
+      bulknavigate"page/ManualReservationsForShipmentAndCustomerOrderLine/Form?initcontext=Source:'Customer Order Line'&$filter=SourceRef1 eq $[OrderNo] and SourceRef2 eq $[LineNo] and SourceRef3 eq $[RelNo] and SourceRef4 eq $[LineItemNumber]";
+   }
+}
+
+--@DynamicComponentDependency CFGCHR
+command ConfigurationCopyFromCommand {
+   label = "Copy From";
+   mode = SingleRecord;
+   enabled = [(CatalogNo != null and Configurable and ConfigurationId = "*" and Objstate = "Released" and OrderState in("Planned", "Released", "Reserved", "PartiallyDelivered", "Picked"))];
+   variable SourceVar {
+      type = Text;
+   }
+   execute {
+      set SourceVar = "CustomerOrderLine";
+      assistant CopyConfigurationForSales.CopyConfigurationForSalesAssistant(SourceVar, OrderNo, LineNo, RelNo, LineItemNo, ConfiguredLinePriceId, PartNo, CatalogNo, CatalogDesc, Contract, CustomerNo, PlannedDeliveryDate) {
+         when CANCEL {
+            exit;
+         }
+         when OK {
+            call RefreshCustOrderLineAfterCrud();
+            exit;
+         }
+      }
+   }
+}
+
+command UnpegCommand {
+   label = "Unpeg";
+   mode = SingleRecord;
+
+   enabled = [((QtyOnOrder > 0) and((Objstate = "Released") and(SupplyCode = "PurchOrderTrans" or SupplyCode = "PurchOrderDir" or SupplyCode = "IntPurchTrans" or SupplyCode = "IntPurchDir"))) or
+   ((Objstate = "Released" or Objstate = "Reserved") and(SupplyCode = "ShopOrder") and((QtyOnOrder = 0 and QtyToReserve > 0) or(QtyOnOrder > 0)))];
+   execute {
+      messagebox("",
+      information, "The order line will be un-pegged.") {
+         when "Yes" {
+            if[SupplyCode = "IntPurchDir"] {
+               messagebox("",
+               question, "Unpegging a Customer Order Line with the supply code Internal Purchase Direct will cancel the connected Purchase Order. Do you want to proceed?.") {
+                  when "Yes" {
+                     call UnpegIpd(OrderNo, LineNo, RelNo, LineItemNo);
+                  }
+                  when "No" {
+                     exit OK;
+
+                  }
+               }
+            }
+            if[SupplyCode != "IntPurchDir"] {
+               call Unpeg(OrderNo, LineNo, RelNo, LineItemNo);
+            }
+         }
+         when "No" {
+            exit;
+         }
+      }
+   }
+}
+
+command CustomerWarrantyCommand {
+   label = "Customer Warranty";
+   variable SelectMethodVar {
+      type = Boolean;
+   }
+   enabled = [not((Objstate != "Released" and Objstate != "Reserved" and Objstate != "Picked") and not CustomerWarranty)];
+
+   execute {
+      set SelectMethodVar = false;
+      if [Objstate = "Released" or Objstate = "Reserved" or Objstate = "Picked"] {
+         set SelectMethodVar = true;
+      }
+
+      assistant CustomerWarranty.CustomerWarrantyAssistant(CatalogNo, null, CustWarrantyId, SelectMethodVar) into(CustWarrantyId) {
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+
+command SourcingSourceOrderLinesManuallyCommand {
+   label = "Source Order Lines Manually";
+   enabled = [SupplyCode = "NotDecided" and not(OrderState in("Cancelled", "Delivered", "Invoiced")) and not(Objstate in("Cancelled", "Invoiced"))];
+
+   mode = SelectedRecords;
+   bulkexecute {
+      bulknavigate "page/SourceOrderLinesManually/Form?$filter=OrderNo eq $[OrderNo]";
+   }
+}
+
+command SourcingReleaseSourceLineCommand {
+   label = "Release Source Line";
+   mode = SelectedRecords;
+
+   execute {
+      call ReleaseSourceLine(OrderNo, LineNo, RelNo, LineItemNo);
+   }
+}
+
+command SourcingSourceOrderLinesAutomaticallCommand {
+   label = "Source Order Lines Automatically";
+   enabled = [SupplyCode = "NotDecided" and not(OrderState in("Cancelled", "Delivered", "Invoiced")) and not(Objstate in("Cancelled", "Invoiced"))];
+   mode = SelectedRecords;
+   variable OrderLineSelectionVar Text;
+
+   bulkexecute {
+      messagebox("",
+      question, "Do you want to source chosen order line automatically?") {
+         when "Yes" {
+            stringify(records, keyref, JSON) into OrderLineSelectionVar;
+            call SourceAutomatically(OrderLineSelectionVar);
+         }
+         when "No" {
+            exit;
+         }
+      }
+
+   }
+}
+
+command SourcingViewAutomaticSourcingCandidaCommand {
+   label = "View Automatic Sourcing Candidates";
+   mode = SingleRecord;
+   enabled = [true];
+   execute {
+      navigate "assistant/AutomaticSourcingCandidates/AutomaticSourcingCandidatesAssistant?$action=InitParameters{OrderNoVar:$[OrderNo], LineNoVar:$[LineNo], RelNoVar:$[RelNo], LineItemNoVar:$[LineItemNo],
+      ContractVar:$[Contract], CatalogNoVar:$[CatalogNo], CatalogDescVar:$[CatalogDesc], RevisedQtyDueVar:$[RevisedQtyDue], SupplyCodeVar:$[SupplyCode], VendorNoVar:$[VendorNo], SupplySiteVar:$[SupplySite]}";
+   }
+}
+
+command ReportReservedQtyAsPickedCommand {
+   label = "Report Reserved Quantities as Picked";
+   mode = SelectedRecords;
+   variable ReportPickVar {
+      type = Structure(ReportPickStructure);
+   }
+   variable ReportPickSelectionVar {
+      type = Text;
+   }
+   variable ShipmentInvLocVar {
+      type = Structure(ShipmentInventoryLocationStructure);
+   }
+   variable LocationNoVar {
+      type = Text;
+   }
+   variable ShipmentInventoryVar Number;
+
+   bulkexecute {
+      messagebox("", information, "Reserved quantities will be reported as picked.") {
+         when "OK" {
+            set LocationNoVar = null;
+            call UsesShipmentInventory(OrderNo, LineNo, RelNo, LineItemNo) into ShipmentInventoryVar;
+            if [ShipmentInventoryVar = 1] {
+               stringify(records, "CONTRACT=${Contract}^ORDER_NO=${OrderNo}^LINE_NO=${LineNo}^REL_NO=${RelNo}^LINE_ITEM_NO=${LineItemNo}^", JSON) into ReportPickSelectionVar;
+               call ExtractShipmentInvValues(ReportPickSelectionVar) into ReportPickVar;
+
+               call CheckReportResQtyAsPickedForManRes(ReportPickVar.Contract, ReportPickVar.OrderNo, ReportPickVar.LineNo, ReportPickVar.RelNo, ReportPickVar.LineItemNo, "CUSTOMER_ORDER", 0, NULL, NULL, NULL, NULL) into ShipmentInvLocVar;
+
+               if [ShipmentInvLocVar.ShowDialog = "TRUE"] {
+                  dialog MovePartsIntoShipmentInventoryDialog(ShipmentInvLocVar.LocationNo, ReportPickVar.Contract, "Site", ReportPickVar.Contract) into(LocationNoVar) {
+                     when CANCEL {
+                        exit;
+                     }
+                  }
+               }
+            }
+            if [ReportPickVar.DisplayInfoType = 1] {
+               messagebox("", information, "There are order line(s) which are not connected to an export license. Do you want to proceed?") {
+                  when "OK" {
+                     exit OK;
+                  }
+                  when "Cancel" {
+                     exit CANCEL;
+                  }
+               }
+            }
+            else {
+               if [ReportPickVar.DisplayInfoType = 2] {
+                  messagebox("", information, "Export Licenses must be connected to order line(s) to proceed, please use the Find and Connect License.") {
+                     when "OK" {
+                        exit OK;
+                     }
+                     when "Cancel" {
+                        exit CANCEL;
+                     }
+                  }
+               }
+            }
+            bulkcall ReserveAsPicked(OrderNo, LineNo, RelNo, LineItemNo, LocationNoVar);
+         }
+         when "Cancel" {
+            exit;
+         }
+      }
+   }
+}
+
+@DynamicComponentDependency RENTAL
+command ManageRentalsCommand {
+   label = "Manage Rentals";
+   mode = SelectedRecords;
+   enabled = [true];
+
+   bulkexecute {
+      bulknavigate "page/ManageRentals/List?$filter=RentalNo eq $[PrimaryRentalNo]";
+   }
+}
+command OrderLineDetailsStagedBillingProfileCommand {
+   label = "Staged Billing Profile";
+   mode = SelectedRecords;
+   enabled = [DemandCode != "FieldServiceManagement" and ChargedItem = "ChargedItem" and SelfBilling = "NotSelfBilling" and PartOwnership != "CustomerOwned" and PartOwnership != "SupplierLoaned"];
+   bulkexecute {
+      bulknavigate "page/CustomerOrderStagedBillingProfile/Form?$filter=OrderNo eq $[OrderNo] and LineNo eq $[LineNo] and RelNo eq $[RelNo]  ";
+   }
+}
+
+command ManualPeggingCommand {
+   label = "Manual Pegging";
+   mode = SelectedRecords;
+
+   enabled = [PartNo != null and LineItemNo = 0 and Objstate != "Delivered" and Objstate != "Invoiced" and Objstate != "Cancelled" and SupplyCode = "InventOrder" and RelMtrlPlanning = true];
+   bulkexecute {
+      bulknavigate "page/ManualPeggingOfCustomerOrderLine/Form?$filter=OrderNo eq $[OrderNo] and LineNo eq $[LineNo] and RelNo eq $[RelNo] and LineItemNo eq $[LineItemNo]";
+   }
+}
+
+
+command UnreserveCommand {
+   label = "Unreserve";
+   mode = SelectedRecords;
+   enabled = [LineItemNo >= 0 and count(*, QtyUnreservable > 0) > 0];
+
+   variable OrderLineSelectionVar Text;
+   variable WarningsExistVar Boolean;
+   variable TitleVar Text;
+
+   bulkexecute {
+      -- passes QtyUnreservable instead of QtyOnPickList, since QtyOnPickList attribute is removed for performance
+      stringify(records, "ORDER_NO=${OrderNo}^LINE_NO=${LineNo}^REL_NO=${RelNo}^LINE_ITEM_NO=${LineItemNo}^SUPPLY_CODE=${SupplyCodeDb}^QTY_ASSIGNED=${QtyAssigned}^QTY_UNRESERVABLE=${QtyUnreservable}^", JSON) into OrderLineSelectionVar;
+      call UnreserveCustOrderLines(OrderLineSelectionVar) into WarningsExistVar;
+      ifall [WarningsExistVar] {
+         ifall [Source = "CUSTOMERORDER"] {
+            set TitleVar = "Unreserve Order Line" {
+               translatable = true;
+            }
+         }
+         else {
+            ifall [Source = "PACKSTRUCTORDER"] {
+               set TitleVar = "Unreserve Component Part Line" {
+                  translatable = true;
+               }
+            }
+         }
+         assistant UnreserveLineWarningsAssistant(OrderLineSelectionVar, Source, TitleVar) {
+            when OK {
+               exit OK;
+            }
+         }
+      }
+   }
+}
+
+@DynamicComponentDependency CFGCHR
+command ConfigurationViewCommand {
+   label = "View";
+   variable Usage;
+
+   enabled = [CatalogNo != null and ConfigurationId != "*" and ConfigurationId != null];
+   execute {
+      set Usage = "CustomerOrder";
+
+      navigate "assistant/PartConfigurationAssistant/EditConfiguration?$action=InitConfiguration{  VarUsage:$[Usage],
+                                                                                                   VarMode:'View',
+                                                                                                   VarIdentity1:$[OrderNo],
+                                                                                                   VarIdentity2:$[LineNo],
+                                                                                                   VarIdentity3:$[RelNo],
+                                                                                                   VarIdentity4:$[LineItemNo]}";
+   }
+}
+
+@DynamicComponentDependency CFGCHR
+command ConfigurationEditCommand {
+   label = "Edit";
+   enabled = [CatalogNo != null and Configurable and ConfigurationId != "*" and
+   ((Source = "CUSTOMERQUOTE" and Objstate in("Planned", "Released", "Revised", "Rejected")) or
+   (Source = "CUSTOMERORDER" and Objstate = "Released") or
+   (Source = "PACKSTRUCTORDER" and Objstate = "Released" and OrderState = "Planned") or
+   (Source = "PACKSTRUCTQUOTE" and Objstate in("Planned", "Released", "Revised")))];
+
+   variable Usage;
+   variable ReturnRec {
+      type = Structure(EditConfigAllowReturnStructure);
+   }
+   variable ConfigInfo {
+      type = Structure(ConfigInfoStructure);
+   }
+   variable VarDateRequired;
+
+   execute {
+      set Usage = "CustomerOrder";
+
+      set EditPegDop = true;
+
+      call CheckEditConfigAllowed(OrderNo, LineNo, RelNo, LineItemNo) into ReturnRec {
+         when SUCCESS {
+            if [ReturnRec.OrderConf = "Y"] {
+               confirm("This order acknowledgement has already been printed") {
+                  when CANCEL {
+                     exit CANCEL;
+                  }
+               }
+            }
+
+            if [ReturnRec.IntOrderExist = "TRUE" and ReturnRec.CtpPlanned = "Yes"] {
+               messagebox("", question, "Interim order created from capability check exists for this Customer Order Line. Click Yes to edit configuration and also cancel interim order and capability check. Click No to edit the configuration. If you click no the configuration changes can not be applied until capability check is removed.") {
+                  when "Yes" {
+                     call ConvertToDate(PlannedDueDate) into VarDateRequired;
+                     call ExecutingInterimOrder("InterimOrderCancel", Source, Identity1, Identity2, Identity3, Identity4, Contract, PartNo, RevisedQtyDue, VarDateRequired, SupplyCode) into SuccessBool;
+                  }
+                  when "No" {
+                     --Dummy statement to get "No" option
+                     set Usage = "CustomerOrder";
+                  }
+                  when "Cancel" {
+                     exit CANCEL;
+                  }
+               }
+            }
+            if [QtyOnOrder != 0 and(SupplyCode = "PurchOrderDir" or SupplyCode = "PurchOrderTrans" or SupplyCode = "IntPurchDir" or SupplyCode = "IntPurchTrans" or(DopConnectionExists > 0 and SupplyCode = "DOP Order") or SupplyCode = "ShopOrder")] {
+               if [ReturnRec.IntOrderExist = "TRUE" and ReturnRec.CtpPlanned != "Yes"] {
+                  confirm("Interim Order exists for this Customer Order Line. Change configuration will update the Interim Order. Do you want to edit the configuration?") {
+                     when CANCEL {
+                        exit CANCEL;
+                     }
+                  }
+               }
+               if [ReturnRec.OrderType = "PR"] {
+                  confirm("Pegged Purchase Requisition Line is created. Do you still want to change the configuration?") {
+                     when CANCEL {
+                        exit CANCEL;
+                     }
+                  }
+
+               }
+               if [ReturnRec.OrderType = "SO"] {
+                  confirm("Pegged Shop Order is created. Do you still want to change the configuration?") {
+                     when CANCEL {
+                        exit CANCEL;
+                     }
+                  }
+
+               }
+               if [ReturnRec.OrderType = "DOP"] {
+
+                  call CheckDopInformation(OrderNo, LineNo, RelNo, LineItemNo, PartNo, ConfigurationId) into ConfigStatus {
+                     when SUCCESS {
+                        if [ConfigStatus = "Completed"] {
+                           confirm("Pegged DOP Order is created. Do you still want to change the configuration?") {
+                              when CANCEL {
+                                 set EditPegDop = false;
+                              }
+
+                           }
+                        }
+                     }
+                     when FAIL {
+                        set EditPegDop = false;
+                        if [not(error.Message = null)] {
+                           error("${error.Message}");
+                        }
+                     }
+                  }
+               }
+               if [ReturnRec.OrderType = "PO"] {
+                  call GetEditConfigInfo(OrderNo, LineNo, RelNo, LineItemNo, SupplyCode) into ConfigInfo {
+                     when SUCCESS {
+                        if [ConfigInfo.PoLineState = "Released" or ConfigInfo.PoLineState = "Confirmed" or ConfigInfo.PoLineState = "Stopped"] {
+                           if [ConfigInfo.TransferConfig = "TRANSCONFIG"] {
+                              if [ConfigInfo.InternalCoNo = null or(ConfigInfo.InternalCoNo != null and(ConfigInfo.InternalCoLineState = "Planned" or ConfigInfo.InternalCoLineState = "Released" or ConfigInfo.InternalCoLineState = "Reserved"))] {
+                                 confirm("Pegged purchase order line will be updated. Do you want to continue?") {
+                                    when OK {
+                                       if [ConfigInfo.InternalCoLineState = "Reserved" and ConfigInfo.InternalConfigId = ConfigurationId] {
+                                          error("Configuration changes not allowed when having a pegged order in Reserved status.");
+                                          exit CANCEL;
+                                       }
+                                       else {
+                                          if [ConfigInfo.InternalCoLineState = "Reserved" and ConfigInfo.InternalConfigId != ConfigurationId] {
+                                             confirm("Since the pegged order is in Reserved status the configuration ID will be changed to the configuration ID of the pegged order. Do you want to continue?") {
+                                                when OK {
+                                                   call AdjustConfigurationPricing(ConfiguredLinePriceId, ConfigurationId, ConfigInfo.InternalConfigId) into UpdatedCount;
+                                                   if [UpdatedCount > 0] {
+                                                      info("Configuration contains ${UpdatedCount} new characteristic values with missing mandatory price. To keep configuration in Completed state, these prices have been set to zero.");
+                                                   }
+
+                                                   exit CANCEL;
+                                                }
+                                                when CANCEL {
+                                                   exit CANCEL;
+                                                }
+                                             }
+                                          }
+
+                                       }
+                                    }
+                                    when CANCEL {
+                                       exit CANCEL;
+                                    }
+                                 }
+
+                              }
+                              else {
+                                 error("The internal customer order line is in status ${ConfigInfo.InternalCoLineState} and configuration changes are not allowed.");
+                                 exit CANCEL;
+                              }
+
+                           }
+                           else {
+                              confirm("Pegged purchase order line will be updated. Do you want to continue?") {
+                                 when CANCEL {
+                                    exit CANCEL;
+                                 }
+                              }
+                           }
+                        }
+                        else {
+                           error("The customer order line is pegged to a purchase order line in status ${ConfigInfo.PoLineState} and configuration changes are not allowed.");
+                           exit CANCEL;
+                        }
+                     }
+                     when FAIL {
+                        exit CANCEL;
+                     }
+                  }
+               }
+            }
+         }
+         when FAIL {
+            exit CANCEL;
+         }
+      }
+
+      if [not EditPegDop] {
+         exit CANCEL;
+      }
+
+      navigate "assistant/PartConfigurationAssistant/EditConfiguration?$action=InitConfiguration{  VarUsage:$[Usage],
+                                                                                                   VarMode:'Edit',
+                                                                                                   VarIdentity1:$[OrderNo],
+                                                                                                   VarIdentity2:$[LineNo],
+                                                                                                   VarIdentity3:$[RelNo],
+                                                                                                   VarIdentity4:$[LineItemNo]}";
+   }
+}
+
+@DynamicComponentDependency CFGCHR
+command ConfigurationEditPricingCommand {
+   label = "Edit Pricing";
+   variable Usage;
+
+   enabled = [ConfigurationId != "*" and ConfigurationId != null and Configurable and CatalogNo != null and
+   ((Source = "CUSTOMERORDER" and((Objstate = "Released" and(OrderState in("Blocked", "Released", "Reserved", "Picked", "PartiallyDelivered"))) or
+   (Objstate = "Reserved" and(OrderState in("Reserved", "Picked", "PartiallyDelivered"))) or
+   (Objstate = "Picked" and(OrderState in("Picked", "PartiallyDelivered"))) or
+   (Objstate = "PartiallyDelivered" and(OrderState in("PartiallyDelivered"))) or
+   (Objstate = "Delivered" and(OrderState in("Delivered", "PartiallyDelivered"))))) or
+   (Source = "PACKSTRUCTORDER" and Objstate = "Released" and OrderState = "Released"))];
+
+   execute {
+      set Usage = "CustomerOrder";
+
+      navigate "assistant/PartConfigurationAssistant/EditConfiguration?$action=InitConfiguration{  VarUsage:$[Usage],
+                                                                                                   VarMode:'EditPrice',
+                                                                                                   VarIdentity1:$[OrderNo],
+                                                                                                   VarIdentity2:$[LineNo],
+                                                                                                   VarIdentity3:$[RelNo],
+                                                                                                   VarIdentity4:$[LineItemNo]}";
+   }
+
+}
+
+@DynamicComponentDependency CFGCHR
+command ConfigurationCreateCommand {
+   label = "Create";
+   variable Usage;
+   variable ReturnRec {
+      type = Structure(EditConfigAllowReturnStructure);
+
+   }
+   enabled = [CatalogNo != null and Configurable and(ConfigurationId = "*" or ConfigurationId = null) and Objstate = "Released" and OrderState in("Planned", "Released", "Reserved", "PartiallyDelivered", "Picked")];
+   execute {
+      set Usage = "CustomerOrder";
+
+      if [SupplySite = null or SupplySite = ""] {
+         set TempSupplySite = Contract;
+      }
+      else {
+         set TempSupplySite = SupplySite;
+      }
+      navigate "assistant/PartConfigurationAssistant/EditConfiguration?$action=InitConfiguration{  VarUsage:$[Usage],
+                                                                                                   VarMode:'Create',
+                                                                                                   VarIdentity1:$[OrderNo],
+                                                                                                   VarIdentity2:$[LineNo],
+                                                                                                   VarIdentity3:$[RelNo],
+                                                                                                   VarIdentity4:$[LineItemNo]}";
+
+      call CheckEditConfigAllowed(OrderNo, LineNo, RelNo, LineItemNo) into ReturnRec {
+         when SUCCESS {
+            if [parent.OrderConfDb] {
+               confirm("This order acknowledgement has already been printed") {
+                  when CANCEL {
+                     exit;
+                  }
+               }
+            }
+         }
+         when FAIL {
+            error("${error.Message}");
+         }
+
+      }
+
+   }
+}
+
+@DynamicComponentDependency CFGCHR
+command ConfigurationReplaceCharacteristicValueCommand {
+   label = "Replace Characteristic Value";
+   mode = SelectedRecords;
+   enabled = [ConfigurationId != "*"];
+   variable KeyrefVar {
+      type = Text;
+   }
+   variable CharacteristicVar {
+      type = Structure(CharacteristicStructure);
+   }
+   variable CharacteristicIdVar {
+      type = Text;
+   }
+   variable CharacteristicValueVar {
+      type = Text;
+   }
+
+   bulkexecute {
+      stringify(records, "${keyref};${PartNo};${ConfigurationId}") into KeyrefVar;
+      call GetCharacteristics(KeyrefVar) into CharacteristicVar;
+      dialog ReplaceCharacteristicValueDialog(CharacteristicVar.CharacteristicIds, CharacteristicVar.PartNos, CharacteristicVar.WantedDeliveryDate) into(CharacteristicIdVar, CharacteristicValueVar) {
+         when OK {
+            call ReplaceCharValueForConfigs(CharacteristicVar.ConnectedIdAttr, CharacteristicIdVar, CharacteristicValueVar);
+         }
+      }
+   }
+}
+
+@DynamicComponentDependency CFGCHR
+command ConfigurationFindExistingCommand {
+   label = "Find Existing";
+   variable CatalogNoStr;
+   variable ConfigIDStr;
+   variable MakeReservationStr;
+   variable LimitSalesToAssortmentsVar Text;
+
+   mode = SingleRecord;
+   enabled = [(CatalogNo != null and Configurable  and(ConfigurationId = null or ConfigurationId = "*")) and(Objstate = "Released" and OrderState in("Planned", "Released", "Reserved", "PartiallyDelivered", "Picked", "Blocked"))];
+   execute {
+      if [LimitSalesToAssortmentsVar = null] {
+         if [parent.LimitSalesToAssortmentsDb] {
+            set LimitSalesToAssortmentsVar = "TRUE";
+         }
+         else {
+            set LimitSalesToAssortmentsVar = "FALSE";
+         }
+      }
+      assistant ConfigurationSearchAssistant.CharacteristicSearchWizardAssistant(PartNo, CatalogNo, CatalogDesc, Contract, RevisedQtyDue, PlannedDeliveryDate, LimitSalesToAssortmentsVar, CustomerNo, true) into(CatalogNoStr, ConfigIDStr, MakeReservationStr) {
+         when CANCEL {
+            exit;
+         }
+         when OK {
+            if [CatalogNo != CatalogNoStr] {
+               // Change configured part with standard part
+               call ReplaceOrderLine(OrderNo, LineNo, RelNo, LineItemNo, 0, Contract, CatalogNoStr, RevisedQtyDue, PlannedDeliveryDate, MakeReservationStr);
+            }
+            else {
+               if [ConfigIDStr != "*"] {
+                  call SetConfigId(OrderNo, LineNo, RelNo, LineItemNo, RevisedQtyDue, ConfiguredLinePriceId, ConfigIDStr, MakeReservationStr, SupplyCode);
+               }
+            }
+            exit OK;
+         }
+      }
+   }
+}
+
+@DynamicComponentDependency CFGCHR
+command ConfigurationReplaceWithStandardPartCommand {
+   label = "Replace with Standard Sales Part";
+   enabled = [(CatalogNo != null and Configurable = true and Objstate = "Released" and OrderState = "Planned")];
+   variable NewContractVar {
+      type = Text;
+   }
+   variable NewCatalogNoVar {
+      type = Text;
+   }
+   execute {
+      assistant ReplaceWithStandardSalesPartAssistant.Assistant(PartNo, Contract, ConfigurationId, false, CustomerNo)into(NewContractVar, NewCatalogNoVar) {
+         when OK {
+            call ReplaceOrderLine(OrderNo, LineNo, RelNo, LineItemNo, 0, NewContractVar, NewCatalogNoVar, BuyQtyDue, WantedDeliveryDate, MakeReservation);
+
+         }
+      }
+   }
+}
+
+command HandleReturnMaterialAuthorizCreateCommand {
+   mode = SelectedRecords;
+   label = "Create";
+   variable TempStruct {
+      type = GetRmaCoLinesOutputStruct;
+   }
+   variable ReasonVar {
+      type = Text;
+   }
+   variable AddChargeLinesVar {
+      type = Boolean;
+   }
+   variable InvoiceVar {
+      type = Number;
+   }
+   variable PromoExistsVar {
+      type = Text;
+   }
+   variable OrderLineSelectionVar {
+      type = Text;
+   }
+   variable LineChargeExistsVar Boolean;
+
+   bulkexecute {
+      stringify(records, keyref, JSON) into OrderLineSelectionVar;
+      call ExistChargeOnOrderLine(OrderLineSelectionVar) into LineChargeExistsVar;
+      dialog ReturnMaterialCustomerOrderLineDialog(LineChargeExistsVar, LineChargeExistsVar) into(ReasonVar, AddChargeLinesVar) {
+
+         when OK {
+            stringify(records, "CUSTOMER_NO=${CustomerNo}^CONTRACT=${Contract}^ORDER_NO=${OrderNo}^LINE_NO=${LineNo}^LINE_NO=${LineNo}^REL_NO=${RelNo}^LINE_ITEM_NO=${LineItemNo}^", JSON) into OrderLineSelectionVar;
+            call CreateRmaFromCustomerOrderLines(OrderLineSelectionVar, ReasonVar, AddChargeLinesVar) into TempStruct;
+            set InvoiceVar = TempStruct.Invoice;
+            set PromoExistsVar = TempStruct.PromoExists;
+            if [PromoExistsVar = "1"] {
+               set PromoExistsVar = "0";
+               alert("There are freight charge lines and/or sales promotion charge lines connected to the order line(s),
+               which will not be added to return material authorization.");
+            }
+            if [InvoiceVar > 1] {
+               alert("Customer Order Line has more than one invoice. Select the invoice manually.");
+            }
+         }
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+
+command HandleReturnMaterialAuthorizViewEditCommand {
+   mode = SelectedRecords;
+   label = "View/Edit";
+   bulkexecute {
+      bulknavigate "page/ReturnMaterialAuthorizationLines/List?$filter=OrderNo eq $[OrderNo] and LineNo eq $[LineNo] and RelNo eq $[RelNo] ";
+   }
+}
+command OrderLineDetailsOrderLineAddressCommand {
+   label = "Address";
+   enabled = [true];
+   variable OrigCoLangCodeVar {
+      type = Text;
+   }
+   execute {
+      -- copy this into AddressVar;
+      if [OriginatingCoLangCode = null] {
+         set OrigCoLangCodeVar = parent.LanguageCode;
+      }
+      else
+         {
+         set OrigCoLangCodeVar = OriginatingCoLangCode;
+      }
+      dialog CustomerOrderLineAddressDialog(Company, OrderNo, LineNo, RelNo, LineItemNo, ShipAddrNo, DefaultAddrFlag, AddrFlag, ShipViaCode, ExtTransportCalendarId, FreightMapId, ZoneId, FreightPriceListNo, CustomerNo, DelTermsLocation, DeliveryLeadtime, PickingLeadtime, ForwardAgentId, ShipViaCode, DeliveryTerms, Contract, PartNo, SupplyCode, VendorNo, Contact, RouteId, SupplierShipViaTransit, CustCalendarId, ShipmentType, ShipmentCreation, RegionCode, DistrictCode, DockCode, SubDockCode, DeliverySequence, LocationNo, DeliverToCustomerNo, IntrastatExempt, SupplyCode, Objstate, OrigCoLangCodeVar, false, false)
+
+     -- into(ShipAddrNo, DefaultAddrFlagDb, AddrFlagDb, ShipViaCode, ExtTransportCalendarId, FreightMapId, ZoneId, FreightPriceListNo, CustomerNo, DelTermsLocation, DeliveryLeadtime, PickingLeadtime, ForwardAgentId, FreightPriceListNo, ShipViaCode, DeliveryTerms, Contact, RouteId, SupplierShipViaTransit, CustCalendarId, ShipmentType, ShipmentCreation, RegionCode, DistrictCode, DockCode, SubDockCode, DeliverySequence, LocationNo, DeliverToCustomerNo, IntrastatExemptDb)
+         {
+         when OK {
+            --copy AddressVar into this;
+           -- save();
+            exit;
+         }
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+
+command OkCommand for UnreserveOrderLineVirtual {
+   label = "Proceed";
+
+   execute {
+      call ProcessUnreserve();
+      exit OK;
+   }
+}
+
+@DynamicComponentDependency EXPCTR
+command FindandConnectExportLicenseCommand {
+   label = "Find and Connect Export License";
+   mode = SelectedRecords;
+
+   variable OrderLineSelectionVar {
+      type = Text;
+   }
+   variable TransferExplicFindIdVar {
+      type = Text;
+   }
+
+   bulkexecute {
+      stringify(records, "${keyref}DEMAND_CODE_DB=${DemandCodeDb}^DEMAND_ORDER_REF1=${DemandOrderRef1}^DEMAND_ORDER_REF2=${DemandOrderRef2}^DEMAND_ORDER_REF3=${DemandOrderRef3}^", JSON) into OrderLineSelectionVar;
+      call CreateOrGetFindAndConnect(OrderLineSelectionVar) into TransferExplicFindIdVar;
+      navigate "page/FindAndConnectExportLicense/Form?$filter=(${TransferExplicFindIdVar})";
+   }
+}
+
+---------------------------------- DIALOGS ----------------------------------
+dialog ReturnMaterialCustomerOrderLineDialog for RmaCustomerOrderLineStructure {
+   label = "Return Material Customer Order Line";
+   input(ExistCharges, AddChargeLines);
+   output(ReturnReasonCode, AddChargeLines);
+   markdowntext {
+      text = "This will create a Return Material Authoriazation ( RMA ) for the customer order line";
+   }
+   group ReturnMaterialCustomerOrderLineGroup;
+   commandgroup ButtonCmdGroup {
+
+      command Ok;
+      command Cancel;
+   }
+}
+
+---------------------------------- GROUPS -----------------------------------
+group ReturnMaterialCustomerOrderLineGroup for RmaCustomerOrderLineStructure {
+   label = "";
+   lov ReturnReasonCodeRef with ReferenceReturnMaterialReasonSelector {
+      description = ReturnReasonCodeRef.ReturnReasonDescription;
+   }
+   field AddChargeLines {
+      editable = [ExistCharges = true];
+      visible = [ExistCharges = true];
+      size = Large;
+
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+list UnreserveWarningList for UnreserveOrderLineMessageVirtual {
+   label = "Warnings";
+   editmode = SingleCellEdit;
+   defaultfilter = [Message != null];
+   preselect = [false];
+   crudactions {
+      new {
+         enabled = [false];
+      }
+   }
+   badge MessageType {
+      style = IconOnly;
+      icon = "information";
+      emphasis Warning = [true];
+      size = Small;
+   }
+   field OrderNo {
+      size = Small;
+      columnexclude = [parent.Source != "CUSTOMERORDER"];
+   }
+   field LineNo {
+      size = Small;
+      columnexclude = [parent.Source != "CUSTOMERORDER"];
+   }
+   field ReleaseNo {
+      size = Small;
+      columnexclude = [parent.Source != "CUSTOMERORDER"];
+   }
+   field LineItemNo {
+      columnexclude = [parent.Source = "CUSTOMERORDER"];
+   }
+   field Message {
+      size = Large;
+      multiline = true;
+   }
+   field Answer;
+}
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+
+--------------------------------- FUNCTIONS ---------------------------------
+function ExtractShipmentInvValues Structure(ReportPickStructure) {
+   parameter Selection Text;
+}
+
+function GetCharacteristics Structure(CharacteristicStructure) {
+   parameter Selection Text;
+}
+
+function GetSupplySitePartNoVar Text {
+   parameter Selection Text;
+}
+
+function CheckSourceExists Boolean {
+   parameter OrderNo Text;
+   parameter LineNo Text;
+   parameter RelNo Text;
+   parameter LineItemNo Number;
+}
+
+function CheckEnableForInvPartAvailPlan Boolean {
+   parameter SupplySite Text;
+   parameter Contract Text;
+   parameter CatalogNo Text;
+   parameter VendorNo Text;
+   parameter PartNo Text;
+   parameter PurchasePartNo Text;
+   parameter DemandCode Text;
+}
+
+function SourcingReleaseSourceLineEnable Boolean {
+   parameter SupplyCode Enumeration(OrderSupplyType);
+   parameter OrderState Text;
+   parameter OrderNo    Text;
+   parameter LineNo     Text;
+   parameter RelNo      Text;
+   parameter LineItemNo Number;
+   parameter RevisedQtyDue Number;
+}
+
+function AnySourceSetExist Boolean {
+   parameter OrderNo    Text;
+   parameter LineNo     Text;
+   parameter RelNo      Text;
+   parameter LineItemNo Number;
+}
+
+function ReserveSerialNumbersEnable Boolean {
+   parameter SupplyCode Enumeration(OrderSupplyType);
+   parameter OrderState Text;
+   parameter PartNo Text;
+}
+
+function GenerateSerialNumbersEnable Boolean {
+   parameter SupplyCode Enumeration(OrderSupplyType);
+   parameter OrderState Text;
+   parameter PartNo Text;
+   parameter OrderNo Text;
+   parameter LineNo Text;
+   parameter ReleaseNo Text;
+   parameter LineItemNo Number;
+   parameter Quantity Number;
+}
+
+function FindAndConnectExptEnable Boolean {
+   parameter OrderNo    Text;
+   parameter LineNo     Text;
+   parameter RelNo      Text;
+   parameter LineItemNo Number;
+   parameter PartNo     Text;
+   parameter CatalogNo  Text;
+}
+
+function HandleRmaViewEditEnable Boolean {
+   parameter OrderNo    Text;
+   parameter LineNo     Text;
+   parameter RelNo      Text;
+   parameter LineItemNo Number;
+   parameter SupplyCode Enumeration(OrderSupplyType);
+}
+
+function HandleRmaViewCreateEnable Boolean {
+   parameter OrderNo    Text;
+   parameter LineNo     Text;
+   parameter RelNo      Text;
+   parameter LineItemNo Number;
+   parameter SupplyCode Enumeration(OrderSupplyType);
+}
+function ExistChargeOnOrderLine Boolean {
+   parameter Selection Text;
+}
+
+function UsesShipmentInventory Number {
+   parameter OrderNo    Text;
+   parameter LineNo     Text;
+   parameter RelNo      Text;
+   parameter LineItemNo Number;
+}
+
+function GetUnConfirmDeliveries Boolean {
+   parameter OrderNo    Text;
+}
+
+function CheckPickReserveAllowed Boolean {
+   parameter OrderNo Text;
+   parameter LineNo Text;
+   parameter RelNo Text;
+   parameter LineItemNo Number;
+}
+
+---------------------------------- ACTIONS ----------------------------------
+action Unpeg {
+   initialcheck CustomerOrderLineInitialCheck(OrderNo, LineNo, RelNo, LineItemNo);
+   parameter OrderNo Text;
+   parameter LineNo Text;
+   parameter RelNo Text;
+   parameter LineItemNo Number;
+   supportwarnings = [true];
+   ludependencies = CustomerOrder, CustomerOrderLine;
+}
+
+action UnpegIpd {
+   initialcheck CustomerOrderLineInitialCheck(OrderNo, LineNo, RelNo, LineItemNo);
+   parameter OrderNo Text;
+   parameter LineNo Text;
+   parameter RelNo Text;
+   parameter LineItemNo Number;
+   supportwarnings = [true];
+   ludependencies = CustomerOrderLine;
+}
+
+action ReleaseSourceLine {
+   initialcheck CustomerOrderLineInitialCheck(OrderNo, LineNo, RelNo, LineItemNo);
+   parameter OrderNo Text;
+   parameter LineNo Text;
+   parameter RelNo Text;
+   parameter LineItemNo Number;
+   ludependencies = CustomerOrder, CustomerOrderLine;
+}
+
+//action SourceAutomatically {
+//   initialcheck CustomerOrderLineInitialCheck(OrderNo, LineNo, RelNo, LineItemNo);
+//   supportwarnings = [true];
+//   parameter OrderNo Text;
+//   parameter LineNo Text;
+//   parameter RelNo Text;
+//   parameter LineItemNo Number;
+//   ludependencies = CustomerOrder, CustomerOrderLine;
+//}
+
+action SourceAutomatically {
+   initialcheck implementation;
+   parameter Selection Text;
+   supportwarnings = [true];
+   ludependencies = CustomerOrder, CustomerOrderLine;
+}
+
+action ReserveAsPicked {
+   initialcheck CustomerOrderLineInitialCheck(OrderNo, LineNo, RelNo, LineItemNo);
+   parameter OrderNo Text;
+   parameter LineNo Text;
+   parameter RelNo Text;
+   parameter LineItemNo Number;
+   parameter LocationNo Text;
+   ludependencies = CustomerOrderLine;
+}
+
+action UnreserveCustOrderLine Text {
+   initialcheck implementation;
+   parameter Selection Text;
+}
+
+action CheckEditConfigAllowed Structure(EditConfigAllowReturnStructure) {
+   initialcheck none;
+   supportwarnings = [true];
+   parameter OrderNo Text;
+   parameter LineNo Text;
+   parameter RelNo Text;
+   parameter LineItemNo Number;
+}
+
+action CheckDopInformation Text {
+   initialcheck none;
+   parameter OrderNo Text;
+   parameter LineNo Text;
+   parameter RelNo Text;
+   parameter LineItemNo Number;
+   parameter PartNo Text;
+   parameter ConfigurationId Text;
+}
+
+//! TODO: Should be refactored as a function!
+action GetEditConfigInfo Structure(ConfigInfoStructure) {
+   initialcheck none;
+   parameter OrderNo Text;
+   parameter LineNo Text;
+   parameter RelNo Text;
+   parameter LineItemNo Number;
+   parameter SupplyCode Enumeration(OrderSupplyType);
+}
+
+action ReplaceCharValueForConfigs {
+   initialcheck none;
+   parameter ConnectedIdAttr Text;
+   parameter CharacteristicId  Text;
+   parameter CharacteristicValue Text;
+   supportwarnings = [true];
+   ludependencies = CustomerOrderLine;
+}
+
+action AdjustConfigurationPricing Number {
+   initialcheck ConfiguredLinePriceInitialCheck(ConfiguredLinePriceId);
+   parameter ConfiguredLinePriceId Number;
+   parameter OldConfigId Text;
+   parameter InternalConfigId Text;
+}
+
+action ReplaceOrderLine {
+   initialcheck CustomerOrderLineInitialCheck(OrderNo, LineNo, RelNo, LineItemNo);
+   initialcheck UserAllowedSite(Contract);
+   initialcheck implementation;
+   supportwarnings = [true];
+   ludependencies = CustomerOrderLine;
+   parameter OrderNo Text;
+   parameter LineNo Text;
+   parameter RelNo Text;
+   parameter LineItemNo Number;
+   parameter ShipmentId Number;
+   parameter Contract Text;
+   parameter CatalogNo Text;
+   parameter RevisedQtyDue Number;
+   parameter RequiredDate Timestamp;
+   parameter MakeReservation Text;
+}
+
+action SetConfigId {
+   initialcheck implementation;
+   ludependencies = CustomerOrderLine;
+   parameter OrderNo Text;
+   parameter LineNo Text;
+   parameter RelNo Text;
+   parameter LineItemNo Number;
+   parameter RevisedQtyDue Number;
+   parameter ConfiguredLinePriceId Number;
+   parameter ConfigId Text;
+   parameter MakeReservation Text;
+   parameter SupplyCode Enumeration(OrderSupplyType);
+}
+
+action CreateRmaFromCustomerOrderLines Structure(GetRmaCoLinesOutputStruct) {
+   initialcheck implementation;
+   parameter Selection Text;
+   parameter Reason Text;
+   parameter AddChargeLines Boolean;
+   ludependencies = CustomerOrderLine;
+}
+
+action UnreserveCustOrderLines Boolean {
+   initialcheck implementation;
+   parameter Selection Text;
+   supportwarnings = [true];
+   ludependencies = CustomerOrderLine;
+}
+
+action CreateOrGetFindAndConnect Text {
+   initialcheck implementation;
+   parameter Selection Text;
+}
+
+action RefreshCustOrderLineAfterCrud {
+   initialcheck none;
+   // Dummy method to refresh CustomerOrderLine
+   ludependencies = CustomerOrderLine;
+}
+-------------------------------- STRUCTURES ---------------------------------
+structure ReportPickStructure {
+   attribute OrderNo Text;
+   attribute LineNo Text;
+   attribute RelNo Text;
+   attribute LineItemNo Text;
+   attribute Contract Text;
+   attribute DisplayInfoType Number;
+}
+structure EditConfigAllowReturnStructure {
+   attribute OrderType Text;
+   attribute CtpPlanned Enumeration(GenYesNo);
+   attribute IntOrderExist Text;
+   attribute OrderConf Text;
+}
+structure ConfigInfoStructure {
+   attribute InternalCoNo Text;
+   attribute InternalCoLineState Text;
+   attribute PoLineState Text;
+   attribute TransferConfig Text;
+   attribute InternalConfigId Text;
+}
+structure CharacteristicStructure {
+   attribute PartNos Text;
+   attribute CharacteristicIds Text;
+   attribute WantedDeliveryDate Timestamp;
+   attribute ConnectedIdAttr Text;
+}
+structure GetRmaCoLinesOutputStruct {
+   attribute Invoice Text {
+      label = "Invoice";
+   }
+   attribute PromoExists Text {
+      label = "Promo Exists";
+   }
+   attribute RecordCount Text {
+      label = "Record Count";
+   }
+}
+structure RmaCustomerOrderLineStructure {
+   attribute ReturnReasonCode Text {
+      label = "Return Reason";
+      maxlength = 10;
+      format = uppercase;
+   }
+   attribute AddChargeLines Boolean("TRUE", "FALSE") {
+      label = "Add Connected Charge Line(s)";
+      required = [true];
+   }
+   attribute ExistCharges Boolean;
+   reference ReturnReasonCodeRef(ReturnReasonCode) to ReturnMaterialReason(ReturnReasonCode) {
+      label = "Return Reason";
+   }
+}
+
+----------------------------- MAIN ENTRY POINTS -----------------------------
+entityset UnreserveOrderLineVirtualSet for UnreserveOrderLineVirtual;
+
+--------------------------------- VIRTUALS ----------------------------------
+virtual UnreserveOrderLineVirtual {
+   ludependencies = CancelPurchaseOrderMessageVirtual;
+   attribute OrderSelection Text;
+   attribute Source Text;
+   attribute AssistantTitle Text;
+
+   array MessageArray() to UnreserveOrderLineMessageVirtual();
+
+   action ProcessUnreserve {
+      initialcheck implementation;
+      supportwarnings = [true];
+      ludependencies = CustomerOrderLine;
+   }
+}
+
+virtual UnreserveOrderLineMessageVirtual {
+   crud = Create, Update;
+   attribute OrderNo Text {
+      editable = [false];
+   }
+   attribute LineNo Text {
+      editable = [false];
+   }
+   attribute ReleaseNo Text {
+      editable = [false];
+   }
+   attribute LineItemNo Number {
+      editable = [false];
+   }
+   attribute Message Text {
+      editable = [false];
+   }
+   attribute MessageType Text {
+      editable = [false];
+   }
+   attribute Answer Enumeration(GenYesNo) {
+      required = [true];
+   }
+   attribute SupplyCode Enumeration(OrderSupplyType) {
+      required = [true];
+   }
+   attribute QtyAssigned Number {
+      editable = [false];
+   }
+   attribute QtyOnPickList Number {
+      editable = [false];
+   }
+}

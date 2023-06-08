@@ -1,0 +1,470 @@
+-------------------------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  --------------------------------------------------------------------------------
+-- 2019-05-30  ChFolk  SCUXXW4-21967, Added missing attributes to TemporaryPartTrackingVirtual to match with SerialsArray.
+-- 2019-04-10  JaThlk  SCUXXW4-18465, Moved the where clause for SerialNo to projection file from plsvc file.
+-- 2018-10-01  JaThlk  SCUXXW4-5836, Created the fragment from dlgSplitReservation to identify reserved serial numbers.
+-------------------------------------------------------------------------------------------------------
+fragment SplitReservationAssistant;
+component INVENT;
+layer Core;
+description "Use this Assistant to identify reserved serial numbers.";
+include fragment SequenceGeneratorAssistant;
+include fragment IdentifySerialsByBarcodeDynamicAssistant;
+//warningsenabled = CreateSerialSequence;
+----------------------------- CLIENT FRAGMENTS ------------------------------
+
+
+-------------------------------- ASSISTANTS ---------------------------------
+assistant SplitReservationAssistant using SplitReservationSet {
+   label = "Identify Serials for Reservation";
+   input(RefTypeDb, Ref1, Ref2, Ref3, Ref4, Ref5, Ref6, QtyReserved, Contract, PartNo, ConfigId, LocationNo, LotBatchNo, EngChgLevel, WaivDevRejNo, ActivitySeq, HandlingUnitId);
+   output(SessionId);
+   init command {
+      execute {
+         call GetInitialValues(Contract, PartNo, ConfigId, LocationNo, LotBatchNo, EngChgLevel, WaivDevRejNo, ActivitySeq, HandlingUnitId, QtyReserved) into CatchUnitInfoStructure;
+         set CatchUoM = CatchUnitInfoStructure.CatchUom;
+         set CatchUnitEnabled = CatchUnitInfoStructure.CatchUnitEnabled;
+         set CatchQtyReserved = CatchUnitInfoStructure.CatchQtyReserved;
+      }
+   }
+   steps {
+      step {
+         group SplitReservationSourceGroup;
+         group StockRecordGroup;
+         group SplitReservationGroup;
+         list SerialsList(SerialsArray);
+      }
+      final step {
+
+      }
+      cancelled step {
+
+      }
+   }
+   finish command {
+      execute {
+         call SplitStockRecord(SessionId, RefTypeDb, Ref1, Ref2, Ref3, Ref4, Ref5, Ref6, Contract, PartNo, ConfigId, LocationNo, LotBatchNo, EngChgLevel, WaivDevRejNo, ActivitySeq, HandlingUnitId);
+         exit OK;
+      }
+   }
+   cancel command {
+      execute {
+         call RemoveSession(SessionId);
+      }
+   }
+   restart command {
+      visible = [false];
+   }
+}
+
+--------------------------------- COMMANDS ----------------------------------
+command GenerateSequenceSplitReservCommand for TemporaryPartTrackingVirtual {
+   label = "Sequence";
+   mode = Global;
+   variable SerialListStr {
+      type = LongText;
+   }
+   variable ReserveSerialVar {
+      type = Number;
+   }
+   enabled = [QtyReserved > computed.SerialsDefined];
+   execute {
+      set ReserveSerialVar = "#{QtyReserved - computed.SerialsDefined}";
+      assistant SequenceGeneratorAssistant(ReserveSerialVar) into(SerialListStr) {
+         when OK {
+            call CreateLines(Objkey, SerialListStr, SessionId, Contract, PartNo);
+         }
+      }
+   }
+}
+
+command IdentifySerialsByBarcodeSplitReservCommand for TemporaryPartTrackingVirtual {
+   label = "Barcode ID";
+   mode = Global;
+   variable SessionIdStr {
+      type = Text;
+   }
+   variable ParentSessionIdStr {
+      type = Text;
+   }
+   variable ActivitySeqStr {
+      type = Text;
+   }
+   enabled = [QtyReserved > computed.SerialsDefined];
+
+   execute {
+      call GetBarcodeInfo(SessionId, ActivitySeq) into BarcodeInfoStructure;
+      set SessionIdStr = BarcodeInfoStructure.SessionIdStr;
+      set SessionIdVar = BarcodeInfoStructure.SessionId;
+      set ParentSessionIdStr = BarcodeInfoStructure.ParentSessionIdStr;
+      set ActivitySeqStr = BarcodeInfoStructure.ActivitySeqStr;
+
+      assistant IdentifySerialsByBarcodeAssistant(Contract, PartNo, ConfigId, LotBatchNo, EngChgLevel, WaivDevRejNo, ActivitySeqStr, SessionIdVar, SessionIdStr, ParentSessionIdStr) into(SessionIdVar) {
+         when CANCEL {
+            call InsertLines(Objkey, SessionIdVar, SessionId, Contract, PartNo);
+            exit;
+         }
+
+      }
+   }
+}
+
+---------------------------------- GROUPS -----------------------------------
+group SplitReservationSourceGroup for SplitReservationVirtual {
+   label = "Source";
+   field Ref1 {
+      size = Small;
+   }
+   field Ref2 {
+      size = Small;
+   }
+   field Ref3 {
+      size = Small;
+   }
+   field Ref4 {
+      size = Small;
+   }
+   field Ref5 {
+      size = Small;
+   }
+   field RefType {
+      size = Small;
+   }
+   field SessionId {
+      visible = [false];
+   }
+   measure QtyReserved(UoM);
+   measure CatchQtyReserved(CatchUoM);
+}
+group StockRecordGroup for SplitReservationVirtual {
+   label = "Stock Record";
+   field Contract {
+      size = Small;
+   }
+   field PartNo {
+      size = Small;
+   }
+   field ConfigId {
+      size = Small;
+   }
+   field LocationNo {
+      size = Small;
+   }
+   field HandlingUnitId {
+      size = Small;
+   }
+   field LotBatchNo {
+      size = Small;
+   }
+   field EngChgLevel {
+      size = Small;
+   }
+   field WaivDevRejNo {
+      size = Small;
+   }
+   field ActivitySeq;
+}
+group SplitReservationGroup for SplitReservationVirtual {
+   label = "";
+   computedfield SerialsDefined {
+      label = "No of Serials Identified";
+      value = "#{SerialsArray.count(SessionId)}";
+      type = Number;
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+list SerialsList for TemporaryPartTrackingVirtual {
+   editmode = SingleCellEdit;
+   lov SerialNoRef with ReferenceTemporaryPartTrackingSerialSelector using GetSerialNumbers(Contract, PartNo, SessionId, LotBatchNo, PartOwnership, ConfigId) {
+      size = Small;
+   }
+   field CatchQty {
+      editable = [parent.CatchUnitEnabled = "TRUE"];
+   }
+
+   command GenerateSequenceSplitReservCommand;
+   command IdentifySerialsByBarcodeSplitReservCommand;
+}
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+
+
+----------------------------- MAIN ENTRY POINTS -----------------------------
+entityset SplitReservationSet for SplitReservationVirtual;
+
+---------------------------------- ACTIONS ----------------------------------
+
+//! TODO: Should be refactored as a function!
+action GetInitialValues Structure(CatchUnitInfoStructure) {
+   initialcheck none;
+   parameter Contract Text;
+   parameter PartNo Text;
+   parameter ConfigId Text;
+   parameter LocationNo Text;
+   parameter LotBatchNo Text;
+   parameter EngChgLevel Text;
+   parameter WaivDevRejNo Text;
+   parameter ActivitySeq Number;
+   parameter HandlingUnitId Number;
+   parameter QtyReserved Number;
+}
+
+action RemoveSession {
+   initialcheck none;
+   parameter SessionId Number;
+}
+
+action SplitStockRecord {
+   initialcheck none;
+   parameter SessionId Number;
+   parameter RefTypeDb Text;
+   parameter Ref1 Text;
+   parameter Ref2 Text;
+   parameter Ref3 Text;
+   parameter Ref4 Text;
+   parameter Ref5 Text;
+   parameter Ref6 Text;
+   parameter Contract Text;
+   parameter PartNo Text;
+   parameter ConfigId Text;
+   parameter LocationNo Text;
+   parameter LotBatchNo Text;
+   parameter EngChgLevel Text;
+   parameter WaivDevRejNo Text;
+   parameter ActivitySeq Number;
+   parameter HandlingUnitId Number;
+   ludependencies = InvPartStockReservation, InventoryPartInStock, ShopMaterialAlloc;
+}
+
+action CreateLines {
+   initialcheck none;
+   parameter ParentObjkey Text;
+   parameter SerialList LongText;
+   parameter SessionId Number;
+   parameter Contract Text;
+   parameter PartNo Text;
+   ludependencies = TemporaryPartTrackingVirtual;
+   supportwarnings = [true];
+}
+
+//! TODO: Should be refactored as a function!
+action InsertLines {
+   initialcheck none;
+   parameter ParentObjkey Text;
+   parameter SessionIdVar Number;
+   parameter SessionId Number;
+   parameter Contract Text;
+   parameter PartNo Text;
+   ludependencies = TemporaryPartTrackingVirtual;
+
+}
+//! TODO: Should be refactored as a function!
+action GetBarcodeInfo Structure(BarcodeInfoStructure) {
+   initialcheck none;
+   parameter ParentSessionId Number;
+   parameter ActivitySeq Number;
+}
+--------------------------------- FUNCTIONS ---------------------------------
+function GetSerialNumbers List < Entity(TemporaryPartTrackingSerial) > {
+   parameter Contract Text;
+   parameter PartNo Text;
+   parameter SessionId Number;
+   parameter LotBatchNo Text;
+   parameter PartOwnership Text;
+   parameter ConfigId Text;
+   where = "PART_NO = :PartNo
+   AND CONTRACT = :Contract
+   AND LOT_BATCH_NO IN (:LotBatchNo)
+   AND CONFIGURATION_ID = :ConfigId
+   AND PART_OWNERSHIP_DB = :PartOwnership
+   AND SERIAL_NO NOT IN (SELECT t.SERIAL_NO
+                         FROM TEMPORARY_PART_TRACKING t
+                         WHERE t.SESSION_ID = :SessionId)
+   AND Inventory_Part_In_Stock_API.Check_Individual_Exist(PART_NO, SERIAL_NO) = 0";
+}
+
+
+-------------------------------- STRUCTURES ---------------------------------
+structure CatchUnitInfoStructure {
+   attribute CatchUnitEnabled Text;
+   attribute CatchUom Text;
+   attribute CatchQtyReserved Number;
+}
+structure BarcodeInfoStructure {
+   attribute SessionId Number;
+   attribute SessionIdStr Text;
+   attribute ParentSessionIdStr Text;
+   attribute ActivitySeqStr Text;
+}
+--------------------------------- VIRTUALS ----------------------------------
+virtual SplitReservationVirtual {
+   attribute Ref1 Text {
+      label = "Order Ref 1";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute Ref2 Text {
+      label = "Order Ref 2";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute Ref3 Text {
+      label = "Order Ref 3";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute Ref4 Text {
+      label = "Order Ref 4";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute Ref5 Text {
+      label = "Order Ref 5";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute Ref6 Text {
+      label = "Order Ref 6";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute RefTypeDb Text {
+      label = "Alt Source Ref Type";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute RefType Text {
+      label = "Alt Source Ref Type";
+      fetch = "Order_Supply_Demand_Type_API.Decode(REF_TYPE_DB)";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute QtyReserved Number {
+      label = "Reserved Qty";
+      editable = [false];
+   }
+   attribute UoM Text {
+      label = "UoM";
+      fetch = "Inventory_Part_API.Get_Unit_Meas(CONTRACT, PART_NO)";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute CatchQtyReserved Number {
+      label = "Catch Quantity Received";
+      editable = [false];
+   }
+   attribute CatchUoM Text {
+      label = "Catch UoM";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute Contract Text {
+      label = "Site";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute PartNo Text {
+      label = "Part No";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute ConfigId Text {
+      label = "Configuration ID";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute LocationNo Text {
+      label = "Location No";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute HandlingUnitId Number {
+      label = "Handling Unit ID";
+      editable = [false];
+   }
+   attribute LotBatchNo Text {
+      label = "Lot/Batch No";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute EngChgLevel Text {
+      label = "Revision No";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute WaivDevRejNo Text {
+      label = "W/D/R No";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute ActivitySeq Number {
+      label = "Activity Sequence";
+      editable = [false];
+   }
+   attribute SerialsDefined Number {
+      label = "No of Serials Identified";
+   }
+   attribute SessionId Number {
+      fetch = "Temporary_Part_Tracking_API.Get_Next_Session_Id";
+   }
+   attribute PartOwnership Text {
+      fetch = "Inventory_Part_In_Stock_API.Get_Part_Ownership_Db(CONTRACT, PART_NO, CONFIG_ID, LOCATION_NO, LOT_BATCH_NO, '*', ENG_CHG_LEVEL, WAIV_DEV_REJ_NO, ACTIVITY_SEQ, HANDLING_UNIT_ID)";
+   }
+   attribute CatchUnitEnabled Text;
+
+   array SerialsArray(Contract, PartNo, LocationNo, SessionId, LotBatchNo, ConfigId, EngChgLevel, WaivDevRejNo, ActivitySeq, PartOwnership, CatchUnitEnabled) to TemporaryPartTrackingVirtual(Contract, PartNo, LocationNo, SessionId, LotBatchNo, ConfigId, EngChgLevel, WaivDevRejNo, ActivitySeq, PartOwnership, CatchUnitEnabled);
+}
+
+@Override
+virtual TemporaryPartTrackingVirtual {
+   crud = Create, Read, Update, Delete;
+   attribute SessionId Number {
+      fetch = "session_id";
+      label = "Session ID";
+      required = [true];
+      editable = [ETag = null];
+   }
+   attribute SerialNo Text {
+      fetch = "serial_no";
+      label = "Serial No";
+      maxlength = 50;
+      required = [true];
+      editable = [ETag = null];
+      format = uppercase;
+   }
+   attribute CatchQty Number {
+      fetch = "catch_qty";
+      label = "Catch Qty";
+   }
+   attribute Contract Text {
+      fetch = "contract";
+      label = "Contract";
+      maxlength = 5;
+      editable = [ETag = null];
+      format = uppercase;
+   }
+   attribute PartNo Text {
+      fetch = "part_no";
+      label = "Part No";
+      maxlength = 25;
+      editable = [ETag = null];
+      format = uppercase;
+   }
+   attribute LocationNo Text;
+   attribute LotBatchNo Text;
+   attribute ConfigId Text;
+   attribute EngChgLevel Text;
+   attribute WaivDevRejNo Text;
+   attribute ActivitySeq Number;
+   attribute PartOwnership Text;
+   attribute CatchUnitEnabled Text;
+   attribute SerialNoAttr Text;
+   attribute Generated Boolean;
+
+   reference SerialNoRef(SerialNo) to TemporaryPartTrackingSerial(SerialNo) {
+      label = "Serial No";
+   }
+}
+

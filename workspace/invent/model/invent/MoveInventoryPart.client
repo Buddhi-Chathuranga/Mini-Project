@@ -1,0 +1,686 @@
+-------------------------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  --------------------------------------------------------------------------------
+-- 2021-10-27  DigPlk  SC21R2-2889, Replaced the functionality of IdentifySerialsInLocAssistant with IdentifySerialsInLocRepeatAssistant.
+-- 2021-07-07  JaThlk  SC21R2-1848, Modified PreprocessCommand to replace the confirm message with messagebox to provide yes, no and cancel options.
+-- 2021-05-25  JaThlk  Bug 158861(SCZ-14726), Modified PreprocessCommand and NewPartLocList to remove usages of CheckExist to avoid issues
+-- 2021-05-25          with confirmation dialog when updating records with Consignment parts.
+-- 2020-12-03  WaSalk  SC2020R1-11386, Modified PreprocessCmd to update AvailabilityControlId where line already exists and ToUoMRef to editable false.
+-- 2020-11-18  WaSalk  SC2020R1-11386, Removed two error masseges with conditions in PreprocessCommand to avoid unnessary validations.
+-- 2020-10-13  BudKlk  Bug 155744(SCZ-11641), Added exit CANCEL for the error messages in order to terminate the execution after the error.
+-- 2020-06-15  JaThlk  Bug 154380(SCZ-10399), Modified the PreprocessCommand to validate parent PartOwnershipDb instead of child.
+-- 2020-06-01  WaSalk  SCXTEND-4280, Added GetLocationInfo() call to PreprocessCommand to get necessary values when do line duplicate.
+-- 2020-04-22  KHVESE  SCZ-9720, Disabled dublicate on list since extra coding is needed to get duplicatdue to work on this page. Issue SCXTEND-4280 has been reported and needs to corrected in next release.
+-- 2019-11-13  FRBESE  SCXTEND-1158, Changed TransportTaskLineNavEntry navigator entry index from 1000 to 900.
+-- 2019-05-15  JaThlk  SCUXXW4-20748, Enabled the support for multiple CRUD operations.
+-- 2019-04-05  JaThlk  SCUXXW4-6021, Fixed navigation issue in ResolveShortageCommand.
+-- 2019-04-03  ShKolk  SCUXXW4-17953, Added create and update actions for NewPartLocList to avoid overtaking crud methods in plsvc
+-- 2019-03-12  JaThlk  SCUXXW4-17128, Added SessionId as an in parameter in IdentifySerialsInLocationAssistant.
+-- 2019-03-07  ChFolk  SCUXXW4-16871, Added dynamic dependency where it is missing.
+-- 2018-12-26  JaThlk  SCUXXW4-6021, Fixed the navigation in ViewConfigurationCommand.
+-- 2018-10-23  ChFolk  SCUXXW4-5231, Added ChangePartAvailabilityControlAssistant to support dlgChangePartAvailabilityControl.
+-- 2018-09-21  JaThlk  SCUXXW4-6021, Added the call to IdentifySerialsInLocationAssistant.
+-- 2018-08-29  JaThlk  SCUXXW4-6021, Added parent value for the Contract in the child table as the default value.
+-- 2018-08-28  JaThlk  SCUXXW4-6021, Added the validate methods in before command prior to inserting or updating records.
+-- 2018-07-03  JaThlk  SCUXXW4-6021, Converted from frmChangePartLoc using MTG Version: 1.23
+-------------------------------------------------------------------------------------------------------
+
+client MoveInventoryPart;
+component INVENT;
+layer Core;
+
+--------------------------------- FRAGMENTS ---------------------------------
+include fragment InventoryPartLovSelector;
+include fragment UserAllowedSiteLovSelector;
+include fragment InventoryLocation5Selector;
+include fragment InventoryLocation20Selector;
+include fragment IdentifySerialsInLocationAssistant;
+
+warningsenabled = CreateSerialSequence;
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+navigator {
+   entry TransportTaskLineNavEntry parent InventNavigator.WarehouseManagementPartHandling at index 900 {
+      label = "Move Inventory Part";
+      page Form;
+   }
+}
+
+-------------------------------- MAIN PAGES ---------------------------------
+page Form using InventoryPartInStockSet {
+   label = "Move Inventory Part";
+   startupmode = search;
+   defaultfilter = [QtyOnhand > 0];
+   selector InventoryPartInStockSelector;
+   arrange {
+      group ChangePartLocGroup;
+   }
+   arrange {
+      group LocationGroup;
+      arrange {
+         group TrackingGroup;
+         group CharacteristicsGroup;
+      }
+      group AvailabilityGroup;
+      group OwnershipGroup;
+      group QuantityGroup;
+      group HandlingUnitGroup;
+   }
+
+   list NewPartLocList(NewPartLocArray) {
+
+      copyoncruddefault(Contract, DefaultLocationNo, CatchUnitEnabled) to(Contract, LocationNo, CatchUnitEnabled);
+   }
+
+   commandgroup CommandGroupCmdGroup {
+
+      command ViewConfigurationCommand;
+   }
+}
+
+-------------------------------- ASSISTANTS ---------------------------------
+assistant ChangePartAvailabilityControlAssistant for ChangePartAvailabilityControlStructure {
+   label = "Change Availability Control";
+   savemode = OnLostFocus;
+   input(Contract, PartNo, ConfigurationId, FromLocation, ToLocation, LotBatchNo, SerialNo, EngChgLevel, WaivDevRejNo, ActivitySeq, HandlingUnitId, FromAvailabilityCtrlId, ToAvailabilityCtrlId, QtyOnhand, QtyInTransit);
+   output(NewAvailabilityCtrlId, NewWaivDevRejNo);
+   init command {
+      execute {
+         set NewWaivDevRejNo = WaivDevRejNo;
+         set SetAvailbilityCtrlOption = "SameAsToLocation";
+         set NewAvailabilityCtrlId = ToAvailabilityCtrlId;
+      }
+   }
+   steps {
+      step {
+         group PartInformationForChangeAvailabilityCtrlGroup;
+         group MoveFromLocationForChangeAvailabilityCtrlGroup;
+         group MoveToLocationForChangeAvailabilityCtrlGroup;
+         group SetAvailCtrlForChangeAvailabilityCtrlGroup;
+         group SetWdrNoForChangeAvailabilityCtrlGroup;
+
+      }
+      final step {
+      }
+      cancelled step {
+      }
+   }
+   finish command {
+      enabled = [NewWaivDevRejNo != null];
+      variable InvPartInStockInfoVar {
+         type = Structure(InvPartInStockInfoStructure);
+      }
+      variable WarningRaisedBool {
+         type = Boolean;
+      }
+      execute {
+         set WarningRaisedBool = false;
+         if [SetAvailbilityCtrlOption = "SameAsFromLocation" or SetAvailbilityCtrlOption = "SameAsToLocation"] {
+            if [SetAvailbilityCtrlOption = "SameAsFromLocation"] {
+               set NewAvailabilityCtrlId = FromAvailabilityCtrlId;
+            }
+            if [SetAvailbilityCtrlOption = "SameAsToLocation"] {
+               set NewAvailabilityCtrlId = ToAvailabilityCtrlId;
+            }
+
+            if [NewWaivDevRejNo = WaivDevRejNo] {
+               call GetInventoryPartInStockInfo(Contract,
+               PartNo,
+               ConfigurationId,
+               ToLocation,
+               LotBatchNo,
+               SerialNo,
+               EngChgLevel,
+               NewWaivDevRejNo,
+               ActivitySeq,
+               HandlingUnitId) into InvPartInStockInfoVar;
+               if [InvPartInStockInfoVar.PartExist and InvPartInStockInfoVar.AvailabilityCtrlId != NewAvailabilityCtrlId and(QtyOnhand != 0 or QtyInTransit != 0)] {
+                  warning("Must Enter a new value for W/D/R No. Part already exists in the same location with different Availability Control Id.");
+                  set WarningRaisedBool = true;
+               }
+            }
+         }
+
+         if [SetAvailbilityCtrlOption = "NewAvailabilityCtrl"] {
+            if [NewAvailabilityCtrlId = null] {
+               warning("Must enter a value for Availability Control ID");
+               set WarningRaisedBool = true;
+            }
+            else {
+               call GetInventoryPartInStockInfo(Contract,
+               PartNo,
+               ConfigurationId,
+               ToLocation,
+               LotBatchNo,
+               SerialNo,
+               EngChgLevel,
+               NewWaivDevRejNo,
+               ActivitySeq,
+               HandlingUnitId) into InvPartInStockInfoVar;
+               if [InvPartInStockInfoVar.PartExist and InvPartInStockInfoVar.AvailabilityCtrlId != NewAvailabilityCtrlId and(QtyOnhand != 0 or QtyInTransit != 0)] {
+                  warning("Must Enter a new value for W/D/R No. Part already exists in the same location with different Availability Control Id.");
+                  set WarningRaisedBool = true;
+               }
+            }
+         }
+         if [WarningRaisedBool = false] {
+            exit OK;
+         }
+         else {
+            exit;
+         }
+      }
+   }
+   cancel command {
+      execute {
+         exit CANCEL;
+      }
+   }
+   restart command {
+      visible = [false];
+   }
+}
+
+--------------------------------- COMMANDS ----------------------------------
+command ViewConfigurationCommand for InventoryPartPickShipStock {
+   label = "View Configuration";
+   enabled = [ConfigurationId != "*"];
+   variable Mode;
+
+   execute {
+      set Mode = "View";
+      navigate "assistant/PartConfigurationAssistant/EditConfiguration?$action=InitConfiguration{  VarMode:$[Mode],
+                                                                                                   VarPartNo:$[PartNo],
+                                                                                                   VarConfigurationId:$[ConfigurationId]}";
+   }
+}
+
+command ResolveShortageCommand for InventoryPartInStockDelivery {
+   label = "Resolve Shortage";
+   enabled = [SystemShortageFlag = "Y" and ShortageExists != 0];
+   mode = SingleRecord;
+
+   execute {
+      if [PartOwnershipDb != null] {
+         if [PartOwnershipDb = "CUSTOMER OWNED"] {
+            if [ConditionCode != null] {
+               navigate "page/ResolveShortagesForInventoryPart/Form?$filter=PartNo eq $[PartNo] and Contract eq $[Contract] and ConditionCode eq $[ConditionCode] and PartOwnership eq $[PartOwnershipDb] and OwningCustomerNo eq $[Owner]";
+            }
+            else {
+               navigate "page/ResolveShortagesForInventoryPart/Form?$filter=PartNo eq $[PartNo] and Contract eq $[Contract] and PartOwnership eq $[PartOwnershipDb] and OwningCustomerNo eq $[Owner]";
+            }
+         }
+         else {
+            if [PartOwnershipDb = "SUPPLIER LOANED"] {
+               if [ConditionCode != null] {
+                  navigate "page/ResolveShortagesForInventoryPart/Form?$filter=PartNo eq $[PartNo] and Contract eq $[Contract] and ConditionCode eq $[ConditionCode] and PartOwnership eq $[PartOwnershipDb] and OwningVendorNo eq $[Owner]";
+               }
+               else {
+                  navigate "page/ResolveShortagesForInventoryPart/Form?$filter=PartNo eq $[PartNo] and Contract eq $[Contract] and PartOwnership eq $[PartOwnershipDb] and OwningVendorNo eq $[Owner]";
+               }
+            }
+            else {
+               if [PartOwnershipDb != "SUPPLIER LOANED" or PartOwnershipDb != "CUSTOMER OWNED"] {
+                  if [ConditionCode != null] {
+                     navigate "page/ResolveShortagesForInventoryPart/Form?$filter=PartNo eq $[PartNo] and Contract eq $[Contract] and ConditionCode eq $[ConditionCode] and PartOwnership eq $[PartOwnershipDb]";
+                  }
+                  else {
+                     navigate "page/ResolveShortagesForInventoryPart/Form?$filter=PartNo eq $[PartNo] and Contract eq $[Contract] and PartOwnership eq $[PartOwnershipDb]";
+                  }
+               }
+            }
+
+         }
+
+      }
+      else {
+         if [ConditionCode != null] {
+            navigate "page/ResolveShortagesForInventoryPart/Form?$filter=PartNo eq $[PartNo] and Contract eq $[Contract] and ConditionCode eq $[ConditionCode]";
+         }
+         else {
+            navigate "page/ResolveShortagesForInventoryPart/Form?$filter=PartNo eq $[PartNo] and Contract eq $[Contract]";
+         }
+      }
+   }
+}
+
+command DefaultLocationCommand for InventoryPartInStockDelivery {
+   label = "Default Location";
+   mode = SingleRecord;
+   enabled = [true];
+
+   execute {
+      confirm("Set default location to ${LocationNo} for Part ${PartNo} at site ${Contract}") {
+         when OK {
+            call ModifyDefaultLocation(Contract, PartNo, LocationNo);
+         }
+      }
+   }
+}
+
+command PreprocessCommand for InventoryPartInStockDelivery {
+   mode = SingleRecord;
+   variable AvailabilityControlIdTemp;
+   variable WaivDevRejNoTemp;
+   variable AvailabilityControl;
+   variable SessionSelection Text;
+   variable SessionId Number;
+
+   execute {
+      call GetLocationInfo(Contract, LocationNo) into LocationInfoStructure;
+      set DefaultAvailabilityControlId = LocationInfoStructure.AvailabilityControlId;
+      set ParentLocationNo = parent.LocationNo;
+      set ParentContract = parent.Contract;
+      set ParentWaivDevRejNo = parent.WaivDevRejNo;
+      if [not(parent.AvailabilityControlId = null and AvailabilityControlId = null)] {
+         if [AvailabilityControlId = null and QtyOnhand = 0] {
+            set AvailabilityControl = DefaultAvailabilityControlId;
+         }
+         else {
+            set AvailabilityControl = AvailabilityControlId;
+         }
+         set WaivDevRejNo = parent.WaivDevRejNo;
+         assistant ChangePartAvailabilityControlAssistant(Contract, parent.PartNo, parent.ConfigurationId,
+         parent.LocationNo, LocationNo,
+         parent.LotBatchNo, parent.SerialNo, parent.EngChgLevel, parent.WaivDevRejNo,
+         parent.ActivitySeq, parent.HandlingUnitId, parent.AvailabilityControlId, AvailabilityControl,
+         QtyOnhand, QtyInTransit) into(AvailabilityControlIdTemp, WaivDevRejNoTemp) {
+            when OK {
+               set WaivDevRejNo = WaivDevRejNoTemp;
+               if [not AvailabilityControlIdTemp] {
+                  set NewAvailabilityControlId = "STRING_NULL";
+               }
+               else {
+                  set NewAvailabilityControlId = AvailabilityControlIdTemp;
+               }
+            }
+            when CANCEL {
+               exit CANCEL;
+            }
+         }
+      }
+      else {
+         set WaivDevRejNo = parent.WaivDevRejNo;
+         set NewAvailabilityControlId = parent.AvailabilityControlId;
+      }
+      if [parent.PartOwnershipDb = "CONSIGNMENT"] {
+         messagebox("", question, "Do you want to consume consignment stock when moving to location ${LocationNo}?") {
+            when "Yes" {
+               set ConsumeStock = "Y";
+            }
+            when "No" {
+               set ConsumeStock = "N";
+            }
+            when "Cancel" {
+               exit CANCEL;
+            }
+         }
+      }
+      else {
+         set ConsumeStock = "N";
+      }
+
+      if [parent.ReceiptIssueSerialTrackingDb = "TRUE" and parent.SerialNo = "*" and(parent.Contract != Contract or ConsumeStock = "Y") and QuantityMoved > 0] {
+         call GetRecordsWithSessionId(parent.Contract, parent.PartNo, parent.ConfigurationId, parent.LocationNo, parent.LotBatchNo, parent.EngChgLevel, parent.WaivDevRejNo, parent.ActivitySeq, parent.HandlingUnitId, QuantityMoved, CatchQuantityMoved, NULL, NULL, NULL) into IdentifySerialsRecStructure;
+         assistant IdentifySerialsInLocRepeatAssistant(IdentifySerialsRecStructure.RemainingSelection, IdentifySerialsRecStructure.Total, null, null) into(SessionSelection) {
+            when OK {
+               if [SessionSelection != null and SessionSelection != ""] {
+                  set SessionId = IdentifySerialsRecStructure.SessionId;
+               }
+               refresh;
+            }
+            when CANCEL {
+               exit;
+            }
+         }
+      }
+   }
+}
+
+command CheckShortageExists for InventoryPartInStockDelivery {
+   variable PartShortageFlagVar {
+      type = Text;
+   }
+   variable SystemShortageFlagVar {
+      type = Text;
+   }
+   variable ShortageVar {
+      type = Text;
+   }
+   variable ShortageExistsVar {
+      type = Text;
+   }
+   execute {
+      set SystemShortageFlagVar = "${SystemShortageFlag}";
+      if [SystemShortageFlagVar = "Y"] {
+         set PartShortageFlagVar = "${parent.PartShortageFlag}";
+         set ShortageVar = "${Shortage}";
+         if [PartShortageFlagVar = ShortageVar] {
+            call CheckShortageExists(parent.Contract, Contract) into ShortageExistsVar;
+            if [ShortageExistsVar != 0] {
+               info("There are shortages for part ${parent.PartNo} and site ${Contract}");
+            }
+         }
+      }
+   }
+}
+
+--------------------------------- SELECTORS ---------------------------------
+selector InventoryPartInStockSelector for InventoryPartPickShipStock {
+   label = "${PartNo} - ${PartNoRef.Description} - ${Contract}";
+   static PartNo;
+   static PartNoRef.Description;
+   static Contract;
+   static LocationNo;
+}
+
+---------------------------------- GROUPS -----------------------------------
+group ChangePartLocGroup for InventoryPartPickShipStock {
+   label = "";
+   lov PartNoRef with ReferenceInventoryPartLovSelector {
+      label = "Part";
+      description = PartNoRef.Description;
+      editable = [false];
+   }
+   lov ContractRef with ReferenceUserAllowedSiteLovSelector {
+      size = Small;
+   }
+}
+
+group AvailabilityGroup for InventoryPartPickShipStock {
+   label = "Availability";
+   collapsed = [true];
+
+   field WaivDevRejNo {
+      size = Small;
+   }
+   field ExpirationDate;
+   field AvailabilityControlId;
+   field PartShortageFlag {
+      visible = [false];
+   }
+}
+
+group TrackingGroup for InventoryPartPickShipStock {
+   label = "Tracking";
+   field LotBatchNo;
+   field SerialNo;
+   field ReceiptIssueSerialTrackingDb {
+      visible = [false];
+   }
+}
+
+group OwnershipGroup for InventoryPartPickShipStock {
+   label = "Ownership";
+   collapsed = [true];
+
+   field PartOwnership;
+   field PartOwnershipDb {
+      visible = [false];
+   }
+   field Owner {
+      size = Small;
+      contactwidget {
+         enabled = [Owner != null];
+         source {
+            Customer = [PartOwnershipDb = "CUSTOMER OWNED"];
+            Supplier = [PartOwnershipDb = "SUPPLIER OWNED" or PartOwnershipDb = "SUPPLIER LOANED" or PartOwnershipDb = "SUPPLIER RENTED" or PartOwnershipDb = "CONSIGNMENT"];
+         }
+      }
+   }
+   field ProjectId {
+      size = Small;
+   }
+   field ActivitySeq;
+}
+
+group CharacteristicsGroup for InventoryPartPickShipStock {
+   label = "Characteristics";
+   field ConditionCode;
+   field ConfigurationId;
+   field EngChgLevel;
+}
+
+group QuantityGroup for InventoryPartPickShipStock {
+   label = "Quantities";
+   measure QtyReserved(PartNoRef.UnitMeas) {
+      editable = [false];
+   }
+   measure QtyOnhand(PartNoRef.UnitMeas) {
+      editable = [false];
+   }
+   measure CatchQtyOnhand(CatchQtyOnhandUoM) {
+      editable = [false];
+      visible = [CatchUnitEnabled];
+   }
+   measure AvailableQtyToMove(PartNoRef.UnitMeas) {
+      editable = [false];
+   }
+}
+
+group LocationGroup for InventoryPartPickShipStock {
+   label = "Location";
+   lov LocationNoRef with ReferenceInventoryLocation20Selector {
+      size = Small;
+   }
+   field Warehouse {
+      size = Small;
+   }
+   field BayNo {
+      label = "Bay ID";
+      size = Small;
+   }
+   field TierNo {
+      label = "Tier ID";
+      size = Small;
+   }
+   field RowNo {
+      label = "Row ID";
+      size = Small;
+   }
+   field BinNo {
+      label = "Bin ID";
+      size = Small;
+   }
+   field DefaultLocation;
+}
+
+group HandlingUnitGroup for InventoryPartPickShipStock {
+   label = "Handling Unit";
+   field HandlingUnitId {
+      label = "Handling Unit ID";
+   }
+   lov HandlingUnitTypeIdRef with ReferenceHandlingUnitTypeSelector {
+      label = "Handling Unit Type";
+      description = HandlingUnitTypeIdRef.Description;
+      editable = [false];
+   }
+   field HandlingUnitRef.Sscc {
+      size = Small;
+      label = "SSCC";
+   }
+   field HandlingUnitRef.AltHandlingUnitLabelId {
+      label = "Alt Handling Unit Label ID";
+   }
+}
+
+group PartInformationForChangeAvailabilityCtrlGroup for ChangePartAvailabilityControlStructure {
+   label = "Part Information";
+   lov PartNoRef with ReferenceInventoryPartSelector {
+      label = "Part";
+      description = PartNoRef.DescriptionInUse;
+      editable = [false];
+   }
+}
+
+group MoveFromLocationForChangeAvailabilityCtrlGroup for ChangePartAvailabilityControlStructure {
+   label = "Move from Location";
+   field FromLocation;
+   field FromAvailabilityCtrlId;
+}
+
+group MoveToLocationForChangeAvailabilityCtrlGroup for ChangePartAvailabilityControlStructure {
+   label = "Move to Location";
+   field ToLocation;
+   field ToAvailabilityCtrlId;
+}
+
+group SetAvailCtrlForChangeAvailabilityCtrlGroup for ChangePartAvailabilityControlStructure {
+   label = "Set availability Control ID";
+   radiogroup SetAvailbilityCtrlOption {
+      label = "";
+      size = Medium;
+      validate command {
+         execute {
+            if [SetAvailbilityCtrlOption = "SameAsFromLocation"] {
+               set NewAvailabilityCtrlId = FromAvailabilityCtrlId;
+            }
+            if [SetAvailbilityCtrlOption = "SameAsToLocation"] {
+               set NewAvailabilityCtrlId = ToAvailabilityCtrlId;
+            }
+            if [SetAvailbilityCtrlOption = "NewAvailabilityCtrl"] {
+               set NewAvailabilityCtrlId = null;
+            }
+         }
+      }
+   }
+   lov NewAvailabilityCtrlIdRef with ReferencePartAvailabilityControlSelector using AvailableControlIds {
+      editable = [SetAvailbilityCtrlOption = "NewAvailabilityCtrl"];
+      visible = [NewAvailabilityCtrlId != null or SetAvailbilityCtrlOption = "NewAvailabilityCtrl"];
+   }
+}
+
+group SetWdrNoForChangeAvailabilityCtrlGroup for ChangePartAvailabilityControlStructure {
+   label = "Set W/D/R No";
+   field NewWaivDevRejNo;
+}
+
+----------------------------------- LISTS -----------------------------------
+list NewPartLocList for InventoryPartInStockDelivery {
+   label = "";
+
+   crudactions {
+      before command PreprocessCommand;
+      create action = CreateInventoryPartInStockDelivery;
+      update action = UpdateInventoryPartInStockDelivery;
+      after command CheckShortageExists;
+   }
+
+   field QuantityMoved {
+      label = "Qty to Move";
+   }
+   field CatchQuantityMoved {
+      label = "Catch Qty to Move";
+      columnvisible = [parent.CatchUnitEnabled];
+      editable = [parent.CatchUnitEnabled];
+   }
+   field Destination {
+      size = Small;
+   }
+   lov ContractRef with ReferenceUserAllowedSiteLovSelector {
+      size = Small;
+      validate command {
+         execute {
+            set PartNo = "${parent.PartNo}";
+            call GetDefaultLocation(Contract, PartNo) into LocationNo;
+         }
+      }
+   }
+   lov ConditionCodeRef with ReferenceConditionCodeSelector {
+      description = ConditionCodeRef.Description;
+   }
+   field ExpirationDate;
+   lov LocationNoRef with ReferenceInventoryLocation5Selector {
+      size = Small;
+      validate command {
+         execute {
+            call GetLocationInfo(Contract, LocationNo) into LocationInfoStructure;
+            set Warehouse = LocationInfoStructure.Warehouse;
+            set BayNo = LocationInfoStructure.BayNo;
+            set RowNo = LocationInfoStructure.RowNo;
+            set TierNo = LocationInfoStructure.TierNo;
+            set BinNo = LocationInfoStructure.BinNo;
+            set ReceiptDate = parent.ReceiptDate;
+            set DefaultAvailabilityControlId = LocationInfoStructure.AvailabilityControlId;
+         }
+      }
+   }
+   field Warehouse {
+      size = Small;
+   }
+   field BayNo {
+      label = "Bay ID";
+      size = Small;
+   }
+   field RowNo {
+      label = "Row ID";
+      size = Small;
+   }
+   field TierNo {
+      label = "Tier ID";
+      size = Small;
+   }
+   field BinNo {
+      label = "Bin ID";
+      size = Small;
+   }
+   lov AvailabilityControlIdRef with ReferencePartAvailabilityControlSelector {
+      description = AvailabilityControlIdRef.Description;
+   }
+   field WaivDevRejNo {
+      size = Small;
+   }
+   field DefaultLocation {
+      size = Small;
+   }
+   field ToUoMRef {
+      editable = [false];
+   }
+   field QtyInTransit;
+   field QtyOnhand;
+   field ToCatchUoM {
+      size = Small;
+      columnvisible = [parent.CatchUnitEnabled];
+   }
+   field CatchQtyInTransit {
+      editable = [false];
+      columnvisible = [parent.CatchUnitEnabled];
+   }
+   field CatchQtyOnhand {
+      editable = [false];
+      columnvisible = [parent.CatchUnitEnabled];
+   }
+   field FreezeFlag {
+      size = Small;
+      enumerationtrue = "Yes";
+      enumerationfalse = "No";
+   }
+   field PartOwnership {
+      size = Small;
+   }
+   field Owner {
+      size = Small;
+      contactwidget {
+         enabled = [Owner != null];
+         source {
+            Customer = [PartOwnershipDb = "CUSTOMER OWNED"];
+            Supplier = [PartOwnershipDb = "SUPPLIER OWNED" or PartOwnershipDb = "SUPPLIER LOANED" or PartOwnershipDb = "SUPPLIER RENTED" or PartOwnershipDb = "CONSIGNMENT"];
+         }
+      }
+   }
+   @DynamicComponentDependency PURCH
+   @DynamicComponentDependency ORDER
+   field OwnerName {
+      size = Small;
+   }
+   field Note {
+      multiline = true;
+   }
+
+   commandgroup CommandGroupCmdGroup {
+
+      command ResolveShortageCommand;
+      command DefaultLocationCommand;
+   }
+}
+

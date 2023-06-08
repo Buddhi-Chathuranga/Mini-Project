@@ -1,0 +1,500 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: CreateSalesLinesFromTemplate
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign    History
+-- ----------  ------   ---------------------------------------------------------
+-- 2021-06-07  Skanlk   Bug 159500(SCZ-15113), Override the CRUD_Create___ method to populate the templates lines when opening the dialog.
+-- 2019-08-17  MalLlk   SCUXXW4-22978, Renamed the projection CreateSalesLinesFromTemplateAssistant to CreateSalesLinesFromTemplate.
+-- 2019-07-04  MiKulk   SCUXXW4-22978, Supporting to move assistant CreateSqLinesOrCoLinesFromTemplateAssistant to a seperate projection.
+-- 2019-08-14  SeJalk   SCUXXW4-23535, Modified Create_Quote_Lines_From_Template___() to pass COPY_STATUS as FALSE to avoid 
+-- 2019-08-14           incorrect calculation of discounts for quotation line.
+-- 2019-04-29  ChBnlk   SCUXXW4-8515, Corrected according to the code review suggestions.
+-- 2019-03-31  ChBnlk   SCUXXW4-18290, Properly handled info returned from Create_Order_Lines_From_Template___.
+-- 2019-03-31  ChBnlk   SCUXXW4-18288, Corrected issues reported through this bug.
+-- 2019-03-28  ChBnlk   SCUXXW4-18216, Modified Populate_Quote_Lines___() to filter the cursor  get_records_from_quote_period
+-- 2019-03-28           from row_type_ in order to get the proper data selection.
+-- 2019-03-28  ChBnlk   SCUXXW4-8377, Implemented the Customer Order Template dialog.
+-- 2019-03-19  ChBnlk   SCUXXW4-8517, Implemented the Sales Quotation Template dialog.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Fetch_Defaults___ (
+	customer_no_ IN VARCHAR2,
+	contract_ IN VARCHAR2,
+	quotation_no_ IN VARCHAR2,
+	order_no_ IN VARCHAR2	) RETURN Template_Structure_Rec
+IS
+   rec_ Template_Structure_Rec;
+   wanted_delivery_date_    DATE;
+BEGIN   
+   rec_.template_id               := Cust_Ord_Customer_API.Get_Template_Id(customer_no_);
+   rec_.latest_quotation_no       := Order_Quotation_API.Get_Latest_Quotation_No(quotation_no_, customer_no_, contract_);
+   rec_.latest_date_entered       := Order_Quotation_API.Get_Date_Entered(rec_.latest_quotation_no);
+   rec_.period_to                 := Site_API.Get_Site_Date(contract_);  
+   IF order_no_ IS NOT NULL THEN      
+      rec_.latest_order_no           := Customer_Order_API.Get_Latest_Order_No(order_no_, customer_no_, contract_); 
+   ELSIF quotation_no_ IS NOT NULL THEN  
+      rec_.latest_order_no           := Customer_Order_API.Get_Latest_Order_No(' ', customer_no_, contract_);       
+   END IF;   
+   rec_.latest_order_date_entered := Customer_Order_API.Get_Date_Entered(rec_.latest_order_no);
+   IF order_no_ IS NOT NULL THEN
+      wanted_delivery_date_ := Customer_Order_API.Get_Wanted_Delivery_Date(order_no_);
+   ELSIF quotation_no_ IS NOT NULL THEN
+      wanted_delivery_date_ := Order_Quotation_API.Get_Wanted_Delivery_Date(quotation_no_);
+   END IF;
+   rec_.planned_rental_start_date_editable         := wanted_delivery_date_;
+   rec_.planned_rental_start_time_editable         := wanted_delivery_date_; 
+   
+   RETURN rec_;
+END Fetch_Defaults___;
+
+
+PROCEDURE Populate_Quote_Lines___ (
+	parent_key_                   IN VARCHAR2,
+	quotation_no_                 IN VARCHAR2,
+	from_date_                    IN DATE,
+	to_date_                      IN DATE,
+	customer_no_                  IN VARCHAR2,
+	contract_                     IN VARCHAR2,
+	quotation_selection_method_   IN VARCHAR2,
+	template_id_                  IN VARCHAR2,
+	row_type_                     IN VARCHAR2)
+IS
+CURSOR get_records_from_quote_no IS
+   SELECT *
+   FROM order_quotation_template
+   WHERE quotation_no = NVL(quotation_no_, ' ')
+   AND template_id = NVL(template_id_, ' ')
+   AND row_type = row_type_
+   AND objstate != 'Cancelled'
+   AND contract = contract_
+   ORDER BY quotation_no, line_no, rel_no;
+   
+   CURSOR get_records_from_quote_period IS
+   SELECT *
+   FROM order_quotation_template
+   WHERE quotation_no > ' ' 
+   AND (((row_type = 'PERIOD') AND (Order_Quotation_API.Get_Customer_No(quotation_no) = customer_no_) AND 
+                     TRUNC(Order_Quotation_Api.Get_Date_Entered(quotation_no)) BETWEEN from_date_ AND to_date_)
+         OR ((row_type = 'ORDPERIO') AND (Customer_Order_API.Get_Customer_No(quotation_no) = customer_no_) AND (TRUNC(wanted_delivery_date) BETWEEN from_date_ AND to_date_)) )
+   AND template_id = ' ' 
+   AND row_type = row_type_
+   AND objstate != 'Cancelled'
+   AND contract = contract_
+   ORDER BY quotation_no, line_no, rel_no;
+   
+   CURSOR get_records_from_latest_quote_no IS
+   SELECT *
+   FROM order_quotation_template
+   WHERE quotation_no = quotation_no_
+   AND template_id = NVL(template_id_, ' ')
+   AND row_type = row_type_
+   AND Order_Quotation_API.Get_Customer_No(quotation_no) = customer_no_
+   AND objstate != 'Cancelled'
+   AND contract = contract_
+   ORDER BY quotation_no, line_no, rel_no;
+   
+   
+   line_rec_   Template_Line_Virtual_Rec;   
+   key_        Create_Sq_Lines_Or_Co_Lines_From_Template_Virtual_Key;
+BEGIN
+    key_.objkey := parent_key_;   
+   
+   FOR rec_ IN Get_Template_Line_Array___(key_) LOOP       
+         line_rec_.objkey   := rec_.objkey;
+      CRUD_Delete___(line_rec_);
+   END LOOP;  
+   
+   IF ((quotation_selection_method_ IN ('USE_QUOTATION_NO', 'USE_ORDER_NO', 'USE_TEMPLATE', 'USE_LATEST_ORDER') )AND (quotation_no_ IS NOT NULL ))THEN
+           
+      FOR quote_rec_ IN get_records_from_quote_no LOOP           
+         line_rec_.standard_qty := quote_rec_.standard_qty;
+         line_rec_.standard_qty2 := quote_rec_.standard_qty2;
+         line_rec_.customer_part_no := quote_rec_.customer_part_no;
+         line_rec_.catalog_no := quote_rec_.catalog_no;
+         line_rec_.contract := quote_rec_.contract;
+         line_rec_.description := Sales_Part_API.Get_Catalog_Desc_For_Lang(quote_rec_.contract, quote_rec_.catalog_no, Order_Quotation_API.Get_Language_Code(quote_rec_.quotation_no));
+         line_rec_.condition_code := quote_rec_.condition_code;
+         IF quote_rec_.rental_db = 'TRUE' THEN
+            line_rec_.rental_db := TRUE;
+         ELSE 
+            line_rec_.rental_db := FALSE;
+         END IF;
+         line_rec_.quotation_no := quote_rec_.quotation_no;
+         line_rec_.line_no := quote_rec_.line_no;
+         line_rec_.rel_no := quote_rec_.rel_no;
+         line_rec_.objstate := quote_rec_.objstate;
+         line_rec_.row_type := quote_rec_.row_type;
+         line_rec_.objkey   := sys_guid();
+         line_rec_.parent_objkey := key_.objkey;
+         
+         IF template_id_ != ' '  THEN
+            line_rec_.customer_part_no :=  Sales_Part_Cross_Reference_API.Get_Customer_Part_No(customer_no_, contract_, quote_rec_.catalog_no);   
+         END IF;
+         
+         CRUD_Create___(line_rec_);         
+         
+      END LOOP;
+   ELSIF (quotation_selection_method_ IN ('USE_QUOTATION_PERIOD', 'USE_ORDER_PERIOD')) AND (from_date_ IS NOT NULL) THEN
+      FOR quote_rec_ IN get_records_from_quote_period LOOP 
+         line_rec_.standard_qty := quote_rec_.standard_qty;
+         line_rec_.standard_qty2 := quote_rec_.standard_qty2;
+         line_rec_.customer_part_no := quote_rec_.customer_part_no;
+         line_rec_.catalog_no := quote_rec_.catalog_no;
+         line_rec_.contract := quote_rec_.contract;
+         line_rec_.description := Sales_Part_API.Get_Catalog_Desc_For_Lang(quote_rec_.contract, quote_rec_.catalog_no, Order_Quotation_API.Get_Language_Code(quote_rec_.quotation_no));
+         line_rec_.condition_code := quote_rec_.condition_code;
+         IF quote_rec_.rental_db = 'TRUE' THEN
+            line_rec_.rental_db := TRUE;
+         ELSE 
+            line_rec_.rental_db := FALSE;
+         END IF;         
+         line_rec_.quotation_no := quote_rec_.quotation_no;
+         line_rec_.line_no := quote_rec_.line_no;
+         line_rec_.rel_no := quote_rec_.rel_no;
+         line_rec_.objstate := quote_rec_.objstate;
+         line_rec_.row_type := quote_rec_.row_type;
+         line_rec_.objkey   := sys_guid();
+         line_rec_.parent_objkey := key_.objkey;
+         
+         CRUD_Create___(line_rec_);
+      END LOOP;
+   ELSIF ((quotation_selection_method_ = 'USE_LATEST_QUOTATION') AND (quotation_no_ IS NOT NULL )) THEN      
+      FOR quote_rec_ IN get_records_from_latest_quote_no LOOP 
+         line_rec_.standard_qty := quote_rec_.standard_qty;
+         line_rec_.standard_qty2 := quote_rec_.standard_qty2;
+         line_rec_.customer_part_no := quote_rec_.customer_part_no;
+         line_rec_.catalog_no := quote_rec_.catalog_no;
+         line_rec_.contract := quote_rec_.contract;
+         line_rec_.description := Sales_Part_API.Get_Catalog_Desc_For_Lang(quote_rec_.contract, quote_rec_.catalog_no, Order_Quotation_API.Get_Language_Code(quote_rec_.quotation_no));
+         line_rec_.condition_code := quote_rec_.condition_code;
+         IF quote_rec_.rental_db = 'TRUE' THEN
+            line_rec_.rental_db := TRUE;
+         ELSE 
+            line_rec_.rental_db := FALSE;
+         END IF;
+         line_rec_.quotation_no := quote_rec_.quotation_no;
+         line_rec_.line_no := quote_rec_.line_no;
+         line_rec_.rel_no := quote_rec_.rel_no;
+         line_rec_.objstate := quote_rec_.objstate;
+         line_rec_.row_type := quote_rec_.row_type;
+         line_rec_.objkey   := sys_guid();
+         line_rec_.parent_objkey := key_.objkey;
+         
+         CRUD_Create___(line_rec_);
+      END LOOP;
+   END IF;
+END Populate_Quote_Lines___;
+
+
+PROCEDURE Clear_Records___ (
+	parent_key_ IN VARCHAR2)
+IS
+   line_rec_   Template_Line_Virtual_Rec;   
+   key_        Create_Sq_Lines_Or_Co_Lines_From_Template_Virtual_Key;
+   
+BEGIN
+   key_.objkey := parent_key_;   
+   
+	FOR rec_ IN Get_Template_Line_Array___(key_) LOOP     
+         line_rec_.objkey   := rec_.objkey;
+      CRUD_Delete___(line_rec_);
+   END LOOP;  
+END Clear_Records___;
+
+
+FUNCTION Create_Quote_Lines_From_Template___ (
+	parent_key_                         IN VARCHAR2,
+	contract_                           IN VARCHAR2,
+	start_quotation_no_                 IN VARCHAR2,
+	planned_rental_start_date_editable_ IN DATE,
+	planned_rental_start_time_editable_ IN DATE,
+	planned_rental_end_date_editable_   IN DATE,
+	planned_rental_end_time_editable_   IN DATE) RETURN VARCHAR2
+IS
+   key_                 Create_Sq_Lines_Or_Co_Lines_From_Template_Virtual_Key;
+   attr_                VARCHAR2(32000);
+   info_                VARCHAR2(32000);
+   key_list_            VARCHAR2(32000); 
+   temp_quote_no_       VARCHAR2(12);
+   temp_line_no_        VARCHAR2(4);
+   temp_rel_no_         VARCHAR2(4);
+   temp_line_item_no_   NUMBER;
+BEGIN
+		key_.objkey := parent_key_;
+   
+   Validate_Fields___(parent_key_, planned_rental_start_date_editable_, planned_rental_start_time_editable_, planned_rental_end_date_editable_, planned_rental_end_time_editable_, 'OrderQuotationLine');
+
+   User_Allowed_Site_API.Is_Authorized(contract_);
+   
+   FOR rec_ IN Get_Template_Line_Array___(key_) LOOP
+      IF rec_.standard_qty > 0 THEN
+         Client_SYS.Clear_Attr(attr_);
+         Client_SYS.Add_To_Attr('QUOTATION_NO', start_quotation_no_, attr_);
+         Client_SYS.Add_To_Attr('CONTRACT', contract_, attr_);
+         Client_SYS.Add_To_Attr('CATALOG_NO', rec_.catalog_no, attr_);
+         Client_SYS.Add_To_Attr('CATALOG_DESC', rec_.description, attr_);
+         Client_SYS.Add_To_Attr('BUY_QTY_DUE', rec_.standard_qty, attr_);
+         Client_SYS.Add_To_Attr('CONDITION_CODE', rec_.condition_code, attr_);
+         Client_SYS.Add_To_Attr('CUSTOMER_PART_NO', rec_.customer_part_no, attr_); 
+         Client_SYS.Add_To_Attr('COPY_STATUS', 'FALSE', attr_);
+         Client_SYS.Add_To_Attr('RENTAL_DB', rec_.rental_db, attr_);
+         IF rec_.rental_db = 'TRUE' THEN
+            Client_SYS.Add_To_Attr('PLANNED_RENTAL_START_DATE', planned_rental_start_date_editable_, attr_);
+            Client_SYS.Add_To_Attr('PLANNED_RENTAL_START_TIME', planned_rental_start_time_editable_, attr_);
+            Client_SYS.Add_To_Attr('PLANNED_RENTAL_END_DATE', planned_rental_end_date_editable_, attr_);
+            Client_SYS.Add_To_Attr('PLANNED_RENTAL_END_TIME', planned_rental_end_time_editable_, attr_);   
+         END IF;      
+         Client_SYS.Add_To_Attr('CREATE_TEMPLATE_FROM_AURENA', 'TRUE', attr_);
+         
+         Order_Quotation_Line_API.New(info_, attr_);
+      
+         IF (Suggested_Sales_Part_API.Suggested_Sales_Part_Exists(contract_, rec_.catalog_no) = 1) THEN
+            temp_quote_no_ := Client_Sys.Get_Item_Value('QUOTATION_NO', attr_);
+            temp_line_no_   := Client_Sys.Get_Item_Value('LINE_NO', attr_);
+            temp_rel_no_ := Client_Sys.Get_Item_Value('REL_NO', attr_);
+            temp_line_item_no_   := Client_Sys.Get_Item_Value('LINE_ITEM_NO', attr_);
+            key_list_ := key_list_ || temp_quote_no_ ||'^'|| temp_line_no_ || '^' || temp_rel_no_ || '^' || temp_line_item_no_ || '^' || ',';
+         END IF;
+      ELSE
+         NULL;
+      END IF;
+   END LOOP; 
+
+   RETURN key_list_;
+END Create_Quote_Lines_From_Template___;
+
+
+PROCEDURE Populate_Order_Lines___ (
+	parent_key_             IN VARCHAR2,
+	order_no_               IN VARCHAR2,
+	from_date_              IN DATE,
+	to_date_                IN DATE,
+	customer_no_            IN VARCHAR2,
+	contract_               IN VARCHAR2,
+	order_selection_method_ IN VARCHAR2,
+	template_id_            IN VARCHAR2,
+	row_type_               IN VARCHAR2)
+IS
+   CURSOR get_records_from_order_no IS
+   SELECT *
+   FROM cust_order_template
+   WHERE order_no = NVL(order_no_, ' ')
+   AND template_id = NVL(template_id_, ' ')
+   AND row_type = row_type_
+   AND objstate != 'Cancelled'
+   AND contract = contract_
+   ORDER BY order_no, line_no, rel_no;
+   
+   CURSOR get_records_from_order_period IS
+   SELECT *
+   FROM cust_order_template
+   WHERE order_no > ' ' 
+   AND customer_no = customer_no_
+   AND row_type = 'ORDER' 
+   AND TRUNC(Customer_Order_API.Get_Date_Entered(order_no)) BETWEEN from_date_ AND to_date_        
+   AND template_id = ' '   
+   AND objstate != 'Cancelled'
+   AND contract = contract_
+   ORDER BY order_no, line_no, rel_no;
+   
+   line_rec_   Template_Line_Virtual_Rec;   
+   key_        Create_Sq_Lines_Or_Co_Lines_From_Template_Virtual_Key;
+BEGIN
+   
+   key_.objkey := parent_key_;
+   
+   FOR rec_ IN Get_Template_Line_Array___(key_) LOOP       
+         line_rec_.objkey   := rec_.objkey;
+      CRUD_Delete___(line_rec_);
+   END LOOP; 
+   
+   IF ((order_selection_method_ IN ('USE_ORDER_NO', 'USE_TEMPLATE', 'USE_LATEST_ORDER') ))THEN      
+      FOR order_rec_ IN get_records_from_order_no LOOP
+         line_rec_.standard_qty := order_rec_.standard_qty;
+         line_rec_.standard_qty2 := order_rec_.standard_qty2;
+         line_rec_.customer_part_no := order_rec_.customer_part_no;
+         line_rec_.catalog_no := order_rec_.catalog_no;         
+         line_rec_.condition_code := order_rec_.condition_code;
+         IF order_rec_.rental_db = 'TRUE' THEN
+            line_rec_.rental_db := TRUE;
+         ELSE 
+            line_rec_.rental_db := FALSE;
+         END IF;
+         line_rec_.quotation_no := order_rec_.order_no;
+         line_rec_.line_no := order_rec_.line_no;
+         line_rec_.rel_no := order_rec_.rel_no;
+         line_rec_.contract := order_rec_.contract;
+         line_rec_.objstate := order_rec_.objstate;
+         line_rec_.row_type := order_rec_.row_type;
+         line_rec_.objkey   := sys_guid();
+         line_rec_.parent_objkey := key_.objkey;   
+         
+         IF Sales_Part_Cross_Reference_API.Check_Exist(customer_no_, contract_, line_rec_.customer_part_no, line_rec_.catalog_no) = 'FALSE' THEN
+            line_rec_.customer_part_no := Sales_Part_Cross_Reference_API.Get_Customer_Part_No(customer_no_, contract_, line_rec_.catalog_no);
+            line_rec_.description := NVL(Sales_Part_Cross_Reference_API.Get_Catalog_Desc(customer_no_, contract_, line_rec_.customer_part_no),
+                                      Sales_Part_API.Get_Catalog_Desc_For_Lang(contract_, line_rec_.catalog_no, Customer_Order_API.Get_Language_Code(order_no_)));
+         END IF;
+         CRUD_Create___(line_rec_);
+         
+      END LOOP;
+   
+      
+      
+   ELSIF ((order_selection_method_ IN ('USE_ORDER_PERIOD') )AND (from_date_ IS NOT NULL ))THEN
+      FOR order_rec_ IN get_records_from_order_period LOOP
+         
+         line_rec_.standard_qty := order_rec_.standard_qty;
+         line_rec_.standard_qty2 := order_rec_.standard_qty2;
+         line_rec_.customer_part_no := order_rec_.customer_part_no;
+         line_rec_.catalog_no := order_rec_.catalog_no;         
+         line_rec_.condition_code := order_rec_.condition_code;
+         IF order_rec_.rental_db = 'TRUE' THEN
+            line_rec_.rental_db := TRUE;
+         ELSE 
+            line_rec_.rental_db := FALSE;
+         END IF;
+         line_rec_.quotation_no := order_rec_.order_no;
+         line_rec_.line_no := order_rec_.line_no;
+         line_rec_.rel_no := order_rec_.rel_no;
+         line_rec_.contract := order_rec_.contract;
+         line_rec_.objstate := order_rec_.objstate;
+         line_rec_.row_type := order_rec_.row_type;
+         line_rec_.objkey   := sys_guid();
+         line_rec_.parent_objkey := key_.objkey;   
+         
+         IF Sales_Part_Cross_Reference_API.Check_Exist(customer_no_, contract_, line_rec_.customer_part_no, line_rec_.catalog_no) = 'FALSE' THEN
+            line_rec_.customer_part_no := Sales_Part_Cross_Reference_API.Get_Customer_Part_No(customer_no_, contract_, line_rec_.catalog_no);
+            line_rec_.description := NVL(Sales_Part_Cross_Reference_API.Get_Catalog_Desc(customer_no_, contract_, line_rec_.customer_part_no),
+                                      Sales_Part_API.Get_Catalog_Desc_For_Lang(contract_, line_rec_.catalog_no, Customer_Order_API.Get_Language_Code(order_no_)));
+         END IF;
+         CRUD_Create___(line_rec_);
+         
+      END LOOP;
+      
+         
+   END IF;
+	
+END Populate_Order_Lines___;
+
+
+FUNCTION Create_Order_Lines_From_Template___ (
+	parent_key_                         IN VARCHAR2,
+	contract_                           IN VARCHAR2,
+	start_order_no_                     IN VARCHAR2,
+	planned_rental_start_date_editable_ IN DATE,
+	planned_rental_start_time_editable_ IN DATE,
+	planned_rental_end_date_editable_   IN DATE,
+	planned_rental_end_time_editable_   IN DATE,
+	info$_                              OUT VARCHAR2) RETURN VARCHAR2
+IS
+   key_                 Create_Sq_Lines_Or_Co_Lines_From_Template_Virtual_Key;
+   attr_                VARCHAR2(32000);
+   info_                VARCHAR2(32000);
+   current_info_        VARCHAR2(32000);
+   key_list_            VARCHAR2(32000) := ''; 
+   temp_order_no_       VARCHAR2(12);
+   temp_line_no_        VARCHAR2(4);
+   temp_rel_no_         VARCHAR2(4);
+   temp_line_item_no_   NUMBER;
+BEGIN
+	Validate_Fields___(parent_key_, planned_rental_start_date_editable_, planned_rental_start_time_editable_, planned_rental_end_date_editable_, planned_rental_end_time_editable_, 'OrderQuotationLine');
+   key_.objkey := parent_key_;
+   
+   User_Allowed_Site_API.Is_Authorized(contract_);
+   
+   FOR rec_ IN Get_Template_Line_Array___(key_) LOOP
+      IF rec_.standard_qty > 0 THEN
+        Client_SYS.Clear_Attr(attr_);
+         Client_SYS.Add_To_Attr('ORDER_NO', start_order_no_, attr_);
+         Client_SYS.Add_To_Attr('CONTRACT', contract_, attr_);
+         Client_SYS.Add_To_Attr('CATALOG_NO', rec_.catalog_no, attr_);
+         Client_SYS.Add_To_Attr('CATALOG_DESC', rec_.description, attr_);
+         Client_SYS.Add_To_Attr('BUY_QTY_DUE', rec_.standard_qty, attr_);
+         Client_SYS.Add_To_Attr('CONDITION_CODE', rec_.condition_code, attr_);
+         Client_SYS.Add_To_Attr('CUSTOMER_PART_NO', rec_.customer_part_no, attr_); 
+         Client_SYS.Add_To_Attr('COPY_DISCOUNT', 'FALSE', attr_);   
+         Client_SYS.Add_To_Attr('RENTAL_DB', rec_.rental_db, attr_);
+         IF rec_.rental_db = 'TRUE' THEN
+            Client_SYS.Add_To_Attr('PLANNED_RENTAL_START_DATE', planned_rental_start_date_editable_, attr_);
+            Client_SYS.Add_To_Attr('PLANNED_RENTAL_START_TIME', planned_rental_start_time_editable_, attr_);
+            Client_SYS.Add_To_Attr('PLANNED_RENTAL_END_DATE', planned_rental_end_date_editable_, attr_);
+            Client_SYS.Add_To_Attr('PLANNED_RENTAL_END_TIME', planned_rental_end_time_editable_, attr_);   
+         END IF;          
+         Client_SYS.Add_To_Attr('CREATE_TEMPLATE_FROM_AURENA', 'TRUE', attr_);
+         Client_SYS.Add_To_Attr('END_OF_LINE', 'END_OF_LINE', attr_);  
+      
+         IF NOT((Suggested_Sales_Part_API.Suggested_Sales_Part_Exists(contract_, rec_.catalog_no) = 1) AND (rec_.rental_db = 'FALSE')) THEN
+            Customer_Order_API.Add_Lines_From_Template__(current_info_, attr_); 
+         ELSE          
+            
+            Customer_Order_API.Add_Lines_From_Template__(current_info_, attr_); 
+            
+            temp_order_no_ := Client_Sys.Get_Item_Value('ORDER_NO', attr_);
+            temp_line_no_   := Client_Sys.Get_Item_Value('LINE_NO', attr_);
+            temp_rel_no_ := Client_Sys.Get_Item_Value('REL_NO', attr_);
+            temp_line_item_no_   := Client_Sys.Get_Item_Value('LINE_ITEM_NO', attr_);
+            key_list_ := key_list_ || temp_order_no_ ||'^'|| temp_line_no_ || '^' || temp_rel_no_ || '^' || temp_line_item_no_ || '^' || ',';
+         END IF; 
+         info_ := info_ || current_info_;
+      ELSE
+         NULL;
+      END IF;    
+     
+   END LOOP;
+   info$_ := info_;
+  RETURN key_list_; 
+END Create_Order_Lines_From_Template___;
+
+
+PROCEDURE Validate_Fields___ (
+   parent_key_                         IN VARCHAR2,	
+	planned_rental_start_date_editable_ IN DATE,
+	planned_rental_start_time_editable_ IN DATE,
+	planned_rental_end_date_editable_   IN DATE,
+	planned_rental_end_time_editable_   IN DATE,
+	lu_name_ IN VARCHAR2)
+IS
+   key_                 Create_Sq_Lines_Or_Co_Lines_From_Template_Virtual_Key;
+BEGIN
+	key_.objkey := parent_key_;
+   
+   FOR rec_ IN Get_Template_Line_Array___(key_) LOOP
+     IF rec_.standard_qty < 0 THEN
+         Error_SYS.Record_General(lu_name_, 'LESSTHANZERO: The quantity of Line No :P1 Del No :P2 must not be less than zero!', rec_.line_no, rec_.rel_no);
+      ELSIF ((rec_.rental_db = 'TRUE') AND (rec_.standard_qty > 0)) THEN
+         IF planned_rental_start_date_editable_ IS NULL THEN
+            Error_SYS.Record_General(lu_name_, 'EMPTYRENTALSTARTDATE: Planned rental start date must have a value!');
+         ELSIF planned_rental_start_time_editable_ IS NULL THEN
+            Error_SYS.Record_General(lu_name_, 'EMPTYRENTALSTARTTIME: Planned rental start time must have a value!');
+         ELSIF planned_rental_end_date_editable_ IS NULL THEN
+            Error_SYS.Record_General(lu_name_, 'EMPTYRENTALENDDATE: Planned rental end date must have a value!');
+         ELSIF planned_rental_end_time_editable_ IS NULL THEN
+            Error_SYS.Record_General(lu_name_, 'EMPTYRENTALENDTIME: Planned rental end time must have a value!');
+         END IF;   
+      END IF;
+   END LOOP;
+END Validate_Fields___;
+
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Create_Sq_Lines_Or_Co_Lines_From_Template_Virtual_Rec )
+IS
+   parent_rec_ Create_Sq_Lines_Or_Co_Lines_From_Template_Virtual_Rec;
+BEGIN   
+   parent_rec_ := rec_;
+   super(parent_rec_);
+   IF (parent_rec_.template_id IS NOT NULL)THEN   
+      IF (parent_rec_.order_selection_method = 'USE_TEMPLATE')THEN   
+         Populate_Order_Lines___(parent_rec_.objkey, parent_rec_.order_no, parent_rec_.order_period_from, parent_rec_.order_period_to, parent_rec_.customer_no, parent_rec_.contract, parent_rec_.order_selection_method, parent_rec_.template_id, 'TEMPLATE');
+      ELSIF (parent_rec_.quotation_selection_method = 'USE_TEMPLATE') THEN
+         Populate_Quote_Lines___(parent_rec_.objkey, parent_rec_.quotation_no, parent_rec_.order_period_from, parent_rec_.order_period_to, parent_rec_.customer_no, parent_rec_.contract, parent_rec_.quotation_selection_method, parent_rec_.template_id, 'TEMPLATE');
+      END IF;
+   END IF;
+END CRUD_Create___;

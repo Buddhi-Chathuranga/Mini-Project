@@ -1,0 +1,230 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     CustomerOrderAddressDialog
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign     History
+-- ----------  ------   ----------------------------------------------------------------------------------------------------------------------------
+-- 2021-01-29  Skanlk   SCZ-13274, Modified Get_Validate_Info___() by adding a method call to retrieve the tax liability type.
+-- 2020-07-23  MaRalk   SCXTEND-4307, Modified Set_Order_Address___ to handle warnings.
+-- 2019-03-25  JeLise   SCUXXW4-9077, Added call to Update_Line___ in method Set_Order_Address___, to handle the replication of address.
+-- 2019-01-30  SeJalk   SCUXXW4-9077, Converted.
+----------------------------------------------------------------------------------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Get_Validate_Info___ (
+	company_  IN VARCHAR2,
+	order_no_ IN VARCHAR2) RETURN Validate_Info_Structure_Rec
+IS
+   rec_   Validate_Info_Structure_Rec;
+   dummy_ VARCHAR2(2000);
+BEGIN
+   rec_.tax_method           := Company_Tax_Control_API.Get_External_Tax_Cal_Method_Db(company_);
+   rec_.order_lines_exist    := Customer_Order_API.Order_Lines_Exist(order_no_);
+   rec_.charge_lines_exist   := Customer_Order_API.Exist_Charges__(order_no_);
+   rec_.pegged_lines_exist   := Customer_Order_API.Check_Address_Replication__(order_no_);
+   rec_.ipd_and_default_info := Check_Ipd_And_Default_Info___(order_no_);  
+   
+   Customer_Order_API.Check_Ipd_Ipt_Exist__(dummy_,
+                                            rec_.ipd_exist,
+                                            rec_.ipt_exist,
+                                            rec_.only_ipt_exist,
+                                            rec_.send_change_request,
+                                            dummy_,
+                                            order_no_,
+                                            'FALSE');
+   rec_.tax_liability_type_db := Tax_Liability_API.Get_Tax_Liability_Type_Db(Customer_Order_API.Get_Tax_Liability(order_no_), Customer_Order_Address_API.Get_Address_Country_Code(order_no_));
+   RETURN rec_;
+END Get_Validate_Info___;
+
+
+FUNCTION Get_Addr_Info___ (
+	order_no_     IN VARCHAR2,
+	company_      IN VARCHAR2,
+	customer_no_  IN VARCHAR2,
+	ship_addr_no_ IN VARCHAR2 ) RETURN Order_Address_Structure_Rec
+IS
+   rec_           Order_Address_Structure_Rec;
+   addr_rec_      Customer_Order_Address_API.Cust_Ord_Addr_Rec;
+   cust_info_rec_ Customer_Info_Address_API.Public_Rec;
+BEGIN	
+   IF Customer_Order_Address_API.Exists(order_no_)THEN
+      addr_rec_              := Customer_Order_Address_API.Get_Cust_Ord_Addr(order_no_);
+      rec_.address_name      := addr_rec_.addr_1;
+      rec_.address1          := addr_rec_.address1;
+      rec_.address2          := addr_rec_.address2;
+      rec_.address3          := addr_rec_.address3;
+      rec_.address4          := addr_rec_.address4;
+      rec_.address5          := addr_rec_.address5;
+      rec_.address6          := addr_rec_.address6;
+      rec_.zip_code          := addr_rec_.zip_code;
+      rec_.city              := addr_rec_.city;
+      rec_.county            := addr_rec_.county;
+      rec_.state             := addr_rec_.state;
+      rec_.country_code      := addr_rec_.country_code;
+      rec_.vat_free_vat_code := addr_rec_.vat_free_vat_code;
+      IF addr_rec_.in_city = 'TRUE' THEN
+         rec_.in_city := true;
+      ELSE
+         rec_.in_city := false;
+      END IF;
+      rec_.country_desc := Iso_Country_API.Get_Description(addr_rec_.country_code);
+      rec_.single_occur := true;
+   ELSE
+      cust_info_rec_    := Customer_Info_Address_API.Get(customer_no_, ship_addr_no_);
+      rec_.address_name := cust_info_rec_.name;
+      rec_.address1     := cust_info_rec_.address1;
+      rec_.address2     := cust_info_rec_.address2;
+      rec_.address3     := cust_info_rec_.address3;
+      rec_.address4     := cust_info_rec_.address4;
+      rec_.address5     := cust_info_rec_.address5;
+      rec_.address6     := cust_info_rec_.address6;
+      rec_.zip_code     := cust_info_rec_.zip_code;
+      rec_.city         := cust_info_rec_.city;
+      rec_.county       := cust_info_rec_.county;
+      rec_.state        := cust_info_rec_.state;
+      rec_.country_code := cust_info_rec_.country;
+      IF cust_info_rec_.in_city = 'TRUE' THEN
+         rec_.in_city := TRUE;        
+      ELSE
+         rec_.in_city := FALSE;
+      END IF;
+      rec_.single_occur := false;
+      rec_.country_desc := Iso_Country_API.Get_Description(cust_info_rec_.country);
+   END IF;
+
+   rec_.order_no            := order_no_;
+   rec_.company             := company_;
+   rec_.customer_no         := customer_no_;
+   rec_.ship_addr_no        := ship_addr_no_;
+   rec_.non_def_lines_exist := Customer_Order_API.Has_Non_Def_Info_Lines(order_no_);  
+   rec_.row_state           := Customer_Order_API.Get_Objstate(order_no_);  
+   
+   RETURN rec_;
+END Get_Addr_Info___;
+
+
+PROCEDURE Set_Order_Address___ (
+	order_no_          IN VARCHAR2,
+	single_occur_      IN BOOLEAN,
+	in_city_           IN BOOLEAN,
+	address_name_      IN VARCHAR2,
+	address1_          IN VARCHAR2,
+	address2_          IN VARCHAR2,
+	address3_          IN VARCHAR2,
+	address4_          IN VARCHAR2,
+	address5_          IN VARCHAR2,
+	address6_          IN VARCHAR2,
+	zip_code_          IN VARCHAR2,
+	city_              IN VARCHAR2,
+	county_            IN VARCHAR2,
+	state_             IN VARCHAR2,
+	country_code_      IN VARCHAR2,
+	vat_free_vat_code_ IN VARCHAR2,
+   copy_addr_to_line_ IN VARCHAR2,
+   replicate_         IN VARCHAR2,
+   info$_             OUT VARCHAR2)
+IS
+   order_rec_         Customer_Order_API.Public_Rec;
+   bill_addr_no_      CUSTOMER_ORDER_ADDRESS_2.bill_addr_no%TYPE;
+   ship_addr_no_      CUSTOMER_ORDER_ADDRESS_2.ship_addr_no%TYPE;
+   info_              VARCHAR2(20000);
+   objid_             VARCHAR2(2000);
+   objversion_        VARCHAR2(2000);
+   attr_              VARCHAR2(20000);
+   pegged_obj_        VARCHAR2(5);
+   local_info_        VARCHAR2(20000);
+   replicate_changes_ VARCHAR2(5);
+   
+   CURSOR get_id_version IS
+      SELECT objid, objversion
+      FROM customer_order_address
+      WHERE order_no = order_no_;
+BEGIN
+   order_rec_    := Customer_Order_API.Get(order_no_);  
+   bill_addr_no_ := order_rec_.bill_addr_no;
+   ship_addr_no_ := order_rec_.ship_addr_no;
+
+   IF single_occur_ THEN      
+      Client_SYS.Add_To_Attr('ADDR_1', address_name_, attr_);   
+      Client_SYS.Add_To_Attr('COUNTRY_CODE', country_code_, attr_);
+      Client_SYS.Add_To_Attr('ADDRESS1', address1_, attr_);
+      Client_SYS.Add_To_Attr('ADDRESS2', address2_, attr_);
+      Client_SYS.Add_To_Attr('ADDRESS3', address3_, attr_);
+      Client_SYS.Add_To_Attr('ADDRESS4', address4_, attr_);
+      Client_SYS.Add_To_Attr('ADDRESS5', address5_, attr_);
+      Client_SYS.Add_To_Attr('ADDRESS6', address6_, attr_);
+      Client_SYS.Add_To_Attr('ZIP_CODE', zip_code_, attr_);
+      Client_SYS.Add_To_Attr('CITY', city_, attr_);
+      Client_SYS.Add_To_Attr('STATE', state_, attr_);
+      Client_SYS.Add_To_Attr('COUNTY', county_, attr_);
+      Client_SYS.Add_To_Attr('ADDR_FLAG_DB', 'Y', attr_);
+      IF in_city_ THEN
+          Client_SYS.Add_To_Attr('IN_CITY', 'TRUE', attr_);
+      ELSE
+         Client_SYS.Add_To_Attr('IN_CITY', 'FALSE', attr_);
+      END IF;
+      Client_SYS.Add_To_Attr('VAT_FREE_VAT_CODE', vat_free_vat_code_, attr_);
+   ELSIF Customer_Order_Address_API.Exists(order_no_) THEN    
+      Client_SYS.Add_To_Attr('ADDR_FLAG_DB', 'N', attr_);
+   END IF;
+   OPEN get_id_version;
+   FETCH get_id_version INTO objid_, objversion_;
+   CLOSE get_id_version;
+   Client_SYS.Add_To_Attr('ORDER_NO', order_no_, attr_);  
+   Client_SYS.Add_To_Attr('BILL_ADDR_NO', bill_addr_no_, attr_);
+   Client_SYS.Add_To_Attr('SHIP_ADDR_NO',ship_addr_no_, attr_);
+   Client_SYS.Add_To_Attr('COPY_ADDR_TO_LINE', copy_addr_to_line_, attr_);
+   -- Replication, start
+   IF ((copy_addr_to_line_ = 'FALSE') OR (replicate_ = 'FALSE'))THEN
+      replicate_changes_ := 'FALSE';
+   ELSE
+      replicate_changes_ := 'TRUE';
+   END IF;
+
+   Client_SYS.Add_To_Attr('REPLICATE_CHANGES', replicate_changes_, attr_);
+   -- Replication, end
+
+   Customer_Order_Address_API.Modify__(info_, objid_, objversion_, attr_, 'DO');
+   
+   -- Replication, start
+   pegged_obj_ := Customer_Order_API.Check_Address_Replication__(order_no_);
+   
+   IF (pegged_obj_ = 'TRUE') THEN
+      Customer_Order_Line_API.Update_Line__(info_                      => local_info_,
+                                            attr_                      => attr_,
+                                            order_no_                  => order_no_,
+                                            changed_attrib_not_in_pol_ => 'FALSE',
+                                            replicate_changes_         => replicate_changes_,
+                                            address_changed_           => 'TRUE');
+      info_ := info_ || local_info_;
+   END IF;
+   -- Replication, end
+   info$_ := info_;
+END Set_Order_Address___;
+
+
+FUNCTION Check_Ipd_And_Default_Info___(
+   order_no_ IN VARCHAR2 ) RETURN VARCHAR2 
+IS
+   ipd_and_default_ VARCHAR2(5) := 'FALSE';
+   
+   CURSOR get_lines IS
+      SELECT supply_code, default_addr_flag
+      FROM customer_order_line_tab
+      WHERE order_no = order_no_
+      AND   supply_code IN ('IPD', 'PD')
+      AND   rowstate NOT IN ('Delivered', 'Invoiced', 'Cancelled');
+BEGIN
+   FOR rec_ IN get_lines LOOP
+      IF ((rec_.supply_code IN ('IPD', 'PD')) AND (rec_.default_addr_flag = 'Y')) THEN
+         ipd_and_default_ := 'TRUE';
+         EXIT;
+      END IF;
+   END LOOP;
+   RETURN ipd_and_default_;
+END Check_Ipd_And_Default_Info___;
+

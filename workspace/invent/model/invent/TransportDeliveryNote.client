@@ -1,0 +1,451 @@
+--------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  ----------------------------------------------------------
+-- 2020-12-09  DiJwlk  SC2020R1-11750, Removed call ModifyDateApplied() and Print() from PrintDeliveryNoteCommand
+-- 2020-11-20  JaThlk  GESPRING20-6009, Modified validations in CompanyRef and VendorNoRef to set DeliveryTerms and ShipViaCode.
+-- 2020-11-19  ErRalk  GESPRING20-6011, Modified editable condition in header fields to disable editing when Objstates are cancelled and printed.
+-- 2020-11-18  ErRalk  GESPRING20-6010, Modified enable condition in ConnectTransactionsCommand.
+-- 2020-07-16  WaSalk  gelr: Added to support Global Extension Functionalities.
+---------------------------------------------------------------------------------
+client TransportDeliveryNote;
+component INVENT;
+layer Core;
+projection TransportDeliveryNoteHandling;
+
+--------------------------------- FRAGMENTS ---------------------------------
+include fragment CompanyPublicSelector;
+include fragment OrderDeliveryTermLovSelector;
+include fragment CompanyAddressLovPubSelector;
+@DynamicComponentDependency PURCH
+include fragment ValidSupplierLovSelector;
+include fragment UserAllowedSiteLovSelector;
+include fragment InventoryPartLovSelector;
+include fragment ConnectTransactionsAssistant;
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+-- gelr:transport_delivery_note, begin
+navigator {
+   entry TransportDeliveryNoteNavEntry parent InventNavigator.WarehouseManagementPartHandling at index 1500 {
+      label = "Transport Delivery Note";
+      page Form;
+   }
+}
+-------------------------------- MAIN PAGES ---------------------------------
+page Form using TransportDeliveryNoteSet {
+   label = "Transport Delivery Note";
+   stateindicator TransportDeliveryNoteStateIndicator;
+   selector TransportDeliveryNoteSelector;
+   arrange {
+      group TransportDeliveryGroup;
+   }
+   group DateAndTimeGroup;
+   group WeightvolumeGroup;
+   tabs {
+      tab {
+         label = "Address Information";
+         group DeliveryFromAddressGroup;
+         @DynamicComponentDependency PURCH
+         group DeliveryToAddressGroup;
+         group ForwardAgentAddressGroup;
+      }
+      tab {
+         label = "Delivery Lines";
+         list TransportDelivNoteLineList(TransportDelivNoteLineListArray);
+      }
+   }
+   commandgroup TransportDeliveryNoteCmdGroup {
+      label = "Transport Delivery Note Command Group";
+      command PrintPreviewDeliveryNoteCommand;
+      command PrintDeliveryNoteCommand;
+      command CancelDeliveryNoteCommand;
+   }
+}
+--------------------------------- COMMANDS ----------------------------------
+command PrintPreviewDeliveryNoteCommand for TransportDeliveryNote {
+   label = "Print Preview";
+   enabled = [Objstate = "Created" and LineCount != 0];
+   execute {
+      call GetPreviewTransportDeliveryNoteResultKey(DeliveryNoteId) into ResultKey;
+      printdialog ResultKey;
+      refresh;
+   }
+}
+
+command PrintDeliveryNoteCommand for TransportDeliveryNote {
+   label = "Print";
+   enabled = [LineCount != 0];
+   execute {
+      call GetTransportDeliveryNoteResultKey(DeliveryNoteId, Objstate) into ResultKey;
+      printdialog ResultKey;
+      refresh;
+   }
+}
+
+command CancelDeliveryNoteCommand for TransportDeliveryNote {
+   label = "Cancel";
+   enabled = [Objstate = "Printed"];
+   execute {
+      confirm("This will cancel the transport delivery note.") {
+         when OK {
+            call Cancel();
+            refresh;
+         }
+      }
+   }
+}
+
+command ConnectTransactionsCommand for TransportDelivNoteLine {
+   label = "Connect Transactions";
+   mode = Global;
+   enabled = [Parent.Objstate = "Created"];
+   execute {
+      assistant ConnectTransactions(DeliveryNoteId, Contract)
+         {
+         when CANCEL {
+            exit CANCEL;
+         }
+      }
+      refresh;
+   }
+}
+--------------------------------- SELECTORS ---------------------------------
+@Override
+selector TransportDeliveryNoteSelector for TransportDeliveryNote {
+   label = "${DeliveryNoteId} - ${AltDeliveryNoteId} - ${Contract}";
+   static DeliveryNoteId;
+   static AltDeliveryNoteId;
+   static Contract;
+   badge Objstate {
+      label = "Status";
+      emphasis Progress6 = [TransportDeliveryNoteRef.Objstate = "Created"];
+      emphasis Progress12 = [TransportDeliveryNoteRef.Objstate = "Printed"];
+      emphasis StateCancelled = [TransportDeliveryNoteRef.Objstate = "Cancelled"];
+      style = TextOnly;
+   }
+}
+
+@Override
+@DynamicComponentDependency PURCH
+selector SupplierAddressSelector for SupplierAddress {
+   field VendorNo {
+      label = "VenderNo";
+   }
+   field AddrNo;
+}
+----------------------------- STATE INDICATORS ------------------------------
+@Override
+stateindicator TransportDeliveryNoteStateIndicator for TransportDeliveryNote {
+   state "Created" {
+      completed = 50%;
+      emphasis Progress6 = [TransportDeliveryNoteRef.Objstate = "Created"];
+   }
+   state "Printed" {
+      completed = 100%;
+      emphasis Progress12 = [TransportDeliveryNoteRef.Objstate = "Printed"];
+   }
+   state "Cancelled" {
+      completed = 100%;
+      emphasis StateCancelled = [TransportDeliveryNoteRef.Objstate = "Cancelled"];
+   }
+}
+---------------------------------- GROUPS -----------------------------------
+group TransportDeliveryGroup for TransportDeliveryNote {
+   label = "";
+   field DeliveryNoteId;
+   field AltDeliveryNoteId {
+      editable = [not(Objstate = "Printed" or Objstate = "Cancelled")];
+   }
+   lov AuthorizeCodeRef with ReferenceOrderCoordinatorLovSelector {
+      editable = [not(Objstate = "Printed" or Objstate = "Cancelled")];
+      label = "Coordinator";
+      description = AuthorizeCodeRef.Name;
+   }
+   lov ContractRef with ReferenceUserAllowedSiteLovSelector {
+      label = "Site";
+      validate command {
+         variable ContractInfoVar {
+            type = Structure(ContractInformationStructure);
+         }
+         execute {
+            call GetContractInformation(Contract) into ContractInfoVar;
+            set Company = ContractInfoVar.Company;
+            set DeliveryAddressNo = ContractInfoVar.DeliveryAddressNo;
+            set DeliveryFromAddress = ContractInfoVar.DeliveryFromAddress;
+         }
+      }
+   }
+   @DynamicComponentDependency PURCH
+   lov CompanyRef with ReferenceCompanyFinanceSelector {
+      label = "Recipient Company";
+      editable = [VendorNo = null and not(Objstate = "Printed" or Objstate = "Cancelled")];
+      description = CompanyRef.Description;
+      validate command {
+         variable ShipAddressInfoVar {
+            type = Structure(ShipAddressInfomationStructure);
+         }
+         execute {
+            call GetShipAddressInformation("", RecipientCompany, SingleOccurrenceAddress) into ShipAddressInfoVar;
+            set ShipAddressNo = ShipAddressInfoVar.ShipAddressNo;
+            set ShipAddressName = ShipAddressInfoVar.ShipAddressName;
+            set ShipAddress1 = ShipAddressInfoVar.ShipAddress1;
+            set ShipAddress2 = ShipAddressInfoVar.ShipAddress2;
+            set ShipCity = ShipAddressInfoVar.ShipCity;
+            set ShipCounty = ShipAddressInfoVar.Company;
+            set ShipState = ShipAddressInfoVar.ShipCounty;
+            set ShipZipCode = ShipAddressInfoVar.ShipZipCode;
+            set ShipCountryCode = ShipAddressInfoVar.ShipCountryCode;
+            set ShipCountry = ShipAddressInfoVar.ShipCountry;
+            set DeliveryTerms = ShipAddressInfoVar.DeliveryTerms;
+            set ShipViaCode = ShipAddressInfoVar.ShipViaCode;
+         }
+      }
+   }
+   @DynamicComponentDependency PURCH
+   lov VendorNoRef with ReferenceValidSupplierLovSelector {
+      label = "Supplier";
+      editable = [RecipientCompany = null and not(Objstate = "Printed" or Objstate = "Cancelled")];
+      validate command {
+         variable ShipAddressInfoVar {
+            type = Structure(ShipAddressInfomationStructure);
+         }
+         execute {
+            call GetShipAddressInformation(VendorNo, "", SingleOccurrenceAddress) into ShipAddressInfoVar;
+            set ShipAddressNo = ShipAddressInfoVar.ShipAddressNo;
+            set ShipAddressName = ShipAddressInfoVar.ShipAddressName;
+            set ShipAddress1 = ShipAddressInfoVar.ShipAddress1;
+            set ShipAddress2 = ShipAddressInfoVar.ShipAddress2;
+            set ShipCity = ShipAddressInfoVar.ShipCity;
+            set ShipCounty = ShipAddressInfoVar.Company;
+            set ShipState = ShipAddressInfoVar.ShipCounty;
+            set ShipZipCode = ShipAddressInfoVar.ShipZipCode;
+            set ShipCountryCode = ShipAddressInfoVar.ShipCountryCode;
+            set ShipCountry = ShipAddressInfoVar.ShipCountry;
+            set DeliveryTerms = ShipAddressInfoVar.DeliveryTerms;
+            set ShipViaCode = ShipAddressInfoVar.ShipViaCode;
+         }
+      }
+   }
+   lov ForwardAgentIdRef with ReferenceForwarderInfoSelector {
+      label = "Forwarder ID";
+      editable = [not(Objstate = "Printed" or Objstate = "Cancelled")];
+      description = ForwardAgentIdRef.Name;
+   }
+   lov DeliveryTermsRef with ReferenceOrderDeliveryTermLovSelector {
+      label = "Delivery Terms";
+      editable = [not(Objstate = "Printed" or Objstate = "Cancelled")];
+   }
+   lov ShipViaCodeRef with ReferenceMpccomShipViaSelector {
+      label = "Ship-Via Code";
+      editable = [not(Objstate = "Printed" or Objstate = "Cancelled")];
+      description = ShipViaCodeRef.Description;
+   }
+   lov DeliveryReasonIdRef with ReferenceDeliveryReasonSelector using DeliveryReasonType(Contract) {
+      label = "Delivery Reason";
+      editable = [not(Objstate = "Printed" or Objstate = "Cancelled")];
+      description = DeliveryReasonIdRef.Description;
+   }
+   field LabelText {
+      editable = [not(Objstate = "Printed" or Objstate = "Cancelled")];
+   }
+}
+
+group DateAndTimeGroup for TransportDeliveryNote {
+   label = "Date/Time";
+   field CreateDate {
+      editable = [not(Objstate = "Printed" or Objstate = "Cancelled")];
+   }
+   field TransportDate {
+      editable = [not(Objstate = "Printed" or Objstate = "Cancelled")];
+   }
+}
+
+group WeightvolumeGroup for TransportDeliveryNote {
+   label = "Weight & Volume Totals";
+   field GrossWeight {
+      editable = [not(Objstate = "Printed" or Objstate = "Cancelled")];
+   }
+   field NetWeight {
+      editable = [not(Objstate = "Printed" or Objstate = "Cancelled")];
+   }
+   field Volume {
+      editable = [not(Objstate = "Printed" or Objstate = "Cancelled")];
+   }
+}
+
+group DeliveryFromAddressGroup for TransportDeliveryNote {
+   label = "Delivery From Address";
+   lov CompanyAddressDeliveryFromRef with ReferenceCompanyAddressSelector {
+      label = "Address No";
+      filterlabel = "Delivery From Address";
+      description = DeliveryFromAddress;
+      editable = [not(Objstate = "Printed" or Objstate = "Cancelled")];
+   }
+   field DeliveryFromAddress {
+      label = "Name";
+      editable = [false];
+   }
+   addressfield {
+      address1 CompanyAddressDeliveryFromRef.Address1;
+      address2 CompanyAddressDeliveryFromRef.Address2;
+      address3 CompanyAddressDeliveryFromRef.Address3;
+      address4 CompanyAddressDeliveryFromRef.Address4;
+      address5 CompanyAddressDeliveryFromRef.Address5;
+      address6 CompanyAddressDeliveryFromRef.Address6;
+      city CompanyAddressDeliveryFromRef.City;
+      country DeliveryFromCountry;
+      county CompanyAddressDeliveryFromRef.County;
+      state CompanyAddressDeliveryFromRef.State;
+      zipcode CompanyAddressDeliveryFromRef.ZipCode;
+      countrycode CompanyAddressDeliveryFromRef.Country;
+      label = "Address Details";
+      size = Medium;
+   }
+}
+@DynamicComponentDependency PURCH
+group DeliveryToAddressGroup for TransportDeliveryNote {
+   label = "Delivery To Address";
+
+   field SingleOccurrenceAddress {
+      size = Small;
+      label = "Single Occurrence";
+      editable = [(VendorNo != null or RecipientCompany != null) and not(Objstate = "Printed" or Objstate = "Cancelled")];
+   }
+   field ShipAddressNo {
+      label = "Address No";
+      size = Small;
+      editable = [(VendorNo != null or RecipientCompany != null) and SingleOccurrenceAddress = false and not(Objstate = "Printed" or Objstate = "Cancelled")];
+      lovswitch {
+         when [RecipientCompany != null] {
+            lov CompanyAddressRef with ReferenceCompanyAddressLovPubSelector;
+         }
+         when [VendorNo != null] {
+            lov VendorShipAddressRef with SupplierAddressSelector;
+         }
+      }
+   }
+   field ShipAddressName {
+      label = "Name";
+      editable = [not(Objstate = "Printed" or Objstate = "Cancelled")];
+      visible = [SingleOccurrenceAddress = true];
+   }
+
+   field ShipAddressName2 {
+      label = "Name";
+      editable = [false];
+      visible = [SingleOccurrenceAddress = false];
+   }
+   addressfield CompanyAddressDeliveryTo {
+      address1 CompanyAddressDeliveryToRef.Address1;
+      address2 CompanyAddressDeliveryToRef.Address2;
+      address3 CompanyAddressDeliveryToRef.Address3;
+      address4 CompanyAddressDeliveryToRef.Address4;
+      address5 CompanyAddressDeliveryToRef.Address5;
+      address6 CompanyAddressDeliveryToRef.Address6;
+      city CompanyAddressDeliveryToRef.City;
+      country CompanyAddressDeliveryToRef.Country;
+      county CompanyAddressDeliveryToRef.County;
+      state CompanyAddressDeliveryToRef.State;
+      zipcode CompanyAddressDeliveryToRef.ZipCode;
+      countrycode CompanyAddressDeliveryToRef.Country;
+      label = "Address Details";
+      visible = [RecipientCompany != null and SingleOccurrenceAddress = false];
+      size = Medium;
+   }
+
+   addressfield VendorAddress {
+      address1 VendorAddressRef.Address1;
+      address2 VendorAddressRef.Address2;
+      address3 VendorAddressRef.Address3;
+      address4 VendorAddressRef.Address4;
+      address5 VendorAddressRef.Address5;
+      address6 VendorAddressRef.Address6;
+      city VendorAddressRef.City;
+      country VendorAddressRef.Country;
+      county VendorAddressRef.County;
+      state VendorAddressRef.State;
+      zipcode VendorAddressRef.ZipCode;
+      countrycode VendorAddressRef.Country;
+      label = "Address Details";
+      visible = [VendorNo != null and SingleOccurrenceAddress = false];
+      size = Medium;
+   }
+   addressfield ShipAddress {
+      address1 ShipAddress1;
+      address2 ShipAddress2;
+      address3 ShipAddress3;
+      address4 ShipAddress4;
+      address5 ShipAddress5;
+      address6 ShipAddress6;
+      city ShipCity;
+      country ShipCountry;
+      county ShipCounty;
+      state ShipState;
+      zipcode ShipZipCode;
+      countrycode ShipCountryCode;
+      label = "Address Details";
+      visible = [SingleOccurrenceAddress = true];
+      size = Medium;
+   }
+}
+
+group ForwardAgentAddressGroup for TransportDeliveryNote {
+   label = "Forward Agent Address";
+   field ForwarderAddrId {
+      editable = [false];
+      label = "Address No";
+   }
+   field ForwardAgentIdRef.Name {
+      label = "Name";
+   }
+   addressfield {
+      address1 ForwarderInfoAddressRef.Address1;
+      address2 ForwarderInfoAddressRef.Address2;
+      address3 ForwarderInfoAddressRef.Address3;
+      address4 ForwarderInfoAddressRef.Address4;
+      address5 ForwarderInfoAddressRef.Address5;
+      address6 ForwarderInfoAddressRef.Address6;
+      city ForwarderInfoAddressRef.City;
+      country ForwarderInfoAddressRef.Country;
+      county ForwarderInfoAddressRef.County;
+      state ForwarderInfoAddressRef.State;
+      zipcode ForwarderInfoAddressRef.ZipCode;
+      countrycode ForwarderInfoAddressRef.Country;
+      label = "Address Details";
+      size = Medium;
+   }
+}
+----------------------------------- LISTS -----------------------------------
+list TransportDelivNoteLineList for TransportDelivNoteLine {
+
+   field TransactionId;
+   field TransactionType;
+   field TransactionCode;
+   field PartNo;
+   field PartDescription;
+   field QtyShipped;
+
+   commandgroup TransportDelivNoteLineCmdGroup {
+      command ConnectTransactionsCommand;
+   }
+}
+-- gelr:transport_delivery_note, end
+---------------------------------- DIALOGS ----------------------------------
+
+
+-------------------------------- SINGLETONS ---------------------------------
+
+
+---------------------------------- CHARTS -----------------------------------
+
+
+--------------------------------- CALENDERS ---------------------------------
+
+
+---------------------------------- SHEETS -----------------------------------
+
+----------------------------------- TREES -----------------------------------
+
+
+---------------------------------- PLUGINS ----------------------------------
+
+
+------------------------------- IMAGE VIEWERS -------------------------------

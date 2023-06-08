@@ -1,0 +1,312 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: CountPerInventoryPart
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+-- Date        Sign    History
+-- ----------  ------  ---------------------------------------------------------------
+-- 2021-10-28  DigPlk  SC21R2-2882, Added the function Get_Session_Id_Selection___ to create the selection with session id.
+-- 2020-07-08  DIJWLK  SCXTEND-4338, Added CRUD_Default_Copy___(), Modified Create_New_Counting_Resulting___() by addidng validation for mandatory_expiration_date_ flag.
+-- 2020-02-18  PamPlk  Bug 152171(SCZ-8946), Modified Create_New_Counting_Resulting___() method  in order to retrieve the expiration date from the lot batch master, when "Mandatory expiration date" is False.
+-- 2020-02-06  PamPlk  Bug 152109(SCZ-8448), Modified Create_New_Counting_Resulting___() method in order to pass an information message when doing a COUNT IN and creating a new stock for a part. 
+-- 2019-07-30  MeAblk  Merge the bug correction 148682 (SCZ-5280), and modified the required methods accordingly.
+-- 2019-04-04  SWiclk  SCUXXW4-12331, Added Check_Default_Cost_Exist___().
+-- 2019-04-01  ShKolk  SCUXXW4-17948, Added Create_Counting_Result___ and Update_Counting_Result___ to avoid overtaking CRUD_Create___ and CRUD_Update___
+-- 2018-06-13  SWiclk  SCUXXW4-6059, Created.
+--------------------------------------------------------------------------------------
+
+layer Core;
+
+@Override
+PROCEDURE CRUD_Default___ (
+   key_  IN  Inventory_Part_In_Stock_Key,
+   attr_ IN OUT VARCHAR2,
+   info_ OUT VARCHAR2 )
+IS
+   part_no_          VARCHAR2(25);
+   contract_         VARCHAR2(5);
+   eng_chg_level_    VARCHAR2(6);
+   last_count_date_  DATE := sysdate;
+BEGIN
+   part_no_ := Client_SYS.Get_Item_Value('PART_NO', attr_);
+   contract_ := Client_SYS.Get_Item_Value('CONTRACT', attr_);   
+    
+   super(key_, attr_, info_);  
+   eng_chg_level_ := Inventory_Part_Revision_API.Get_Eng_Chg_Level(contract_, part_no_, last_count_date_);
+   Client_SYS.Add_To_Attr('ENG_CHG_LEVEL', eng_chg_level_, attr_);
+   Client_SYS.Add_To_Attr('LOT_BATCH_NO', '*', attr_);
+   Client_SYS.Add_To_Attr('WAIV_DEV_REJ_NO', '*', attr_);
+   Client_SYS.Add_To_Attr('SERIAL_NO', '*', attr_);
+   Client_SYS.Add_To_Attr('LAST_COUNT_DATE', last_count_date_, attr_);
+   Client_SYS.Add_To_Attr('RCPT_ISSUE_PART_TRACKING_DB', Part_Catalog_API.Get_Rcpt_Issue_Serial_Track_Db(part_no_), attr_);
+   Client_SYS.Add_To_Attr('INV_SERIAL_TRACKING_DB', Part_Catalog_API.Get_Serial_Tracking_Code_Db(part_no_), attr_);
+END CRUD_Default___;
+
+@Override
+PROCEDURE CRUD_Default_Copy___ (
+   rec_ IN OUT Inventory_Part_In_Stock_Rec )
+IS
+   last_count_date_  DATE := sysdate;
+BEGIN   
+   super(rec_);
+   rec_.last_count_date    := last_count_date_;
+   rec_.eng_chg_level      := Inventory_Part_Revision_API.Get_Eng_Chg_Level(rec_.contract, rec_.part_no, rec_.last_count_date);
+END CRUD_Default_Copy___;
+
+PROCEDURE Create_Counting_Result___ (
+   part_no_                  IN VARCHAR2,
+   contract_                 IN VARCHAR2,
+   location_no_              IN VARCHAR2,
+   configuration_id_         IN VARCHAR2,
+   lot_batch_no_             IN VARCHAR2,
+   serial_no_                IN VARCHAR2,
+   eng_chg_level_            IN VARCHAR2,
+   waiv_dev_rej_no_          IN VARCHAR2,
+   activity_seq_             IN NUMBER,
+   handling_unit_id_         IN NUMBER,
+   counted_qty_              IN NUMBER,
+   counted_catch_qty_        IN NUMBER,
+   condition_code_           IN VARCHAR2,
+   note_                     IN VARCHAR2,
+   cost_detail_id_           IN NUMBER,
+   part_tracking_session_id_ IN NUMBER,
+   define_cost_              IN BOOLEAN,
+   info$_                    OUT VARCHAR2 ) 
+IS
+   key_                      Inventory_Part_In_Stock_Key;
+BEGIN
+   key_.part_no := part_no_;
+   key_.contract := contract_;
+   key_.location_no := location_no_;
+   key_.configuration_id := configuration_id_;
+   key_.lot_batch_no := lot_batch_no_;
+   key_.serial_no := serial_no_;
+   key_.eng_chg_level := eng_chg_level_;
+   key_.waiv_dev_rej_no := waiv_dev_rej_no_;
+   key_.activity_seq := activity_seq_;
+   key_.handling_unit_id := handling_unit_id_;
+   Create_New_Counting_Resulting___(info$_, key_, 0, counted_qty_, 0, counted_catch_qty_, condition_code_, note_, cost_detail_id_, part_tracking_session_id_, NULL);
+END Create_Counting_Result___;
+
+
+PROCEDURE Update_Counting_Result___ (
+   key_                      IN Inventory_Part_In_Stock_Key,
+   counted_qty_              IN NUMBER,
+   counted_catch_qty_        IN NUMBER,
+   condition_code_           IN VARCHAR2,
+   note_                     IN VARCHAR2,
+   cost_detail_id_           IN NUMBER,
+   part_tracking_session_id_ IN NUMBER,
+   info$_                    OUT VARCHAR2 ) 
+IS
+   qty_onhand_               NUMBER;
+   catch_qty_onhand_         NUMBER;
+   expiration_date_          DATE;
+BEGIN
+   BEGIN 
+      SELECT qty_onhand, catch_qty_onhand, expiration_date
+         INTO qty_onhand_, catch_qty_onhand_, expiration_date_
+         FROM inventory_part_pick_ship_stock
+         WHERE part_no = key_.part_no  
+         AND   contract = key_.contract 
+         AND   location_no = key_.location_no
+         AND   configuration_id =  key_.configuration_id 
+         AND   lot_batch_no = key_.lot_batch_no 
+         AND   serial_no = key_.serial_no 
+         AND   eng_chg_level = key_.eng_chg_level  
+         AND   waiv_dev_rej_no = key_.waiv_dev_rej_no 
+         AND   activity_seq = key_.activity_seq  
+         AND   handling_unit_id = key_.handling_unit_id;
+   END;
+   Create_New_Counting_Resulting___(info$_, key_, qty_onhand_, counted_qty_, catch_qty_onhand_, counted_catch_qty_, condition_code_, note_, cost_detail_id_, part_tracking_session_id_, expiration_date_);
+END Update_Counting_Result___;
+
+
+PROCEDURE Create_New_Counting_Resulting___ (   
+   info_                      OUT VARCHAR2,
+   key_                       IN Inventory_Part_In_Stock_Key,
+   qty_onhand_                IN NUMBER,
+   qty_counted_               IN NUMBER,
+   catch_qty_onhand_          IN NUMBER,
+   catch_qty_counted_         IN NUMBER,
+   condition_code_            IN VARCHAR2,
+   note_text_                 IN VARCHAR2,
+   cost_detail_id_            IN NUMBER,
+   part_tracking_session_id_  IN NUMBER,
+   expiration_date_           IN DATE )
+IS
+   tot_qty_onhand_               NUMBER;
+   tot_qty_reserved_             NUMBER;
+   tot_qty_in_transit_           NUMBER;
+   tot_qty_in_order_transit_     NUMBER;
+   acc_count_diff_               NUMBER;
+   state_                        VARCHAR2(20);   
+   system_para_shortage_flag_    VARCHAR2(1);
+   part_shortage_flag_db_        VARCHAR2(1);
+   number_of_shortage_demands_   NUMBER;
+   old_qty_onhand_               NUMBER;
+   new_qty_onhand_               NUMBER;
+   mandatory_expiration_date_    VARCHAR2(5);
+   new_expiration_date_          DATE;
+BEGIN
+   
+   old_qty_onhand_ := Inventory_Part_In_Stock_API.Get_Inventory_Qty_Onhand(key_.contract, key_.part_no, key_.configuration_id);   
+   Counting_Result_API.New_Result(tot_qty_onhand_ => tot_qty_onhand_,
+                                  tot_qty_reserved_ =>tot_qty_reserved_,
+                                  tot_qty_in_transit_ =>tot_qty_in_transit_,
+                                  tot_qty_in_order_transit_=>tot_qty_in_order_transit_,
+                                  acc_count_diff_ =>acc_count_diff_,
+                                  state_ => state_,
+                                  contract_  => key_.contract,
+                                  part_no_ => key_.part_no,
+                                  configuration_id_ => key_.configuration_id,
+                                  location_no_ => key_.location_no,
+                                  lot_batch_no_ => key_.lot_batch_no,
+                                  serial_no_ => key_.serial_no,
+                                  eng_chg_level_ => key_.eng_chg_level,
+                                  waiv_dev_rej_no_ => key_.waiv_dev_rej_no,
+                                  activity_seq_ => key_.activity_seq,
+                                  handling_unit_id_ => key_.handling_unit_id,
+                                  count_date_ => null,
+                                  inv_list_no_ => null,
+                                  seq_ => null,
+                                  qty_onhand_ => qty_onhand_,
+                                  qty_counted_ => qty_counted_,
+                                  catch_qty_onhand_ =>catch_qty_onhand_,
+                                  catch_qty_counted_ =>catch_qty_counted_,
+                                  count_user_id_ => null,
+                                  inventory_value_ => null,
+                                  condition_code_ => condition_code_,
+                                  note_text_ => note_text_,
+                                  cost_detail_id_ => cost_detail_id_,
+                                  part_tracking_session_id_ => part_tracking_session_id_);   
+                                 
+   IF (state_ = 'Rejected') THEN    
+      info_ := 'The counting result was rejected. Approval is needed.';
+   END IF;     
+   system_para_shortage_flag_ := Mpccom_System_Parameter_API.Get_Parameter_Value1('SHORTAGE_HANDLING');   
+   part_shortage_flag_db_ := Inventory_Part_API.Get_Shortage_Flag_Db(key_.contract, key_.part_no);
+   number_of_shortage_demands_ := Shortage_Demand_API.Shortage_Exists(key_.contract, key_.part_no);
+   
+   new_qty_onhand_ := Inventory_Part_In_Stock_API.Get_Inventory_Qty_Onhand(key_.contract, key_.part_no, key_.configuration_id);
+   
+   IF (state_ != 'Rejected' AND system_para_shortage_flag_ = 'Y') THEN
+      IF part_shortage_flag_db_ = 'Y'  THEN
+         IF number_of_shortage_demands_ != 0 THEN
+            IF (new_qty_onhand_ > old_qty_onhand_) THEN
+               info_ := 'There are shortages for part ' || key_.part_no || '.';
+            END IF;            
+         END IF;
+      END IF;
+   END IF;
+   IF (state_ != 'Rejected' AND expiration_date_ IS NULL) THEN
+      mandatory_expiration_date_ := Inventory_Part_API.Get_Mandatory_Expiration_Da_Db(key_.contract, key_.part_no);
+      new_expiration_date_ := Inventory_Part_In_Stock_API.Get_Expiration_Date(key_.contract, key_.part_no, key_.configuration_id, key_.location_no, key_.lot_batch_no, 
+                                                                              key_.serial_no, key_.eng_chg_level, key_.waiv_dev_rej_no, key_.activity_seq, key_.handling_unit_id);
+      
+      IF (new_expiration_date_ IS NULL AND qty_counted_ != 0 AND (mandatory_expiration_date_ = Fnd_Boolean_API.DB_TRUE)) THEN
+         info_ := info_ || 'Expiration date is null for the part. Consider reviewing expiration date for the stock record.';   
+      END IF;
+   END IF;
+END Create_New_Counting_Resulting___;
+
+FUNCTION Get_Handling_Unit_Type_Description___ (
+   handling_unit_id_ IN NUMBER)  RETURN VARCHAR2
+   IS
+   BEGIN      
+   return Handling_Unit_Type_API.Get_Description(Handling_Unit_API.Get_Handling_Unit_Type_Id(handling_unit_id_));
+END Get_Handling_Unit_Type_Description___;
+
+
+
+FUNCTION Get_Details_By_Handling_Unit_Id___(
+	handling_unit_id_ IN NUMBER) RETURN Handling_Unit_Structure_Rec
+IS
+hu_structure_rec_ Handling_Unit_Structure_Rec;
+BEGIN
+   hu_structure_rec_.location_no := Handling_Unit_API.Get_Location_No(Handling_Unit_API.Get_Root_Handling_Unit_Id(handling_unit_id_));
+   hu_structure_rec_.handling_unit_type_id := Handling_Unit_API.Get_Handling_Unit_Type_Id(handling_unit_id_);
+   hu_structure_rec_.hadling_unit_type_description := Handling_Unit_Type_API.Get_Description(Handling_Unit_API.Get_Handling_Unit_Type_Id(handling_unit_id_));
+   hu_structure_rec_.sscc := Handling_Unit_API.Get_Sscc(handling_unit_id_);
+   hu_structure_rec_.alt_handling_unit_label_id := Handling_Unit_API.Get_Alt_Handling_Unit_Label_Id(handling_unit_id_);
+    
+   RETURN hu_structure_rec_;
+END Get_Details_By_Handling_Unit_Id___;
+
+
+FUNCTION Check_Default_Cost_Exist___ (
+	contract_         IN VARCHAR2,
+	part_no_          IN VARCHAR2,
+	configuration_id_ IN VARCHAR2,
+	lot_batch_no_     IN VARCHAR2,
+	serial_no_        IN VARCHAR2,
+	condition_code_   IN VARCHAR2) RETURN BOOLEAN
+IS
+   default_cost_exist_ VARCHAR2(5);
+BEGIN
+	default_cost_exist_ := Inventory_Part_Unit_Cost_API.Default_Cost_Exist(contract_,
+                                                                          part_no_,
+                                                                          configuration_id_,
+                                                                          lot_batch_no_,
+                                                                          serial_no_,
+                                                                          condition_code_,
+                                                                          'COUNTING');
+                                                                          
+   IF (default_cost_exist_ = 'TRUE') THEN
+      RETURN TRUE; 
+   ELSE
+      RETURN FALSE;
+   END IF;                                                                          
+   
+END Check_Default_Cost_Exist___;
+
+
+FUNCTION Get_Session_Id_Selection___ (
+   contract_            IN VARCHAR2,
+   part_no_             IN VARCHAR2,
+   configuration_id_    IN VARCHAR2,
+   location_no_         IN VARCHAR2,
+   lot_batch_no_        IN VARCHAR2,
+   eng_chg_level_       IN VARCHAR2,
+   waiv_dev_rej_no_     IN VARCHAR2,
+   activity_seq_        IN NUMBER,
+   handling_unit_id_    IN NUMBER,
+   qty_num_             IN VARCHAR2,
+   catch_qty_num_       IN NUMBER,
+   assistant_title_     IN VARCHAR2,
+   assistant_context_   IN VARCHAR2,
+   session_id_          IN NUMBER) RETURN Identify_Serials_Rec_Structure_Rec
+IS
+   new_selection_       VARCHAR2(32000) := NULL;
+   req_rec_structure_   Identify_Serials_Rec_Structure_Rec;
+   total_               NUMBER:=1;
+   new_session_id_      NUMBER;
+BEGIN
+   IF session_id_ IS NULL THEN 
+      new_session_id_ := Temporary_Part_Tracking_API.Get_Next_Session_Id;
+   ELSE 
+      new_session_id_ := session_id_;
+   END IF;
+    
+   Client_SYS.Add_To_Key_Reference(new_selection_,'CONTRACT',contract_);
+   Client_SYS.Add_To_Key_Reference(new_selection_,'PART_NO',part_no_);
+   Client_SYS.Add_To_Key_Reference(new_selection_,'CONFIGURATION_ID',configuration_id_);
+   Client_SYS.Add_To_Key_Reference(new_selection_,'LOCATION_NO',location_no_);
+   Client_SYS.Add_To_Key_Reference(new_selection_,'LOT_BATCH_NO',lot_batch_no_);
+   Client_SYS.Add_To_Key_Reference(new_selection_,'ENG_CHG_LEVEL',eng_chg_level_);
+   Client_SYS.Add_To_Key_Reference(new_selection_,'WAIV_DEV_REJ_NO',waiv_dev_rej_no_);
+   Client_SYS.Add_To_Key_Reference(new_selection_,'ACTIVITY_SEQ',activity_seq_);
+   Client_SYS.Add_To_Key_Reference(new_selection_,'HANDLING_UNIT_ID',handling_unit_id_);
+   Client_SYS.Add_To_Key_Reference(new_selection_,'QTY_TO_PICK',qty_num_);
+   Client_SYS.Add_To_Key_Reference(new_selection_,'CATCH_QTY_ISSUE',catch_qty_num_);
+   Client_SYS.Add_To_Key_Reference(new_selection_,'ASSISTANT_TITLE',assistant_title_);
+   Client_SYS.Add_To_Key_Reference(new_selection_,'ASSISTANT_CONTEXT',assistant_context_);
+   Client_SYS.Add_To_Key_Reference(new_selection_,'SESSION_ID',new_session_id_);
+
+   req_rec_structure_.remaining_selection  := new_selection_;
+   req_rec_structure_.total                := total_;
+   req_rec_structure_.session_id           := new_session_id_;
+   RETURN req_rec_structure_;
+END Get_Session_Id_Selection___;

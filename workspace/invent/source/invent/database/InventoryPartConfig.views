@@ -1,0 +1,264 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: InventoryPartConfig
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  210708  Jayplk  MF21R2-2499, Modified order_requisition_db column in Inventory_Part_Config_Ext view.
+--  210702  Shwtlk  MF21R2-2444, Created Inventory_Part_Config_Ext view to be used in the main list of Intraday availability client.
+--  180716  RasDlk  Bug 142741, Modified Inventory_Part_Config_Count view by adding a condition to not retrieve parts with planning method K,O and T.
+--  151029  JeLise  LIM-4351, Removed column part_on_pallet from Inventory_Part_Count_Result.
+--  150507  JoAnSe  MONO-213, Removed the obsoleted column accumulated_manuf_diff from several views
+-----------------------------------------------------------------------------
+
+layer Core;
+
+-------------------- COMMON COLUMN DEFINITIONS ------------------------------
+
+COLUMN Description IS
+   Flags      = 'A----'
+   Datatype   = 'STRING(200)'
+   Prompt     = 'Description';
+
+COLUMN Unit_Meas IS
+   Flags      = 'A----'
+   Datatype   = 'STRING(10)'
+   Prompt     = 'Unit Meas'
+   Ref        = 'IsoUnit';
+
+COLUMN Enabled_Catch_Unit_Meas IS
+   Flags      = 'A----'
+   Datatype   = 'STRING(30)'
+   Prompt     = 'Enabled Catch Unit Meas'
+   Ref        = 'IsoUnit';
+
+COLUMN Type_Code IS
+   Flags      = 'AMIUL'
+   Datatype   = 'STRING(200)'
+   Enumeration = 'InventoryPartType'
+   Prompt     = 'Type Code';
+
+COLUMN Type_Code_Db IS
+   Flags      = 'A----'
+   Datatype   = 'STRING(20)'
+   Prompt     = 'Type Code';
+
+COLUMN Count_Variance IS
+   Flags      = 'A----'
+   Datatype   = 'NUMBER'
+   Prompt     = 'Acc Count Diff';
+
+COLUMN Qty_Onhand IS
+   Flags      = 'A----'
+   Datatype   = 'NUMBER'
+   Prompt     = 'Qty Onhand';
+
+COLUMN Qty_Reserved IS
+   Flags      = 'A----'
+   Datatype   = 'NUMBER'
+   Prompt     = 'Qty Reserved';
+
+COLUMN Qty_In_Transit IS
+   Flags      = 'A----'
+   Datatype   = 'NUMBER'
+   Prompt     = 'Qty In Transit';
+
+COLUMN Qty_In_Ord_Transit IS
+   Flags      = 'A----'
+   Datatype   = 'NUMBER'
+   Prompt     = 'Qty In Order Transit';
+
+-------------------- PUBLIC VIEW DEFINITIONS --------------------------------
+@ServerOnlyAccess
+VIEW Inventory_Part_Config_Pub IS
+   Prompt = 'Inventory Part Configuration'
+SELECT contract                       contract,
+       part_no                        part_no,
+       configuration_id               configuration_id,
+       latest_purchase_price          latest_purchase_price,
+       average_purchase_price         average_purchase_price,
+       estimated_material_cost        estimated_material_cost,
+       accumulated_purchase_diff      accumulated_purchase_diff,
+       last_actual_cost_calc          last_actual_cost_calc,
+       last_manuf_cost_calc           last_manuf_cost_calc,
+       rowkey                        objkey
+FROM   inventory_part_config_tab;
+
+
+-------------------- PRIVATE VIEW DEFINITIONS -------------------------------
+
+@SecurityCheck Site.UserAuthorized(conf.contract)
+VIEW Inventory_Part_Config_Count IS
+   Prompt = 'Inventory Part Config'
+   Part_No.Ref = 'InventoryPart(contract)'
+   Configuration_Id.Flags = 'PMI-L'
+   Configuration_Id.Ref = 'ConfigurationSpec(part_no)'
+SELECT conf.contract                       contract,
+       conf.part_no                        part_no,
+       conf.configuration_id               configuration_id,
+       conf.latest_purchase_price          latest_purchase_price,
+       conf.average_purchase_price         average_purchase_price,
+       conf.estimated_material_cost        estimated_material_cost,
+       conf.accumulated_purchase_diff      accumulated_purchase_diff,
+       conf.last_actual_cost_calc          last_actual_cost_calc,
+       conf.last_manuf_cost_calc           last_manuf_cost_calc,
+       conf.ROWID                          objid,
+       ltrim(lpad(to_char(rowversion,'YYYYMMDDHH24MISS'),2000))                         objversion,
+       rowkey                             objkey
+FROM   inventory_part_config_tab conf, part_catalog_pub part
+WHERE  conf.part_no  = part.part_no
+AND ((part.configurable = 'NOT CONFIGURED')
+      OR  ((part.configurable = 'CONFIGURED') AND (configuration_id != '*')))
+AND EXISTS (SELECT 1
+              FROM inventory_part_planning_pub ipp
+             WHERE ipp.contract = conf.contract
+               AND ipp.part_no = conf.part_no
+               AND ipp.planning_method NOT IN ('K','O','T'));
+
+@SecurityCheck Site.UserAuthorized(ipc.contract)
+VIEW Inventory_Part_Count_Result IS
+   Prompt = 'Inventory Part Config'
+   Part_No.Ref = 'InventoryPart(contract)'
+   Configuration_Id.Flags = 'PMI-L'
+   Configuration_Id.Ref = 'ConfigurationSpec(part_no)'
+SELECT ipc.contract                                                                       contract,
+       ipc.part_no                                                                        part_no,
+       configuration_id                                                                   configuration_id,
+       ip.description                                                                     description,       
+       ip.unit_meas                                                                       unit_meas,
+       Inventory_Part_API.Get_Enabled_Catch_Unit_Meas(ipc.contract,
+                                                      ipc.part_no)                        enabled_catch_unit_meas,
+       ip.count_variance                                                                  count_variance,
+       Inventory_Part_In_Stock_API.Get_Inventory_Qty_Onhand(ipc.contract,
+                                                            ipc.part_no,
+                                                            ipc.configuration_id)         qty_onhand,
+       Inventory_Part_In_Stock_API.Get_Inventory_Qty_Reserved(ipc.contract,
+                                                              ipc.part_no,
+                                                              ipc.configuration_id)       qty_reserved,
+       Inventory_Part_In_Stock_API.Get_Total_Qty_In_Transit(ipc.contract,
+                                                            ipc.part_no,
+                                                            ipc.configuration_id)         qty_in_transit,
+       Inventory_Part_In_Transit_API.Get_Total_Qty_In_Order_Transit(ipc.contract,
+                                                                    ipc.part_no,
+                                                                    ipc.configuration_id) qty_in_ord_transit,
+       ipc.rowid                                                                          objid,
+       ltrim(lpad(to_char(ipc.rowversion,'YYYYMMDDHH24MISS'),2000))                       objversion,
+       ipc.rowkey                                                                         objkey
+FROM   inventory_part_config_tab ipc, inventory_part_tab ip
+WHERE  ipc.contract = ip.contract
+  AND  ipc.part_no = ip.part_no
+  AND  EXISTS (SELECT 1
+               FROM  COUNTING_RESULT_PUB c
+               WHERE c.contract = ipc.contract
+               AND   c.part_no = ipc.part_no
+               AND   c.configuration_id = ipc.configuration_id
+               AND   c.inv_list_no = '*'
+               AND   c.state = 'Rejected');
+
+@SecurityCheck Site.UserAuthorized(ipc.contract)
+VIEW Invent_Part_Config_Stockable IS
+   Prompt = 'Inventory Part Config Stockable'
+   Part_No.Ref = 'InventoryPart(contract)'
+SELECT ipc.contract                   contract,
+       part_no                        part_no,
+       configuration_id               configuration_id,
+       latest_purchase_price          latest_purchase_price,
+       average_purchase_price         average_purchase_price,
+       estimated_material_cost        estimated_material_cost,
+       accumulated_purchase_diff      accumulated_purchase_diff,
+       last_actual_cost_calc          last_actual_cost_calc,
+       last_manuf_cost_calc           last_manuf_cost_calc,                    
+       rowid                         objid,
+       ltrim(lpad(to_char(rowversion,'YYYYMMDDHH24MISS'),2000))                    objversion,
+       rowkey                        objkey
+FROM   INVENTORY_PART_CONFIG_TAB ipc  
+WHERE  EXISTS (SELECT 1 
+                 FROM inventory_part_planning_tab ipp
+                WHERE ipc.contract = ipp.contract 
+                  AND ipc.part_no = ipp.part_no 
+                  AND ipp.planning_method NOT IN ('K','T','O'));
+
+@SecurityCheck Site.UserAuthorized(ipc.contract)
+VIEW Inventory_Part_Config_Ext IS
+   Prompt = 'Inventory Part Config Ext'
+   Part_No.Ref = 'InventoryPart(contract)'
+SELECT ip.contract                                                                                             contract,
+       ip.part_no                                                                                              part_no,
+       Inventory_Part_API.Get_Description(ip.contract, ip.part_no)                                             description,
+       Inventory_Part_Type_API.Decode(ip.type_code)                                                            type_code,
+       ip.type_code                                                                                            type_code_db,
+       ipc.configuration_id                                                                                    configuration_id,
+       ip.unit_meas                                                                                            unit_meas,
+       ip.planner_buyer                                                                                        planner_buyer,
+       ip.part_status                                                                                          part_status,
+       ip.part_product_family                                                                                  part_product_family,
+       ip.part_product_code                                                                                    part_product_code,
+       Inv_Part_Lead_Time_Code_API.Decode(ip.lead_time_code)                                                   lead_time_code,
+       ip.lead_time_code                                                                                       lead_time_code_db,   
+       ip.accounting_group                                                                                     accounting_group,
+       ip.prime_commodity                                                                                      prime_commodity,
+       ip.second_commodity                                                                                     second_commodity,
+       ippt.shrinkage_fac                                                                                      scrap_factor,
+       ippt.safety_stock                                                                                       safety_stock,
+       ippt.min_order_qty                                                                                      min_order_qty,
+       ippt.max_order_qty                                                                                      max_order_qty,
+       ippt.std_order_size                                                                                     std_order_size,
+       ippt.mul_order_qty                                                                                      mul_order_qty,
+       ippt.safety_lead_time                                                                                   safety_lead_time,
+       ippt.planning_method                                                                                    planning_method,
+       ippt.order_requisition                                                                                  order_requisition_db,
+       Inventory_Part_In_Stock_API.Get_Inventory_Quantity(contract_             => ip.contract,
+                                                          part_no_              => ip.part_no,
+                                                          configuration_id_     => ipc.configuration_id,
+                                                          qty_type_             => 'ONHAND',
+                                                          ownership_type1_db_   => 'CONSIGNMENT',
+                                                          ownership_type2_db_   => 'COMPANY OWNED',
+                                                          location_type1_db_    => 'PICKING',
+                                                          location_type2_db_    => 'F',
+                                                          location_type3_db_    => 'MANUFACTURING',
+                                                          location_type4_db_    => 'SHIPMENT',
+                                                          include_standard_     => 'TRUE',
+                                                          include_project_      => 'FALSE',
+                                                          project_id_           => '*')                         qty_on_hand,
+       Inventory_Part_In_Stock_API.Get_Inventory_Quantity(contract_             => ip.contract,
+                                                          part_no_              => ip.part_no,
+                                                          configuration_id_     => ipc.configuration_id,
+                                                          qty_type_             => 'AVAILTRANSIT',
+                                                          expiration_control_   => 'NOT EXPIRED',
+                                                          supply_control_db_    => 'NETTABLE',
+                                                          ownership_type1_db_   => 'CONSIGNMENT',
+                                                          ownership_type2_db_   => 'COMPANY OWNED',
+                                                          location_type1_db_    => 'PICKING',
+                                                          location_type2_db_    => 'F',
+                                                          location_type3_db_    => 'MANUFACTURING',
+                                                          location_type4_db_    => 'SHIPMENT',
+                                                          include_standard_     => 'TRUE',
+                                                          include_project_      => 'FALSE',
+                                                          project_id_           => '*')                         qty_available,
+       Inventory_Part_In_Stock_API.Get_Inventory_Quantity (contract_            => ip.contract,
+                                                           part_no_             => ip.part_no,
+                                                           configuration_id_    => ipc.configuration_id,
+                                                           qty_type_            => 'ONHAND_PLUS_TRANSIT',
+                                                           expiration_control_  => 'NOT EXPIRED',
+                                                           supply_control_db_   => 'NETTABLE',
+                                                           ownership_type1_db_  => 'CONSIGNMENT',
+                                                           ownership_type2_db_  => 'COMPANY OWNED',
+                                                           location_type1_db_   => 'PICKING',
+                                                           location_type2_db_   => 'F',
+                                                           location_type3_db_   => 'MANUFACTURING',
+                                                           location_type4_db_   => 'SHIPMENT',
+                                                           include_standard_    => 'TRUE',
+                                                           include_project_     => 'FALSE',
+                                                           project_id_          => '*')                         qty_usable,
+       ipc.rowkey                                                                                               objkey
+FROM   INVENTORY_PART_CONFIG_TAB ipc,  INVENTORY_PART_TAB ip, PART_CATALOG_PUB pc, INVENTORY_PART_PLANNING_TAB ippt
+WHERE  ipc.contract  = ip.contract
+AND    ipc.part_no   = ip.part_no
+AND    ip.part_no    = pc.part_no
+AND    ip.part_no    = ippt.part_no
+AND    ip.contract   = ippt.contract
+AND    pc.position_part = 'NOT POSITION PART';
+

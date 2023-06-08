@@ -1,0 +1,495 @@
+-----------------------------------------------------------------------------
+-- Date        Sign      History
+-- ----------  ------   -----------------------------------------------------
+-- 2018-10-18  AMNALK   SAUXXW4-1271, Created using MTG Version: 1.31. EE Source: frmObjectMeasurements
+-- 2018-10-19  TAJALK   SAUXXW4-1266, Added command ManagePreliminaryReadingCommand
+-- 2019-05-20  LoPrlk   SAUXXW4-15349, Corrected the navigation by the command Object Information for Tool Equipment.
+-- 2020-01-02  LASSLK   SAXTEND-1244, Implement LOV Filtering
+-- 2021-01-05  SHAGLK   AM2020R1-7255, Modified enabled condition for ChangeMeterCommand
+-- 2021-08-17  RUSSLK   AM21R2-2526, Modified the page and EquipmentObjectParamSelector, Added ToolEquipValuesList.
+-----------------------------------------------------------------------------
+client MeasurementsForObject;
+component EQUIP;
+layer Core;
+projection MeasurementsForObjectHandling;
+include fragment UserAllowedSiteLovSelector;
+include fragment EquipmentObjectTestPntLovSelector;
+include fragment MarkAsIncorrectAssistant;
+include fragment ChangeMeterAssistant;
+include fragment SetMeterRollOverValueAssistant;
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+navigator {
+   entry ServMeasurementsforObjectNavEntry parent EquipNavigator.ServEquipmentMeasurements at index 100 {
+      label = "Measurements for Object";
+      page Form;
+   }
+   entry MaintMeasurementsforObjectNavEntry parent EquipNavigator.MaintEquipmentMeasurements at index 100 {
+      label = "Measurements for Object";
+      page Form home EquipmentObjectParam;
+   }
+}
+-------------------------------- MAIN PAGES ---------------------------------
+page Form using EquipmentObjectParamSet {
+   label = "Measurements for Object";
+   startupmode = search;
+   selector EquipmentObjectParamSelector;
+   group ObjectMeasurementsGroup;
+   list ValuesList(ValuesArray) {
+      visible = [ResourceSeq = null];
+   }
+   list ToolEquipValuesList(ToolEquipValuesArray) {
+      visible = [ResourceSeq != null];
+   }
+   list HistMeasList1(HistMeasArray1) bind ValuesList {
+      visible = [ResourceSeq = null];
+   }
+   list HistMeasList2(HistMeasArray2) bind ToolEquipValuesList {
+      visible = [ResourceSeq != null];
+   }
+   commandgroup CommandGroupCmdGroup {
+
+      command ShowObjectCommand;
+   }
+}
+
+-------------------------------- ASSISTANTS ---------------------------------
+
+--------------------------------- COMMANDS ----------------------------------
+command ShowObjectCommand for EquipmentObjectParam {
+   label = "Object Information";
+   //! TODO: <Use the "enabled" keyword below to define the Inquire logic, found within the event handler 'cmdShowObject_Inquire'>
+   enabled = [true];
+   //! TODO: <Use the "execute" keyword below to define the Execute logic, found within the event handler 'cmdShowObject_Execute'>
+   execute {
+      if [ObjLevel = null and Contract != null] {
+         navigate "page/SerialObject/Form?$filter=MchCode eq '${MchCode}' and Contract eq '${Contract}'";
+      }
+      else {
+         if [Contract = null and ResourceSeq != null] {
+            navigate "page/ToolEquipment/Form;$filter=ResourceSeq eq ${ResourceSeq}";
+         }
+         else {
+            navigate "page/FunctionalObject/Form?$filter=MchCode eq '${MchCode}' and Contract eq '${Contract}'";
+         }
+      }
+
+   }
+}
+
+command MarkIncorrectCommand {
+   label = "Mark as Incorrect";
+   enabled = [MeasurementTypeDb = "RecordedReading"];
+
+   mode = SelectedRecords;
+
+   execute {
+      if [MeasurementTypeDb = "RecordedReading"] {
+         assistant MarkIncorrectAssistant(ValuesSeq, Contract, MchCode, EquipmentObjectRef.MchName, ParameterCode, MeasurementParameterRef.Description, TestPointId, UnitOfMeasure, RecordedValue, RegDate, TestPntSeq) {
+            when OK {
+               refresh;
+            }
+            when CANCEL {
+               exit;
+            }
+         }
+      }
+      else {
+         alert("Reading cannot be set as Incorrect, as it is followed by a meter change/meter rollover");
+      }
+
+
+   }
+}
+
+command ManagePreliminaryReadingCommand {
+   label = "Manage Preliminary Reading";
+   mode = SingleRecord;
+   enabled = [(MeasurementTypeDb = "PreliminaryReading" and MchCode != null) or(MeasurementTypeDb = "MeterRollOver" and MchCode != null)];
+   variable VarHasPrevRecords;
+   variable ParameterTypeDb;
+   execute {
+      call HasPrevPreliminaryRecords(TestPntSeq, ParameterCode, RegDate) into VarHasPrevRecords;
+      call GetParameterType(ParameterCode) into ParameterTypeDb;
+      if[(VarHasPrevRecords and MeasurementTypeDb = "PreliminaryReading") and ParameterTypeDb = "A"] {
+         navigate  "assistant/ManagePreliminaryReading/MeterReadAdjustWizAssistant?$action=SetupSourceInfo{VarValuesSeq:$[ValuesSeq], VarContract:$[Contract], VarMchCode:$[MchCode], VarParameterCode:$[ParameterCode], VarTestpointId:$[TestPointId], VarRegDate:$[RegDate], VarTestPntSeq:$[TestPntSeq]}";
+      }
+      else {
+         if[MeasurementTypeDb = "MeterRollOver" and ParameterTypeDb = "A"] {
+            call MarkFlipIncorrect(ValuesSeq);
+            navigate  "assistant/ManagePreliminaryReading/MeterReadAdjustWizAssistant?$action=SetupSourceInfo{VarValuesSeq:$[ValuesSeq], VarContract:$[Contract], VarMchCode:$[MchCode], VarParameterCode:$[ParameterCode], VarTestpointId:$[TestPointId], VarRegDate:$[RegDate], VarTestPntSeq:$[TestPntSeq]}";
+         }
+         else {
+            alert("Please process the first Preliminary Record in this series before this.");
+         }
+      }
+   }
+}
+
+command SetFlipValueCommand {
+   label = "Set Meter Roll-over Value";
+   enabled = [ParamTypeDb = "A"];
+   execute {
+      assistant ChangeMeterFlipValueAssistant(Contract, MchCode, ObjectDescription, ParameterCode, MeasurementParameterRef.Description, TestPointId, TestPntSeq, UnitOfMeasure) {
+         when OK {
+            refresh;
+         }
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+
+command ChangeMeterCommand {
+   label = "Setup/Change Meter";
+
+   enabled = [MeterIDRequired != "NU"];
+   variable InputData Structure(ChangeMeterStructure);
+   execute {
+      call GetInputData(TestPntSeq, ParameterCode) into InputData;
+      assistant ChangeMeterAssistant(InputData) {
+         when OK {
+            refresh;
+         }
+         when CANCEL {
+            exit;
+         }
+      }
+
+   }
+}
+--------------------------------- SELECTORS ---------------------------------
+@Override
+selector EquipmentObjectParamSelector for EquipmentObjectParam {
+   label = "${MchCode} - ${Description} - ${Contract}";
+   static TestPntSeq {
+      visible = [false];
+      searchable = false;
+   }
+   static ParameterCode {
+      visible = [false];
+      searchable = false;
+   }
+   static MchCode;
+   static Description;
+   static Contract;
+}
+
+---------------------------------- GROUPS -----------------------------------
+group ObjectMeasurementsGroup for EquipmentObjectParam {
+   label = "Object Information";
+
+   field MchCode {
+      size = Small;
+   }
+   field Description {
+      size = Medium;
+   }
+   lov ContractRef with ReferenceUserAllowedSiteLovSelector {
+      search = Contract, ContractDesc;
+      preview = UserAllowedSiteLovCard;
+      size = Small;
+   }
+
+}
+
+----------------------------------- LISTS -----------------------------------
+list ValuesList for EquipmentObjectMeasGroup {
+   label = "New Measurements";
+
+   multiselect = [false];
+
+   orderby = TestPointId;
+
+   lov TestPointIdRef with ReferenceEquipmentObjectTestPntLovSelector {
+      search = TestPointId, Description;
+      size = Small;
+   }
+   field EquipmentObjectTestPntRef.Description {
+      size = Medium;
+      label = "Test Point Description";
+   }
+   lov ParameterCodeRef with ReferenceMeasurementParameterSelector {
+      search = ParameterCode, Description;
+      size = Small;
+//      validate command {
+//         execute {
+//            call GetUnit(TestPntSeq, ParameterCode) into UnitOfMeasure;
+//         }
+//      }
+   }
+
+   field MeasurementParameterRef.Description {
+      size = Medium;
+      label = "Parameter Description";
+   }
+   field UnitOfMeasure {
+      size = Small;
+   }
+   field MeasurementType {
+      size = Medium;
+   }
+   field RecordedValue;
+   field NewRecordedValue {
+
+      validate command {
+         execute {
+            if [NewRegDate = null] {
+               call GetSiteDate(Contract) into NewRegDate;
+            }
+            if [not NoteModified]
+               {
+               set MeasurementNote = null;
+            }
+//            if [Remark = null] {
+//               call GetDefaultRemark() into Remark;
+//            }
+            call GetDefaultRemark() into Remark;
+         }
+      }
+   }
+
+   field NewRegDate {
+
+      validate command {
+         variable RegDateExist;
+
+         execute {
+            if [NewRegDate = null] {
+               alert("New Reading Date is mandatory.");
+            }
+            if [not NoteModified]
+               {
+               set MeasurementNote = null;
+            }
+            if [Remark = null] {
+               call GetDefaultRemark() into Remark;
+            }
+
+            call IsRegDateExists(TestPointSq, ParameterCode, NewRegDate) into RegDateExist;
+
+            if [RegDateExist = 1] {
+               alert("A Measurement is already exists with same readings.");
+            }
+
+            call GetPrevMeterIdByDate(NewRegDate, TestPointSq, ParameterCode) into MeterId;
+         }
+      }
+   }
+   field TotalValue {
+      size = Small;
+   }
+   field MeterId {
+      size = Small;
+
+   }
+   field MeasurementNote {
+      size = Small;
+      multiline = true;
+      validate command {
+         execute {
+            set NoteModified = true;
+         }
+      }
+   }
+   field RegDate {
+      columnvisible = [false];
+   }
+   field Remark {
+      size = Small;
+      columnvisible = [false];
+   }
+
+   command SetFlipValueCommand;
+   command ChangeMeterCommand;
+
+}
+list ToolEquipValuesList for EquipmentObjectMeasGroup {
+   label = "New Measurements";
+
+   multiselect = [false];
+
+   orderby = TestPointId;
+
+   lov TestPointIdRef with ReferenceEquipmentObjectTestPntLovSelector {
+      search = TestPointId, Description;
+      size = Small;
+   }
+   field ToolEquipmentTestPntRef.Description {
+      size = Medium;
+      label = "Test Point Description";
+
+   }
+   lov ParameterCodeRef with ReferenceMeasurementParameterSelector {
+      search = ParameterCode, Description;
+      size = Small;
+//      validate command {
+//         execute {
+//            call GetUnit(TestPntSeq, ParameterCode) into UnitOfMeasure;
+//         }
+//      }
+   }
+
+   field MeasurementParameterRef.Description {
+      size = Medium;
+      label = "Parameter Description";
+   }
+   field UnitOfMeasure {
+      size = Small;
+   }
+   field MeasurementType {
+      size = Medium;
+   }
+   field RecordedValue;
+   field NewRecordedValue {
+
+      validate command {
+         execute {
+            if [NewRegDate = null] {
+               call GetSiteDate(Contract) into NewRegDate;
+            }
+            if [not NoteModified]
+               {
+               set MeasurementNote = null;
+            }
+//            if [Remark = null] {
+//               call GetDefaultRemark() into Remark;
+//            }
+            call GetDefaultRemark() into Remark;
+         }
+      }
+   }
+
+   field NewRegDate {
+
+      validate command {
+         variable RegDateExist;
+
+         execute {
+            if [NewRegDate = null] {
+               alert("New Reading Date is mandatory.");
+            }
+            if [not NoteModified]
+               {
+               set MeasurementNote = null;
+            }
+            if [Remark = null] {
+               call GetDefaultRemark() into Remark;
+            }
+
+            call IsRegDateExists(TestPointSq, ParameterCode, NewRegDate) into RegDateExist;
+
+            if [RegDateExist = 1] {
+               alert("A Measurement is already exists with same readings.");
+            }
+
+            call GetPrevMeterIdByDate(NewRegDate, TestPointSq, ParameterCode) into MeterId;
+         }
+      }
+   }
+   field TotalValue {
+      size = Small;
+   }
+   field MeterId {
+      size = Small;
+
+   }
+   field MeasurementNote {
+      size = Small;
+      multiline = true;
+      validate command {
+         execute {
+            set NoteModified = true;
+         }
+      }
+   }
+   field RegDate {
+      columnvisible = [false];
+   }
+   field Remark {
+      size = Small;
+      columnvisible = [false];
+   }
+
+   command SetFlipValueCommand;
+   command ChangeMeterCommand;
+
+}
+// This list will show the records which has a contract and no resource seq
+list HistMeasList1 for EquipmentObjectMeas {
+
+   label = "Measurement History";
+
+   multiselect = [false];
+   orderby = RegDate desc, ValuesSeq desc;
+
+   field MeasurementType {
+      size = Small;
+   }
+   field RecordedValue;
+   field MeasuredValue;
+   field MeasurementNote {
+      size = Medium;
+      multiline = true;
+   }
+   field RegDate {
+      format = longtime;
+   }
+   field MeterId {
+      size = Small;
+
+   }
+   field Remark {
+      size = Small;
+   }
+
+   command MarkIncorrectCommand;
+   command ManagePreliminaryReadingCommand;
+}
+// This list will show the records which has a resource seq and no contract
+list HistMeasList2 for EquipmentObjectMeas {
+   label = "Measurement History";
+   multiselect = [false];
+   orderby = RegDate desc, ValuesSeq desc;
+
+   field MeasurementType {
+      size = Small;
+   }
+   field RecordedValue;
+   field MeasuredValue;
+   field MeasurementNote {
+      size = Medium;
+      multiline = true;
+   }
+   field RegDate;
+   field MeterId {
+      size = Small;
+
+   }
+   field Remark {
+      size = Small;
+   }
+
+   command MarkIncorrectCommand;
+   command ManagePreliminaryReadingCommand;
+}
+
+
+----------------------------------- CARDS -----------------------------------
+
+---------------------------------- DIALOGS ----------------------------------
+
+---------------------------------- CHARTS -----------------------------------
+
+--------------------------------- CALENDARS ---------------------------------
+
+---------------------------------- SHEETS -----------------------------------
+
+----------------------------- STATE INDICATORS ------------------------------
+
+----------------------------------- TREES -----------------------------------
+
+---------------------------------- PLUGINS ----------------------------------
+
+------------------------------- IMAGE VIEWERS -------------------------------

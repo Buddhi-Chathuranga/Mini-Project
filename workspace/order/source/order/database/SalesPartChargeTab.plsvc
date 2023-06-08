@@ -1,0 +1,139 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     SalesPartChargeTab
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign    History
+--  ------     ------  ---------------------------------------------------------
+-- 2020-02-18  MaEelk  SCXTEND-2246, Enabled the Duplicate Functionality.
+-- 2018-12-08  IzShlk  SCUXXW4-1451, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Fetch_Charge_Defaults___(
+   contract_    IN VARCHAR2,
+   chargetype_  IN VARCHAR2,
+   catalog_no_  IN VARCHAR2,
+   charged_qty_ IN NUMBER)  RETURN Charge_Info_Rec
+IS
+   rec_             Sales_Charge_Type_API.Public_Rec;
+   price_rec_       Charge_Amounts_Info_Rec;
+   charge_info_rec_ Charge_Info_Rec;
+BEGIN
+   rec_ := Sales_Charge_Type_API.Get(contract_, chargetype_);
+   
+   charge_info_rec_.print_charge_type      := NVL(rec_.print_charge_type, 'N');
+   charge_info_rec_.print_collect_charge   := NVL(rec_.print_collect_charge, 'NO PRINT');
+   charge_info_rec_.charge_amount          := rec_.charge_amount;
+   charge_info_rec_.charge_amount_incl_tax := rec_.charge_amount_incl_tax;
+   charge_info_rec_.charge                 := rec_.charge;
+   charge_info_rec_.charge_cost            := rec_.charge_cost;
+   charge_info_rec_.charge_cost_percent    := rec_.charge_cost_percent;
+   charge_info_rec_.intrastat_exempt       := NVL(rec_.intrastat_exempt, 'FALSE') = 'TRUE';
+   charge_info_rec_.unit_charge            := NVL(rec_.unit_charge, 'FALSE') = 'TRUE';
+   charge_info_rec_.tax_code               := rec_.tax_code;
+   charge_info_rec_.currency_code          := Sales_Charge_Type_API.Get_Currency_Code(contract_, chargetype_);
+                                     
+   
+   price_rec_ := Calculate_Charge_Prices___(contract_, catalog_no_, chargetype_, charge_info_rec_.charge_amount, charge_info_rec_.charge_amount_incl_tax, charge_info_rec_.tax_code, charged_qty_);
+   charge_info_rec_.charge_amount          := price_rec_.charge_amount;
+   charge_info_rec_.charge_amount_incl_tax := price_rec_.charge_amount_incl_tax;
+   charge_info_rec_.total_base             := price_rec_.total_base;
+         
+   RETURN charge_info_rec_;
+END Fetch_Charge_Defaults___;
+
+FUNCTION Calculate_Charge_Prices___(
+   contract_               IN VARCHAR2,
+   catalog_no_             IN VARCHAR2,
+   chargetype_             IN VARCHAR2,
+   charge_amount_          IN NUMBER,
+   charge_amount_incl_tax_ IN NUMBER,
+   tax_code_               IN VARCHAR2,
+   charged_qty_            IN NUMBER)  RETURN Charge_Amounts_Info_Rec
+IS
+  use_price_incl_tax_  VARCHAR2(10);
+  taxable_             VARCHAR2(10);
+  tax_calc_base_       VARCHAR2(50);
+  tax_percentage_      NUMBER;
+  price_temp_          NUMBER;
+  price_incl_tax_temp_ NUMBER;
+  calculate_price_     BOOLEAN := TRUE;
+  charge_amounts_info_rec_  Charge_Amounts_Info_Rec;
+   -- TODO: Fetch the ifs curr rounding from profile
+   ifs_curr_rounding_   NUMBER := 16;
+BEGIN
+   use_price_incl_tax_      := Sales_Part_API.Get_Use_Price_Incl_Tax_Db(contract_, catalog_no_);
+   taxable_                 := Sales_Charge_Type_API.Get_Taxable_Db(contract_, chargetype_);
+
+   IF use_price_incl_tax_ = 'TRUE' THEN
+      tax_calc_base_ := 'GROSS_BASE';
+      IF charge_amount_incl_tax_ IS NULL OR taxable_ = 'FALSE' OR tax_code_ IS NULL  THEN
+         charge_amounts_info_rec_.charge_amount := charge_amount_incl_tax_;
+         charge_amounts_info_rec_.charge_amount_incl_tax := charge_amount_incl_tax_;
+         calculate_price_ := FALSE;
+      END IF;
+   ELSE
+      tax_calc_base_ := 'NET_BASE';
+      IF charge_amount_ IS NULL OR taxable_ = 'FALSE' OR tax_code_ IS NULL THEN
+         charge_amounts_info_rec_.charge_amount := charge_amount_;
+         charge_amounts_info_rec_.charge_amount_incl_tax := charge_amount_;
+         calculate_price_ := FALSE;
+      END IF;
+   END IF;
+   
+   IF calculate_price_ THEN
+      price_temp_          := charge_amount_;
+      price_incl_tax_temp_ := charge_amount_incl_tax_;
+      tax_percentage_      := Statutory_Fee_API.Get_Fee_Rate(Site_API.Get_Company(contract_), tax_code_);
+      
+      Tax_Handling_Util_API.Calculate_Prices(price_temp_, price_incl_tax_temp_, tax_calc_base_, tax_percentage_, ifs_curr_rounding_);
+      
+      charge_amounts_info_rec_.charge_amount := price_temp_;
+      charge_amounts_info_rec_.charge_amount_incl_tax := price_incl_tax_temp_;
+   END IF;
+   
+   IF charged_qty_ IS NOT NULL THEN
+      charge_amounts_info_rec_.total_base := Sales_Part_Charge_API.Get_Total_Charge_Base(charge_amounts_info_rec_.charge_amount, charged_qty_ ,contract_);
+   ELSE
+      charge_amounts_info_rec_.total_base := 0;
+   END IF;
+   
+   RETURN charge_amounts_info_rec_;
+END Calculate_Charge_Prices___;
+
+FUNCTION Calculate_Total_Base___(
+   charge_amount_ IN NUMBER,
+   charged_qty_   IN NUMBER,
+   contract_      IN VARCHAR2 )  RETURN NUMBER
+IS
+BEGIN
+   RETURN Sales_Part_Charge_API.Get_Total_Charge_Base(charge_amount_, charged_qty_ ,contract_);
+END Calculate_Total_Base___;
+
+@Override
+PROCEDURE CRUD_Default_Copy___ (
+   rec_  IN OUT Sales_Part_Charge_Rec )
+IS
+   charge_info_rec_ Charge_Info_Rec;
+BEGIN
+
+   super(rec_);
+   charge_info_rec_ := Fetch_Charge_Defaults___( rec_.contract, rec_.charge_type, rec_.catalog_no, rec_.charged_qty);
+   rec_.print_charge_type := charge_info_rec_.print_charge_type;
+   rec_.print_collect_charge := charge_info_rec_.print_collect_charge;
+   rec_.charge_amount := charge_info_rec_.charge_amount;
+   rec_.charge_amount_incl_tax := charge_info_rec_.charge_amount_incl_tax;
+   rec_.charge := charge_info_rec_.charge;
+   rec_.charge_cost := charge_info_rec_.charge_cost;
+   rec_.charge_cost_percent := charge_info_rec_.charge_cost_percent;
+   rec_.intrastat_exempt := charge_info_rec_.intrastat_exempt;
+   rec_.unit_charge := charge_info_rec_.unit_charge;
+   rec_.tax_code := charge_info_rec_.tax_code;
+   rec_.currency := charge_info_rec_.currency_code;
+   rec_.total_base:= charge_info_rec_.total_base;   
+   rec_.customer_no := NULL;
+END CRUD_Default_Copy___;

@@ -1,0 +1,1337 @@
+-------------------------------------------------------------------------------------------------
+-- Date        Sign     History
+-- ----------  ------   -------------------------------------------------------------------------
+-- 2022-01-26  PrRtlk   SC21R2-7353, Added ParentQtyReserved to CalculateQuantity.
+-- 2021-11-16  Aabalk   Bug 161592 (SCZ-16657), Modified where clause for GetAggregatedTab by fetching only values with handling unit ids.
+-- 2021-08-18  ApWilk   Bug 160507(SCZ-15983), Added the function TranstateLabelConstant().
+-- 2021-06-22  Asiglk   MF21R2-74, Modify Customer order line to add IUID information
+-- 2021-03-05  RasDlk   SC2020R1-12636, Modified the query ManualReservationsForShipmentAndCustomerOrderLine by setting Contract as keys to improve performance.
+-- 2021-02-11  RoJalk   SC2020R1-11806, Removed ActivityRef since it is not used in client.
+-- 2020-10-27  RasDlk   SC2020R1-10944, Changed the editable property of the attributes HandlingUnitTypeId, Sscc, AltHandlingUnitLabelId and AvailabilityControlId.
+-- 2020-10-02  RasDlk   SC2020R1-10286, Changed the label of the reference AvailabilityControlIdRef.
+-- 2020-09-23  RasDlk   SC2020R1-9924, Modified Objstate by changing its name to SourceObjstate to prevent the static code analysis error.
+-- 2020-09-08  RasDlk   SC2020R1-9661, Changed the label of the attribute EngChgLevel to Revision No.
+-- 2020-06-01  RasDlk   SCSPRING20-1954, Increased the maxlength of SenderId and ReceiverId and added the Required property for BlockedForPickByChoice to be shown as a toggle.
+-- 2020-03-03  KiSalk   Bug 152676(SCZ-9021), Added parameters part_no_ and contract_ to action GenerateHandingUnitSnapshot.
+-- 2020-04-17  RasDlk   SCSPRING20-1954, Modified ReserveManually, Reserve, Unreserve actions, InventoryPartInStock entity, ManualReservationsHandlingUnit query and GetAggregatedTab function
+-- 2020-04-17           by adding sender related information required for manual reservations.
+-- 2020-02-16  RasDlk   SCSPRING20-170, Modified the attribute MinimumRemainingDaysAtCODelivery by calling the method Reserve_Shipment_API.Get_Min_Durab_Days_For_Reserve
+-- 2020-02-16           in the fetch statement to handle dynamic dependency correctly.
+-- 2020-02-16           Added the attribute SourceQtyReservedClient to support the orderby statement.
+-- 2020-02-10  RasDlk   SCSPRING20-170, Added ReceiverType, SenderType, SenderId, SenderDescription.
+-- 2019-09-20  RasDlk   SCXTEND-564, Removed temp order reference values.
+-- 2019-08-29  RasDlk   SCUXXW4-20180, Moved the quantity reservation validations to the server side.
+-- 2019-08-16  RasDlk   SCUXXW4-22330, Added the property luname to pick the correct LU required for attachments.
+-- 2019-08-04  RoJalk   SCUXXW4-23474, Replaced LogisticsSourceRefType with LogisticsSourceRefType.Shipment.
+-- 2019-08-04  RoJalk   SCUXXW4-23469, Removed the commented code.
+-- 2019-08-03  MeAblk   SCUXXW4-18131, Code improvement changes done after review.
+-- 2019-06-17  RasDlk   SCUXXW4-22464, Corrected an issue related to changing Reserved Qty by passing the QtyReserveDiff to the CalculateQuantity method.
+-- 2019-06-12  RasDlk   SCUXXW4-21849, Changed related to the interface design.
+-- 2019-05-24  RasDlk   SCUXXW4-20137, Corrected miscellaneous issues.
+-- 2019-03-21  RoJalk   SCUXXW4-15409, Added where clause for ManualReservationsHandlingUnitArray.
+-- 2019-01-22  RoJalk   SCUXXW4-4724, Converted from frmHuReservations using MTG Version: 1.34
+-- 2019-01-09  RasDlk   SCUXXW4-4704, Converted from frmChangeReservation, frmHuReservations and tbwSingleReservations using MTG Version: 1.34
+-------------------------------------------------------------------------------------------------
+
+projection ManualReservationsForShipmentAndCustomerOrderLine;
+component SHPMNT;
+layer Core;
+description "Manage InventoryPartInStock";
+category Users;
+include fragment InventoryLocation21Selector;
+include fragment IntorderPartLovSelector;
+include fragment UserAllowedSiteLovSelector;
+include fragment SplitReservationAssistant;
+include fragment TemporaryPartTrackingSerialSelector;
+include fragment SequenceGeneratorAssistant;
+include fragment IdentifySerialsByBarcodeDynamicAssistant;
+include fragment MovePartsIntoShipmentInventoryDialog;
+include fragment HandlingUnitsSearchContext;
+include fragment EnterInputUomParametersAssistant;
+include fragment InputUnitOfMeasure;
+include fragment SourceManualReservMainInitialCheck;
+include fragment ShipmentReceiverSelector;
+include fragment ShipmentSenderSelector;
+
+--------------------------------- FRAGMENTS ---------------------------------
+
+----------------------------- MAIN ENTRY POINTS -----------------------------
+
+entityset ManualReservationsForShipmentAndCustomerOrderLineSet for ManualReservationsForShipmentAndCustomerOrderLine;
+entityset InventoryPartInStockSet for InventoryPartInStock;
+entityset IsoUnitSet for IsoUnit;
+entityset ManualReservationsHandlingUnitSet for ManualReservationsHandlingUnit;
+
+------------------------------ ENTITY DETAILS -------------------------------
+
+query ManualReservationsForShipmentAndCustomerOrderLine {
+   from = "SOURCE_MANUAL_RESERV_MAIN";
+   keys = SourceRef1, SourceRef2Db, SourceRef3Db, SourceRef4Db, SourceRefType, ShipmentId, Contract;
+
+   where = "INVENTORY_PART_NO IS NOT NULL AND ( QTY_TO_RESERVE != 0 OR QTY_ASSIGNED != 0) AND (NOT(QTY_TO_RESERVE <= 0 AND QTY_ASSIGNED <= 0))";
+
+   attribute SourceRef1 Text {
+      fetch = "source_ref1";
+      label = "Source Ref 1";
+      maxlength = 50;
+      editable = [false];
+      format = uppercase;
+   }
+   attribute ProjectId Text {
+      fetch = "project_id";
+      label = "Project ID";
+   }
+   attribute SourceRef2 Text {
+      fetch = "source_ref2";
+      label = "Source Ref 2";
+      maxlength = 50;
+      editable = [false];
+   }
+   attribute SourceRef2Db Text {
+      fetch = "NVL(SOURCE_REF2,'*')";
+      label = "Source Ref 2";
+      lovcolumn = [false];
+   }
+   attribute SourceRef3 Text {
+      fetch = "source_ref3";
+      label = "Source Ref 3";
+      maxlength = 50;
+      editable = [false];
+   }
+   attribute SourceRef3Db Text {
+      fetch = "NVL(SOURCE_REF3,'*')";
+      label = "Source Ref 3";
+      lovcolumn = [false];
+   }
+   attribute SourceRef4 Text {
+      fetch = "source_ref4";
+      label = "Source Ref 4";
+      maxlength = 50;
+      editable = [false];
+   }
+   attribute SourceRef4Duplicate Number {
+      fetch = "SOURCE_REF4";
+      label = "Source Ref 4";
+   }
+   attribute SourceRef4Db Text {
+      fetch = "NVL(SOURCE_REF4,'*')";
+      label = "Source Ref 4";
+      lovcolumn = [false];
+   }
+   attribute SourceRefType Enumeration(LogisticsSourceRefType.Shipment) {
+      fetch = "source_ref_type_db";
+      label = "Source Ref Type";
+      editable = [false];
+   }
+   attribute Contract Text {
+      fetch = "contract";
+      editable = [false];
+   }
+   attribute ShipmentId Number {
+      fetch = "shipment_id";
+      label = "Shipment ID";
+      maxlength = 32767;
+      editable = [false];
+   }
+   attribute ShipmentLineNo Number {
+      fetch = "shipment_line_no";
+      label = "Line No";
+      maxlength = 32767;
+      required = [true];
+      editable = [ETag = null];
+   }
+   attribute ReceiverId Text {
+      fetch = "receiver_id";
+      label = "Receiver ID";
+      maxlength = 50;
+      editable = [false];
+      format = uppercase;
+   }
+   attribute ReceiverDescription Text {
+      fetch = "Shipment_Source_Utility_API.Get_Receiver_Name(receiver_id, receiver_type_db)";
+      label = "Receiver Description";
+      maxlength = 32767;
+      editable = [false];
+   }
+   attribute InventoryPartNo Text {
+      fetch = "inventory_part_no";
+      label = "Part Number";
+      maxlength = 25;
+      editable = [false];
+      format = uppercase;
+   }
+   attribute QtyAssigned Number {
+      fetch = "NVL(qty_assigned,0)";
+      label = "Reserved Qty";
+      maxlength = 32767;
+      editable = [false];
+   }
+   attribute QtyToReserve Number {
+      fetch = "NVL(qty_to_reserve,0)";
+      label = "Qty to Reserve";
+      maxlength = 32767;
+      editable = [false];
+   }
+   attribute QtyOnOrder Number {
+      fetch = "qty_on_order";
+      label = "Pegged Qty";
+      maxlength = 32767;
+      editable = [false];
+   }
+   attribute PlannedDeliveryDate Timestamp {
+      fetch = "planned_delivery_date";
+      label = "Delivery Date";
+      editable = [false];
+   }
+   attribute PlannedShipDate Timestamp {
+      fetch = "planned_ship_date";
+      label = "Ship Date";
+      editable = [false];
+   }
+   attribute PlannedDueDate Date {
+      fetch = "planned_due_date";
+      label = "Due Date";
+      editable = [false];
+   }
+   attribute PlannedShipPeriod Text {
+      fetch = "planned_ship_period";
+      label = "Period";
+   }
+   attribute PartOwnership Text {
+      fetch = "part_ownership";
+      label = "Ownership";
+      maxlength = 200;
+      editable = [false];
+   }
+   attribute OwnerID Text {
+      fetch = "owner";
+      label = "Owner ID";
+      maxlength = 20;
+      editable = [false];
+   }
+   attribute ActivitySeq Number {
+      fetch = "activity_seq";
+      label = "Activity Sequence";
+      maxlength = 10;
+      editable = [false];
+   }
+   attribute ConditionCode Text {
+      fetch = "condition_code";
+      editable = [false];
+   }
+   attribute ConfigurationId Text {
+      fetch = "configuration_id";
+      label = "Configuration ID";
+      editable = [false];
+   }
+   attribute InputUom Boolean("TRUE", "FALSE") {
+      fetch = "Shipment_Source_Utility_API.Is_Uom_Group_Connected__(contract,inventory_part_no,source_ref_type_db)";
+      label = "Input UoM";
+      editable = [false];
+   }
+   attribute InputQty Number {
+      fetch = "input_qty";
+      maxlength = 32767;
+      editable = [false];
+   }
+   attribute InputUnitMeas Text {
+      fetch = "input_unit_meas";
+      editable = [false];
+   }
+   attribute InputConvFactor Number {
+      fetch = "input_conv_factor";
+      label = "Conversion Factor";
+      maxlength = 32767;
+      editable = [false];
+   }
+   attribute InputVariableValues Text {
+      fetch = "input_variable_values";
+      label = "Input Values";
+      editable = [false];
+   }
+   attribute MinimumRemainingDaysAtCODelivery Number {
+      fetch = "Reserve_Shipment_API.Get_Min_Durab_Days_For_Reserve(receiver_id,contract,inventory_part_no)";
+      label = "Minimum Remaining Days at CO Delivery 1";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute DemandCodeDb Text {
+      fetch = "demand_code_db";
+      maxlength = 20;
+      editable = [false];
+   }
+   attribute SupplyCodeDb Text {
+      fetch = "supply_code_db";
+      maxlength = 10;
+      editable = [false];
+   }
+   @DynamicComponentDependency PURCH
+   attribute ExchangeSerial Text {
+      fetch = "DECODE(source_ref_type_db, 'CUSTOMER_ORDER', Pur_Order_Exchange_Comp_API.Get_Cust_Ord_Serial_No( source_ref1, source_ref2, source_ref3, source_ref4 ), null)";
+      maxlength = 32767;
+      editable = [false];
+   }
+   @DynamicComponentDependency PURCH
+   attribute ExchangeLotBatch Text {
+      fetch = "DECODE(source_ref_type_db, 'CUSTOMER_ORDER', Pur_Order_Exchange_Comp_API.Get_Cust_Ord_Lot_Batch_No( source_ref1, source_ref2, source_ref3, source_ref4 ), null)";
+      maxlength = 32767;
+      editable = [false];
+   }
+   attribute SourcePartNo Text {
+      fetch = "source_part_no";
+      label = "Source Part No";
+      maxlength = 25;
+      editable = [false];
+      format = uppercase;
+   }
+   attribute SourceRefTypeDb Text {
+      fetch = "source_ref_type_db";
+      maxlength = 20;
+      editable = [false];
+   }
+   attribute ReceiverType Enumeration(SenderReceiverType.Shipment) {
+      fetch = "receiver_type_db";
+      required = [true];
+      updatable = [false];
+      editable = [ETag = null];
+   }
+   attribute SenderType Enumeration(SenderReceiverType.SenderReceiver) {
+      fetch = "sender_type_db";
+      required = [true];
+      updatable = [false];
+      editable = [ETag = null];
+   }
+   // This attribute is used to pass db value in stringify method for ReserveHandlingUnitCommand and UnreserveHandlingUnitCommand. Framework request SCXTEND-2179 has been reported for this issue.
+   attribute SenderTypeDb Text {
+      fetch = "sender_type_db";
+   }
+   attribute SenderId Text {
+      fetch = "sender_id";
+      label = "Sender ID";
+      maxlength = 50;
+      editable = [false];
+      format = uppercase;
+   }
+   attribute SenderDescription Text {
+      fetch = "Shipment_Source_Utility_API.Get_Sender_Name(sender_id, sender_type_db)";
+      label = "Sender Description";
+      maxlength = 32767;
+      editable = [false];
+   }
+   attribute OrderSupplyDemandTypeDb Text {
+      fetch = "Reserve_Shipment_API.Get_Order_Sup_Demand_Type_Db__(source_ref_type_db)";
+      maxlength = 20;
+      editable = [false];
+   }
+   attribute PickByChoiceOption Text {
+      fetch = "Site_Invent_Info_API.Get_Pick_By_Choice_Option_Db(contract)";
+      label = "Pick by Choice Option";
+      editable = [false];
+   }
+   attribute ConfirmDeliveriesDb Text {
+      fetch = "confirm_deliveries_db";
+      label = "ConfirmDeliveries";
+      maxlength = 20;
+      editable = [false];
+   }
+   attribute ConsignmentStockDb Text {
+      fetch = "consignment_stock_db";
+      label = "ConsignmentStock";
+      maxlength = 20;
+      editable = [false];
+   }
+   attribute RentalDb Text {
+      fetch = "rental_db";
+      label = "Rental";
+      maxlength = 5;
+      editable = [false];
+   }
+   attribute SourceObjstate Text {
+      fetch = "objstate";
+      label = "Status";
+      maxlength = 20;
+      editable = [false];
+   }
+   attribute PickAllowed Text {
+      fetch = "Pick_Shipment_API.Reserved_As_Picked_Allowed__(source_ref1, source_ref2, source_ref3, source_ref4, source_ref_type_db, shipment_id, 'TRUE')";
+      label = "Pick Allowed";
+      editable = [false];
+   }
+   @DynamicComponentDependency DEFORD
+   attribute IuidEnabled Boolean("TRUE", "FALSE") {
+      fetch = "DECODE(Defense_Part_Iuid_Util_API.Get_Defense_Part_Iuid_Enabled(PROJECT_ID, Site_API.Get_Company(CONTRACT),  INVENTORY_PART_NO),'1','TRUE','FALSE')";
+      editable = [false];
+   }
+   reference InventoryPartRef(Contract, InventoryPartNo) to InventoryPart(Contract, PartNo);
+   reference ContractRef(Contract) to UserAllowedSiteLov(Contract) {
+      label = "Site";
+   }
+   reference ShipmentIdRef(ShipmentId) to Shipment(ShipmentId) {
+      label = "Shipment ID";
+   }
+   reference InventoryPartNoRef(Contract, InventoryPartNo) to IntorderPartLov(Contract, PartNo) {
+      label = "Part";
+   }
+   reference PlannedShipPeriodRef(PlannedShipPeriod) to WorkTimePeriod(Period) {
+      label = "Period";
+   }
+   @DynamicComponentDependency CFGCHR
+   reference ConfigurationIdRef(ConfigurationId) to ConfigurationSpec(ConfigurationId) {
+      label = "Configuration ID";
+   }
+   reference ReceiverIdRef(ReceiverId) to ShipmentReceiver(ReceiverId) {
+      label = "Receiver ID";
+   }
+   reference SenderIdRef(SenderId) to ShipmentSender(SenderId) {
+      label = "Sender ID";
+   }
+   array InventoryPartInStockArray(Contract, SourceRef1) to InventoryPartInStock(Contract, SourceRef1) {
+      where = " NVL(:parent.SourceRef1, 'STRING_NULL') = NVL(:child.SourceRef1, 'STRING_NULL')
+                AND NVL(:parent.SourceRef2, 'STRING_NULL') = NVL(:child.SourceRef2, 'STRING_NULL')
+                AND NVL(:parent.SourceRef3, 'STRING_NULL') = NVL(:child.SourceRef3, 'STRING_NULL')
+                AND NVL(:parent.SourceRef4, 'STRING_NULL') = NVL(:child.SourceRef4, 'STRING_NULL')
+                AND :parent.SourceRefTypeDb = :child.SourceRefTypeDb
+                AND :parent.ShipmentId = :child.ShipmentId";
+   }
+}
+
+@Override
+entity InventoryPartInStock {
+   crud = Read, Update;
+   from = "single_manual_reservation";
+   supportwarnings = [true];
+   luname = "'ShipmentSourceUtility'";
+   keys = Contract, PartNo, ConfigurationId, LocationNo, LotBatchNo, SerialNo, EngChgLevel, WaivDevRejNo, ActivitySeq, HandlingUnitId, SourceRef1, SourceRef2Db, SourceRef3Db, SourceRef4Db, SourceRefTypeDb, ShipmentId;
+
+   attribute SourceRef1 Text {
+      fetch = "source_ref1";
+      label = "Source Ref 1";
+   }
+   attribute SourceRef2 Text {
+      fetch = "source_ref2";
+      label = "Source Ref 2";
+   }
+   attribute SourceRef2Db Text {
+      fetch = "NVL(source_ref2,'*')";
+      label = "Source Ref 2";
+   }
+   attribute SourceRef3 Text {
+      fetch = "source_ref3";
+      label = "Source Ref 3";
+   }
+   attribute SourceRef3Db Text {
+      fetch = "NVL(source_ref3,'*')";
+      label = "Source Ref 3";
+   }
+   attribute SourceRef4 Text {
+      fetch = "source_ref4";
+      label = "Source Ref 4";
+   }
+   attribute SourceRef4Db Text {
+      fetch = "NVL(source_ref4,'*')";
+      label = "Source Ref 4";
+   }
+   attribute ShipmentId Number {
+      fetch = "shipment_id";
+      label = "Shipment ID";
+   }
+   attribute SourceQtyReserved Number {
+      fetch = "source_qty_reserved";
+      label = "Reserved Qty";
+      maxlength = 2000;
+   }
+   attribute SourceQtyReservedClient Number {
+      fetch = "NVL(source_qty_reserved,0)";
+      label = "Reserved Qty";
+      maxlength = 2000;
+   }
+   attribute AvailableToReserve Number {
+      fetch = "qty_onhand - NVL(qty_reserved, 0)";
+      label = "Available to Reserve";
+      editable = [false];
+   }
+   attribute QtyReserved Number {
+      fetch = "qty_reserved";
+      label = "Total Reserved Qty";
+      editable = [false];
+      insertable = [false];
+      updatable = [false];
+   }
+   attribute QtyOnhand Number {
+      label = "On Hand Qty";
+      editable = [ETag = null];
+   }
+   attribute QtyAvailable Number {
+      fetch = "qty_onhand - NVL(qty_reserved, 0) + NVL(source_qty_reserved, 0)";
+      editable = [true];
+      insertable = [false];
+      updatable = [false];
+   }
+   attribute OldQtyReserved Number {
+      fetch = "source_qty_reserved";
+      editable = [true];
+      insertable = [false];
+      updatable = [false];
+   }
+   attribute QtyReserveDiff Number {
+      fetch = "0";
+      editable = [true];
+      insertable = [false];
+      updatable = [true];
+   }
+   attribute QtyOnPickList Number {
+      fetch = "NVL(Reserve_Shipment_API.Get_Total_Qty_On_Pick_List(source_ref1, source_ref2, source_ref3, source_ref4, contract, part_no, location_no, lot_batch_no, serial_no, eng_chg_level, waiv_dev_rej_no, activity_seq, handling_unit_id, configuration_id, shipment_id, source_ref_type_db),0)";
+      label = "Qty On Pick List";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute CatchQtyOnhand Number {
+      label = "On Hand Catch Qty";
+      editable = [ETag = null];
+   }
+   attribute CatchUom Text {
+      fetch = "Inventory_Part_API.Get_Enabled_Catch_Unit_Meas(contract,part_no)";
+      label = "Catch UoM";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute InputUomGroupId Text {
+      fetch = "Inventory_Part_API.Get_Input_Unit_Meas_Group_Id(contract, part_no)";
+      label = "Input UoM Group Id";
+      maxlength = 30;
+      editable = [false];
+   }
+   attribute InputUom Text {
+      fetch = "Shipment_Source_Utility_API.Get_Reserv_Input_Unit_Meas__(source_ref1, source_ref2, source_ref3, source_ref4, contract, part_no, location_no, lot_batch_no, serial_no, eng_chg_level, waiv_dev_rej_no,activity_seq, handling_unit_id, configuration_id, '*', shipment_id, source_ref_type_db)";
+      label = "Input UoM";
+      maxlength = 30;
+      editable = [ETag != null];
+      updatable = [true];
+   }
+   attribute InputQty Number {
+      fetch = "Shipment_Source_Utility_API.Get_Reserv_Input_Qty__(source_ref1, source_ref2, source_ref3, source_ref4, contract, part_no, location_no, lot_batch_no, serial_no, eng_chg_level, waiv_dev_rej_no,activity_seq, handling_unit_id, configuration_id, '*', shipment_id, source_ref_type_db)";
+      label = "Input Qty";
+      editable = [ETag != null];
+      updatable = [true];
+   }
+   attribute InputConversion Number {
+      fetch = "Shipment_Source_Utility_API.Get_Reserv_Input_Conv_Factor__(source_ref1, source_ref2, source_ref3, source_ref4, contract, part_no, location_no, lot_batch_no, serial_no, eng_chg_level, waiv_dev_rej_no,activity_seq, handling_unit_id, configuration_id, '*', shipment_id, source_ref_type_db)";
+      label = "Input Conversion";
+      editable = [false];
+      updatable = [true];
+   }
+   attribute InputValue Text {
+      fetch = "Shipment_Source_Utility_API.Get_Reserv_Input_Var_Values__(source_ref1, source_ref2, source_ref3, source_ref4, contract, part_no, location_no, lot_batch_no, serial_no, eng_chg_level, waiv_dev_rej_no,activity_seq,handling_unit_id, configuration_id, '*', shipment_id, source_ref_type_db)";
+      label = "Input Value";
+      maxlength = 2000;
+      editable = [false];
+      updatable = [true];
+   }
+   attribute HandlingUnitId Number {
+      editable = [false];
+   }
+   attribute TypeDescription Text {
+      fetch = "Handling_Unit_Type_API.Get_Description(Handling_Unit_API.Get_Handling_Unit_Type_Id(handling_unit_id))";
+      label = "Type Description";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute Composition Text {
+      fetch = "Handling_Unit_API.Get_Composition(handling_unit_id)";
+      label = "Composition";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute AvailabilityControlDescription Text {
+      fetch = "Part_Availability_Control_API.Get_Description(Inventory_Part_In_Stock_API.Get_Availability_Control_Id(contract,part_no,configuration_id,location_no,lot_batch_no,serial_no,eng_chg_level,waiv_dev_rej_no,activity_seq,handling_unit_id))";
+      label = "Availability Control Description";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute ExpirationDate Date {
+      label = "Expires";
+      editable = [ETag = null];
+   }
+   attribute ReceiptDate Date {
+      editable = [ETag = null];
+   }
+   attribute PartOwnership Text {
+      fetch = "part_ownership";
+      label = "Ownership";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute OwnerID Text {
+      fetch = "DECODE(Part_Ownership_API.Encode(part_ownership), 'customer owned', owning_customer_no, 'CONSIGNMENT', owning_vendor_no, 'supplier loaned', owning_vendor_no, 'supplier rented', owning_vendor_no)";
+      label = "Owner ID";
+      maxlength = 20;
+      editable = [false];
+   }
+   attribute OwnerName Text {
+      fetch = "Shipment_Source_Utility_API.Get_Receiver_Name(owning_customer_no, receiver_type_db)";
+      label = "Owner Name";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute EngChgLevel Text {
+      label = "Revision No";
+   }
+   @DynamicComponentDependency PROJ
+   attribute SubProjectDescription Text {
+      fetch = "Activity_API.Get_Sub_Project_Description(activity_seq)";
+      label = "Sub Project Description";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute ActivitySeq Number {
+      maxlength = 10;
+      editable = [false];
+   }
+   attribute TopParentHandlingUnitID Text {
+      fetch = "Handling_Unit_API.Get_Top_Parent_Handl_Unit_Id(handling_unit_id)";
+      label = "Top Parent Handling Unit ID";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TopParentHandlingUnitType Text {
+      fetch = "Handling_Unit_API.Get_Top_Parent_Hu_Type_Id(handling_unit_id)";
+      label = "Top Parent Handling Unit Type";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TopParentTypeDescription Text {
+      fetch = "Handling_Unit_Type_API.Get_Description(Handling_Unit_API.Get_Top_Parent_Hu_Type_Id(handling_unit_id))";
+      label = "Top Parent Type Description";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TopParentSSCC Text {
+      fetch = "Handling_Unit_API.Get_Top_Parent_Sscc(handling_unit_id)";
+      label = "Top Parent SSCC";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TopParentHandlingUnitLabelID Text {
+      fetch = "Handling_Unit_API.Get_Top_Parent_Alt_Hu_Label_Id(handling_unit_id)";
+      label = "Top Parent Handling Unit Label ID";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute BlockedForPickByChoice Boolean("TRUE", "FALSE") {
+      required = [true];
+      fetch = "Shipment_Source_Utility_API.Get_Pick_By_Choice_Blocked_Db(source_ref1, source_ref2, source_ref3, source_ref4, source_ref_type_db, contract, part_no, location_no, lot_batch_no, serial_no, eng_chg_level, waiv_dev_rej_no, activity_seq, handling_unit_id, configuration_id, shipment_id)";
+      label = "Blocked for Pick by Choice";
+      editable = [ETag != null];
+   }
+   attribute ReceiptAndIssueSerialTracking Text {
+      fetch = "Part_Catalog_API.Get_Rcpt_Issue_Serial_Track_Db(part_no)";
+      label = "Receipt and Issue Serial Tracking";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute SourceRefTypeDb Text {
+      fetch = "source_ref_type_db";
+      label = "Source Ref Type Db";
+      maxlength = 20;
+      editable = [false];
+   }
+   attribute ConfigurationId Text {
+      fetch = "configuration_id";
+      label = "Configuration Id";
+   }
+   attribute ConditionCode Text {
+      fetch = "condition_code";
+      label = "Condition Code";
+   }
+   attribute ParentShipmentLineNo Number {
+      fetch = "0";
+   }
+   attribute ParentSupplyCodeDb Text {
+      fetch = "''";
+   }
+   attribute ParentQtyOnOrder Number {
+      fetch = "0";
+   }
+   attribute SourceRef1Temp Text {
+      fetch = "''";
+   }
+   attribute SourceRef2Temp Text {
+      fetch = "''";
+   }
+   attribute SourceRef3Temp Text {
+      fetch = "''";
+   }
+   attribute SourceRef4Temp Text {
+      fetch = "''";
+   }
+   attribute ShipmentIdTemp Number {
+      fetch = "''";
+   }
+   attribute SourceRefTypeDbTemp Text {
+      fetch = "''";
+   }
+   attribute ParentSenderType Enumeration(SenderReceiverType.SenderReceiver) {
+      fetch = "''";
+   }
+   attribute ParentSenderId Text {
+      fetch = "''";
+   }
+   @DynamicComponentDependency PROJ
+   attribute SubProjectId Text {
+      fetch = "ACTIVITY_API.Get_Sub_Project_Id(ACTIVITY_SEQ)";
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ActivityNo Text {
+      fetch = "ACTIVITY_API.Get_Activity_No(ACTIVITY_SEQ)";
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ActivityDescription Text {
+      fetch = "Activity_API.Get_Description(ACTIVITY_SEQ)";
+      editable = [false];
+   }
+   computed QtyToUnreserve Number {
+      compute =(SourceQtyReserved-QtyOnPickList);
+   }
+   attribute HandlingUnitTypeId Text {
+      label = "Handling Unit Type ID";
+      fetch = "Handling_Unit_API.Get_Handling_Unit_Type_Id(handling_unit_id)";
+      editable = [false];
+   }
+   attribute Sscc Text {
+      label = "SSCC";
+      fetch = "Handling_Unit_API.Get_Sscc(handling_unit_id)";
+      editable = [false];
+   }
+   attribute AltHandlingUnitLabelId Text {
+      label = "Alt Handling Unit Label ID";
+      fetch = "Handling_Unit_API.Get_Alt_Handling_Unit_Label_Id(handling_unit_id)";
+      editable = [false];
+   }
+   attribute AvailabilityControlId Text {
+      editable = [false];
+   }
+   @DynamicComponentDependency DEFORD
+   attribute IuidValue Text {
+      fetch = "Defense_Part_Serial_Iuid_API.Get_Iuid_Value(PART_NO,SERIAL_NO)";
+      editable = [false];
+      label = "IUID";
+   }
+   reference LocationNoRef(Contract, LocationNo) to InventoryLocation21(Contract, LocationNo) {
+      label = "Location No";
+   }
+   reference HandlingUnitIdRef(HandlingUnitId) to HandlingUnit(HandlingUnitId) {
+      label = "Handling Unit ID";
+   }
+   reference AvailabilityControlIdRef(AvailabilityControlId) to PartAvailabilityControl(AvailabilityControlId) {
+      label = "Availability Control ID";
+   }
+   reference TopParentHandlingUnitIDRef(TopParentHandlingUnitID) to HandlingUnit(HandlingUnitId) {
+      label = "Top Parent Handling Unit ID";
+   }
+   reference TopParentHandlingUnitTypeRef(TopParentHandlingUnitType) to HandlingUnitType(HandlingUnitTypeId) {
+      label = "Top Parent Handling Unit Type";
+   }
+   reference InputUomRef(InputUom) to InputUnitMeas(UnitCode) {
+      label = "Input UoM";
+   }
+
+   action ReserveManually {
+      supportwarnings = [true];
+      ludependencies = ManualReservationsForShipmentAndCustomerOrderLine;
+
+      parameter SourceRef1Temp         Text;
+      parameter SourceRef2Temp         Text;
+      parameter SourceRef3Temp         Text;
+      parameter SourceRef4Temp         Text;
+      parameter SourceRefTypeDbTemp    Text;
+      parameter ShipmentIdTemp         Number;
+      parameter ParentShipmentLineNo   Number;
+      parameter ParentSupplyCodeDb     Text;
+      parameter ParentSenderType       Enumeration(SenderReceiverType.SenderReceiver);
+      parameter ParentSenderId         Text;
+      parameter ParentQtyOnOrder       Number;
+      parameter SourceQtyReserved      Number;
+      parameter OldQtyReserved         Number;
+      parameter QtyReserveDiff         Number;
+      parameter InputQty               Number;
+      parameter InputUom               Text;
+      parameter InputConversion        Number;
+      parameter InputValue             Text;
+      parameter ConditionCode          Text;
+      parameter BlockedForPickByChoice Boolean;
+   }
+}
+
+query ManualReservationsHandlingUnit {
+   from = "handl_unit_stock_snapshot_uiv";
+   keys = SourceRef1, SourceRef2, SourceRef3, SourceRef4, SourceRefTypeDb, HandlingUnitId, Contract, LocationNo;
+
+   attribute SourceRef1 Text;
+   attribute SourceRef2 Text;
+   attribute SourceRef3 Text;
+   attribute SourceRef4 Text;
+   attribute OutermostDb Text;
+   attribute SourceRefTypeDb Text;
+   attribute Contract Text;
+
+   attribute TotalReservedQty Number {
+      fetch = "total_reserved_qty";
+      label = "Reserved Qty";
+      editable = [false];
+   }
+   attribute AvailableToReserve Number {
+      fetch = "total_onhand_qty - total_reserved_qty";
+      label = "Available to Reserve";
+      editable = [false];
+   }
+   attribute TotalOnhandQty Number {
+      fetch = "total_onhand_qty";
+      label = "On Hand Qty";
+      editable = [false];
+   }
+   attribute QtyOnPickList Number {
+      fetch = "0";
+      label = "Qty On Pick List";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute QtyToReserve Number {
+      fetch = "0";
+      label = "Qty To Reserve";
+      editable = [false];
+   }
+   attribute StructureLevel Number {
+      fetch = "structure_level";
+      label = "Structure Level";
+      editable = [false];
+   }
+   attribute HandlingUnitId Number {
+      editable = [false];
+   }
+   attribute HandlingUnitTypeId Text {
+      fetch = "handling_unit_type_id";
+      label = "Handling Unit Type ID";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute HandlingUnitTypeDescription Text {
+      fetch = "handling_unit_type_description";
+      label = "Handling Unit Type Description";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute HandlingUnitCategoryId Text {
+      fetch = "handling_unit_category_id";
+      label = "Handling Unit Category";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute HandlingUnitCategoryDesc Text {
+      fetch = "handling_unit_category_desc";
+      label = "Category Description";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute Sscc Text {
+      fetch = "sscc";
+      label = "SSCC";
+      maxlength = 18;
+      editable = [false];
+   }
+   attribute AltHandlingUnitLabelId Text {
+      fetch = "alt_handling_unit_label_id";
+      label = "Alt Handling Unit Label ID";
+      maxlength = 25;
+      editable = [false];
+   }
+   attribute LocationNo Text {
+      editable = [false];
+   }
+   attribute WarehouseId Text {
+      fetch = "warehouse_id";
+      label = "Warehouse ID";
+      maxlength = 15;
+      editable = [false];
+   }
+   attribute BayId Text {
+      fetch = "bay_id";
+      label = "Bay ID";
+      maxlength = 5;
+      editable = [false];
+   }
+   attribute RowId Text {
+      fetch = "row_id";
+      label = "Row ID";
+      maxlength = 5;
+      editable = [false];
+   }
+   attribute TierId Text {
+      fetch = "tier_id";
+      label = "Tier ID";
+      maxlength = 5;
+      editable = [false];
+   }
+   attribute BinId Text {
+      fetch = "bin_id";
+      label = "Bin ID";
+      maxlength = 5;
+      editable = [false];
+   }
+   attribute LotBatchNo Text {
+      fetch = "lot_batch_no";
+      label = "Lot/Batch No";
+      maxlength = 20;
+      editable = [false];
+   }
+   attribute EngChgLevel Text {
+      fetch = "eng_chg_level";
+      label = "Revision No";
+      maxlength = 6;
+      editable = [false];
+   }
+   attribute SerialNo Text {
+      fetch = "serial_no";
+      label = "Serial No";
+      maxlength = 50;
+      editable = [false];
+   }
+   attribute WaivDevRejNo Text {
+      fetch = "waiv_dev_rej_no";
+      label = "W/D/R No";
+      maxlength = 15;
+      editable = [false];
+   }
+   attribute AvailabilityControlId Text {
+      fetch = "availability_control_id";
+      label = "Availability Control ID";
+      maxlength = 25;
+      editable = [false];
+   }
+   attribute AvailabilityControlDesc Text {
+      fetch = "availability_control_desc";
+      label = "Availability Control Description";
+      maxlength = 50;
+      editable = [false];
+   }
+   attribute ExpirationDate Timestamp {
+      fetch = "expiration_date";
+      label = "Expiration Date";
+      editable = [false];
+   }
+   attribute ReceiptDate Timestamp {
+      fetch = "receipt_date";
+      label = "Receipt Date";
+      editable = [false];
+   }
+   attribute PartOwnership Text {
+      fetch = "part_ownership";
+      label = "Ownership";
+      maxlength = 200;
+      editable = [false];
+   }
+   attribute Owner Text {
+      fetch = "owner";
+      label = "Owner ID";
+      maxlength = 20;
+      editable = [false];
+   }
+   attribute OwnerName Text {
+      fetch = "owner_name";
+      label = "Owner Name";
+      maxlength = 100;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute SubProjectDescription Text {
+      fetch = "Activity_API.Get_Sub_Project_Description(activity_seq)";
+      label = "Sub Project Description";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute ActivitySeq Number {
+      fetch = "activity_seq";
+      label = "Activity Sequence";
+      editable = [false];
+   }
+   attribute Width Number {
+      fetch = "width";
+      label = "Width";
+      editable = [false];
+   }
+   attribute Height Number {
+      fetch = "height";
+      label = "Height";
+      editable = [false];
+   }
+   attribute Depth Number {
+      fetch = "depth";
+      label = "Depth";
+      editable = [false];
+   }
+   attribute UomForLength Text {
+      fetch = "uom_for_length";
+      label = "UoM for Length";
+      maxlength = 30;
+      editable = [false];
+   }
+   attribute NetWeight Number {
+      fetch = "net_weight";
+      label = "Net Weight";
+      editable = [false];
+   }
+   attribute TareWeight Number {
+      fetch = "tare_weight";
+      label = "Tare Weight";
+      editable = [false];
+   }
+   attribute OperativeGrossWeight Number {
+      fetch = "operative_gross_weight";
+      label = "Operative Gross Weight";
+      editable = [false];
+   }
+   attribute UomForWeight Text {
+      fetch = "uom_for_weight";
+      label = "UoM For Weight";
+      maxlength = 30;
+      editable = [false];
+   }
+   attribute OperativeVolume Number {
+      fetch = "operative_volume";
+      label = "Operative Volume";
+      editable = [false];
+   }
+   attribute UomForVolume Text {
+      fetch = "uom_for_volume";
+      label = "UoM For Volume";
+      maxlength = 30;
+      editable = [false];
+   }
+   attribute TopParentHandlingUnitId Number {
+      fetch = "top_parent_handling_unit_id";
+      label = "Top Parent Handling Unit ID";
+      editable = [false];
+   }
+   attribute TopParentHuTypeId Text {
+      fetch = "top_parent_hu_type_id";
+      label = "Top Parent Handling Unit Type ID";
+      maxlength = 25;
+      editable = [false];
+   }
+   attribute TopParentHuTypeDesc Text {
+      fetch = "top_parent_hu_type_desc";
+      label = "Top Parent Handling Unit Type Desc";
+      maxlength = 200;
+      editable = [false];
+   }
+   attribute TopParentSscc Text {
+      fetch = "top_parent_sscc";
+      label = "Top Parent SSCC";
+      maxlength = 18;
+      editable = [false];
+   }
+   attribute TopParentAltHuLabelId Text {
+      fetch = "top_parent_alt_hu_label_id";
+      label = "Top Parent Alt Handling Unit Label Id";
+      maxlength = 25;
+      editable = [false];
+   }
+   attribute ParentSourceRef1 Text {
+      fetch = "''";
+   }
+   attribute ParentSourceRef2 Text {
+      fetch = "''";
+   }
+   attribute ParentSourceRef3 Text {
+      fetch = "''";
+   }
+   attribute ParentSourceRef4 Text {
+      fetch = "''";
+   }
+   attribute ParentSourceRefTypeDb Text {
+      fetch = "''";
+   }
+   attribute ShipmentId Number {
+      fetch = "0";
+   }
+   attribute ParentSenderType Text {
+      fetch = "''";
+   }
+   attribute ParentSenderId Text {
+      fetch = "''";
+   }
+   @DynamicComponentDependency PROJ
+   attribute SubProjectId Text {
+      fetch = "Activity_API.Get_Sub_Project_Id(ACTIVITY_SEQ)";
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ActivityNo Text {
+      fetch = "Activity_API.Get_Activity_No(ACTIVITY_SEQ)";
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ActivityDescription Text {
+      fetch = "Activity_API.Get_Description(ACTIVITY_SEQ)";
+      editable = [false];
+   }
+   attribute QtyToUnreserve Number {
+      fetch = "0";
+   }
+   @DynamicComponentDependency DEFORD
+   attribute IuidValue Text {
+      fetch = "Defense_Part_Serial_Iuid_API.Get_Iuid_Value(PART_NO,SERIAL_NO)";
+      editable = [false];
+      label = "IUID";
+
+   }
+   reference HandlingUnitIdRef(HandlingUnitId) to HandlingUnit(HandlingUnitId) {
+      label = "Handling Unit ID";
+   }
+   reference HandlingUnitTypeIdRef(HandlingUnitTypeId) to HandlingUnitType(HandlingUnitTypeId) {
+      label = "Handling Unit Type ID";
+   }
+   reference SsccRef(Sscc) to HandlingUnit(HandlingUnitId) {
+      label = "SSCC";
+   }
+   reference AltHandlingUnitLabelIdRef(AltHandlingUnitLabelId) to HandlingUnit(HandlingUnitId) {
+      label = "Alt Handling Unit Label ID";
+   }
+   reference AvailabilityControlIdRef(AvailabilityControlId) to PartAvailabilityControl(AvailabilityControlId) {
+      label = "Availability Control ID";
+   }
+   reference TopParentHandlingUnitIdRef(TopParentHandlingUnitId) to HandlingUnit(HandlingUnitId) {
+      label = "Top Parent Handling Unit ID";
+   }
+   reference TopParentSsccRef(TopParentSscc) to HandlingUnit(HandlingUnitId) {
+      label = "Top Parent SSCC";
+   }
+}
+------------------------------- ENUMERATIONS --------------------------------
+
+---------------------------------- QUERIES ----------------------------------
+
+---------------------------------- ACTIONS ----------------------------------
+action ReserveAsPicked {
+   initialcheck SourceManualReservMainInitialCheck(ShipmentId, SourceRef1, SourceRef2, SourceRef3, SourceRef4, SourceRefTypeDb);
+   parameter SourceRef1 Text;
+   parameter SourceRef2 Text;
+   parameter SourceRef3 Text;
+   parameter SourceRef4 Text;
+   parameter LocationNo Text;
+   parameter ShipmentId Number;
+   parameter SourceRefTypeDb Text;
+   ludependencies = ManualReservationsForShipmentAndCustomerOrderLine, InventoryPartInStock;
+}
+
+action Reserve {
+   initialcheck UserAllowedSite(Contract);
+   supportwarnings = [true];
+   parameter ActivitySeq Number;
+   parameter ConfigurationId Text;
+   parameter Contract Text;
+   parameter EngChgLevel Text;
+   parameter HandlingUnitId Number;
+   parameter LocationNo Text;
+   parameter LotBatchNo Text;
+   parameter PartNo Text;
+   parameter SerialNo Text;
+   parameter WaivDevRejNo Text;
+   parameter AvailableToReserve Number;
+   parameter ParentQtyToReserve Number;
+   parameter SourceRef1 Text;
+   parameter SourceRef2 Text;
+   parameter SourceRef3 Text;
+   parameter SourceRef4 Text;
+   parameter SourceRefTypeDb Text;
+   parameter ShipmentId Number;
+   parameter ShipmentLineNo Number;
+   parameter SupplyCodeDb Text;
+   parameter SenderType Enumeration(SenderReceiverType.SenderReceiver);
+   parameter SenderId Text;
+   parameter ParentQtyOnOrder Number;
+   parameter SourceQtyReserved Number;
+   parameter OldQtyReserved Number;
+   parameter InputQty Number;
+   parameter InputUom Text;
+   parameter InputConversion Number;
+   parameter InputValue Text;
+   parameter ConditionCode Text;
+   parameter BlockedForPickByChoice Boolean;
+   ludependencies = ManualReservationsForShipmentAndCustomerOrderLine, InventoryPartInStock;
+}
+
+action Unreserve {
+   initialcheck UserAllowedSite(Contract);
+   supportwarnings = [true];
+   parameter ActivitySeq Number;
+   parameter ConfigurationId Text;
+   parameter Contract Text;
+   parameter EngChgLevel Text;
+   parameter HandlingUnitId Number;
+   parameter LocationNo Text;
+   parameter LotBatchNo Text;
+   parameter PartNo Text;
+   parameter SerialNo Text;
+   parameter WaivDevRejNo Text;
+   parameter SourceRef1 Text;
+   parameter SourceRef2 Text;
+   parameter SourceRef3 Text;
+   parameter SourceRef4 Text;
+   parameter SourceRefTypeDb Text;
+   parameter ShipmentId Number;
+   parameter ShipmentLineNo Number;
+   parameter SupplyCodeDb Text;
+   parameter SenderType Enumeration(SenderReceiverType.SenderReceiver);
+   parameter SenderId Text;
+   parameter ParentQtyOnOrder Number;
+   parameter SourceQtyReserved Number;
+   parameter OldQtyReserved Number;
+   parameter InputQty Number;
+   parameter InputUom Text;
+   parameter InputConversion Number;
+   parameter InputValue Text;
+   parameter ConditionCode Text;
+   parameter BlockedForPickByChoice Boolean;
+   parameter QtyOnPickList Number;
+   ludependencies = ManualReservationsForShipmentAndCustomerOrderLine, InventoryPartInStock, ManualReservationsHandlingUnit;
+}
+
+action ReserveHuManually {
+   initialcheck implementation;
+   supportwarnings = [true];
+   parameter ReserveHuSelection Text;
+   ludependencies = ManualReservationsForShipmentAndCustomerOrderLine, InventoryPartInStock, ManualReservationsHandlingUnit;
+}
+
+action UnreserveHuManually {
+   initialcheck implementation;
+   supportwarnings = [true];
+   parameter UnreserveHuSelection Text;
+   ludependencies = ManualReservationsForShipmentAndCustomerOrderLine, InventoryPartInStock, ManualReservationsHandlingUnit;
+}
+action GenerateHandingUnitSnapshot {
+   initialcheck none;
+   parameter SourceRef1 Text;
+   parameter SourceRef2 Text;
+   parameter SourceRef3 Text;
+   parameter SourceRef4 Text;
+   parameter SourceRefTypeDb Enumeration(LogisticsSourceRefType);
+   parameter ShipmentId Number;
+   parameter PartNo Text;
+   parameter Contract Text;
+}
+
+--------------------------------- FUNCTIONS ---------------------------------
+function CalculateQuantity Structure(CalculatedQuantityStructure) {
+   parameter NewQtyReserved Number;
+   parameter OldQtyReserved Number;
+   parameter TotalQtyReserved Number;
+   parameter QtyOnhand Number;
+   parameter QtyReserveDiff Number;
+   parameter QtyAvailable Number;
+   parameter QtyOnPickList Number;
+   parameter ParentQtyReserved Number;
+   parameter ParentQtyToReserve Number;
+   parameter ParentShipmentId Number;
+}
+function CheckUseShipmentInventory Structure(ReportPickStructure) {
+   parameter SourceRef1 Text;
+   parameter SourceRef2 Text;
+   parameter SourceRef3 Text;
+   parameter SourceRef4 Text;
+   parameter SourceRefTypeDb Text;
+   parameter ShipmentId Number;
+}
+
+function GetAggregatedTab List<Entity(ManualReservationsHandlingUnit)> {
+   basedon ManualReservationsHandlingUnitSet;
+   parameter ShowDetails Enumeration(ShowHuLevels);
+
+   parameter SourceRef1 Text;
+   parameter SourceRef2 Text;
+   parameter SourceRef3 Text;
+   parameter SourceRef4 Text;
+   parameter SourceRefTypeDb Text;
+   parameter ShipmentId Number;
+   parameter QtyToReserve Number;
+   parameter SenderTypeDb Text;
+   parameter SenderId Text;
+
+   alterattribute QtyOnPickList {
+      fetch = "NVL(Reserve_Shipment_API.Get_Total_Qty_Reserved_In_Hu__(:SourceRef1, :SourceRef2, :SourceRef3, :SourceRef4, handling_unit_id, :ShipmentId, :SourceRefTypeDb), 0) - Reserve_Shipment_API.Get_Qty_Reserved_In_Hu__(:SourceRef1, :SourceRef2, :SourceRef3, :SourceRef4, handling_unit_id, '*', :ShipmentId, :SourceRefTypeDb)";
+   }
+   alterattribute QtyToUnreserve {
+      fetch = "total_reserved_qty-(NVL(Reserve_Shipment_API.Get_Total_Qty_Reserved_In_Hu__(:SourceRef1, :SourceRef2, :SourceRef3, :SourceRef4, handling_unit_id, :ShipmentId, :SourceRefTypeDb), 0) - Reserve_Shipment_API.Get_Qty_Reserved_In_Hu__(:SourceRef1, :SourceRef2, :SourceRef3, :SourceRef4, handling_unit_id, '*', :ShipmentId, :SourceRefTypeDb))";
+   }
+   alterattribute QtyToReserve {
+      fetch = ":QtyToReserve";
+   }
+   alterattribute ParentSourceRef1 {
+      fetch = ":SourceRef1";
+   }
+   alterattribute ParentSourceRef2 {
+      fetch = ":SourceRef2";
+   }
+   alterattribute ParentSourceRef3 {
+      fetch = ":SourceRef3";
+   }
+   alterattribute ParentSourceRef4 {
+      fetch = ":SourceRef4";
+   }
+   alterattribute ParentSourceRefTypeDb {
+      fetch = ":SourceRefTypeDb";
+   }
+   alterattribute ShipmentId {
+      fetch = ":ShipmentId";
+   }
+   alterattribute ParentSenderType {
+      fetch = ":SenderTypeDb";
+   }
+   alterattribute ParentSenderId {
+      fetch = ":SenderId";
+   }
+
+   where = "Handling_Unit_Id != 0
+            AND Source_Ref1 = :SourceRef1
+            AND Source_Ref2 = NVL(:SourceRef2, '*')
+            AND Source_Ref3 = NVL(:SourceRef3, '*')
+            AND Source_Ref4 = NVL(:SourceRef4, '*')
+            AND Source_Ref_Type_Db = Reserve_Shipment_API.Get_Hndl_Unt_Snpshot_Type_Db__(:SourceRefTypeDb)
+            AND ((total_onhand_qty - total_reserved_qty) <= :QtyToReserve)
+            AND NVL(Reserve_Shipment_API.Get_Total_Qty_Reserved_In_Hu__(:SourceRef1,
+                                                                        :SourceRef2,
+                                                                        :SourceRef3,
+                                                                        :SourceRef4,
+                                                                        Handling_Unit_Id,
+                                                                        :ShipmentId,
+                                                                        :SourceRefTypeDb), 0) = Total_Reserved_Qty
+            AND ((:ShowDetails = 'ShowAll')
+            OR  ((:ShowDetails = 'ShowOnlyTopLevel')
+                  AND (OUTERMOST_DB = 'TRUE'
+                       OR (Handling_Unit_API.Get_Qty_Onhand(HANDLING_UNIT_API.Get_Parent_Handling_Unit_Id(Handling_Unit_Id))
+                       - Handling_Unit_API.Get_Qty_Reserved(HANDLING_UNIT_API.Get_Parent_Handling_Unit_Id(Handling_Unit_Id)) > :QtyToReserve))))";
+
+}
+
+function TranstateLabelConstant Text {
+   parameter Source Text;
+}
+
+-------------------------------- STRUCTURES ---------------------------------
+structure CalculatedQuantityStructure {
+   attribute QtyReserveDiff   Number;
+   attribute TotalQtyReserved Number;
+   attribute QtyAvailable     Number;
+   attribute NewLineQtyReserved Number;
+}
+structure ReportPickStructure {
+   attribute DisplayInfoType Number;
+   attribute OrderUsesShipmentInventory Number;
+}
+--------------------------------- VIRTUALS ----------------------------------
+
+--------------------------------- SUMMARIES ---------------------------------
+
+-------------------------------- SINGLETONS ---------------------------------

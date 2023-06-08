@@ -1,0 +1,259 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: AppMessageStatReport
+--  Component:    FNDBAS
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date        Sign    History
+--  ----------  ------  ---------------------------------------------------------
+--  2019-05-03  madrse  LCS-145612: Created
+-----------------------------------------------------------------------------
+
+layer Core;
+
+-------------------- COMMON COLUMN DEFINITIONS ------------------------------
+
+
+-------------------- PUBLIC VIEW DEFINITIONS --------------------------------
+
+
+-------------------- PRIVATE VIEW DEFINITIONS -------------------------------
+
+--
+-- Move timestamps registered by java and PLSQL from UTC time zone to database time zone
+--
+VIEW app_message_stat_local IS
+WITH timezone AS
+  (SELECT TO_CHAR(SYSTIMESTAMP, 'TZR') sys_timezone FROM dual)
+SELECT application_message_id,
+       stat_type,
+       stat_category,
+       FROM_TZ(start_timestamp,'+00:00') AT TIME ZONE sys_timezone start_timestamp,
+       FROM_TZ(end_timestamp  ,'+00:00') AT TIME ZONE sys_timezone end_timestamp,
+       rowversion
+FROM application_message_stat_tab, timezone;
+
+
+--
+-- Input view for Invoke AQ report
+--
+VIEW app_message_stat_input IS
+SELECT C.*,
+       Batch_Processor_Test_API.Elapsed_Seconds(C.start_timestamp, C.end_timestamp) elapsed_seconds
+  FROM (SELECT B.*,
+               DECODE(B.is_java_time, 1, B.start_time, B.start_time + NUMTODSINTERVAL(NVL(B.database_shift, 0), 'SECOND')) start_timestamp,
+               DECODE(B.is_java_time, 1, B.end_time,   B.end_time   + NUMTODSINTERVAL(NVL(B.database_shift, 0), 'SECOND')) end_timestamp
+          FROM (SELECT A.application_message_id,
+                       A.stat_type,
+                       A.stat_category,
+                       A.start_timestamp start_time,
+                       A.end_timestamp   end_time,
+                       DECODE(A.stat_type, 'FORWARD_MDB', 1, 'INVOKE_MDB', 1, 'PROCESS', 1, 'SEND', 1, 0) is_java_time,
+                       (SELECT I.database_shift
+                          FROM app_message_stat_input_tab I
+                         WHERE I.application_message_id = A.application_message_id) database_shift
+                  FROM app_message_stat_local A
+                 WHERE A.application_message_id IN (SELECT I.application_message_id
+                                                      FROM app_message_stat_input_tab I
+                                                     WHERE I.database_shift IS NULL OR I.database_shift <> 0)) B) C;
+
+
+--
+-- Output view for Invoke AQ report
+--
+VIEW app_message_stat_report IS
+SELECT P.*,
+       --
+       (SELECT S.stat_category
+          FROM app_message_stat_local S
+         WHERE S.application_message_id = P.application_message_id
+           AND S.stat_type = 'FORWARD_MDB') cluster_name,
+       --
+       Batch_Processor_Test_API.Elapsed_Seconds(create_am_end_time,    forward_mdb_start_time) start_diff,
+       Batch_Processor_Test_API.Elapsed_Seconds(invoke_mdb_end_time,   invoke_aq_end_time)     end_diff,
+       --
+       Batch_Processor_Test_API.Elapsed_Seconds(invoke_aq_start_time,  create_am_start_time)   create_am_before,
+       Batch_Processor_Test_API.Elapsed_Seconds(create_am_end_time,    forward_mdb_start_time) forward_mdb_before,
+       Batch_Processor_Test_API.Elapsed_Seconds(forward_mdb_end_time,  invoke_mdb_start_time)  invoke_mdb_before,
+       Batch_Processor_Test_API.Elapsed_Seconds(invoke_mdb_start_time, process_start_time)     process_before,
+       Batch_Processor_Test_API.Elapsed_Seconds(process_start_time,    send_start_time)        send_before,
+       Batch_Processor_Test_API.Elapsed_Seconds(send_end_time,         process_end_time)       send_after,
+       Batch_Processor_Test_API.Elapsed_Seconds(process_end_time,      invoke_mdb_end_time)    process_after,
+       Batch_Processor_Test_API.Elapsed_Seconds(invoke_mdb_end_time,   invoke_aq_end_time)     invoke_mdb_after,
+       --
+       Batch_Processor_Test_API.Elapsed_Seconds(invoke_aq_start_time,  process_start_time)     pre_process_time,
+       Batch_Processor_Test_API.Elapsed_Seconds(process_end_time,      invoke_aq_end_time)     post_process_time
+       --
+  FROM (SELECT application_message_id, stat_type, database_shift, start_timestamp, end_timestamp, elapsed_seconds
+          FROM app_message_stat_input
+       )
+       PIVOT
+       (
+         MIN(start_timestamp) start_time,
+         MIN(end_timestamp)   end_time,
+         MIN(elapsed_seconds) time
+         FOR stat_type IN ('INVOKE_AQ'   AS invoke_aq,
+                           'CREATE_AM'   AS create_am,
+                           'FORWARD_MDB' AS forward_mdb,
+                           'INVOKE_MDB'  AS invoke_mdb,
+                           'PROCESS'     AS process,
+                           'SEND'        AS send)
+       ) P;
+
+
+--
+-- Group elapsed time in seconds
+--
+VIEW app_message_stat_report_sum IS
+SELECT MIN(invoke_aq_time) min_invoke_aq_time,
+       MAX(invoke_aq_time) max_invoke_aq_time,
+       SUM(invoke_aq_time) sum_invoke_aq_time,
+       round(AVG(invoke_aq_time), 3) avg_invoke_aq_time,
+       --
+       MIN(create_am_time) min_create_am_time,
+       MAX(create_am_time) max_create_am_time,
+       SUM(create_am_time) sum_create_am_time,
+       round(AVG(create_am_time), 3) avg_create_am_time,
+       --
+       MIN(forward_mdb_time) min_forward_mdb_time,
+       MAX(forward_mdb_time) max_forward_mdb_time,
+       SUM(forward_mdb_time) sum_forward_mdb_time,
+       round(AVG(forward_mdb_time), 3) avg_forward_mdb_time,
+       --
+       MIN(invoke_mdb_time) min_invoke_mdb_time,
+       MAX(invoke_mdb_time) max_invoke_mdb_time,
+       SUM(invoke_mdb_time) sum_invoke_mdb_time,
+       round(AVG(invoke_mdb_time), 3) avg_invoke_mdb_time,
+       --
+       MIN(process_time) min_process_time,
+       MAX(process_time) max_process_time,
+       SUM(process_time) sum_process_time,
+       round(AVG(process_time), 3) avg_process_time,
+       --
+       MIN(send_time) min_send_time,
+       MAX(send_time) max_send_time,
+       SUM(send_time) sum_send_time,
+       round(AVG(send_time), 3) avg_send_time,
+       --
+       MIN(create_am_before) min_create_am_before,
+       MAX(create_am_before) max_create_am_before,
+       SUM(create_am_before) sum_create_am_before,
+       round(AVG(create_am_before), 3) avg_create_am_before,
+       --
+       MIN(forward_mdb_before) min_forward_mdb_before,
+       MAX(forward_mdb_before) max_forward_mdb_before,
+       SUM(forward_mdb_before) sum_forward_mdb_before,
+       round(AVG(forward_mdb_before), 3) avg_forward_mdb_before,
+       --
+       MIN(invoke_mdb_before) min_invoke_mdb_before,
+       MAX(invoke_mdb_before) max_invoke_mdb_before,
+       SUM(invoke_mdb_before) sum_invoke_mdb_before,
+       round(AVG(invoke_mdb_before), 3) avg_invoke_mdb_before,
+       --
+       MIN(process_before) min_process_before,
+       MAX(process_before) max_process_before,
+       SUM(process_before) sum_process_before,
+       round(AVG(process_before), 3) avg_process_before,
+       --
+       MIN(send_before) min_send_before,
+       MAX(send_before) max_send_before,
+       SUM(send_before) sum_send_before,
+       round(AVG(send_before), 3) avg_send_before,
+       --
+       MIN(send_after) min_send_after,
+       MAX(send_after) max_send_after,
+       SUM(send_after) sum_send_after,
+       round(AVG(send_after), 3) avg_send_after,
+       --
+       MIN(process_after) min_process_after,
+       MAX(process_after) max_process_after,
+       SUM(process_after) sum_process_after,
+       round(AVG(process_after), 3) avg_process_after,
+       --
+       MIN(invoke_mdb_after) min_invoke_mdb_after,
+       MAX(invoke_mdb_after) max_invoke_mdb_after,
+       SUM(invoke_mdb_after) sum_invoke_mdb_after,
+       round(AVG(invoke_mdb_after), 3) avg_invoke_mdb_after,
+       --
+       --
+       MIN(pre_process_time) min_pre_process_time,
+       MAX(pre_process_time) max_pre_process_time,
+       SUM(pre_process_time) sum_pre_process_time,
+       round(AVG(pre_process_time), 3) avg_pre_process_time,
+       --
+       MIN(post_process_time) min_post_process_time,
+       MAX(post_process_time) max_post_process_time,
+       SUM(post_process_time) sum_post_process_time,
+       round(AVG(post_process_time), 3) avg_post_process_time,
+       --
+       100.0 * ((SUM(pre_process_time) + SUM(post_process_time)) / SUM(invoke_aq_time)) wait_time_pct,
+       100.0 * ((SUM(invoke_aq_time) - SUM(GREATEST(send_time, 0.001))) / SUM(invoke_aq_time)) wait_send_time_pct,
+       --
+       100.0 * MIN((invoke_aq_time - GREATEST(send_time, 0.001)) / invoke_aq_time) min_wait_time_pct,
+       100.0 * MAX((invoke_aq_time - GREATEST(send_time, 0.001)) / invoke_aq_time) max_wait_time_pct,
+       100.0 * AVG((invoke_aq_time - GREATEST(send_time, 0.001)) / invoke_aq_time) avg_wait_time_pct
+  FROM app_message_stat_report_tab;
+
+
+--
+-- Time distribution per stat type
+--
+VIEW app_message_stat_report_dist IS
+SELECT stat_type, round(time, 1) time, count(*) frequency
+  FROM (SELECT application_message_id, stat_type, time
+          FROM (SELECT application_message_id,
+                       invoke_aq_time     ,
+                       create_am_time     ,
+                       forward_mdb_time   ,
+                       invoke_mdb_time    ,
+                       process_time       ,
+                       send_time          ,
+                       create_am_before   ,
+                       forward_mdb_before ,
+                       invoke_mdb_before  ,
+                       process_before     ,
+                       process_after      ,
+                       send_before        ,
+                       send_after         ,
+                       invoke_mdb_after   ,
+                       pre_process_time   ,
+                       post_process_time
+                  FROM app_message_stat_report_tab)
+        UNPIVOT (time FOR stat_type IN (invoke_aq_time     AS 'INVOKE_AQ_TIME'    ,
+                                        create_am_time     AS 'CREATE_AM_TIME'    ,
+                                        forward_mdb_time   AS 'FORWARD_MDB_TIME'  ,
+                                        invoke_mdb_time    AS 'INVOKE_MDB_TIME'   ,
+                                        process_time       AS 'PROCESS_TIME'      ,
+                                        send_time          AS 'SEND_TIME'         ,
+                                        create_am_before   AS 'CREATE_AM_BEFORE'  ,
+                                        forward_mdb_before AS 'FORWARD_MDB_BEFORE',
+                                        invoke_mdb_before  AS 'INVOKE_MDB_BEFORE' ,
+                                        process_before     AS 'PROCESS_BEFORE'    ,
+                                        process_after      AS 'PROCESS_AFTER'     ,
+                                        send_before        AS 'SEND_BEFORE'       ,
+                                        send_after         AS 'SEND_AFTER'        ,
+                                        invoke_mdb_after   AS 'INVOKE_MDB_AFTER'  ,
+                                        pre_process_time   AS 'PRE_PROCESS_TIME'  ,
+                                        post_process_time  AS 'POST_PROCESS_TIME')))
+ GROUP BY stat_type, round(time, 1)
+ ORDER BY stat_type, round(time, 1);
+
+
+--
+-- Compute additional report columns
+--
+VIEW app_message_stat_report_full IS
+WITH
+  V AS
+    (SELECT R.*,
+            100 * ABS(pre_process_time)  / invoke_aq_time pre_process_pct,
+            100 * ABS(process_time)      / invoke_aq_time process_pct,
+            100 * ABS(post_process_time) / invoke_aq_time post_process_pct
+       FROM app_message_stat_report_tab R)
+SELECT V.*,
+       round(pre_process_pct)                                 pre_process_pct_count,
+       round(post_process_pct)                                post_process_pct_count,
+       100 - round(pre_process_pct) - round(post_process_pct) process_pct_count
+  FROM V;
+

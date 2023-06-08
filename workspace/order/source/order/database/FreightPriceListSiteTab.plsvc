@@ -1,0 +1,119 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     FreightPriceListSiteTab
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date        Sign    History
+--  ----------  ------  ---------------------------------------------------------
+--  2018-12-16  LaThlk  SCUXXW4-891, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+PROCEDURE Connect_Sites___ (
+   key_                       IN Valid_For_Sites_Header_Virtual_Key,
+   company_                   IN VARCHAR2,
+   price_list_no_             IN VARCHAR2,
+   charge_type_               IN VARCHAR2,
+   contract_                  IN VARCHAR2,
+   sitecluster_id_var_        IN VARCHAR2,
+   site_cluster_node_id_var_  IN VARCHAR2) 
+IS
+   attr_       VARCHAR2(2000);
+   info_       VARCHAR2(32000) := NULL;
+   CURSOR get_approved_sites_ IS
+      SELECT * 
+      FROM ${PROJECTION}_Sites_Virtual_VRT 
+      WHERE parent_objkey = key_.objkey;  
+BEGIN
+   FOR rec_ IN get_approved_sites_ LOOP
+      IF rec_.copy_charge_type = Gen_Yes_No_API.DB_YES THEN
+         IF rec_.charge_type_copied = Gen_Yes_No_API.DB_NO THEN
+            Sales_Charge_Type_API.Copy_Charge_Type(charge_type_, contract_, rec_.contract);
+         END IF;
+         Client_SYS.Add_To_Attr('PRICE_LIST_NO', price_list_no_, attr_);
+         Client_SYS.Add_To_Attr('CONTRACT', rec_.contract, attr_);
+         Freight_Price_List_Site_API.New(info_, attr_);
+      END IF;    
+   END LOOP;
+END Connect_Sites___;
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Valid_For_Sites_Header_Virtual_Rec )
+IS
+BEGIN
+   super(rec_);
+   Check_Add_Sites___(rec_);
+END CRUD_Create___;
+   
+PROCEDURE Check_Add_Sites___(
+   rec_ IN Valid_For_Sites_Header_Virtual_Rec )
+IS
+   key_           Valid_For_Sites_Header_Virtual_Key;
+   site_rec_ Sites_Virtual_Rec;
+   data_found_    BOOLEAN := FALSE;
+   
+   CURSOR get_company_sites IS
+      SELECT site
+      FROM USER_ALLOWED_SITE_PUB
+      WHERE site NOT IN (SELECT contract 
+                         FROM FREIGHT_PRICE_LIST_SITE  
+                         WHERE PRICE_LIST_NO = rec_.price_list_no) 
+      AND   Site_API.Get_Company(site)= rec_.company;
+      
+   CURSOR get_cluster_connected_site IS
+      SELECT contract
+      FROM SITE_CLUSTER_NODE_JOIN
+      WHERE contract NOT IN (SELECT contract 
+                             FROM FREIGHT_PRICE_LIST_SITE  
+                             WHERE PRICE_LIST_NO = rec_.price_list_no) 
+      AND   Site_API.Get_Company(CONTRACT)= rec_.company 
+      AND   site_cluster_id = rec_.sitecluster_id_var
+      AND   contract IN (SELECT site 
+                         FROM USER_ALLOWED_SITE_PUB)
+      AND   contract IN (SELECT  contract
+                        FROM    SITE_CLUSTER_NODE
+                        START WITH site_cluster_id = rec_.sitecluster_id_var
+                        AND  site_cluster_node_id = rec_.site_cluster_node_id_var
+                        CONNECT BY PRIOR site_cluster_id = site_cluster_id
+                        AND PRIOR site_cluster_node_id =  parent_node);
+      
+BEGIN
+   IF rec_.sitecluster_id_var IS NOT NULL THEN
+      FOR sites_rec_ IN get_cluster_connected_site LOOP
+         site_rec_.parent_objkey := rec_.objkey;
+         site_rec_.objkey := sys_guid();
+         site_rec_.contract := sites_rec_.contract;
+         IF (Sales_Charge_Type_API.Check_Exist(sites_rec_.contract, rec_.charge_type) = 'FALSE') THEN         
+            site_rec_.copy_charge_type := Gen_Yes_No_API.DB_NO;
+            site_rec_.charge_type_copied := Gen_Yes_No_API.DB_NO;
+         ELSE
+            site_rec_.copy_charge_type := Gen_Yes_No_API.DB_YES;
+            site_rec_.charge_type_copied := Gen_Yes_No_API.DB_YES;
+         END IF;
+         CRUD_Create___(site_rec_);
+         data_found_ := TRUE;
+      END LOOP;
+   ELSE
+      FOR sites_rec_ IN get_company_sites LOOP 
+         site_rec_.parent_objkey := rec_.objkey;
+         site_rec_.objkey := sys_guid();
+         site_rec_.contract := sites_rec_.site;
+         IF (Sales_Charge_Type_API.Check_Exist(sites_rec_.site, rec_.charge_type) = 'FALSE') THEN         
+            site_rec_.copy_charge_type := Gen_Yes_No_API.DB_NO;
+            site_rec_.charge_type_copied := Gen_Yes_No_API.DB_NO;
+         ELSE
+            site_rec_.copy_charge_type := Gen_Yes_No_API.DB_YES;
+            site_rec_.charge_type_copied := Gen_Yes_No_API.DB_YES;
+         END IF;
+         CRUD_Create___(site_rec_);
+         data_found_ := TRUE;
+      END LOOP;
+   END IF;
+   IF NOT(data_found_) THEN
+      Error_SYS.Record_General(lu_name_, 'NODATA: No Data found');   
+   END IF;
+END Check_Add_Sites___;     

@@ -1,0 +1,1694 @@
+-------------------------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  --------------------------------------------------------------------------------
+-- 2021-10-26  DigPlk  SC21R2-2887, Replaced the functionality of IdentifySerialsInLocAssistant with IdentifySerialsInLocRepeatAssistant.
+-- 2021-02-11  WaSalk  SCZ-13536, Modified DateEntered, RemainingQty, QtyShort, QtyToReserve, QtyRemaining, StatusCode, InventoryPart
+-- 2020-02-11          and SerialTrackingAtReceiptAndIssue attributes as insertable false.
+-- 2020-10-12  JaThlk  SCZ-11817, Modified the attribute DueDate to set it editable by removing editable false property.
+-- 2020-09-21  JaThlk  SC2020R1-9886, Added the contact widget in the field, CreatedByUserId instead of personwidget.
+-- 2020-07-21  JaThlk  Bug 154532 (SCZ-10444), Modified the assistants, ManualReservationAssistant and ManualIssueAssistant and added the functions,
+-- 2020-07-21          IsReserveQuantityExpired and IsIssueQuantityExpired to check whether it is an expired quantity before reserving or issuing.
+-- 2020-03-06  JaThlk  SCXTEND-2147, Added DueDate to support Warehouse Instant View lobby page.
+-- 2019-12-26  ChFolk  SCXTEND-994, Added CreatedByUserId.
+-- 2019-07-30  JaThlk  SCUXXW4-22798, Removed unnecessary project related references.
+-- 2019-07-25  ChFolk  SCUXXW4-22798, included fragment ProjectDetailsFieldSet and modified project information to improve performance.
+-- 2019-05-29  fandse  SCUXXW4-21120: Removed LOV on projects in edit-mode, Refresh code parts on line after Pre Posting
+-- 2019-05-23  fgusse  SCUXXW4-21039: Added ID for all labels for Warehouse/Bay/Row/Tier/Bin.
+-- 2019-05-02  fandse  SCUXXW4-14199: Removed alert from previous commit.
+-- 2019-04-30  fandse  SCUXXW4-14199: Passed page title to InventoryPartInStock.
+-- 2019-04-16  fandse  SCUXXW4-18094: Minor changes, changed Created and Shortage Qty to non-editable, moved notes label
+-- 2019-04-05  fandse  SCUXXW4-18889: Changed fieldranking in Manual Issue and Reserve to show Qty to Reserve/Issue in list view plus some additional adjustments.
+-- 2019-03-21  fandse  SCUXXW4-17416: Label Changes to Capital letter, Aligned handling of StatusCode and SupplyCode,
+--                                    Fixed Identify Serial before/after command with execute instead of bulk,
+--                                    Changed to SingelCell ofr manual issue/reserve to avoid problems with identify serials,
+--                                    Added fieldranking to get values even when list view, exclude ReceiptIssueSerialTrack, etc
+-- 2019-03-21  fandse  SCUXXW4-15388, Raise Pre Posting dialog per line when mandatory pre posting is missing, only at create.
+-- 2019-03-19  fandse  SCUXXW4-15388, Raise Pre Posting dialog per line when mandatory pre posting is missing.
+-- 2019-03-19  fandse  SCUXXW4-15907, State indicator and badge material requisition.
+-- 2019-03-15  fandse  SCUXXW4-17763, Not possible to add new line due to FW change in string interpolation. The assignment of duedate has been changed.
+-- 2019-03-12  JaThlk  SCUXXW4-17128, Added SessionId as an in parameter in IdentifySerialsInLocationAssistant.
+-- 2019-01-16  fandse  SCUXXW4-14262, Corrected Posting Type
+-- 2019-01-11  milise  SCUXXW4-14263, Added dynamic labels for code parts (default company).
+-- 2019-01-08  fandse  SCUXXW4-14262, Added handling of Pre Posting
+-- 2018-12-18  milise  SCUXXW4-6850: tbwIntOrderDetail - Material Requisition Lines - Moved to fragment
+-------------------------------------------------------------------------------------------------------
+
+fragment MaterialRequisitionLinesList;
+component INVENT;
+layer Core;
+description "Fragment for Material Requisition Lines";
+include fragment UserAllowedSiteLovSelector;
+include fragment MaterialRequisSelector;
+include fragment InternalDestinationLovSelector;
+include fragment InventoryPartLovMrpSelector;
+include fragment IdentifySerialsInMultipleLocationsAssistant;
+include fragment DocumentText;
+include fragment OutputTypeLovSelector;
+include fragment MpccomPhraseTextLovSelector;
+@DynamicComponentDependency PROJ
+include fragment ConnectObjectToActivityDialog;
+include fragment IdentifySerialsInLocationAssistant;
+include fragment PrePostingWithSourceAssistant;
+include fragment MaterialRequisitionLineStateIndicator;
+include fragment MaterialRequisLineInitialCheck;
+include fragment ProjectDetailsFieldSet;
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+
+-------------------------------- ASSISTANTS ---------------------------------
+assistant ManualReservationAssistant using ManualReservationSet {
+   label = "Manual Reservation";
+   savemode = OnLostFocus;
+   input(OrderNo, OrderClass, LineNo, ReleaseNo, LineItemNo, PartNo, ConditionCode, UnitMeas, Contract, QtyLeft, ActivitySeq, ProjectId);
+   steps {
+      step {
+         group ManualReservationGroup;
+         list ReserveLocationList(PartInStockToReserveArray);
+      }
+      final step {
+
+      }
+      cancelled step {
+
+      }
+   }
+   finish command {
+      enabled = [LinesReadyToReserve = "TRUE"];
+      variable ContinueVar Boolean;
+
+      execute {
+         set ContinueVar = true;
+         call IsReserveQuantityExpired(Contract, Objkey) into IsExpired;
+         if [IsExpired] {
+            confirm("Reserving from expired quantity. Do you want to continue?") {
+               when CANCEL {
+                  set ContinueVar = false;
+               }
+            }
+         }
+         if [ContinueVar] {
+            call ReserveMaterials(OrderClass, OrderNo, LineNo, ReleaseNo, LineItemNo, Contract, PartNo, Objkey);
+            exit OK;
+         }
+      }
+   }
+   cancel command {
+      execute {
+         exit CANCEL;
+      }
+   }
+   restart command {
+      visible = [false];
+   }
+}
+assistant ManualIssueAssistant using ManualIssueSet {
+   label = "Manual Issue";
+   savemode = OnLostFocus;
+   input(OrderNo, OrderClass, LineNo, ReleaseNo, LineItemNo, PartNo, UnitMeas, Contract, QtyLeft, ActivitySeq, ProjectId);
+
+   steps {
+      step {
+         group ManualIssueGroup;
+         list IssueLocationList(PartInStockToIssueArray);
+      }
+      final step {
+
+      }
+      cancelled step {
+
+      }
+   }
+   finish command {
+      enabled = [not component.IssueLocationList.IsDirty];
+      variable ContinueVar Boolean;
+
+      execute {
+         set ContinueVar = true;
+         call IsIssueQuantityExpired(Contract, PartNo, Objkey) into IsExpired;
+         if [IsExpired] {
+            confirm("Issuing from expired quantity. Do you want to continue?") {
+               when CANCEL {
+                  set ContinueVar = false;
+               }
+            }
+         }
+         if [ContinueVar] {
+            call IssueMaterial(OrderClass, OrderNo, LineNo, ReleaseNo, LineItemNo, PartNo, Contract, Objkey);
+            exit OK;
+         }
+      }
+   }
+   cancel command {
+      execute {
+         exit CANCEL;
+      }
+   }
+   restart command {
+      visible = [false];
+   }
+}
+
+--------------------------------- COMMANDS ----------------------------------
+command ReserveCommand for MaterialRequisLine {
+   label = "Reserve";
+   mode = SelectedRecords;
+   enabled = [QtyToReserve > 0 and StatusCode != "Closed" and StatusCode != "Planned" and StatusCode != "Stopped" and SupplyCode != "PurchaseOrder"];
+   bulkexecute {
+      confirm("This will RESERVE material for all selected lines") {
+         when CANCEL {
+            exit;
+         }
+      }
+      bulkcall MakeLineReservations(OrderClass, OrderNo, LineNo, ReleaseNo, LineItemNo, QtyToReserve, PartNo);
+   }
+}
+command ReserveManuallyCommand for MaterialRequisLine {
+   label = "Reserve Manually";
+   mode = SingleRecord;
+   enabled = [(QtyToReserve > 0 or QtyAssigned > 0) and StatusCode != "Closed" and StatusCode != "Planned" and StatusCode != "Stopped" and SupplyCode != "PurchaseOrder"];
+   variable ProjectIdVar {
+      type = Text;
+   }
+   variable ActivitySeqVar {
+      type = Number;
+   }
+   execute {
+      if [SupplyCode = "InventoryOrder"] {
+         set ProjectIdVar = null;
+         set ActivitySeqVar = 0;
+      }
+      else {
+         set ProjectIdVar = ProjectId;
+         set ActivitySeqVar = ActivitySeq;
+      }
+      assistant ManualReservationAssistant(OrderNo, OrderClass, LineNo, ReleaseNo, LineItemNo, PartNo, ConditionCode, UnitMeas, Contract, QtyToReserve, ActivitySeqVar, ProjectIdVar) {
+         when NO {
+            exit CANCEL;
+         }
+      }
+   }
+}
+command AvailabletoReserveCommand for MaterialRequisLine {
+   label = "Available to Reserve";
+   enabled = [StatusCode != "Closed" and InventoryPart and SupplyCode != "PurchaseOrder"];
+   variable ProjectFilter Text;
+   variable PageTitleVar Text;
+   execute {
+      if [SupplyCode = "InventoryOrder"] {
+         set ProjectFilter = " and ProjectId eq null and ActivitySeq eq 0";
+      }
+      else {
+         set ProjectFilter = " and ProjectId eq $[ProjectId]";
+      }
+      set PageTitleVar = "Available to Reserve for Material Requisition - ${OrderNo} - ${PartNo}" {
+         translatable = true;
+      }
+      navigate "page/InventoryPartInStock/List?initcontext=PageTitle:$[PageTitleVar]&$filter=Contract eq $[Contract] and PartNo eq $[PartNo] and AvailableQty gt 0 and LocationType eq IfsApp.InventoryPartInStockHandling.InventoryLocationType'Picking' and (PartOwnership eq IfsApp.InventoryPartInStockHandling.PartOwnership'CompanyOwned' or PartOwnership eq IfsApp.InventoryPartInStockHandling.PartOwnership'Consignment')${ProjectFilter}";
+   }
+}
+command IssueCommand for MaterialRequisLine {
+   label = "Issue";
+   mode = SelectedRecords;
+   enabled = [QtyAssigned > 0 and(StatusCode = "Reserved" or StatusCode = "PartiallyDelivered") and(count(*, UnIdentifiedSerials > 0) > 0)];
+   variable PartTrackingSessionId {
+      type = Number;
+   }
+   variable LineItemNoStr {
+      type = Text;
+   }
+   execute {
+      confirm("This will ISSUE material for selected line: ${LineNo} - ${PartNo}") {
+         when CANCEL {
+            exit;
+         }
+      }
+      set PartTrackingSessionId = null;
+      if [UnIdentifiedSerials > 0] {
+         call ConvertToString(LineItemNo) into LineItemNoStr;
+         assistant IdentifySerialsInMultipleLocAssistant("3", OrderNo, LineNo, ReleaseNo, LineItemNoStr, null, Contract, PartNo, UnIdentifiedSerials) into(PartTrackingSessionId) {
+            when CANCEL {
+               exit;
+            }
+         }
+      }
+      call MakeLineDelivery(OrderClass, OrderNo, LineNo, ReleaseNo, LineItemNo, PartTrackingSessionId);
+   }
+}
+
+command BulkIssueCommand for MaterialRequisLine {
+   label = "Issue";
+   mode = SelectedRecords;
+   enabled = [QtyAssigned > 0 and(StatusCode = "Reserved" or StatusCode = "PartiallyDelivered") and(count(*, UnIdentifiedSerials > 0) = 0)];
+   variable PartTrackingSessionId {
+      type = Number;
+   }
+   bulkexecute {
+      confirm("This will ISSUE material for all selected lines") {
+         when CANCEL {
+            exit;
+         }
+      }
+      bulkcall MakeLineDelivery(OrderClass, OrderNo, LineNo, ReleaseNo, LineItemNo, PartTrackingSessionId);
+   }
+}
+
+command IssueManuallyCommand for MaterialRequisLine {
+   label = "Issue Manually";
+   mode = SingleRecord;
+   enabled = [QtyAssigned > 0 and(StatusCode = "Reserved" or StatusCode = "PartiallyDelivered")];
+   variable ProjectIdVar {
+      type = Text;
+   }
+   variable ActivitySeqVar {
+      type = Number;
+   }
+   execute {
+      if [SupplyCode = "InventoryOrder"] {
+         set ProjectIdVar = null;
+         set ActivitySeqVar = 0;
+      }
+      else {
+         set ProjectIdVar = ProjectId;
+         set ActivitySeqVar = ActivitySeq;
+      }
+      assistant ManualIssueAssistant(OrderNo, OrderClass, LineNo, ReleaseNo, LineItemNo, PartNo, UnitMeas, Contract, RemainingQty, ActivitySeqVar, ProjectIdVar) {
+         when NO {
+            exit CANCEL;
+         }
+      }
+   }
+}
+
+command CloseCommand for MaterialRequisLine {
+   label = "Close";
+   mode = SelectedRecords;
+   enabled = [(StatusCode = "PartiallyDelivered" and QtyAssigned = 0) or(not InventoryPart and StatusCode = "Released" and ConnectedPoLineCancelled)];
+   bulkexecute {
+      confirm("This will CLOSE all selected lines") {
+         when CANCEL {
+            exit;
+         }
+      }
+      bulkcall CloseLine(OrderClass, OrderNo, LineNo, ReleaseNo, LineItemNo);
+   }
+}
+command ProjectConnectionConnecttoActivityCommand for MaterialRequisLine {
+   label = "Connect to Activity";
+   mode = SelectedRecords;
+   enabled = [ActivitySeq = null and SupplyCode = "InventoryOrder" and(StatusCode = "Planned" or StatusCode = "Released")];
+   variable VarActivitySeq {
+      type = Number;
+   }
+   bulkexecute {
+      @DynamicComponentDependency PROJ
+      dialog ConnectActivityDialog(parent.Company, null, Contract, "MTRLREQLINE") into(VarActivitySeq) {
+         when OK {
+            bulkcall ModifyActivitySequence(OrderClass, OrderNo, LineNo, ReleaseNo, LineItemNo, VarActivitySeq);
+         }
+      }
+   }
+}
+command ProjectConnectionDisconnectfromActivityCommand for MaterialRequisLine {
+   label = "Disconnect from Activity";
+   mode = SelectedRecords;
+   enabled = [ActivitySeq != null and SupplyCode = "ProjectInventory" and(StatusCode = "Planned" or StatusCode = "Released")];
+   variable VarActivitySeq {
+      type = Number;
+   }
+   bulkexecute {
+      set VarActivitySeq = null;
+      bulkcall ModifyActivitySequence(OrderClass, OrderNo, LineNo, ReleaseNo, LineItemNo, VarActivitySeq);
+   }
+}
+command PurchaseInformationCommand for MaterialRequisLine {
+   label = "Purchase Information";
+   enabled = [SupplyCode = "PurchaseOrder"];
+   variable PurchaseInformationNavigation;
+   execute {
+      call CreatePurchaseInformationNavigation(OrderClass, OrderNo, LineNo, ReleaseNo, LineItemNo) into PurchaseInformationNavigation;
+      navigate "${PurchaseInformationNavigation}";
+   }
+}
+command InventoryPartAvailabilityPlanningCommand for MaterialRequisLine {
+   label = "Inventory Part Availability Planning";
+   mode = SelectedRecords;
+   enabled = [InventoryPart];
+   bulkexecute {
+      if [SupplyCode = "ProjectInventory"] {
+         bulknavigate "page/InventoryPartAvailabilityPlanning/Form?$filter=PartNo eq $[PartNo] and Contract eq $[Contract] and ProjectId eq $[ProjectId] and ConfigurationId eq '*'";
+      }
+      else {
+         bulknavigate "page/InventoryPartAvailabilityPlanning/Form?$filter=PartNo eq $[PartNo] and Contract eq $[Contract] and ProjectId eq '*' and ConfigurationId eq '*'";
+      }
+   }
+}
+command MaterialRequisitionUnissueCommand for MaterialRequisLine {
+   label = "Unissue";
+   mode = SelectedRecords;
+   enabled = [QtyShipped > 0];
+   bulkexecute {
+      bulknavigate "page/UnissueInventoryPartFromMaterialRequisition/Form?$filter=OrderNo eq $[OrderNo] and LineNo eq $[LineNo] and ReleaseNo eq $[ReleaseNo]";
+   }
+}
+command BeforeSaveMaterialRequisitionLines for MaterialRequisLine {
+   variable SourceIdentifierVar {
+      type = Text;
+   }
+   variable DummyVar {
+      type = Boolean;
+   }
+   bulkexecute {
+      if [CreateCount > 0] {
+         set SourceIdentifierVar = "Material Requisition Header ${Record.OrderNo}" {
+            translatable = true;
+         }
+         call CheckMandatoryCodeParts(parent.PreAccountingId, "M109", Record.Contract, SourceIdentifierVar, false) into DummyVar;
+      }
+   }
+}
+command AfterSaveMaterialRequisitionLinesCommand for MaterialRequisLine {
+   variable MandatoryPrePostingCompleteVar {
+      type = Boolean;
+   }
+   variable SourceIdentifierVar {
+      type = Text;
+   }
+   execute {
+      if [PreAccountingId != null and CrudOperation = "create"] {
+         call MandatoryPrePostingComplete(PreAccountingId, "M107", Contract) into MandatoryPrePostingCompleteVar;
+         if [not MandatoryPrePostingCompleteVar] {
+            set SourceIdentifierVar = "for Material Requisition ${OrderNo}, Line No ${LineNo}, Release No ${ReleaseNo}" {
+               translatable = true;
+            }
+            assistant PrePostingWithSourceAssistant("M107", PreAccountingId, Contract, false, SourceIdentifierVar) {
+               when NO {
+                  exit CANCEL;
+               }
+            }
+         }
+      }
+   }
+}
+command PrePostingDetailCommand for MaterialRequisLine {
+   label = "Pre Posting";
+   enabled = [PreAccountingId != null];
+   variable SourceIdentifierVar {
+      type = Text;
+   }
+   execute {
+      set SourceIdentifierVar = "for Material Requisition ${OrderNo}, Line No ${LineNo}, Release No ${ReleaseNo}" {
+         translatable = true;
+      }
+      assistant PrePostingWithSourceAssistant("M107", PreAccountingId, Contract, false, SourceIdentifierVar) {
+         when NO {
+            exit CANCEL;
+         }
+      }
+   }
+}
+command DocumentTextLineCommand for MaterialRequisLine {
+   label = "Document Text";
+   enabled = [true];
+   execute {
+      set Label = " for Material Requisition - ${OrderNo} - ${LineNo}" {
+         translatable = true;
+      }
+      assistant DocumentText(NoteId, Label, false) {
+         when NO {
+            exit CANCEL;
+         }
+      }
+   }
+}
+
+command GetIdentifySerialsCommand for InvPartInStockToIssueVirtual {
+   variable SessionSelection Text;
+   execute {
+      if [ReceiptIssueSerialTrack = "TRUE" and SerialNo = "*" and QtyToIssue > 0 and CrudOperation = "update"] {
+         call GetRecordsWithSessionId(Contract, PartNo, ConfigurationId, LocationNo, LotBatchNo, EngChgLevel, WaivDevRejNo, ActivitySeq, HandlingUnitId, QtyToIssue, CatchQtyToIssue, NULL, NULL, NULL) into IdentifySerialsRecStructure;
+         assistant IdentifySerialsInLocRepeatAssistant(IdentifySerialsRecStructure.RemainingSelection, IdentifySerialsRecStructure.Total, null, null) into(SessionSelection) {
+            when OK {
+               if [SessionSelection != null and SessionSelection != ""] {
+                  set PartTrackingSessionId = IdentifySerialsRecStructure.SessionId;
+                  exit OK;
+               }
+            }
+            when CANCEL {
+               info("${QtyToIssue} serials must be identified, Qty to Issue is reset.");
+               set QtyToIssue = null;
+               exit CANCEL;
+            }
+         }
+      }
+   }
+}
+
+
+---------------------------------- GROUPS -----------------------------------
+group ManualReservationGroup for ManualReservationVirtual {
+   label = "";
+   lov PartNoRef with ReferenceInventoryPartSelector {
+      label = "Part No";
+      description = PartNoRef.DescriptionInUse;
+      editable = [false];
+   }
+   field QtyLeft {
+      label = "Remaining Qty to Reserve";
+      editable = [false];
+   }
+   lov ConditionCodeRef with ReferenceConditionCodeSelector {
+      label = "Condition Code";
+      description = ConditionCodeRef.Description;
+      editable = [false];
+      visible = [ConditionCode != null];
+   }
+   field ProjectId {
+      label = "Project ID";
+      editable = [false];
+      visible = [ProjectId != null];
+   }
+   field ActivitySeq {
+      label = "Activity Sequence";
+      editable = [false];
+      visible = [ActivitySeq != 0];
+   }
+   field LinesReadyToReserve {
+      visible = [false];
+   }
+}
+
+group ManualIssueGroup for ManualIssueVirtual {
+   label = "";
+   lov PartNoRef with ReferenceInventoryPartSelector {
+      label = "Part No";
+      description = PartNoRef.DescriptionInUse;
+      editable = [false];
+   }
+   field QtyLeft {
+      label = "Remaining Qty";
+      editable = [false];
+   }
+   field PartNoRef.UnitMeas {
+      label = "UoM";
+      editable = [false];
+   }
+   field CatchUnitMeas {
+      label = "Catch UoM";
+      editable = [false];
+      visible = [CatchUnitMeas != null];
+   }
+   field ProjectId {
+      label = "Project ID";
+      size = Small;
+      visible = [ProjectId != null];
+   }
+   field ActivitySeq {
+      size = Small;
+      visible = [ActivitySeq != 0];
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+list MaterialRequisitionLinesList for MaterialRequisLine {
+   orderby = LineNoOrderBy, ReleaseNoOrderBy;
+   crudactions {
+      before command BeforeSaveMaterialRequisitionLines;
+      after command AfterSaveMaterialRequisitionLinesCommand;
+      new {
+         enabled = [parent.StatusCode != "Closed"];
+      }
+      delete {
+         enabled = [parent.StatusCode != "Closed"];
+      }
+      edit {
+         enabled = [parent.StatusCode != "Closed"];
+      }
+   }
+   lov OrderNoRef with ReferenceMaterialRequisSelector;
+   field LineNo {
+      size = Small;
+   }
+   field ReleaseNo {
+      size = Small;
+   }
+   field LineItemNo {
+      columnexclude = [true];
+   }
+   lov PartNoRef with ReferenceInventoryPartLovMrpSelector {
+      description = PartNoRef.Description;
+      label = "Part";
+      validate command {
+         execute {
+            if [PartNo != null] {
+               call GetPartInformation(PartNo, parent.Contract) into PartInformationStructure;
+               set SupplyCode = PartInformationStructure.SupplyCode;
+               set UnitMeas = PartInformationStructure.UnitMeas;
+               set DueDate = parent.DueDate;
+            }
+         }
+      }
+   }
+   lov ContractRef with ReferenceUserAllowedSiteLovSelector {
+      description = ContractRef.ContractDesc;
+   }
+   lov InternalCustomerNoRef with ReferenceInternalCustomerSelector {
+      description = InternalCustomerNoRef.Name;
+      label = "Internal Customer";
+   }
+   lov InternalDestinationIdRef with ReferenceInternalDestinationLovSelector {
+      description = InternalDestinationIdRef.Description;
+      label = "Internal Destination";
+   }
+   field QtyDue;
+   field UnitMeasRef {
+      size = Small;
+   }
+   field DueDate;
+   field DateEntered;
+   field CreatedByUserId {
+      contactwidget {
+         enabled = [true];
+         source = Person;
+      }
+   }
+   field PlannedDeliveryDate;
+   fieldset StatusCodeLine;
+   field SupplyCode;
+   field QtyAssigned;
+   field QtyShipped;
+   field RemainingQty;
+   field QtyOnOrder;
+   field QtyReturned;
+   field QtyShort;
+
+   lov ConditionCodeRef with ReferenceConditionCodeSelector {
+      description = ConditionCodeRef.Description;
+   }
+   field DocumentText;
+   field NoteText {
+      multiline = true;
+   }
+   field PreAccountingRef.AccountNo {
+      size = Small;
+      label = "${context.Company.CodeAName}";
+   }
+   field PreAccountingRef.CodenoB {
+      size = Small;
+      label = "${context.Company.CodeBName}";
+   }
+   field PreAccountingRef.CodenoC {
+      size = Small;
+      label = "${context.Company.CodeCName}";
+   }
+   field PreAccountingRef.CodenoD {
+      size = Small;
+      label = "${context.Company.CodeDName}";
+   }
+   field PreAccountingRef.CodenoE {
+      size = Small;
+      label = "${context.Company.CodeEName}";
+   }
+   field PreAccountingRef.CodenoF {
+      size = Small;
+      label = "${context.Company.CodeFName}";
+   }
+   field PreAccountingRef.CodenoG {
+      size = Small;
+      label = "${context.Company.CodeGName}";
+   }
+   field PreAccountingRef.CodenoH {
+      size = Small;
+      label = "${context.Company.CodeHName}";
+   }
+   field PreAccountingRef.CodenoI {
+      size = Small;
+      label = "${context.Company.CodeIName}";
+   }
+   field PreAccountingRef.CodenoJ {
+      size = Small;
+      label = "${context.Company.CodeJName}";
+   }
+   fieldset ProjectDetailsFieldSet;
+   @DynamicComponentDependency PROJ
+   field ActivitySeqRef;
+   fieldranking LineNo, ReleaseNo, PartNoRef, PartDescription, QtyDue, UnitMeasRef, DueDate, StatusCode, QtyAssigned, QtyShipped, SupplyCode;
+
+   commandgroup MaterialActionsCmdGroup {
+      label = "Material Actions";
+      command ReserveCommand;
+      command ReserveManuallyCommand;
+      command IssueCommand;
+      command BulkIssueCommand;
+      command IssueManuallyCommand;
+      command MaterialRequisitionUnissueCommand;
+      command CloseCommand;
+   }
+   commandgroup ProjectConnectionCmdGroup {
+      label = "Project Connection";
+      command ProjectConnectionConnecttoActivityCommand;
+      command ProjectConnectionDisconnectfromActivityCommand;
+   }
+   command AvailabletoReserveCommand;
+   command InventoryPartAvailabilityPlanningCommand;
+   command PurchaseInformationCommand;
+   command PrePostingDetailCommand;
+   command DocumentTextLineCommand;
+}
+list ReserveLocationList for InvPartInStockToReserveVirtual {
+   editmode = SingleCellEdit;
+   label = "";
+   field QtyToReserve {
+      validate command {
+         execute {
+            if [QtyToReserve > AvailableQty] {
+               error("Cannot reserve more than quantity left to be reserved on material requisition line.");
+            }
+         }
+      }
+   }
+   field AvailableQty;
+   field QtyReserved;
+   field LocationNo {
+      size = Small;
+   }
+   field HandlingUnitIdRef;
+   lov HandlingUnitTypeIdRef with ReferenceHandlingUnitTypeSelector {
+      label = "Handling Unit Type";
+      editable = [false];
+      description = HandlingUnitTypeIdRef.Description;
+   }
+   field HandlingUnitIdRef.Sscc {
+      size = Small;
+      label = "SSCC";
+   }
+   field HandlingUnitIdRef.AltHandlingUnitLabelId {
+      size = Small;
+      label = "Alt Handling Unit Label ID";
+   }
+   field Warehouse {
+      size = Small;
+   }
+   field BayNo {
+      size = Small;
+   }
+   field RowNo {
+      size = Small;
+   }
+   field TierNo {
+      size = Small;
+   }
+   field BinNo {
+      size = Small;
+   }
+   field PartNo {
+      columnexclude = [true];
+   }
+   field LotBatchNo {
+      size = Small;
+   }
+   field SerialNo {
+      size = Small;
+   }
+   field EngChgLevel {
+      size = Small;
+   }
+   field WaivDevRejNo {
+      size = Small;
+   }
+   fieldset ProjectDetailsFieldSet;
+   @DynamicComponentDependency PROJ
+   field ActivitySeqRef;
+   field TopParentHandlingUnitId;
+   field TopParentHuTypeId {
+      size = Small;
+   }
+   field TopParentHuTypeDesc {
+      size = Small;
+   }
+   field TopParentSSCC {
+      size = Small;
+   }
+   field TopParentAltHuLabelId {
+      size = Small;
+   }
+   lov AvailabilityControlIdRef with ReferencePartAvailabilityControlSelector {
+      label = "Availability Control";
+      editable = [false];
+      description = AvailabilityControlIdRef.Description;
+   }
+   field ExpirationDate;
+   fieldranking QtyToReserve, QtyReserved, AvailableQty, LocationNo, LotBatchNo, SerialNo, EngChgLevel, HandlingUnitIdRef, HandlingUnitRef.HandlingUnitTypeId, WaivDevRejNo, ActivitySeqRef;
+}
+list IssueLocationList for InvPartInStockToIssueVirtual {
+   editmode = SingleCellEdit;
+   label = "";
+   crudactions {
+      before command GetIdentifySerialsCommand;
+   }
+   field QtyToIssue {
+      validate command {
+         execute {
+            if [QtyToIssue < 0] {
+               error("The quantity must be greater than 0.");
+            }
+            if [QtyToIssue > QtyAssigned] {
+               error("Cannot issue more than quantity left to be issued on material requisition line.");
+            }
+         }
+      }
+   }
+   field QtyAssigned;
+   field CatchQtyToIssue {
+      columnvisible = [parent.CatchUnitMeas != null];
+   }
+   field Contract;
+   field PartNo {
+      columnexclude = [true];
+   }
+   field ConfigurationId {
+      columnexclude = [true];
+   }
+   field LocationNo {
+      size = Small;
+   }
+   field HandlingUnitId;
+   lov HandlingUnitTypeIdRef with ReferenceHandlingUnitTypeSelector {
+      label = "Handling Unit Type";
+      editable = [false];
+      description = HandlingUnitTypeIdRef.Description;
+   }
+   field HandlingUnitIdRef.Sscc {
+      size = Small;
+      label = "SSCC";
+   }
+   field HandlingUnitIdRef.AltHandlingUnitLabelId {
+      size = Small;
+      label = "Alt Handling Unit Label ID";
+   }
+   field Warehouse {
+      size = Small;
+   }
+   field BayNo {
+      size = Small;
+   }
+   field RowNo {
+      size = Small;
+   }
+   field TierNo {
+      size = Small;
+   }
+   field BinNo {
+      size = Small;
+   }
+   field LotBatchNo {
+      size = Small;
+   }
+   field SerialNo {
+      size = Small;
+   }
+   lov ConditionCodeRef with ReferenceConditionCodeSelector {
+      label = "Condition Code";
+      editable = [false];
+      description = ConditionCodeRef.Description;
+   }
+   field EngChgLevel {
+      size = Small;
+   }
+   field WaivDevRejNo {
+      size = Small;
+   }
+   fieldset ProjectDetailsFieldSet;
+   @DynamicComponentDependency PROJ
+   field ActivitySeqRef;
+   field TopParentHandlingUnitId;
+   lov TopParentHuTypeIdRef with ReferenceHandlingUnitTypeSelector {
+      label = "Top Parent Handling Unit Type";
+      editable = [false];
+      description = TopParentHuTypeIdRef.Description;
+   }
+   field TopParentSscc {
+      size = Small;
+   }
+   field TopParentAltHuLabelId {
+      size = Small;
+   }
+   lov AvailabilityControlIdRef with ReferencePartAvailabilityControlSelector {
+      label = "Availability Control";
+      editable = [false];
+      description = AvailabilityControlIdRef.Description;
+   }
+   field ReceiptIssueSerialTrack {
+      columnexclude = [true];
+   }
+   fieldranking QtyToIssue, QtyAssigned, LocationNo, LotBatchNo, SerialNo, EngChgLevel, HandlingUnitIdRef, HandlingUnitRef.HandlingUnitTypeId, WaivDevRejNo, ActivitySeqRef;
+}
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+
+entityset ManualReservationSet for ManualReservationVirtual;
+entityset MaterialRequisitionLineSet for MaterialRequisLine;
+entityset MaterialRequisReservatSet for MaterialRequisReservat;
+entityset ManualIssueSet for ManualIssueVirtual;
+
+
+@Override
+entity MaterialRequisLine {
+   ludependencies = DocumentText, PreAccounting;
+   from = "MATERIAL_REQUIS_LINE";
+   use attributes = Contract, PartNo, ConditionCode, QtyDue, UnitMeas, DueDate, NoteText, SupplyCode, QtyAssigned, QtyShipped, QtyOnOrder, QtyReturned, StatusCode, PlannedDeliveryDate, PreAccountingId, NoteId, ProjectId, ActivitySeq;
+   attribute PartNo Text {
+      editable = [ETag = null];
+   }
+   attribute ConditionCode Text {
+      format = uppercase;
+   }
+   attribute QtyDue Number {
+      label = "Due Qty";
+   }
+   attribute DateEntered Date {
+      label = "Created";
+      insertable = [false];
+      editable = [false];
+   }
+   attribute UnitMeas Text {
+      label = "UoM";
+      editable = [false];
+   }
+   attribute RemainingQty Number {
+      fetch = "qty_due - qty_shipped";
+      label = "Remaining Qty";
+      insertable = [false];
+      editable = [false];
+   }
+   attribute NoteText Text {
+      label = "Notes";
+   }
+   attribute QtyAssigned Number {
+      label = "Reserved Qty";
+      editable = [false];
+      required = [Etag != null];
+   }
+   attribute QtyShort Number {
+      label = "Shortage Qty";
+      insertable = [false];
+      editable = [false];
+   }
+   attribute QtyShipped Number {
+      label = "Issued Qty";
+      editable = [false];
+      required = [Etag != null];
+   }
+   attribute QtyOnOrder Number {
+      label = "Qty to be Received";
+      editable = [false];
+      required = [Etag != null];
+   }
+   attribute QtyReturned Number {
+      label = "Returned Qty";
+      editable = [false];
+      required = [Etag != null];
+   }
+   attribute QtyToReserve Number {
+      fetch = "qty_due - qty_shipped - qty_assigned";
+      label = "Qty to Reserve";
+      insertable = [false];
+      editable = [false];
+      required = [Etag != null];
+   }
+   attribute QtyRemaining Number {
+      fetch = "qty_due - qty_shipped";
+      label = "Qty to Reserve";
+      insertable = [false];
+      editable = [false];
+      required = [Etag != null];
+   }
+   attribute StatusCode Enumeration(MaterialRequisStatus) {
+      label = "Status";
+      insertable = [false];
+      editable = [false];
+      required = [Etag != null];
+   }
+   attribute PlannedDeliveryDate Date {
+      editable = [false];
+   }
+   attribute PreAccountingId Number {
+      label = "Pre-Posting ID";
+   }
+   attribute NoteId Number {
+      maxlength = 10;
+   }
+   attribute ActivitySeq Number {
+      fetch = "activity_seq";
+      label = "Activity Sequence";
+      maxlength = 10;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ProgramId Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Program_Id(ACTIVITY_SEQ))";
+      maxlength = 10;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ProgramDescription Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Program_Description(ACTIVITY_SEQ))";
+      maxlength = 2000;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ProjectName Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Project_Name(ACTIVITY_SEQ))";
+      maxlength = 2000;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute SubProjectId Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Sub_Project_Id(ACTIVITY_SEQ))";
+      maxlength = 10;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute SubProjectDescription Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Sub_Project_Description(ACTIVITY_SEQ))";
+      maxlength = 2000;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ActivityNo Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Activity_No(ACTIVITY_SEQ))";
+      maxlength = 10;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ActivityDescription Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Description(ACTIVITY_SEQ))";
+      maxlength = 200;
+      editable = [false];
+   }
+   attribute InventoryPart Boolean("TRUE", "FALSE") {
+      fetch = "DECODE(Inventory_Part_API.Part_Exist(contract, part_no),1,'TRUE','FALSE')";
+      label = "Inventory Part";
+      insertable = [false];
+      editable = [false];
+   }
+   attribute SerialTrackingAtReceiptAndIssue Text {
+      fetch = "Part_Catalog_API.Get_Rcpt_Issue_Serial_Track_Db(part_no)";
+      label = "Serial Tracking at Receipt and Issue";
+      insertable = [false];
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute OrderClass Enumeration(MaterialRequisType) {
+      fetch = "order_class_db";
+      label = "Order Class";
+      maxlength = 20;
+      editable = [false];
+   }
+   attribute OrderNo Text {
+      editable = [false];
+   }
+   attribute UnIdentifiedSerials Number {
+      fetch = "Material_Requis_Reservat_API.Get_Unidentified_Serials(order_no, line_no, release_no, line_item_no)";
+      editable = [false];
+   }
+   attribute ConnectedPoLineCancelled Boolean("TRUE", "FALSE") {
+      fetch = "DECODE(SUPPLY_CODE_DB,'PO',DECODE(Material_Requis_Pur_Order_API.Connected_Po_Line_Cancelled(ORDER_NO, LINE_NO, RELEASE_NO, LINE_ITEM_NO, ORDER_CLASS), '1', 'TRUE', 'FALSE'),'FALSE')";
+      editable = [false];
+   }
+   attribute DocumentText Boolean("TRUE", "FALSE") {
+      fetch = "DECODE(Document_Text_API.Note_Id_Exist(note_id), '1', 'TRUE', 'FALSE')";
+      editable = [false];
+   }
+   attribute LineNoOrderBy Text {
+      fetch = "LPAD(LINE_NO, 4)";
+      editable = [false];
+   }
+   attribute IntCustomerNo Text {
+      fetch = "Material_Requisition_API.Get_Int_Customer_No(order_class,order_no)";
+      label = "Internal Customer No";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute DestinationId Text {
+      fetch = "Material_Requisition_API.Get_Destination_Id(ORDER_CLASS,ORDER_NO)";
+      editable = [false];
+   }
+   attribute ReleaseNoOrderBy Text {
+      fetch = "LPAD(RELEASE_NO, 4)";
+      editable = [false];
+   }
+   attribute CreatedByUserId Text {
+      fetch = "Material_Requisition_API.Get_Created_By_User_Id(order_class,order_no)";
+      label = "Created By";
+      editable = [false];
+      updatable = [false];
+   }
+   attribute DueDate Date {
+      fetch = "trunc(due_date)";
+   }
+
+   reference ContractRef(Contract) to UserAllowedSiteLov(Contract) {
+      label = "Site";
+   }
+   reference OrderNoRef(OrderNo) to MaterialRequis(OrderNo) {
+      label = "Order No";
+   }
+   reference ConditionCodeRef(ConditionCode) to ConditionCode(ConditionCode) {
+      label = "Condition Code";
+   }
+   reference PreAccountingRef(PreAccountingId) to PreAccounting(PreAccountingId);
+   reference InternalCustomerNoRef(IntCustomerNo) to InternalCustomer(IntCustomerNo) {
+      label = "Internal Customer No";
+   }
+   reference InternalDestinationIdRef(Contract, DestinationId) to InternalDestinationLov(Contract, DestinationId) {
+      label = "Internal Destination ID";
+   }
+   @DynamicComponentDependency PROJ
+   reference ActivitySeqRef(ActivitySeq) to Activity(ActivitySeq) {
+      label = "Activity Sequence";
+   }
+   @DynamicComponentDependency PROJ
+   reference ProjectIdRef(ProjectId) to Project(ProjectId);
+   @DynamicComponentDependency PROJ
+   reference ProgramIdRef(ProgramId) to ProjectProgramGlobal(ProgramId);
+   @DynamicComponentDependency PROJ
+   reference SubProjectIdRef(ProjectId, SubProjectId) to SubProject(ProjectId, SubProjectId);
+   @DynamicComponentDependency PROJ
+   reference ActivityNoRef(ActivitySeq, ActivityNo) to Activity(ActivitySeq, ActivityNo);
+   reference PartCatalogRef(PartNo) to PartCatalog(PartNo);
+   reference PartNoRef(Contract, PartNo) to InventoryPartLovMrp(Contract, PartNo) {
+      label = "Part No";
+   }
+   reference UnitMeasRef(UnitMeas) to IsoUnit(UnitCode) {
+      label = "UoM";
+   }
+}
+virtual ManualReservationVirtual {
+   ludependencies = InvPartInStockToReserveVirtual;
+   attribute OrderNo Text {
+      editable = [false];
+   }
+   attribute OrderClass Enumeration(MaterialRequisType) {
+      editable = [false];
+   }
+   attribute LineNo Text {
+      editable = [false];
+   }
+   attribute ReleaseNo Text {
+      editable = [false];
+   }
+   attribute LineItemNo Number {
+      editable = [false];
+   }
+   attribute PartNo Text {
+      editable = [false];
+   }
+   attribute ConditionCode Text {
+      editable = [false];
+   }
+   attribute UnitMeas Text {
+      editable = [false];
+   }
+   attribute Contract Text {
+      editable = [false];
+   }
+   attribute QtyLeft  Number {
+      editable = [false];
+   }
+   attribute ActivitySeq Number {
+      editable = [false];
+   }
+   attribute ProjectId Text {
+      editable = [false];
+   }
+   attribute LinesReadyToReserve Text;
+
+   array PartInStockToReserveArray() to InvPartInStockToReserveVirtual();
+
+   reference PartNoRef(Contract, PartNo)to InventoryPart(Contract, PartNo);
+   reference ConditionCodeRef(ConditionCode)to ConditionCode(ConditionCode);
+   @DynamicComponentDependency PROJ
+   reference ActivitySeqRef(ActivitySeq)to Activity(ActivitySeq);
+}
+
+virtual InvPartInStockToReserveVirtual {
+   crud = Read, Update;
+   ludependencies = ManualReservationVirtual;
+   attribute QtyToReserve Number {
+      label = "Qty to Reserve";
+      editable = [true];
+   }
+   attribute AvailableQty Number {
+      label = "Available Qty";
+      editable = [false];
+   }
+   attribute QtyReserved Number {
+      label = "Reserved Qty";
+      editable = [false];
+   }
+   attribute LocationNo Text {
+      label = "Location No";
+      maxlength = 35;
+      editable = [false];
+   }
+   attribute HandlingUnitId Number {
+      label = "Handling Unit ID";
+      required = [true];
+      editable = [ETag = null];
+   }
+   attribute Warehouse Text {
+      label = "Warehouse ID";
+      maxlength = 15;
+      editable = [false];
+   }
+   attribute BayNo Text {
+      label = "Bay ID";
+      maxlength = 5;
+      editable = [false];
+   }
+   attribute RowNo Text {
+      label = "Row ID";
+      maxlength = 5;
+      editable = [false];
+   }
+   attribute TierNo Text {
+      label = "Tier ID";
+      maxlength = 5;
+      editable = [false];
+   }
+   attribute BinNo Text {
+      label = "Bin";
+      maxlength = 5;
+      editable = [false];
+   }
+   attribute PartNo Text {
+      label = "Part No";
+      maxlength = 25;
+      required = [true];
+      editable = [ETag = null];
+   }
+   attribute Contract Text {
+      label = "Site";
+      maxlength = 5;
+      required = [true];
+      editable = [ETag = null];
+   }
+   attribute LotBatchNo Text {
+      label = "Lot/Batch No";
+      maxlength = 20;
+      required = [true];
+      editable = [ETag = null];
+   }
+   attribute SerialNo Text {
+      label = "Serial No";
+      maxlength = 50;
+      required = [true];
+      editable = [ETag = null];
+   }
+   attribute EngChgLevel Text {
+      label = "Revision No";
+      maxlength = 6;
+      required = [true];
+      editable = [ETag = null];
+   }
+   attribute WaivDevRejNo Text {
+      label = "W/D/R No";
+      maxlength = 15;
+      required = [true];
+      editable = [ETag = null];
+   }
+   attribute ProjectId Text {
+      label = "Project ID";
+      maxlength = 10;
+      editable = [false];
+      format = uppercase;
+   }
+   attribute ActivitySeq Number {
+      label = "Activity Seq";
+      maxlength = 10;
+      editable = [false];
+   }
+   attribute TopParentHandlingUnitId Number {
+      fetch = "Handling_Unit_API.Get_Top_Parent_Handl_Unit_Id(handling_unit_id)";
+      label = "Top Parent Handling Unit ID";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TopParentHuTypeId Text {
+      fetch = "Handling_Unit_API.Get_Top_Parent_Hu_Type_Id(handling_unit_id)";
+      label = "Top Parent Handling Unit Type ID";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TopParentHuTypeDesc Text {
+      fetch = "Handling_Unit_Type_API.Get_Description(Handling_Unit_API.Get_Top_Parent_Hu_Type_Id(handling_unit_id))";
+      label = "Top Parent Handling Unit Type Desc";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TopParentSSCC Text {
+      fetch = "Handling_Unit_API.Get_Top_Parent_Sscc(handling_unit_id)";
+      label = "Top Parent SSCC";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TopParentAltHuLabelId Text {
+      fetch = "Handling_Unit_API.Get_Top_Parent_Alt_Hu_Label_Id(handling_unit_id)";
+      label = "Top Parent Alt Handling Unit Label ID";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute AvailabilityControlId Text {
+      label = "Availability Control ID";
+      maxlength = 25;
+      editable = [false];
+   }
+   attribute ExpirationDate Date {
+      label = "Expiration Date";
+      editable = [false];
+   }
+
+   @DynamicComponentDependency PROJ
+   attribute ProgramId Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Program_Id(ACTIVITY_SEQ))";
+      maxlength = 10;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ProgramDescription Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Program_Description(ACTIVITY_SEQ))";
+      maxlength = 2000;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ProjectName Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Project_Name(ACTIVITY_SEQ))";
+      maxlength = 2000;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute SubProjectId Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Sub_Project_Id(ACTIVITY_SEQ))";
+      maxlength = 10;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute SubProjectDescription Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Sub_Project_Description(ACTIVITY_SEQ))";
+      maxlength = 2000;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ActivityNo Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Activity_No(ACTIVITY_SEQ))";
+      maxlength = 10;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ActivityDescription Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Description(ACTIVITY_SEQ))";
+      maxlength = 200;
+      editable = [false];
+   }
+   attribute HandlingUnitTypeId Text {
+      fetch = "Handling_Unit_API.Get_Handling_Unit_Type_Id(HANDLING_UNIT_ID)";
+   }
+   reference HandlingUnitIdRef(HandlingUnitId)to HandlingUnit(HandlingUnitId) {
+      label = "Handling Unit ID";
+   }
+   reference HandlingUnitTypeIdRef(HandlingUnitTypeId) to HandlingUnitType(HandlingUnitTypeId);
+   @DynamicComponentDependency PROJ
+   reference ActivitySeqRef(ActivitySeq)to Activity(ActivitySeq) {
+      label = "Activity Seq";
+   }
+   @DynamicComponentDependency PROJ
+   reference ActivityNoRef(ActivitySeq)to Activity(ActivitySeq);
+   @DynamicComponentDependency PROJ
+   reference ProgramIdRef(ProgramId) to ProjectProgramGlobal(ProgramId);
+   @DynamicComponentDependency PROJ
+   reference SubProjectIdRef(ProjectId, SubProjectId) to SubProject(ProjectId, SubProjectId);
+   reference AvailabilityControlIdRef(AvailabilityControlId) to PartAvailabilityControl(AvailabilityControlId);
+}
+
+virtual ManualIssueVirtual {
+   ludependencies = InvPartInStockToIssueVirtual;
+   attribute OrderNo Text {
+      editable = [false];
+   }
+   attribute OrderClass Enumeration(MaterialRequisType) {
+      editable = [false];
+   }
+   attribute LineNo Text {
+      editable = [false];
+   }
+   attribute ReleaseNo Text {
+      editable = [false];
+   }
+   attribute LineItemNo Number {
+      editable = [false];
+   }
+   attribute PartNo Text {
+      editable = [false];
+   }
+   attribute CatchUnitMeas Text {
+      fetch = "Inventory_Part_API.Get_Enabled_Catch_Unit_Meas(Contract, Part_No)";
+      editable = [false];
+   }
+   attribute Contract Text {
+      editable = [false];
+   }
+   attribute QtyLeft  Number {
+      editable = [false];
+   }
+   attribute ActivitySeq Number {
+      editable = [false];
+   }
+   attribute ProjectId Text {
+      editable = [false];
+   }
+   attribute LinesReadyToIssue Text;
+
+   array PartInStockToIssueArray() to InvPartInStockToIssueVirtual();
+
+   reference PartNoRef(Contract, PartNo)to InventoryPart(Contract, PartNo);
+   @DynamicComponentDependency PROJ
+   reference ActivitySeqRef(ActivitySeq)to Activity(ActivitySeq);
+}
+
+virtual InvPartInStockToIssueVirtual {
+   crud = Read, Update;
+   ludependencies = ManualIssueVirtual;
+
+   attribute QtyToIssue Number {
+      label = "Qty to Issue";
+      editable = [true];
+   }
+   attribute QtyAssigned Number {
+      label = "Qty Reserved";
+      editable = [false];
+   }
+   attribute CatchQtyToIssue Number {
+      label = "Catch Qty to Issue";
+      editable = [true];
+   }
+   attribute LocationNo Text {
+      label = "Location No";
+      maxlength = 35;
+      editable = [false];
+   }
+   attribute HandlingUnitId Number {
+      label = "Handling Unit ID";
+      required = [true];
+      editable = [false];
+   }
+   attribute Warehouse Text {
+      label = "Warehouse";
+      maxlength = 15;
+      editable = [false];
+   }
+   attribute BayNo Text {
+      label = "Bay ID";
+      maxlength = 5;
+      editable = [false];
+   }
+   attribute RowNo Text {
+      label = "Row ID";
+      maxlength = 5;
+      editable = [false];
+   }
+   attribute TierNo Text {
+      label = "Tier ID";
+      maxlength = 5;
+      editable = [false];
+   }
+   attribute BinNo Text {
+      label = "Bin";
+      maxlength = 5;
+      editable = [false];
+   }
+   attribute PartNo Text {
+      label = "Part No";
+      maxlength = 25;
+      required = [true];
+      editable = [false];
+   }
+   attribute Contract Text {
+      label = "Site";
+      maxlength = 5;
+      required = [true];
+      editable = [false];
+   }
+   attribute LotBatchNo Text {
+      label = "Lot/Batch No";
+      maxlength = 20;
+      required = [true];
+      editable = [false];
+   }
+   attribute SerialNo Text {
+      label = "Serial No";
+      maxlength = 50;
+      required = [true];
+      editable = [false];
+   }
+   attribute ConditionCode Text {
+      label = "Condition Code";
+      maxlength = 10;
+      required = [false];
+      editable = [false];
+   }
+   attribute EngChgLevel Text {
+      label = "Revision No";
+      maxlength = 6;
+      required = [true];
+      editable = [false];
+   }
+   attribute WaivDevRejNo Text {
+      label = "W/D/R No";
+      maxlength = 15;
+      required = [true];
+      editable = [false];
+   }
+   attribute ProjectId Text {
+      label = "Project ID";
+      maxlength = 10;
+      editable = [false];
+      format = uppercase;
+   }
+   attribute ActivitySeq Number {
+      label = "Activity Seq";
+      maxlength = 10;
+      editable = [false];
+   }
+   attribute TopParentHandlingUnitId Number {
+      label = "Top Parent Handling Unit ID";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TopParentHuTypeId Text {
+      label = "Top Parent Handling Unit Type ID";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TopParentSscc Text {
+      label = "Top Parent SSCC";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TopParentAltHuLabelId Text {
+      label = "Top Parent Alt Handling Unit Label ID";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute AvailabilityControlId Text {
+      label = "Availability Control ID";
+      maxlength = 25;
+      editable = [false];
+   }
+   attribute ConfigurationId Text {
+      label = "Configuration ID";
+      maxlength = 50;
+      required = [true];
+      editable = [false];
+   }
+   attribute ReceiptIssueSerialTrack Text {
+      label = "Receipt Issue Tracking";
+   }
+   attribute PartTrackingSessionId Number;
+   @DynamicComponentDependency PROJ
+   attribute ProgramId Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Program_Id(ACTIVITY_SEQ))";
+      maxlength = 10;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ProgramDescription Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Program_Description(ACTIVITY_SEQ))";
+      maxlength = 2000;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ProjectName Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Project_Name(ACTIVITY_SEQ))";
+      maxlength = 2000;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute SubProjectId Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Sub_Project_Id(ACTIVITY_SEQ))";
+      maxlength = 10;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute SubProjectDescription Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Sub_Project_Description(ACTIVITY_SEQ))";
+      maxlength = 2000;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ActivityNo Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Activity_No(ACTIVITY_SEQ))";
+      maxlength = 10;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ActivityDescription Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Description(ACTIVITY_SEQ))";
+      maxlength = 200;
+      editable = [false];
+   }
+   attribute HandlingUnitTypeId Text {
+      fetch = "Handling_Unit_API.Get_Handling_Unit_Type_Id(HANDLING_UNIT_ID)";
+   }
+   reference HandlingUnitIdRef(HandlingUnitId)to HandlingUnit(HandlingUnitId) {
+      label = "Handling Unit ID";
+   }
+   reference HandlingUnitTypeIdRef(HandlingUnitTypeId) to HandlingUnitType(HandlingUnitTypeId);
+   reference ConditionCodeRef(ConditionCode)to ConditionCode(ConditionCode);
+   @DynamicComponentDependency PROJ
+   reference ActivitySeqRef(ActivitySeq)to Activity(ActivitySeq) {
+      label = "Activity Seq";
+   }
+   @DynamicComponentDependency PROJ
+   reference ProjectIdRef(ProjectId) to Project(ProjectId);
+   @DynamicComponentDependency PROJ
+   reference ProgramIdRef(ProgramId) to ProjectProgramGlobal(ProgramId);
+   @DynamicComponentDependency PROJ
+   reference SubProjectIdRef(ProjectId, SubProjectId) to SubProject(ProjectId, SubProjectId);
+   @DynamicComponentDependency PROJ
+   reference ActivityNoRef(ActivitySeq, ActivityNo) to Activity(ActivitySeq, ActivityNo);
+   reference AvailabilityControlIdRef(AvailabilityControlId) to PartAvailabilityControl(AvailabilityControlId);
+   reference TopParentHuTypeIdRef(TopParentHuTypeId) to HandlingUnitType(HandlingUnitTypeId);
+}
+
+ ---------------------------------- ACTIONS ----------------------------------
+
+action MakeLineReservations {
+   initialcheck implementation;
+   supportwarnings = [true];
+   parameter OrderClass Enumeration(MaterialRequisType);
+   parameter OrderNo Text;
+   parameter LineNo Text;
+   parameter ReleaseNo Text;
+   parameter LineItemNo Number;
+   parameter QtyDue Number;
+   parameter PartNo Text;
+   ludependencies = MaterialRequisLine;
+}
+
+action MakeLineDelivery {
+   initialcheck implementation;
+   supportwarnings = [true];
+   parameter OrderClass Enumeration(MaterialRequisType);
+   parameter OrderNo Text;
+   parameter LineNo Text;
+   parameter ReleaseNo Text;
+   parameter LineItemNo Number;
+   parameter PartTrackingSessionId Number;
+   ludependencies = MaterialRequisLine;
+}
+
+//! TODO: Should be refactored as a function!
+action ConvertToString Text {
+   initialcheck none;
+   parameter NumberToConvert Number;
+}
+
+action CloseLine {
+   initialcheck implementation;
+   parameter OrderClass Enumeration(MaterialRequisType);
+   parameter OrderNo Text;
+   parameter LineNo Text;
+   parameter ReleaseNo Text;
+   parameter LineItemNo Number;
+   ludependencies = MaterialRequisLine, MaterialRequisition;
+
+}
+
+action ModifyActivitySequence {
+   initialcheck implementation;
+   supportwarnings = [true];
+   parameter OrderClass Enumeration(MaterialRequisType);
+   parameter OrderNo Text;
+   parameter LineNo Text;
+   parameter ReleaseNo Text;
+   parameter LineItemNo Number;
+   parameter ActivitySeq Number;
+   ludependencies = MaterialRequisLine;
+}
+
+action ReserveMaterials {
+   initialcheck implementation;
+   parameter OrderClass Enumeration(MaterialRequisType);
+   parameter OrderNo Text;
+   parameter LineNo Text;
+   parameter ReleaseNo Text;
+   parameter LineItemNo Number;
+   parameter Contract Text;
+   parameter PartNo Text;
+   parameter ParentObjkey Text;
+   ludependencies = MaterialRequisLine;
+}
+
+action IssueMaterial {
+   initialcheck implementation;
+   supportwarnings = [true];
+   parameter OrderClass Enumeration(MaterialRequisType);
+   parameter OrderNo Text;
+   parameter LineNo Text;
+   parameter ReleaseNo Text;
+   parameter LineItemNo Number;
+   parameter PartNo Text;
+   parameter Contract Text;
+   parameter ParentObjkey Text;
+   ludependencies = MaterialRequisLine;
+}
+
+   --------------------------------- FUNCTIONS ---------------------------------
+function CreatePurchaseInformationNavigation Text {
+   parameter OrderClass Enumeration(MaterialRequisType);
+   parameter OrderNo Text;
+   parameter LineNo Text;
+   parameter ReleaseNo Text;
+   parameter LineItemNo Number;
+}
+
+function GetPartInformation Structure(PartInformationStructure) {
+   parameter PartNo Text;
+   parameter Contract Text;
+}
+
+function IsReserveQuantityExpired Boolean {
+   parameter Contract Text;
+   parameter ParentObjkey Text;
+}
+
+function IsIssueQuantityExpired Boolean {
+   parameter Contract Text;
+   parameter PartNo Text;
+   parameter ParentObjkey Text;
+}
+-------------------------------- STRUCTURES ---------------------------------
+structure PartInformationStructure {
+   attribute PartDescription Text;
+   attribute SupplyCode Enumeration(MaterialRequisSupply);
+   attribute UnitMeas Text;
+}

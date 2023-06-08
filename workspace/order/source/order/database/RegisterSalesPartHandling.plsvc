@@ -1,0 +1,259 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: RegisterSalesPartHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  210711  ErFelk  Bug 159608(MFZ-8108), Added tax_class parameter to Register_Sales_Part___().
+--  191014  NiDalk  Bug 150128 (SCZ-6784), Modified Get_Estimate_Transfer_Details___ to fetch the part no.
+--  190504  ChWkLk  MFUXXW4-11615, Added Estimate related logics to the Register Sales Part.
+--  180516  KoDelk  SCUXX-3182, Created
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Get_Defaults_From_Opp_Line___(
+   opportunity_no_   IN VARCHAR2,
+   revision_no_      IN VARCHAR2,
+   line_no_          IN VARCHAR2 ) RETURN Reg_Sales_Part_Defaults_Structure_Rec
+IS
+   return_val_    Reg_Sales_Part_Defaults_Structure_Rec;
+   $IF Component_Crm_SYS.INSTALLED $THEN
+      rec_           Business_Opportunity_Line_API.Public_Rec;
+   $END
+   taxable_       VARCHAR2(10);
+   price_inc_tax_ VARCHAR2(10);
+   def_site_      VARCHAR2(5);
+BEGIN
+   $IF Component_Crm_SYS.INSTALLED $THEN
+      rec_                          := Business_Opportunity_Line_API.Get(opportunity_no_, revision_no_, line_no_);
+      return_val_.company           := Business_Opportunity_API.Get_Company(opportunity_no_);
+      return_val_.currency_code     := Business_Opportunity_API.Get_Currency_Code(opportunity_no_);
+      return_val_.description       := rec_.description;
+      return_val_.site              := rec_.contract;
+      return_val_.cost              := rec_.cost;
+      return_val_.sale_unit_price   := rec_.base_sale_unit_price;
+      return_val_.sales_unit_meas   := rec_.sales_unit_meas;
+      taxable_                      := Company_Tax_Discom_Info_API.Get_Order_Taxable_Db(return_val_.company);
+      IF (taxable_ = 'TRUE') THEN
+         return_val_.taxable  := TRUE;
+         return_val_.tax_code := Company_Tax_Discom_Info_API.Get_Tax_Code(return_val_.company);
+      ELSE
+         return_val_.taxable  := FALSE;
+         return_val_.tax_code := Company_Tax_Discom_Info_API.Get_Tax_Free_Tax_Code(return_val_.company);
+      END IF;
+      return_val_.tax_rate := Statutory_Fee_API.Get_Fee_Rate(return_val_.company, return_val_.tax_code);
+      def_site_ := User_Default_API.Get_Contract;
+      price_inc_tax_:= Site_Discom_Info_API.Get_Use_Price_Incl_Tax_Pur_Db(nvl(return_val_.site, def_site_));
+      IF price_inc_tax_ = 'TRUE' THEN
+         return_val_.use_price_inc_tax := TRUE;
+      ELSE
+         return_val_.use_price_inc_tax := FALSE;
+      END IF;
+      IF return_val_.company = Company_Site_API.Get_Company(def_site_) THEN
+         return_val_.site := nvl(return_val_.site, def_site_);
+      END IF;
+   $END
+   
+   RETURN return_val_;
+END Get_Defaults_From_Opp_Line___;
+
+
+FUNCTION Get_Defaults_For_Sales_Part___(
+   source_      IN VARCHAR2,
+   source_ref1_ IN VARCHAR2,
+   source_ref2_ IN VARCHAR2,
+   source_ref3_ IN VARCHAR2 ) RETURN Reg_Sales_Part_Defaults_Structure_Rec
+IS
+   
+BEGIN
+   IF source_ = 'OpportunityLine' THEN
+      $IF Component_Crm_SYS.INSTALLED $THEN
+         RETURN Get_Defaults_From_Opp_Line___(source_ref1_, source_ref2_, source_ref3_);
+      $ELSE
+         RETURN NULL;
+      $END
+   END IF;
+END Get_Defaults_For_Sales_Part___;
+
+
+PROCEDURE Register_Sales_Part___ (
+   source_                IN VARCHAR2,
+   source_ref1_           IN VARCHAR2,
+   source_ref2_           IN VARCHAR2,
+   source_ref3_           IN VARCHAR2,
+   sales_part_type_       IN VARCHAR2,
+   part_no_               IN VARCHAR2,
+   inventory_part_no_     IN VARCHAR2,
+   description_           IN VARCHAR2,
+   site_                  IN VARCHAR2,
+   unit_of_measure_       IN VARCHAR2,
+   conversion_fact_       IN NUMBER,
+   invert_conv_fact_      IN NUMBER,
+   sales_uom_             IN VARCHAR2,
+   price_uom_             IN VARCHAR2,
+   price_conv_fact_       IN NUMBER,
+   sales_price_group_     IN VARCHAR2,
+   sales_group_           IN VARCHAR2,
+   discount_group_        IN VARCHAR2,
+   rebate_group_          IN VARCHAR2,
+   taxable_               IN BOOLEAN,
+   use_price_inc_tax_     IN BOOLEAN,
+   tax_code_              IN VARCHAR2,
+   cost_                  IN NUMBER,
+   price_                 IN NUMBER,
+   price_inc_tax_         IN NUMBER,
+   create_pur_part_       IN BOOLEAN,
+   estimate_id_           IN NUMBER,
+   estimate_revision_no_  IN NUMBER,
+   node_id_               IN NUMBER,
+   estimate_cost_version_ IN NUMBER,
+   tax_class_             IN VARCHAR2) 
+IS
+   info_                   VARCHAR2(32000);
+   attr_                   VARCHAR2(32000);
+BEGIN
+   Client_SYS.Clear_Attr(attr_);
+   Client_SYS.Add_To_Attr('CATALOG_NO',                  part_no_,            attr_);
+   Client_SYS.Add_To_Attr('CONTRACT',                    site_,               attr_);
+   Client_SYS.Add_To_Attr('CATALOG_DESC',                description_,        attr_);
+   Client_SYS.Add_To_Attr('CATALOG_TYPE',                Sales_Part_Type_API.Decode(sales_part_type_),   attr_);
+   Client_SYS.Add_To_Attr('SALES_UNIT_MEAS',             sales_uom_,          attr_);
+   Client_SYS.Add_To_Attr('PRICE_UNIT_MEAS',             price_uom_,          attr_);
+   Client_SYS.Add_To_Attr('PRICE_CONV_FACTOR',           price_conv_fact_,    attr_);
+   
+   IF sales_part_type_ = 'INV' THEN
+      Client_SYS.Add_To_Attr('PART_NO',                  inventory_part_no_,  attr_);
+      Client_SYS.Add_To_Attr('PART_DESCRIPTION',         description_,        attr_);
+      Client_SYS.Add_To_Attr('UNIT_MEAS',                unit_of_measure_,    attr_);
+      Client_SYS.Add_To_Attr('CONV_FACTOR',              conversion_fact_,    attr_);
+      Client_SYS.Add_To_Attr('INVERTED_CONV_FACTOR',     invert_conv_fact_,   attr_);
+      Client_SYS.Add_To_Attr('SOURCING_OPTION_DB',       'INVENTORYORDER',    attr_);
+      IF create_pur_part_ THEN
+         Client_SYS.Add_To_Attr('CREATE_PURCHASE_PART',     'TRUE',              attr_);
+      ELSE
+         Client_SYS.Add_To_Attr('CREATE_PURCHASE_PART',     'FALSE',             attr_);
+      END IF;
+   END IF;
+   
+   Client_SYS.Add_To_Attr('CATALOG_GROUP',               sales_group_,        attr_);
+   Client_SYS.Add_To_Attr('SALES_PRICE_GROUP_ID',        sales_price_group_,  attr_);
+   Client_SYS.Add_To_Attr('DISCOUNT_GROUP',              discount_group_,     attr_);
+   Client_SYS.Add_To_Attr('SALES_PART_REBATE_GROUP',     rebate_group_,       attr_);
+   
+   IF sales_part_type_ != 'PKG' THEN
+      Client_SYS.Add_To_Attr('COST',                     cost_,               attr_);
+   END IF;
+   
+   Client_SYS.Add_To_Attr('LIST_PRICE',                  price_,              attr_);
+   IF ( tax_code_ IS NOT NULL )THEN
+      Client_SYS.Add_To_Attr('TAX_CODE',                 tax_code_,           attr_);
+   ELSE
+      Client_SYS.Add_To_Attr('TAX_CLASS_ID',             tax_class_,          attr_);
+   END IF; 
+   Client_SYS.Add_To_Attr('LIST_PRICE_INCL_TAX',         price_inc_tax_,      attr_);
+   IF taxable_ THEN
+      Client_SYS.Add_To_Attr('TAXABLE_DB',               'TRUE',              attr_);
+   ELSE
+      Client_SYS.Add_To_Attr('TAXABLE_DB',               'FALSE',             attr_);
+   END IF;
+   IF use_price_inc_tax_ THEN
+      Client_SYS.Add_To_Attr('USE_PRICE_INCL_TAX_DB',    'TRUE',              attr_);
+   ELSE
+      Client_SYS.Add_To_Attr('USE_PRICE_INCL_TAX_DB',    'FALSE',             attr_);
+   END IF;
+   Client_SYS.Add_To_Attr('QUICK_REGISTERED_PART_DB',    'TRUE',              attr_);
+   
+   
+   Sales_Part_API.Register_Sales_Part__(info_, attr_);
+   
+   IF source_ = 'OpportunityLine' THEN
+      $IF Component_Crm_SYS.INSTALLED $THEN
+         Business_Opportunity_Line_API.Replace_Using_Registereed_Part(source_ref1_, source_ref3_, site_, part_no_);
+      $ELSE
+         NULL;
+      $END
+   END IF;
+   IF (source_ = 'Estimate') THEN
+      $IF Component_Estman_SYS.INSTALLED $THEN
+         Estimate_Deliverable_Api.Update_Deliverable_Line(estimate_id_,estimate_revision_no_,estimate_cost_version_,node_id_,part_no_,site_);
+      $ELSE
+         NULL;
+      $END
+   END IF;
+   
+END Register_Sales_Part___;
+
+FUNCTION Get_Default_Values_For_Estimate___ (
+	estimate_id_            IN NUMBER,
+	estimate_revision_no_   IN NUMBER,
+	node_id_                IN NUMBER,
+	estimate_cost_version_  IN NUMBER,
+	customer_no_            IN VARCHAR2) RETURN Reg_Sales_Part_Defaults_Structure_Rec
+IS
+   return_val_             Reg_Sales_Part_Defaults_Structure_Rec;
+BEGIN
+   ---
+   $IF Component_Estman_SYS.INSTALLED $THEN
+      Estimate_Deliverable_Api.Get_Sales_Part_Defaults(  return_val_.sales_part_type,
+                                                         return_val_.part_no,
+                                                         return_val_.description,
+                                                         return_val_.site,
+                                                         return_val_.est_deliverable_site,
+                                                         return_val_.sales_uom ,
+                                                         return_val_.price_uom,
+                                                         return_val_.price_conv_fact,
+                                                         return_val_.price,
+                                                         return_val_.cost,
+                                                         return_val_.company,
+                                                         return_val_.component_type,
+                                                         return_val_.currency_code,
+                                                         return_val_.taxable,
+                                                         return_val_.tax_code,
+                                                         return_val_.tax_rate ,
+                                                         return_val_.use_price_inc_tax,
+                                                         return_val_.price_inc_tax,
+                                                         return_val_.inventory_part_no,
+                                                         return_val_.unit_of_measure,
+                                                         return_val_.conversion_fact,
+                                                         return_val_.invert_conv_fact,   
+                                                         return_val_.transferred,
+                                                         estimate_id_,
+                                                         estimate_revision_no_,
+                                                         node_id_,
+                                                         estimate_cost_version_,
+                                                         customer_no_);     
+      RETURN return_val_;                                                   
+   $ELSE
+      NULL;
+   $END  
+
+   ---
+END Get_Default_Values_For_Estimate___;
+
+
+FUNCTION Get_Estimate_Transfer_Details___ (
+	estimate_id_          IN NUMBER,
+	estimate_revision_no_ IN NUMBER,
+	node_id_              IN NUMBER) RETURN Est_Transfer_Status_Struct_Rec
+IS
+   return_val_         Est_Transfer_Status_Struct_Rec;
+BEGIN
+    $IF Component_Estman_SYS.INSTALLED $THEN
+      Estimate_Deliverable_Api.Get_Est_Transfer_Details( return_val_.transferred,
+                                                         return_val_.inventory_part_no, 
+                                                         estimate_id_,
+                                                         estimate_revision_no_, 
+                                                         node_id_);
+      IF (return_val_.transferred IS NULL) THEN 
+         return_val_.inventory_part_no := Estimate_Node_API.Get_Displaytext(estimate_id_, estimate_revision_no_, node_id_); 
+      END IF;
+      RETURN return_val_;
+   $ELSE
+      NULL;
+   $END
+END Get_Estimate_Transfer_Details___;
+

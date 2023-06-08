@@ -1,0 +1,768 @@
+---------------------------------------------------------------------------------------------------------
+--
+--  Logical unit: NewPartAssistantHandling
+--  Component:    PARTCA
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  --------------------------------------------------------------------------------------
+--  2019-04-06  AwWelk  SCUXXW4-18857, Corrected the upgrade error. Framework issue reported SCUXXW4-18899.
+--  2019-01-23  AwWelk  SCUXXW4-1699, Created to handled the New Part Wizard functionality in IFSEE.
+-----------------------------------------------------------------------------------------------------------
+
+layer Core;
+
+PROCEDURE Create_Master_Part___ (
+   part_no_                    IN VARCHAR2,
+   description_                IN VARCHAR2,
+   unit_code_                  IN VARCHAR2,
+   eng_serial_tracking_code_   IN VARCHAR2,
+   serial_tracking_code_       IN VARCHAR2,
+   configurable_               IN VARCHAR2,
+   condition_code_usage_       IN VARCHAR2,
+   lot_tracking_code_          IN VARCHAR2,
+   catch_unit_enabled_         IN BOOLEAN,
+   multilevel_tracking_        IN VARCHAR2,
+   gtin_                       IN VARCHAR2,
+   gtin_series_                IN VARCHAR2,
+   receipt_issue_serial_track_ IN BOOLEAN )
+IS
+BEGIN
+   IF (NOT Part_Catalog_API.Exists(part_no_)) THEN  
+      Part_Catalog_API.Create_Part(part_no_                       => part_no_, 
+                                   description_                   => description_, 
+                                   unit_code_                     => unit_code_, 
+                                   std_name_id_                   => NULL, 
+                                   info_text_                     => NULL, 
+                                   eng_serial_tracking_code_      => Part_Serial_Tracking_API.Decode(eng_serial_tracking_code_), 
+                                   serial_tracking_code_          => Part_Serial_Tracking_API.Decode(serial_tracking_code_), 
+                                   configurable_db_               => configurable_, 
+                                   condition_code_usage_db_       => condition_code_usage_, 
+                                   lot_tracking_code_db_          => lot_tracking_code_, 
+                                   catch_unit_enabled_db_         => CASE catch_unit_enabled_ WHEN TRUE THEN 'TRUE' ELSE 'FALSE' END, 
+                                   multilevel_tracking_db_        => multilevel_tracking_, 
+                                   gtin_no_                       => gtin_, 
+                                   gtin_series_db_                => gtin_series_, 
+                                   receipt_issue_serial_track_db_ => CASE receipt_issue_serial_track_ WHEN TRUE THEN 'TRUE' ELSE 'FALSE' END);
+   END IF; 
+END Create_Master_Part___;
+
+
+@Override
+PROCEDURE CRUD_Default___ (
+   rec_ IN OUT New_Part_Assistant_Virtual_Rec )
+IS
+BEGIN
+   -- Wizard elements default flags
+   Get_Wizard_Flags_Defaults____(rec_);
+   
+   -- User Default Site
+   $IF Component_Mpccom_SYS.INSTALLED $THEN
+      rec_.contract := User_Allowed_Site_API.Get_Default_Site;   
+      $IF Component_Accrul_SYS.INSTALLED $THEN
+         rec_.company := Site_API.Get_Company(rec_.contract);
+         rec_.company_currency_code := Company_Finance_API.Get_Currency_Code(rec_.company);
+      $END 
+      $IF Component_Invent_SYS.INSTALLED $THEN
+         IF  (Site_Invent_Info_API.Get_Use_Partca_Desc_Invent_Db(rec_.contract) = 'TRUE') THEN
+            rec_.use_part_catalog_description := TRUE;
+         END IF;
+      $END   
+   $END 
+   $IF Component_Rental_SYS.INSTALLED $THEN
+      rec_.rental_installed := 'TRUE';
+   $ELSE
+      rec_.rental_installed := 'FALSE';
+   $END 
+   -- Part Catalog Defaults 
+   Get_Partcatalog_Defaults___(rec_);
+   -- Inventory Part Defaults
+   Get_Inventory_Part_Defaults___(rec_);
+   super(rec_);
+   
+END CRUD_Default___;
+
+@Override
+PROCEDURE CRUD_Update___(
+   old_ IN New_Part_Assistant_Virtual_Rec,
+   new_ IN New_Part_Assistant_Virtual_Rec )
+IS
+   rec_  New_Part_Assistant_Virtual_Rec;
+BEGIN
+   rec_ := new_;
+   IF Validate_SYS.Is_Changed(old_.part_type, rec_.part_type) THEN 
+      Handle_Wizard_Optional_Step_Flags___(rec_);
+   END IF;
+   IF (Validate_SYS.Is_Changed(old_.lot_tracking_code, new_.lot_tracking_code)
+       OR (old_.receipt_issue_serial_track != new_.receipt_issue_serial_track)
+       OR Validate_SYS.Is_Changed(old_.serial_tracking_code, new_.serial_tracking_code))THEN 
+      IF  (Validate_SYS.Is_Changed(old_.serial_tracking_code, new_.serial_tracking_code)
+           AND (new_.serial_tracking_code = 'SERIAL TRACKING')) THEN
+         rec_.receipt_issue_serial_track := TRUE;
+         rec_.eng_serial_tracking_code := 'SERIAL TRACKING';
+      END IF;
+      IF rec_.receipt_issue_serial_track THEN 
+         rec_.eng_serial_tracking_code := 'SERIAL TRACKING';
+      END IF;
+      
+      Set_Multi_Level_Tracking___(rec_);
+   END IF;
+   $IF Component_Mpccom_SYS.INSTALLED AND Component_Accrul_SYS.INSTALLED $THEN
+      IF Validate_SYS.Is_Changed(old_.contract, rec_.contract) THEN 
+         IF rec_.contract IS NOT NULL THEN  
+            rec_.company := Site_API.Get_Company(rec_.contract);
+            rec_.company_currency_code := Company_Finance_API.Get_Currency_Code(rec_.company);
+            $IF Component_Invent_SYS.INSTALLED $THEN
+               IF  (Site_Invent_Info_API.Get_Use_Partca_Desc_Invent_Db(rec_.contract) = 'TRUE') THEN
+                  rec_.use_part_catalog_description := TRUE;
+               ELSE 
+                  rec_.use_part_catalog_description := FALSE;
+               END IF;
+            $END   
+         ELSE 
+            rec_.company_currency_code := NULL;
+         END IF;
+      END IF;
+   $END 
+   
+   $IF Component_Order_SYS.INSTALLED $THEN
+      IF (rec_.part_no IS NOT NULL) AND (rec_.contract IS NOT NULL) AND (rec_.part_type IS NOT NULL) THEN 
+         IF (Validate_SYS.Is_Changed(old_.catalog_type, rec_.catalog_type)  
+             OR Validate_SYS.Is_Changed(old_.contract, rec_.contract)
+             OR Validate_SYS.Is_Changed(old_.part_no, rec_.part_no)
+             OR Validate_SYS.Is_Changed(old_.catalog_no, rec_.catalog_no)) 
+            AND rec_.part_type IN ('PURCHASED_INVENTORY_SALES_PART', 'NON_INVENTORY_SALES_PART') THEN      
+            Get_Sales_Part_Defaults___(rec_, 
+                                       CASE rec_.part_type 
+                                       WHEN 'PURCHASED_INVENTORY_SALES_PART' THEN 
+                                       'INV' 
+                                       ELSE 
+                                       'NON' 
+                                       END,
+                                       rec_.contract,
+                                       rec_.part_no,
+                                       rec_.catalog_no);
+         END IF;   
+      END IF;
+     
+  
+      IF (Validate_SYS.Is_Changed(old_.tax_code, rec_.tax_code)) OR (old_.sales_taxable != rec_.sales_taxable) THEN
+         Calculate_Sales_List_Prices___(rec_);
+      ELSIF(Validate_SYS.Is_Changed(old_.sales_list_price_incl_tax, rec_.sales_list_price_incl_tax)) THEN 
+         Calculate_Sales_List_Price___(rec_);
+      ELSIF(Validate_SYS.Is_Changed(old_.sales_rental_list_price_incl_tax, rec_.sales_rental_list_price_incl_tax)) THEN 
+         Calculate_Sales_Rental_List_Price___(rec_);
+      ELSIF(Validate_SYS.Is_Changed(old_.sales_list_price, rec_.sales_list_price)) THEN
+         Calculate_Sales_List_Price_Including_Tax___(rec_);
+      ELSIF (Validate_SYS.Is_Changed(old_.sales_rental_list_price, rec_.sales_rental_list_price)) THEN
+         Calculate_Sales_Rental_List_Price_Including_Tax___(rec_);
+      END IF;
+      
+      IF (Validate_SYS.Is_Changed(old_.sales_type, rec_.sales_type)) THEN 
+         IF rec_.sales_type = 'SALES' THEN
+            rec_.sales_list_price := NULL;
+            rec_.sales_list_price_incl_tax := NULL;
+            rec_.sales_rental_list_price := 0;
+            rec_.sales_rental_list_price_incl_tax := 0;
+            rec_.sales_cost := 0;
+         ELSIF (rec_.sales_type = 'RENTAL') THEN
+            rec_.sales_list_price := 0;
+            rec_.sales_list_price_incl_tax := 0;
+            rec_.sales_rental_list_price := NULL;
+            rec_.sales_rental_list_price_incl_tax := NULL;
+            rec_.sales_cost := 0;
+         ELSE
+            rec_.sales_list_price := NULL;
+            rec_.sales_list_price_incl_tax := NULL;
+            rec_.sales_rental_list_price := NULL;
+            rec_.sales_rental_list_price_incl_tax := NULL;
+            rec_.sales_cost := 0;
+         END IF;
+      END IF;
+      
+      IF Validate_SYS.Is_Changed(old_.inventory_unit_meas, rec_.inventory_unit_meas) THEN 
+         rec_.sales_unit_meas := rec_.inventory_unit_meas;
+      END IF;
+      
+      IF Validate_SYS.Is_Changed(old_.sales_unit_meas, rec_.sales_unit_meas) AND NOT (rec_.sales_unit_meas IS NULL) THEN 
+         rec_.sales_price_unit_meas := rec_.sales_unit_meas;
+      END IF;
+      
+      IF Validate_SYS.Is_Changed(old_.sales_price_unit_meas, rec_.sales_price_unit_meas) 
+         OR (Validate_SYS.Is_Changed(old_.sales_unit_meas, rec_.sales_unit_meas) AND NOT (rec_.sales_unit_meas IS NULL)) THEN 
+         rec_.sales_price_conv_factor := Technical_Unit_Conv_API.Get_Valid_Conv_Factor(rec_.sales_unit_meas, rec_.sales_price_unit_meas);
+      END IF;
+   $END 
+   
+   $IF Component_Purch_SYS.INSTALLED $THEN
+      IF (rec_.part_no IS NOT NULL) AND (rec_.contract IS NOT NULL) AND (rec_.part_type IN ('PURCHASED_INVENTORY_PART', 'PURCHASED_INVENTORY_SALES_PART', 'PURCHASED_NON_INVENTORY_PART')) THEN 
+         IF Validate_SYS.Is_Changed(old_.contract, rec_.contract) 
+            OR Validate_SYS.Is_Changed(old_.part_no, rec_.part_no)
+            OR Validate_SYS.Is_Changed(old_.part_type, rec_.part_type) THEN 
+            -- Purchase Part Defaults
+            Get_Purch_Part_Defaults___(rec_);  
+            -- Purchase Part Supplier Defautls
+            Get_Purch_Part_Sup_Defaults___(rec_);       
+            rec_.is_inventory_part := Purchase_Part_API.Is_Inventory_Part(rec_.contract, rec_.part_no);   
+         END IF;       
+      END IF;
+      IF (rec_.purchase_part_exist OR rec_.purchase_part_created) AND rec_.acquisition_type IS NULL THEN 
+         rec_.acquisition_type  := Purchase_Part_API.Get_Acquisition_Type_Db(rec_.contract, rec_.part_no);
+      END IF;
+      
+      IF (Validate_SYS.Is_Changed(old_.vendor_no, rec_.vendor_no)) THEN 
+         rec_.buy_unit_meas          := Purchase_Part_Supplier_API.Get_Default_Buy_Unit_Meas(rec_.contract, rec_.part_no, rec_.vendor_no);
+         rec_.supplier_currency_code := Supplier_API.Get_Currency_Code(rec_.vendor_no); 
+         rec_.purch_currency_code    := rec_.supplier_currency_code;
+         rec_.vat_code               := Tax_Handling_Purch_Util_API.Get_Tax_Info_For_Purch_Object(rec_.contract, rec_.vendor_no, rec_.part_no, 'PURCHASE_PART');
+         rec_.taxable_db             := Purchase_Part_API.Get_Taxable_Db(rec_.contract, rec_.part_no);
+         rec_.supplier_taxable       := Tax_Handling_Purch_Util_API.Supplier_Is_Taxable(rec_.company, rec_.vendor_no); 
+         
+         IF rec_.taxable_db = 'TRUE' THEN
+            rec_.purch_taxable := TRUE;  
+            IF NOT rec_.use_price_including_tax_purch_changed THEN 
+               rec_.use_price_including_tax_purch := CASE Site_Discom_Info_API.Get_Use_Price_Incl_Tax_Pur_Db(rec_.contract) WHEN 'TRUE' THEN TRUE ELSE FALSE END;
+            END IF;
+         ELSE 
+            rec_.use_price_including_tax_purch := FALSE; 
+         END IF;
+         
+         IF (rec_.taxable_db = 'FALSE') THEN
+            rec_.tax_percentage := 0;
+            rec_.fee_code := NULL;
+         ELSIF (rec_.supplier_taxable = 'FALSE') THEN 
+            rec_.tax_percentage := 0;
+         END IF;
+         
+         IF (NOT rec_.vat_code IS NULL) AND (rec_.taxable_db = 'TRUE') AND (rec_.fee_code IS NULL)THEN
+            rec_.fee_code := rec_.vat_code;
+            Get_Tax_Percentage_Info___(rec_);
+         END IF;             
+      END IF;
+      
+      IF (Validate_SYS.Is_Changed(old_.buy_unit_meas, rec_.buy_unit_meas)) THEN 
+         rec_.inventory_unit_meas := Inventory_Part_API.Get_Unit_Meas(rec_.contract, rec_.part_no);
+         rec_.purch_conv_factor := Technical_Unit_Conv_API.Get_Valid_Conv_Factor(rec_.buy_unit_meas, rec_.inventory_unit_meas);
+         IF rec_.purch_conv_factor IS NULL THEN 
+            IF rec_.inventory_unit_meas IS NULL THEN
+               rec_.purch_conv_factor := 1;
+            ELSE
+               rec_.purch_conv_factor := NULL;
+            END IF;
+         END IF;
+         rec_.purch_price_unit_meas := rec_.buy_unit_meas;
+      END IF;
+      
+      IF (old_.use_price_including_tax_purch != rec_.use_price_including_tax_purch) THEN 
+         rec_.use_price_including_tax_purch_changed := TRUE;
+      END IF;
+      
+      IF (Validate_SYS.Is_Changed(old_.acquisition_type, rec_.acquisition_type)) THEN          
+         IF (rec_.acquisition_type = 'PURCHASE') THEN 
+            rec_.purch_list_price := NULL;
+            rec_.purch_list_price_incl_tax := NULL;
+            rec_.purch_rental_list_price := 0;
+            rec_.purch_rental_list_price_incl_tax := 0;
+         ELSIF (rec_.acquisition_type = 'RENTAL') THEN 
+            rec_.purch_list_price := 0;
+            rec_.purch_list_price_incl_tax := 0;
+            rec_.purch_rental_list_price := NULL;
+            rec_.purch_rental_list_price_incl_tax := NULL;
+         ELSE
+            rec_.purch_list_price := NULL;
+            rec_.purch_list_price_incl_tax := NULL;
+            rec_.purch_rental_list_price := NULL;
+            rec_.purch_rental_list_price_incl_tax := NULL;
+         END IF;
+      END IF;
+      
+      IF (Validate_SYS.Is_Changed(old_.fee_code, rec_.fee_code)) THEN 
+         rec_.tax_percentage := Get_Tax_Percentage___(rec_.company, rec_.fee_code);
+      END IF;
+      
+      IF (Validate_SYS.Is_Changed(old_.purch_list_price, rec_.purch_list_price) OR 
+          Validate_SYS.Is_Changed(old_.purch_list_price_incl_tax, rec_.purch_list_price_incl_tax) OR 
+          Validate_SYS.Is_Changed(old_.fee_code, rec_.fee_code)) THEN   
+         Calculate_Purch_List_Price___(rec_);
+      END IF;
+      
+      IF (Validate_SYS.Is_Changed(old_.purch_rental_list_price, rec_.purch_rental_list_price) OR 
+          Validate_SYS.Is_Changed(old_.purch_rental_list_price_incl_tax, rec_.purch_rental_list_price_incl_tax) OR 
+          Validate_SYS.Is_Changed(old_.fee_code, rec_.fee_code)) THEN  
+         Calculate_Purch_Rental_List_Price___(rec_);
+      END IF;
+      
+      IF (Validate_SYS.Is_Changed(old_.additional_cost_amount, rec_.additional_cost_amount) OR 
+          Validate_SYS.Is_Changed(old_.additional_cost_incl_tax, rec_.additional_cost_incl_tax) OR 
+          Validate_SYS.Is_Changed(old_.fee_code, rec_.fee_code)) THEN  
+         Calculate_Additional_Cost___(rec_);
+      END IF;
+      
+      IF (Validate_SYS.Is_Changed(old_.purch_price_unit_meas, rec_.purch_price_unit_meas)) THEN 
+         rec_.purch_price_conv_factor := Technical_Unit_Conv_API.Get_Valid_Conv_Factor(rec_.purch_price_unit_meas, rec_.buy_unit_meas);
+      END IF;    
+   $END 
+   
+   super(old_, rec_);
+END CRUD_Update___;
+
+PROCEDURE Calculate_Sales_Rental_List_Price_Including_Tax___(
+   rec_ IN OUT New_Part_Assistant_Virtual_Rec)
+IS 
+   tax_percentage_ NUMBER := 0;
+BEGIN 
+   IF rec_.sales_taxable AND rec_.tax_code IS NOT NULL THEN 
+      tax_percentage_ := Get_Tax_Percentage___(rec_.company, rec_.tax_code);
+      rec_.sales_rental_list_price_incl_tax := rec_.sales_rental_list_price * ((tax_percentage_/100) + 1);
+   ELSE 
+      rec_.sales_rental_list_price_incl_tax := rec_.sales_rental_list_price;
+   END IF;
+END Calculate_Sales_Rental_List_Price_Including_Tax___;
+
+PROCEDURE Calculate_Sales_List_Price_Including_Tax___(
+   rec_ IN OUT New_Part_Assistant_Virtual_Rec)
+IS 
+   tax_percentage_ NUMBER := 0;
+BEGIN 
+   IF rec_.sales_taxable AND rec_.tax_code IS NOT NULL THEN 
+      tax_percentage_ := Get_Tax_Percentage___(rec_.company, rec_.tax_code);
+      rec_.sales_list_price_incl_tax := rec_.sales_list_price * ((tax_percentage_/100) + 1);
+   ELSE 
+      rec_.sales_list_price_incl_tax := rec_.sales_list_price;
+   END IF;
+END Calculate_Sales_List_Price_Including_Tax___;
+
+PROCEDURE Calculate_Sales_Rental_List_Price___(
+   rec_ IN OUT New_Part_Assistant_Virtual_Rec)
+IS 
+   tax_percentage_ NUMBER := 0;
+BEGIN
+   IF (rec_.sales_rental_list_price_incl_tax IS NULL) THEN 
+      rec_.sales_rental_list_price := 0;
+   ELSE 
+      IF (rec_.sales_taxable AND rec_.tax_code IS NOT NULL) THEN
+         tax_percentage_ := Get_Tax_Percentage___(rec_.company, rec_.tax_code);
+         rec_.sales_rental_list_price := rec_.sales_rental_list_price_incl_tax/ ((tax_percentage_/100) + 1);
+      ELSE 
+         rec_.sales_rental_list_price :=  rec_.sales_rental_list_price_incl_tax;
+      END IF;
+   END IF;
+END Calculate_Sales_Rental_List_Price___;
+
+PROCEDURE Calculate_Sales_List_Price___(
+   rec_ IN OUT New_Part_Assistant_Virtual_Rec)
+IS 
+   tax_percentage_ NUMBER := 0;
+BEGIN
+   IF (rec_.sales_list_price_incl_tax IS NULL) THEN 
+      rec_.sales_list_price := 0;
+   ELSE 
+      IF (rec_.sales_taxable AND rec_.tax_code IS NOT NULL) THEN
+         tax_percentage_ := Get_Tax_Percentage___(rec_.company, rec_.tax_code);
+         rec_.sales_list_price := rec_.sales_list_price_incl_tax/ ((tax_percentage_/100) + 1);
+      ELSE 
+         rec_.sales_list_price :=  rec_.sales_list_price_incl_tax;
+      END IF;
+   END IF;
+END Calculate_Sales_List_Price___;
+
+
+PROCEDURE Calculate_Sales_List_Prices___(
+   rec_ IN OUT New_Part_Assistant_Virtual_Rec)
+IS 
+BEGIN 
+   IF rec_.use_price_including_tax_order THEN 
+      Calculate_Sales_List_Price___(rec_);
+      Calculate_Sales_Rental_List_Price___(rec_);
+   ELSE 
+      Calculate_Sales_List_Price_Including_Tax___(rec_);
+      Calculate_Sales_Rental_List_Price_Including_Tax___(rec_);
+   END IF;
+END Calculate_Sales_List_Prices___;
+
+FUNCTION Get_Tax_Percentage___(
+   company_  IN VARCHAR2,
+   tax_code_ IN VARCHAR2) RETURN NUMBER
+IS 
+   tax_percentage_ NUMBER := 0;
+BEGIN 
+   $IF Component_Accrul_SYS.INSTALLED $THEN
+      tax_percentage_ := Statutory_Fee_API.Get_Fee_Rate(company_, tax_code_);
+   $END 
+   RETURN tax_percentage_;
+END Get_Tax_Percentage___;
+
+PROCEDURE Get_Partcatalog_Defaults___(
+   rec_ IN OUT New_Part_Assistant_Virtual_Rec )
+IS
+   attr_    VARCHAR2(32000);
+   dummy_   VARCHAR2(32000);
+   ptr_     NUMBER;
+   name_    VARCHAR2(30);
+   value_   VARCHAR2(32000);
+BEGIN
+   Client_SYS.Clear_Attr(attr_);
+   Part_Catalog_API.New__(dummy_, dummy_, dummy_, attr_, 'PREPARE');
+   
+   ptr_ := NULL;
+   WHILE (Client_SYS.Get_Next_From_Attr(attr_, ptr_, name_, value_)) LOOP
+      CASE name_
+         WHEN ('RECEIPT_ISSUE_SERIAL_TRACK_DB') THEN
+            rec_.receipt_issue_serial_track := CASE value_ WHEN 'TRUE' THEN TRUE ELSE FALSE END;
+         WHEN ('SERIAL_TRACKING_CODE_DB') THEN
+            rec_.serial_tracking_code := value_;
+         WHEN ('ENG_SERIAL_TRACKING_CODE_DB') THEN
+            rec_.eng_serial_tracking_code := value_;
+         WHEN ('LOT_TRACKING_CODE') THEN
+            rec_.lot_tracking_code := Part_Lot_Tracking_API.Encode(value_);
+         WHEN ('CONDITION_CODE_USAGE_DB') THEN
+            rec_.condition_code_usage := value_;
+         WHEN ('CONFIGURABLE_DB') THEN
+            rec_.configurable := value_;
+         WHEN ('CATCH_UNIT_ENABLED_DB') THEN
+            rec_.catch_unit_enabled := CASE value_ WHEN 'TRUE' THEN TRUE ELSE FALSE END;
+         WHEN ('MULTILEVEL_TRACKING_DB') THEN
+            rec_.multilevel_tracking := value_;
+         WHEN ('MULTILEVEL_TRACKING_DB') THEN
+            rec_.multilevel_tracking := value_;
+         ELSE 
+            NULL;
+      END CASE;
+   END LOOP;
+   
+   -- Part Catalog Related Client Control Logic
+   rec_.gtin_validated := TRUE;
+   
+END Get_Partcatalog_Defaults___;
+
+PROCEDURE Get_Inventory_Part_Defaults___(
+   rec_ IN OUT New_Part_Assistant_Virtual_Rec )
+IS
+   attr_    VARCHAR2(32000);
+   dummy_   VARCHAR2(32000);
+   ptr_     NUMBER;
+   name_    VARCHAR2(30);
+   value_   VARCHAR2(32000);
+BEGIN
+   Client_SYS.Clear_Attr(attr_);
+   $IF Component_Invent_SYS.INSTALLED $THEN
+      Inventory_Part_API.New__(dummy_, dummy_, dummy_, attr_, 'PREPARE');
+      
+      ptr_ := NULL;
+      WHILE (Client_SYS.Get_Next_From_Attr(attr_, ptr_, name_, value_)) LOOP
+         CASE name_
+            WHEN ('PLANNER_BUYER') THEN
+               rec_.planner_buyer := value_;
+            WHEN ('TYPE_CODE') THEN
+               rec_.type_code := Inventory_Part_Type_API.Encode(value_);
+            WHEN ('ESTIMATED_MATERIAL_COST') THEN
+               rec_.estimated_material_cost := value_;
+            WHEN ('ZERO_COST_FLAG') THEN
+               rec_.zero_cost_level := Inventory_Part_Zero_Cost_API.Encode(value_);
+            ELSE 
+               NULL;
+         END CASE;
+      END LOOP; 
+      rec_.negative_on_hand_allowed := Negative_On_Hand_API.DB_NEGATIV_ON_HAND_NOT_ALLOWED;
+   $END 
+END Get_Inventory_Part_Defaults___;
+
+PROCEDURE Get_Purch_Part_Defaults___(
+   rec_ IN OUT New_Part_Assistant_Virtual_Rec )
+IS
+   attr_    VARCHAR2(32000);
+   dummy_   VARCHAR2(32000);
+   ptr_     NUMBER;
+   name_    VARCHAR2(30);
+   value_   VARCHAR2(32000);
+BEGIN
+   Client_SYS.Clear_Attr(attr_);
+   $IF Component_Purch_SYS.INSTALLED $THEN
+      Purchase_Part_API.New__(dummy_, dummy_, dummy_, attr_, 'PREPARE');
+      
+      ptr_ := NULL;
+      WHILE (Client_SYS.Get_Next_From_Attr(attr_, ptr_, name_, value_)) LOOP
+         CASE name_
+         WHEN ('BUYER_CODE') THEN
+            rec_.buyer_code := value_;
+         WHEN ('TAXABLE_DB') THEN
+            rec_.purch_taxable := CASE value_ WHEN 'TRUE' THEN TRUE ELSE FALSE END;
+         ELSE 
+            NULL;
+         END CASE;
+      END LOOP; 
+   $END 
+END Get_Purch_Part_Defaults___;
+
+PROCEDURE Get_Purch_Part_Sup_Defaults___(
+   rec_ IN OUT New_Part_Assistant_Virtual_Rec )
+IS
+   attr_    VARCHAR2(32000);
+   dummy_   VARCHAR2(32000);
+   ptr_     NUMBER;
+   name_    VARCHAR2(30);
+   value_   VARCHAR2(32000);
+BEGIN
+   Client_SYS.Clear_Attr(attr_);
+   $IF Component_Purch_SYS.INSTALLED $THEN
+      Purchase_Part_Supplier_API.New__(dummy_, dummy_, dummy_, attr_, 'PREPARE');
+      
+      ptr_ := NULL;
+      WHILE (Client_SYS.Get_Next_From_Attr(attr_, ptr_, name_, value_)) LOOP
+         CASE name_
+            WHEN ('CONV_FACTOR') THEN
+               rec_.purch_conv_factor := value_;
+            WHEN ('PRICE_CONV_FACTOR') THEN
+               rec_.purch_price_conv_factor := value_;
+            WHEN ('DISCOUNT') THEN
+               rec_.discount := value_;
+            WHEN ('ADDITIONAL_COST_AMOUNT') THEN
+               rec_.additional_cost_amount := value_;
+            WHEN ('ADDITIONAL_COST_INCL_TAX') THEN
+               rec_.additional_cost_incl_tax := value_;
+            WHEN ('USE_PRICE_INCL_TAX_DB') THEN 
+               rec_.use_price_including_tax_purch := CASE value_ WHEN 'TRUE' THEN TRUE ELSE FALSE END;
+            ELSE 
+               NULL;
+         END CASE;
+      END LOOP; 
+      rec_.acquisition_type := Acquisition_Type_API.DB_PURCHASE_ONLY;
+   $END 
+END Get_Purch_Part_Sup_Defaults___;
+
+
+PROCEDURE Get_Sales_Part_Defaults___(
+   rec_          IN OUT New_Part_Assistant_Virtual_Rec,
+   catalog_type_ IN     VARCHAR2,
+   contract_     IN     VARCHAR2,
+   part_no_      IN     VARCHAR2,
+   catalog_no_   IN     VARCHAR2)
+IS
+   attr_    VARCHAR2(32000);
+   dummy_   VARCHAR2(32000);
+   ptr_     NUMBER;
+   name_    VARCHAR2(30);
+   value_   VARCHAR2(32000);
+BEGIN
+   Client_SYS.Clear_Attr(attr_);
+   $IF Component_Order_SYS.INSTALLED $THEN
+      Client_SYS.Add_To_Attr('CATALOG_TYPE_DB', catalog_type_, attr_);
+      Client_SYS.Add_To_Attr('CONTRACT', contract_, attr_);
+      Client_SYS.Add_To_Attr('PART_NO', part_no_, attr_);
+      Client_SYS.Add_To_Attr('CATALOG_NO', part_no_, attr_);
+      Sales_Part_API.New__(dummy_, dummy_, dummy_, attr_, 'PREPARE');
+      
+      ptr_ := NULL;
+      WHILE (Client_SYS.Get_Next_From_Attr(attr_, ptr_, name_, value_)) LOOP
+         CASE name_    
+            WHEN ('SALES_TYPE') THEN
+               rec_.sales_type := Sales_Type_API.Encode(value_);
+            WHEN ('NON_INV_PART_TYPE') THEN
+               rec_.non_inv_part_type := Non_Inventory_Part_Type_API.Encode(value_);
+            WHEN ('SOURCING_OPTION') THEN
+               rec_.sourcing_option := Sourcing_Option_API.Encode(value_);
+            WHEN ('CONV_FACTOR') THEN
+               rec_.sales_conv_factor := value_;
+            WHEN ('PRICE_CONV_FACTOR') THEN
+               rec_.sales_price_conv_factor := value_;
+            WHEN ('INVERTED_CONV_FACTOR') THEN
+               rec_.inverted_conv_factor := value_;
+            WHEN ('RENTAL_LIST_PRICE') THEN
+               rec_.sales_rental_list_price := value_;
+            WHEN ('RENTAL_LIST_PRICE_INCL_TAX') THEN
+               rec_.sales_rental_list_price_incl_tax := value_;
+            WHEN ('TAX_CODE') THEN
+               rec_.tax_code := value_;
+            WHEN ('USE_PRICE_INCL_TAX_DB') THEN
+               rec_.use_price_including_tax_order := CASE value_ WHEN 'TRUE' THEN TRUE ELSE FALSE END;
+            ELSE 
+               NULL;
+         END CASE;
+      END LOOP;  
+      
+      IF Company_Tax_Discom_Info_API.Get_Order_Taxable_Db(rec_.company) = 'TRUE' THEN 
+         rec_.sales_taxable := TRUE;
+      ELSE
+         rec_.sales_taxable := FALSE;
+      END IF;
+   $END 
+END Get_Sales_Part_Defaults___;
+
+PROCEDURE Get_Wizard_Flags_Defaults____(
+   rec_ IN OUT New_Part_Assistant_Virtual_Rec )
+IS
+BEGIN
+   rec_.is_next_command_enabled := TRUE;
+   rec_.is_finish_command_enabled := TRUE;
+   rec_.is_part_catalog_step_optional := TRUE;
+   rec_.is_inventory_step_optional := TRUE;
+   rec_.is_sales_step_optional := TRUE; 
+   rec_.is_purch_step_optional := TRUE; 
+   rec_.is_sup_purch_part_step_optional := TRUE;
+   rec_.use_part_catalog_description := FALSE;
+END Get_Wizard_Flags_Defaults____;
+
+PROCEDURE Handle_Wizard_Optional_Step_Flags___(
+   rec_ IN OUT New_Part_Assistant_Virtual_Rec )
+IS
+BEGIN
+   CASE rec_.part_type 
+      WHEN 'PURCHASED_INVENTORY_PART' THEN
+         rec_.is_part_catalog_step_optional := FALSE;
+         rec_.is_inventory_step_optional := FALSE;
+         rec_.is_sales_step_optional := TRUE; 
+         rec_.is_purch_step_optional := TRUE; 
+         rec_.is_sup_purch_part_step_optional := FALSE;
+      WHEN 'PURCHASED_INVENTORY_SALES_PART' THEN
+         rec_.is_part_catalog_step_optional := FALSE;
+         rec_.is_inventory_step_optional := FALSE;
+         rec_.is_sales_step_optional := FALSE; 
+         rec_.is_purch_step_optional := TRUE; 
+         rec_.is_sup_purch_part_step_optional := FALSE;
+      WHEN 'PURCHASED_NON_INVENTORY_PART' THEN
+         rec_.is_part_catalog_step_optional := FALSE;
+         rec_.is_inventory_step_optional := TRUE;
+         rec_.is_sales_step_optional := TRUE; 
+         rec_.is_purch_step_optional := FALSE; 
+         rec_.is_sup_purch_part_step_optional := FALSE;
+      WHEN 'NON_INVENTORY_SALES_PART' THEN
+         rec_.is_part_catalog_step_optional := FALSE;
+         rec_.is_inventory_step_optional := TRUE;
+         rec_.is_sales_step_optional := FALSE; 
+         rec_.is_purch_step_optional := TRUE; 
+         rec_.is_sup_purch_part_step_optional := TRUE;
+      ELSE
+         rec_.is_part_catalog_step_optional := TRUE;
+         rec_.is_inventory_step_optional := TRUE;
+         rec_.is_sales_step_optional := TRUE; 
+         rec_.is_purch_step_optional := TRUE;  
+         rec_.is_sup_purch_part_step_optional := TRUE;
+   END CASE;
+END Handle_Wizard_Optional_Step_Flags___;
+
+
+PROCEDURE Get_Tax_Percentage_Info___(
+   rec_ IN OUT New_Part_Assistant_Virtual_Rec )
+IS
+BEGIN
+   $IF Component_Accrul_SYS.INSTALLED $THEN
+      rec_.tax_percentage := Statutory_Fee_API.Get_Fee_Rate(rec_.company, rec_.fee_code);
+   $END
+   IF rec_.taxable_db = 'FALSE' OR rec_.supplier_taxable = 'FALSE' OR rec_.tax_percentage IS NULL THEN 
+      rec_.tax_percentage := 0;
+   END IF;
+END Get_Tax_Percentage_Info___;
+
+PROCEDURE Calculate_Purch_List_Price___(
+   rec_ IN OUT New_Part_Assistant_Virtual_Rec )
+IS
+   tax_calc_base_       VARCHAR2(20);
+   calc_prices_         BOOLEAN := TRUE;
+   list_price_          NUMBER;
+   list_price_incl_tax_ NUMBER;
+BEGIN
+   IF rec_.use_price_including_tax_purch THEN 
+      tax_calc_base_ := 'GROSS_BASE';
+      IF ((rec_.purch_list_price_incl_tax = 0) OR (rec_.taxable_db = 'FALSE') OR (rec_.supplier_taxable = 'FALSE')) THEN 
+         rec_.purch_list_price := rec_.purch_list_price_incl_tax;
+         calc_prices_ := FALSE;
+      END IF;
+   ELSE 
+      tax_calc_base_ := 'NET_BASE';
+      IF ((rec_.purch_list_price = 0) OR (rec_.taxable_db = 'FALSE') OR (rec_.supplier_taxable = 'FALSE')) THEN 
+         rec_.purch_list_price_incl_tax := rec_.purch_list_price;
+         calc_prices_ := FALSE;
+      END IF;
+   END IF;
+   
+   $IF Component_Purch_SYS.INSTALLED $THEN
+      IF calc_prices_ THEN 
+         list_price_ := rec_.purch_list_price;
+         list_price_incl_tax_ := rec_.purch_list_price_incl_tax; 
+         Tax_Handling_Purch_Util_API.Calculate_Prices(list_price_, list_price_incl_tax_, tax_calc_base_, rec_.tax_percentage);
+         rec_.purch_list_price := list_price_;
+         rec_.purch_list_price_incl_tax := list_price_incl_tax_;
+      END IF;
+   $END 
+END Calculate_Purch_List_Price___;
+
+PROCEDURE Calculate_Purch_Rental_List_Price___(
+   rec_ IN OUT New_Part_Assistant_Virtual_Rec )
+IS
+   tax_calc_base_       VARCHAR2(20);
+   calc_prices_         BOOLEAN := TRUE;
+   list_price_          NUMBER;
+   list_price_incl_tax_ NUMBER;
+BEGIN
+   IF rec_.use_price_including_tax_purch THEN 
+      tax_calc_base_ := 'GROSS_BASE';
+      IF ((rec_.purch_rental_list_price_incl_tax = 0) OR (rec_.taxable_db = 'FALSE') OR (rec_.supplier_taxable = 'FALSE')) THEN 
+         rec_.purch_rental_list_price := rec_.purch_rental_list_price_incl_tax;
+         calc_prices_ := FALSE;
+      END IF;
+   ELSE 
+      tax_calc_base_ := 'NET_BASE';
+      IF ((rec_.purch_rental_list_price = 0) OR (rec_.taxable_db = 'FALSE') OR (rec_.supplier_taxable = 'FALSE')) THEN 
+         rec_.purch_rental_list_price_incl_tax := rec_.purch_rental_list_price;
+         calc_prices_ := FALSE;
+      END IF;
+   END IF;
+   
+   $IF Component_Purch_SYS.INSTALLED $THEN
+      IF calc_prices_ THEN 
+         list_price_ := rec_.purch_rental_list_price;
+         list_price_incl_tax_ := rec_.purch_rental_list_price_incl_tax;
+         Tax_Handling_Purch_Util_API.Calculate_Prices(list_price_, list_price_incl_tax_, tax_calc_base_, rec_.tax_percentage);
+         rec_.purch_rental_list_price := list_price_;
+         rec_.purch_rental_list_price_incl_tax := list_price_incl_tax_;
+      END IF;
+   $END 
+END Calculate_Purch_Rental_List_Price___;
+
+PROCEDURE Calculate_Additional_Cost___(
+   rec_ IN OUT New_Part_Assistant_Virtual_Rec )
+IS
+   tax_calc_base_              VARCHAR2(20);
+   calc_prices_                BOOLEAN := TRUE;
+   additional_cost_amount_     NUMBER;
+   additional_cost_incl_tax_   NUMBER;
+BEGIN
+   IF rec_.use_price_including_tax_purch THEN 
+      tax_calc_base_ := 'GROSS_BASE';
+      IF (rec_.additional_cost_incl_tax = 0) THEN 
+         rec_.additional_cost_amount := rec_.additional_cost_incl_tax;
+         calc_prices_ := FALSE;
+      END IF;
+   ELSE 
+      tax_calc_base_ := 'NET_BASE';
+      IF ((rec_.additional_cost_amount = 0) OR (rec_.taxable_db = 'FALSE') OR (rec_.supplier_taxable = 'FALSE')) THEN 
+         rec_.additional_cost_incl_tax := rec_.additional_cost_amount;
+         calc_prices_ := FALSE;
+      END IF;
+   END IF;
+   
+   $IF Component_Purch_SYS.INSTALLED $THEN
+      IF calc_prices_ THEN 
+         additional_cost_amount_ := rec_.additional_cost_amount;
+         additional_cost_incl_tax_ := rec_.additional_cost_incl_tax;
+         Tax_Handling_Purch_Util_API.Calculate_Prices(additional_cost_amount_, additional_cost_incl_tax_, tax_calc_base_, rec_.tax_percentage);
+         rec_.additional_cost_amount := additional_cost_amount_;
+         rec_.additional_cost_incl_tax := additional_cost_incl_tax_;
+      END IF;
+   $END 
+END Calculate_Additional_Cost___;
+
+
+PROCEDURE Set_Multi_Level_Tracking___(
+   rec_ IN OUT New_Part_Assistant_Virtual_Rec )
+IS
+BEGIN 
+   IF rec_.serial_tracking_code = 'SERIAL TRACKING' OR rec_.receipt_issue_serial_track 
+      OR rec_.lot_tracking_code != 'NOT LOT TRACKING' THEN
+      rec_.multilevel_tracking := 'TRACKING_ON';
+   ELSE 
+      rec_.multilevel_tracking := 'TRACKING_OFF';
+   END IF;
+END Set_Multi_Level_Tracking___;
+

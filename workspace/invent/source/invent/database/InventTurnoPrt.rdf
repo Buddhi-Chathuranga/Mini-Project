@@ -1,0 +1,625 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: Inventory Part
+--
+--  File:         INVTURNR.RDF
+--
+--  Date    Sign    History
+--  ------  ----    -----------------------------------------------------------
+--  141124  DaZase  PRSC-4337, Replaced call to Company_Address_Deliv_Info_API.Get_Address_Name with Site_API.Get_Company_Address_Name.
+--  140716  TiRalk  Bug 117850, Modified report method to print company name properly.
+--  130730  UdGnlk  TIBE-870, Removed the global variables and moved to the method. 
+--  120731  SBalLK  Bug 101597, Modified &REP1METHOD ( Report_Printout ) to get location specific document phrase id table and for enhance code readability.
+--  120618  SBallk  Bug 103080, Modified to print document phrases in line level.
+--  110228  ChJalk  Used inventory_part_period_hist_tab instead of inventory_part_period_hist base view in cursors. 
+--  091030  ShKolk  Bug 86768, Merge IPR to APP75 core.
+--  090924  ChFolk  Removed functions GET_MIN_COMMODITY_CODE__ and GET_MAX_COMMODITY_CODE__ which are no longer used.
+--  091030  ShKolk  Bug 86768, Merge IPR to APP75 core.
+-------------------------------------- 14.0.0 ---------------------------------
+--  081230  HoInlk  Bug 78837, Modified to avoid division by zero error when calculating turnover_rate_total_.
+--  071228  NuVelk  Bug 70067, Removed method COUNT_STATISTIC_PERIOD__ and used 
+--  071228          Statistic_Period_API.Get_Num_Of_Periods. Also Modified cursor GET_GROUP.
+--  070619  WaJalk  Bug 65135, Replaced UNISTR with new functions in Database_SYS.
+--  070601  ShVese  CID 143134- Added LOV View Reference for stat_year and stat_period in REP1VIEW.
+--  070521  WaJalk  Modified QFLAGS of column 'site', made it uppercase.
+------------------------ 13.4.0 ---------------------------------------------
+--  040610  NaWilk  Bug 44975, Modified FROM clause in view INVENT_TURNO_PRT_REP.
+--  040209  NaWalk  Converted CHR(255) to UNISTR for Unicode Modification.
+--  031016  PrJalk  Bug fix 106237, Added procedure Init.
+--  030609  KiSalk  GEDI206NJ-1 Owner Codes: Added ROW_NO to REP1VIEW. 
+--  021113  SaRalk  Bug 33337, Added code which enables to add different logos for different companies. 
+--  020816  LEPESE  Replaced use of Inventory_Part_Config_API.Get_Inventory_Value_By_Method
+--                  to instead use Inventory_Part_Unit_Cost_API.Get_Inventory_Value_By_Config.
+--  **********************  AD Baseline  ***********************************************
+--  000925  JOHESE  Added undefines.
+--  000925  ANLASE  Modified cursor GET_GROUP.
+--  000816  PERK    Added Inventory_Part_Config to cursor GET_GROUP
+--  000417  NISOSE  Added General_SYS.Init_Method in test.
+--  990920  FRDI    Commodity_group = NULL is now included in report (is the highest value).
+--  990521  ROOD    Made it possible to send NULL as a parameter for commodity_group_.
+--  981106  SHVE    Replaced fetching of columns from InventoryPartCost with InventoryPart.
+--  980915  LEPE    Removed SET VERIFY and SET FEEDBACK statements.
+--  971124  GOPE    Added Report_SYS.refresh
+--  970904  JOMC    Converted the RDF to use the report table INVENT_INFO_SERVICES_RPT
+--  961011  GOPE    Removed "/" and drop of view
+--  960927  GOPE    Corrections after review
+--  960926  GOPE    Correction of document phrase
+--  960925  GOPE    Added report title
+--  960923  GOPE    Corrected and added REF
+--  960816  JOBE    Created.
+-----------------------------------------------------------------------------
+
+define MODULE     = INVENT
+define LU         = InventoryPart
+define PKG        = INVENT_TURNO_RPI
+
+define TABLE      = INVENT_INFO_SERVICES_RPT
+define REP1VIEW   = INVENT_TURNO_PRT_REP
+DEFINE VIEW_RPV   = INVENT_INFO_SERVICES_RPV
+define REP1METHOD = Report_Printout
+
+define RECORD_TYPE           = N1
+define ISSUED_VALUE_TOTAL    = N2
+define AVG_INVENTORY_TOTAL   = N3
+define TURNOVER_RATE_TOTAL   = N4
+define PHRASE_ID             = N5
+define FROM_STAT_YEAR        = N6
+define FROM_STAT_PERIOD      = N7
+define TO_STAT_YEAR          = N8
+define TO_STAT_PERIOD        = N9
+define COMMODITY_CODE        = S1
+define DESCRIPTION           = S2
+define ISSUED_VALUE          = N10
+define AVG_INVENTORY         = N11
+define TURNOVER_RATE         = N12
+define DOCUMENT_PHRASE       = S3
+
+
+-----------------------------------------------------------------------------
+-- PACKAGE SPECIFICATION:     INVENT_TURNO_RPI
+-----------------------------------------------------------------------------
+
+PROMPT Creating &PKG specification
+
+CREATE OR REPLACE PACKAGE &PKG IS
+
+module_     CONSTANT VARCHAR2(6) := '&MODULE';
+lu_name_    CONSTANT VARCHAR2(25) := '&LU';
+
+PROCEDURE &REP1METHOD (
+   report_attr_    IN VARCHAR2,
+   parameter_attr_ IN VARCHAR2 );
+
+PROCEDURE test (
+   reportKey             IN NUMBER      ,
+   to_statistic_year     IN NUMBER      ,
+   to_statistic_period   IN NUMBER      ,
+   from_statistic_year   IN NUMBER      ,
+   from_statistic_period IN NUMBER      ,
+   from_commodity_code   IN VARCHAR2    ,
+   to_commodity_code     IN VARCHAR2    ,
+   site                  IN VARCHAR2    );
+
+PROCEDURE Init;
+
+END &PKG;
+/
+SHOW ERROR
+
+-----------------------------------------------------------------------------
+-- VIEWS
+-----------------------------------------------------------------------------
+
+-----------------------------------------------------------------------------
+-- Report:     Inventory Part Printout
+-- Type:       PLSQL1.2
+-- Objects:    TABLES = INVENTORY_PART_HEADER_RPT,
+--                      INVENTORY_PART_DETAIL_RPT,
+--             VIEW   = INVENTORY_PART_PRINT_REP
+--             METHOD = INVENTORY_PART_RPI.Report_Printout
+-----------------------------------------------------------------------------
+
+PROMPT Creating report view &REP1VIEW
+
+CREATE OR REPLACE VIEW &REP1VIEW AS
+SELECT M.RESULT_KEY               RESULT_KEY,
+       M.ROW_NO                   ROW_NO,
+       M.PARENT_ROW_NO            PARENT_ROW_NO,
+       D.&COMMODITY_CODE          COMMODITY_CODE,
+       D.&DESCRIPTION             DESCRIPTION,
+       D.&ISSUED_VALUE            ISSUED_VALUE,
+       D.&AVG_INVENTORY           AVG_INVENTORY,
+       D.&TURNOVER_RATE           TURNOVER_RATE,
+       D.&DOCUMENT_PHRASE         DOCUMENT_PHRASE,
+       M.&ISSUED_VALUE_TOTAL      ISSUED_VALUE_TOTAL,
+       M.&AVG_INVENTORY_TOTAL     AVG_INVENTORY_TOTAL,
+       M.&TURNOVER_RATE_TOTAL     TURNOVER_RATE_TOTAL,
+       M.&FROM_STAT_YEAR          FROM_STAT_YEAR,
+       M.&FROM_STAT_PERIOD        FROM_STAT_PERIOD,
+       M.&TO_STAT_YEAR            TO_STAT_YEAR,
+       M.&TO_STAT_PERIOD          TO_STAT_PERIOD,
+       0                        FROM_STATISTIC_YEAR,
+       0                        FROM_STATISTIC_PERIOD,
+       0                        TO_STATISTIC_YEAR,
+       0                        TO_STATISTIC_PERIOD,
+       NULL                     FROM_COMMODITY_CODE,
+       NULL                     TO_COMMODITY_CODE,
+       NULL                     SITE
+FROM   &VIEW_RPV M, &VIEW_RPV D
+WHERE  M.&RECORD_TYPE = 1
+AND    D.&RECORD_TYPE = 2
+AND    M.RESULT_KEY = D.RESULT_KEY
+WITH   read only;
+
+COMMENT ON TABLE &REP1VIEW IS
+   'MODULE=&MODULE^LU=&LU^PROMPT=Inventory Part^';
+
+COMMENT ON COLUMN &REP1VIEW..result_key IS
+   'FLAGS=M----^';
+COMMENT ON COLUMN &REP1VIEW..ROW_NO IS
+   'FLAGS=M----^DATATYPE=NUMBER^';
+COMMENT ON COLUMN &REP1VIEW..parent_row_no IS 
+   'FLAGS=M----^DATATYPE=NUMBER^';
+COMMENT ON COLUMN &REP1VIEW..commodity_code IS
+   'FLAGS=A----^DATATYPE=STRING(5)^TITLE=Commodity Group^ITEM_NAME=iCommodityCode^';
+COMMENT ON COLUMN &REP1VIEW..description IS
+   'FLAGS=A----^DATATYPE=STRING(35)^TITLE=Description^ITEM_NAME=iDescription^';
+COMMENT ON COLUMN &REP1VIEW..issued_value IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Issued Value^ITEM_NAME=iIssuedValue^';
+COMMENT ON COLUMN &REP1VIEW..avg_inventory IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Avg Inventory^ITEM_NAME=iAvgInventory^';
+COMMENT ON COLUMN &REP1VIEW..turnover_rate IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Turnover Rate^ITEM_NAME=iTurnoverRate^';
+COMMENT ON COLUMN &REP1VIEW..DOCUMENT_PHRASE
+   IS 'FLAGS=A----^DATATYPE=STRING(2000)^TITLE=Document Phrase^ITEM_NAME=iDocumentPhrase^';
+COMMENT ON COLUMN &REP1VIEW..issued_value_total IS
+   'FLAGS=A----^DATATYPE=NUMBER^ITEM_NAME=iIssuedValueTotal^';
+COMMENT ON COLUMN &REP1VIEW..avg_inventory_total IS
+   'FLAGS=A----^DATATYPE=NUMBER^ITEM_NAME=iAvgInventoryTotal^';
+COMMENT ON COLUMN &REP1VIEW..turnover_rate_total IS
+   'FLAGS=A----^DATATYPE=NUMBER^ITEM_NAME=iTurnoverRateTotal^';
+COMMENT ON COLUMN &REP1VIEW..from_stat_year IS
+   'FLAGS=A----^DATATYPE=NUMBER^ITEM_NAME=iFromStatYear^';
+COMMENT ON COLUMN &REP1VIEW..from_stat_period IS
+   'FLAGS=A----^DATATYPE=NUMBER^ITEM_NAME=iFromStatPeriod^';
+COMMENT ON COLUMN &REP1VIEW..to_stat_year IS
+   'FLAGS=A----^DATATYPE=NUMBER^ITEM_NAME=iToStatYear^';
+COMMENT ON COLUMN &REP1VIEW..to_stat_period IS
+   'FLAGS=A----^DATATYPE=NUMBER^ITEM_NAME=iToStatPeriod^';
+COMMENT ON COLUMN &REP1VIEW..from_statistic_year IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=From Year^QUERY=From Year^REF=StatisticPeriod2^QFLAGS=-CS-L^ITEM_NAME=iFromStatisticYear^';
+COMMENT ON COLUMN &REP1VIEW..from_statistic_period IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=From Period^QUERY=From Period^REF=StatisticPeriod3^QFLAGS=-CS-L^ITEM_NAME=iFromStatisticPeriod^';
+COMMENT ON COLUMN &REP1VIEW..to_statistic_year IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=To Year^QUERY=To Year^REF=StatisticPeriod2^QFLAGS=-CS-L^ITEM_NAME=iToStatisticYear^';
+COMMENT ON COLUMN &REP1VIEW..to_statistic_period IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=To Period^QUERY=To Period^REF=StatisticPeriod3^QFLAGS=-CS-L^ITEM_NAME=iToStatisticPeriod^';
+COMMENT ON COLUMN &REP1VIEW..from_commodity_code IS
+   'FLAGS=A----^DATATYPE=STRING(0)^TITLE=From Commodity Group^QUERY=From Commodity Group^QFLAGS=-CS-L^ITEM_NAME=iFromCommodityCode^REF=Commodity_Group^';
+COMMENT ON COLUMN &REP1VIEW..to_commodity_code IS
+   'FLAGS=A----^DATATYPE=STRING(0)^TITLE=To Commodity Group^QUERY=To Commodity Group^QFLAGS=-CS-L^ITEM_NAME=iToCommodityCode^REF=Commodity_Group^';
+COMMENT ON COLUMN &REP1VIEW..site IS
+   'FLAGS=A----^DATATYPE=STRING(0)/UPPERCASE^TITLE=Site^QUERY=Site^QFLAGS=MCS-L^REF=USER_ALLOWED_SITE_LOV^ITEM_NAME=iSite^';
+
+begin
+   Report_SYS.Define_Report_ ( '&REP1VIEW', '&MODULE', '&LU', 'Inventory Turnover Rate', '&TABLE', '&PKG..&REP1METHOD', 0, NULL, NULL, NULL, 'PLSQL1.2' ,'TRUE','Warehouse Management','Warehouse Statistics');
+   Report_SYS.Define_Report_Text_( '&REP1VIEW','txCalcInt', 'Calculation Interval');
+   Report_SYS.Define_Report_Text_( '&REP1VIEW','txPeriodSeparator', 'to');
+   Report_SYS.Define_Report_Text_( '&REP1VIEW','txTurnoverRep', 'Turnover Report');
+   Report_SYS.Refresh_('&REP1VIEW');
+end;
+/
+-----------------------------------------------------------------------------
+-- PACKAGE IMPLEMENTATION     INVENTORY_PART_RPI
+-----------------------------------------------------------------------------
+
+PROMPT Creating &PKG implementation
+
+CREATE OR REPLACE PACKAGE BODY &PKG IS
+
+
+
+
+FUNCTION GET_ISSUED_VALUE_TOTAL__(
+   result_key_ IN NUMBER)
+   RETURN NUMBER
+IS
+   sum_    NUMBER;
+BEGIN
+   SELECT SUM(&issued_value)
+      INTO sum_
+      FROM &TABLE
+      WHERE result_key = result_key_
+      AND   &record_type = 2;
+   RETURN sum_;
+END GET_ISSUED_VALUE_TOTAL__;
+
+FUNCTION GET_AVG_INVENTORY_TOTAL__(
+   result_key_ IN NUMBER)
+   RETURN NUMBER
+IS
+   sum_     NUMBER;
+BEGIN
+   SELECT SUM(&avg_inventory)
+      INTO sum_
+      FROM &TABLE
+      WHERE result_key = result_key_
+      AND   &record_type = 2;
+   RETURN sum_;
+END GET_AVG_INVENTORY_TOTAL__;
+
+FUNCTION GET_MIN_STAT_YEAR__
+   RETURN NUMBER
+IS
+   min_    NUMBER;
+BEGIN
+   SELECT MIN(stat_year_no)
+      INTO min_
+      FROM statistic_period;
+   RETURN min_;
+END GET_MIN_STAT_YEAR__;
+
+FUNCTION GET_MIN_STAT_PERIOD__
+   RETURN NUMBER
+IS
+   min_    NUMBER;
+BEGIN
+   SELECT MIN(stat_period_no)
+      INTO min_
+      FROM statistic_period;
+   RETURN min_;
+END GET_MIN_STAT_PERIOD__;
+
+FUNCTION GET_MAX_STAT_YEAR__
+   RETURN NUMBER
+IS
+   max_    NUMBER;
+BEGIN
+   SELECT MAX(stat_year_no)
+      INTO max_
+      FROM statistic_period;
+   RETURN max_;
+END GET_MAX_STAT_YEAR__;
+
+FUNCTION GET_MAX_STAT_PERIOD__
+   RETURN NUMBER
+IS
+   max_    NUMBER;
+BEGIN
+   SELECT MAX(stat_period_no)
+      INTO max_
+      FROM statistic_period;
+   RETURN max_;
+END  GET_MAX_STAT_PERIOD__;
+
+PROCEDURE &REP1METHOD (
+   report_attr_    IN VARCHAR2,
+   parameter_attr_ IN VARCHAR2 )
+IS
+   do_xml_                    BOOLEAN := Report_SYS.Should_Generate_Xml('&REP1VIEW');
+   do_rs_                     BOOLEAN := Report_SYS.Should_Generate_Result_Set('&REP1VIEW');
+   xml_                       CLOB;
+   package_name_              VARCHAR2(100) := 'INVENT_TURNO_PRT_REP';
+   result_key_                NUMBER;
+   row_no_                    NUMBER;
+   to_statistic_year_         NUMBER;
+   to_statistic_period_       NUMBER;
+   from_statistic_year_       NUMBER;
+   from_statistic_period_     NUMBER;
+   from_commodity_code_       VARCHAR2(5);
+   to_commodity_code_         VARCHAR2(5);
+   site_                      VARCHAR2(5);
+   count_                     NUMBER;
+   issued_value_total_        NUMBER;
+   avg_inventory_total_       NUMBER;
+   turnover_rate_total_       NUMBER;
+
+   company_                   VARCHAR2(20);
+   logotype_                  VARCHAR2(100);      
+   company_name_              VARCHAR2(100);
+   phrase_text_               VARCHAR2(2000);
+   parent_row_no_             NUMBER;
+   language_code_             VARCHAR2(4);
+   phrase_on_document_tab_    Phrase_On_Document_API.Phrase_Id_Tab;
+   first_char_                VARCHAR2(10) := Database_SYS.Get_First_Character;
+   last_char_                 VARCHAR2(10) := Database_SYS.Get_Last_Character;
+
+   CURSOR GET_GROUP IS
+      SELECT i.SECOND_commodity                                                     commodity_code,
+             commodity_group_api.Get_Description(i.SECOND_commodity)                description,
+             SUM(NVL(h.mtd_issues + h.mtd_abnormal_issues,0) *
+                  Inventory_Part_Unit_Cost_API.Get_Inventory_Value_By_Config(ic.contract,
+                                                                             ic.part_no,
+                                                                             ic.configuration_id))
+                                                                                    issued_value,
+             SUM(NVL(h.qty_onhand,0) *
+                  Inventory_Part_Unit_Cost_API.Get_Inventory_Value_By_Config(ic.contract,
+                                                                             ic.part_no,
+                                                                             ic.configuration_id))/count_
+                                                                                    avg_inventory,
+             SUM(NVL(h.mtd_issues + h.mtd_abnormal_issues,0) *
+                   Inventory_Part_Unit_Cost_API.Get_Inventory_Value_By_Config(ic.contract,
+                                                                             ic.part_no,
+                                                                             ic.configuration_id))/
+               DECODE(SUM(NVL(h.qty_onhand,0) * 
+                  Inventory_Part_Unit_Cost_API.Get_Inventory_Value_By_Config(ic.contract,
+                                                                             ic.part_no,
+                                                                             ic.configuration_id))/count_,
+               0,1,SUM(NVL(h.qty_onhand,0) *
+                  Inventory_Part_Unit_Cost_API.Get_Inventory_Value_By_Config(ic.contract,
+                                                                             ic.part_no,
+                                                                             ic.configuration_id))/count_)              
+                                                                                    turnover_rate
+      FROM inventory_part_period_hist_tab h,
+           inventory_part                 i,
+           inventory_part_config          ic,
+           user_allowed_site_pub          ua
+      WHERE (nvl(i.SECOND_commodity,last_char_) BETWEEN  from_commodity_code_ AND to_commodity_code_)
+      AND   (h.stat_year_no * 100 + h.stat_period_no) <=
+               (to_statistic_year_ * 100 + to_statistic_period_)
+      AND   (h.stat_year_no * 100 + h.stat_period_no) >=
+               (from_statistic_year_ * 100 + from_statistic_period_)
+      AND   i.part_no         = h.part_no
+      AND   h.contract        = i.contract
+      AND   ic.part_no        = i.part_no
+      AND   ic.contract       = i.contract
+      AND   i.contract        = ua.site
+      AND   h.contract        = site_
+      AND   ic.configuration_id = h.configuration_id
+      GROUP BY
+            i.SECOND_commodity
+      ORDER BY
+            i.SECOND_commodity;
+
+BEGIN
+   GENERAL_SYS.INIT_METHOD(lu_name_, '&PKG', '&REP1METHOD');
+
+   IF (do_xml_) THEN
+      Xml_Record_Writer_SYS.Create_Report_Header(xml_,'&REP1VIEW',package_name_);
+   END IF;
+
+   result_key_            := TO_NUMBER(CLIENT_SYS.GET_ITEM_VALUE('RESULT_KEY', report_attr_));
+   to_statistic_year_     := CLIENT_SYS.GET_ITEM_VALUE('TO_STATISTIC_YEAR', parameter_attr_);
+   to_statistic_period_   := CLIENT_SYS.GET_ITEM_VALUE('TO_STATISTIC_PERIOD', parameter_attr_);
+   from_statistic_year_   := CLIENT_SYS.GET_ITEM_VALUE('FROM_STATISTIC_YEAR', parameter_attr_);
+   from_statistic_period_ := CLIENT_SYS.GET_ITEM_VALUE('FROM_STATISTIC_PERIOD', parameter_attr_);
+   from_commodity_code_   := CLIENT_SYS.GET_ITEM_VALUE('FROM_COMMODITY_CODE', parameter_attr_);
+   to_commodity_code_     := CLIENT_SYS.GET_ITEM_VALUE('TO_COMMODITY_CODE', parameter_attr_);
+   site_                  := CLIENT_SYS.GET_ITEM_VALUE('SITE', parameter_attr_);
+   
+   row_no_ := 0;
+
+   IF (do_xml_) THEN
+      Xml_Record_Writer_SYS.Add_Element(xml_,'FROM_STATISTIC_YEAR', from_statistic_year_);
+      Xml_Record_Writer_SYS.Add_Element(xml_,'FROM_STATISTIC_PERIOD', from_statistic_period_);
+      Xml_Record_Writer_SYS.Add_Element(xml_,'TO_STATISTIC_YEAR', to_statistic_year_);
+      Xml_Record_Writer_SYS.Add_Element(xml_,'TO_STATISTIC_PERIOD', to_statistic_period_);
+   END IF;
+
+   -- NULL is the highest possible value accourding to ORACLE sort order and should
+   -- therefor be included only if wildcard is used for to_commodity_group.
+   -- NULL is substituted whith last_char_ in the cursor.
+
+   IF from_commodity_code_ = '%' OR  from_commodity_code_ IS NULL THEN
+      from_commodity_code_ := first_char_; -- Min commodity_code...
+   ELSE
+      from_commodity_code_ := upper( from_commodity_code_);
+   END IF;
+
+   IF to_commodity_code_ = '%' OR to_commodity_code_ IS NULL THEN
+        to_commodity_code_ := last_char_; -- Max commodity_code...
+   END IF;
+
+   IF (from_statistic_year_ IS NULL) THEN
+      from_statistic_year_ := Get_Min_Stat_Year__;
+   END IF;
+   IF (from_statistic_period_ IS NULL) THEN
+      from_statistic_period_ := Get_Min_Stat_Period__;
+   END IF;
+   IF (to_statistic_year_ IS NULL) THEN
+      to_statistic_year_ := Get_Max_Stat_Year__;
+   END IF;
+   IF (to_statistic_period_ IS NULL) THEN
+      to_statistic_period_ := Get_Max_Stat_Period__;
+   END IF;
+
+   IF (do_xml_) THEN
+      Xml_Record_Writer_SYS.Add_Element(xml_,'FROM_STAT_YEAR', from_statistic_year_);
+      Xml_Record_Writer_SYS.Add_Element(xml_,'FROM_STAT_PERIOD', from_statistic_period_);
+      Xml_Record_Writer_SYS.Add_Element(xml_,'TO_STAT_YEAR', to_statistic_year_);
+      Xml_Record_Writer_SYS.Add_Element(xml_,'TO_STAT_PERIOD', to_statistic_period_);
+   END IF;
+
+   count_ := Statistic_Period_API.Get_Num_Of_Periods(from_statistic_year_, 
+                                                     from_statistic_period_, 
+                                                     to_statistic_year_, 
+                                                     to_statistic_period_);
+
+   IF (do_xml_) THEN
+      Xml_Record_Writer_SYS.Start_Element(xml_, 'TURN_OVER_ITEMS');
+   END IF;
+   
+   FOR group_rec_ IN GET_GROUP LOOP
+      IF (do_xml_) THEN
+         Xml_Record_Writer_SYS.Start_Element(xml_, 'TURN_OVER_ITEM');
+         Xml_Record_Writer_SYS.Add_Element(xml_,'COMMODITY_CODE', group_rec_.commodity_code);
+         Xml_Record_Writer_SYS.Add_Element(xml_,'DESCRIPTION', group_rec_.description);
+         Xml_Record_Writer_SYS.Add_Element(xml_,'ISSUED_VALUE', group_rec_.issued_value);
+         Xml_Record_Writer_SYS.Add_Element(xml_,'AVG_INVENTORY', group_rec_.avg_inventory);
+         Xml_Record_Writer_SYS.Add_Element(xml_,'TURNOVER_RATE', group_rec_.turnover_rate);
+         Xml_Record_Writer_SYS.End_Element(xml_, 'TURN_OVER_ITEM');
+      END IF;
+
+      parent_row_no_ := 1;
+
+      IF (do_rs_) THEN
+         INSERT INTO &TABLE (
+             result_key, row_no, parent_row_no, &record_type, &commodity_code,
+             &description, &issued_value, &avg_inventory, &turnover_rate)
+         VALUES(
+             result_key_, row_no_, parent_row_no_, 2, group_rec_.commodity_code,
+             group_rec_.description, group_rec_.issued_value,
+             group_rec_.avg_inventory, group_rec_.turnover_rate);
+      END IF;
+
+      row_no_ := row_no_ + 1;
+   END LOOP;
+
+   IF (do_xml_) THEN
+      Xml_Record_Writer_SYS.End_Element(xml_, 'TURN_OVER_ITEMS');
+   END IF;
+
+   issued_value_total_  := GET_ISSUED_VALUE_TOTAL__(result_key_);
+   avg_inventory_total_ := GET_AVG_INVENTORY_TOTAL__(result_key_);
+
+   turnover_rate_total_ := issued_value_total_ / (CASE avg_inventory_total_ WHEN 0 THEN 1 ELSE avg_inventory_total_ END);
+
+   IF (do_xml_) THEN
+      Xml_Record_Writer_SYS.Start_Element(xml_, 'REPORT_FOOTER_ROW_1');
+         Xml_Record_Writer_SYS.Start_Element(xml_, 'REPORT_FOOTER_ROW');
+         Xml_Record_Writer_SYS.Add_Element(xml_,'ISSUED_VALUE_TOTAL', issued_value_total_);
+         Xml_Record_Writer_SYS.Add_Element(xml_,'AVG_INVENTORY_TOTAL', avg_inventory_total_);
+         Xml_Record_Writer_SYS.Add_Element(xml_,'TURNOVER_RATE_TOTAL', turnover_rate_total_);
+         Xml_Record_Writer_SYS.End_Element(xml_, 'REPORT_FOOTER_ROW');
+      Xml_Record_Writer_SYS.End_Element(xml_, 'REPORT_FOOTER_ROW_1');
+   END IF;
+
+   parent_row_no_ := 0;
+
+   IF (do_rs_) THEN
+      INSERT INTO &TABLE (
+         result_key, row_no, parent_row_no, &record_type,
+         &issued_value_total, &avg_inventory_total,
+         &turnover_rate_total, &from_stat_year, &from_stat_period,
+         &to_stat_year, &to_stat_period)
+      VALUES
+         (result_key_, row_no_, parent_row_no_, 1, issued_value_total_, avg_inventory_total_,
+         turnover_rate_total_, from_statistic_year_, from_statistic_period_,
+         to_statistic_year_, to_statistic_period_);
+   END IF;
+
+   row_no_ := row_no_ + 1;
+
+   language_code_ := Fnd_Session_API.Get_Language();
+   IF language_code_ IS NOT NULL THEN
+      IF (do_xml_) THEN
+         Xml_Record_Writer_SYS.Start_Element(xml_, 'DOC_PHRASES');
+      END IF;
+      
+      phrase_on_document_tab_ := Phrase_On_Document_API.Get_Phrase_Id_Tab( 'INVTURN', NULL, site_);
+      
+      IF (phrase_on_document_tab_.COUNT > 0) THEN
+         FOR n IN phrase_on_document_tab_.FIRST..phrase_on_document_tab_.LAST LOOP
+            phrase_text_ := Mpccom_Phrase_Text_API.Get_Phrase_Text( phrase_on_document_tab_(n), language_code_);
+            IF (phrase_text_ IS NOT NULL) THEN
+               IF (do_xml_) THEN
+                  Xml_Record_Writer_SYS.Start_Element(xml_, 'DOC_PHRASE');
+                  Xml_Record_Writer_SYS.Add_Element(xml_, 'DOCUMENT_PHRASE', phrase_text_);
+                  Xml_Record_Writer_SYS.End_Element(xml_, 'DOC_PHRASE');
+               END IF;
+               IF (do_rs_) THEN
+                  INSERT INTO &TABLE (
+                                      result_key, row_no, parent_row_no, &DOCUMENT_PHRASE)
+                  VALUES (
+                          result_key_, row_no_, parent_row_no_, phrase_text_);
+               END IF;
+               row_no_ := row_no_ + 1;
+            END IF;
+         END LOOP;
+      END IF;
+      IF (do_xml_) THEN
+         Xml_Record_Writer_SYS.End_Element(xml_, 'DOC_PHRASES');
+      END IF;
+   END IF;
+
+   IF (do_xml_) THEN
+      Xml_Record_Writer_SYS.End_Element(xml_,'&REP1VIEW');
+      Report_SYS.Finish_Xml_Report('&REP1VIEW',result_key_,xml_);
+   END IF;
+
+   company_      := Site_API.Get_Company(Upper(site_));       
+   logotype_     := Company_API.Get_Logotype(company_);  
+   company_name_ := Site_API.Get_Company_Address_Name(site_);
+
+   IF (logotype_ IS NOT NULL ) THEN
+      Archive_Variable_API.Set_Object(result_key_, 'rhSysLogo', logotype_);
+      Archive_Variable_API.Set_Variable(result_key_, 'companyName', company_name_);
+   END IF;
+
+END &REP1METHOD;
+
+PROCEDURE test (
+   reportKey             IN NUMBER         ,
+   to_statistic_year     IN NUMBER         ,
+   to_statistic_period   IN NUMBER         ,
+   from_statistic_year   IN NUMBER         ,
+   from_statistic_period IN NUMBER         ,
+   from_commodity_code   IN VARCHAR2       ,
+   to_commodity_code     IN VARCHAR2       ,
+   site                  IN VARCHAR2       )
+IS
+   reportAttr_    VARCHAR2(200);
+   parameterAttr_ VARCHAR2(200);
+BEGIN
+   General_SYS.Init_Method(lu_name_, '&PKG', 'test');
+   CLIENT_SYS.ADD_TO_ATTR('RESULT_KEY', reportKey, reportAttr_);
+   CLIENT_SYS.ADD_TO_ATTR('TO_STATISTIC_YEAR', to_statistic_year, parameterAttr_);
+   CLIENT_SYS.ADD_TO_ATTR('TO_STATISTIC_PERIOD', to_statistic_period, parameterAttr_);
+   CLIENT_SYS.ADD_TO_ATTR('FROM_STATISTIC_YEAR', from_statistic_year, parameterAttr_);
+   CLIENT_SYS.ADD_TO_ATTR('FROM_STATISTIC_PERIOD', from_statistic_period, parameterAttr_);
+   CLIENT_SYS.ADD_TO_ATTR('FROM_COMMODITY_CODE', from_commodity_code, parameterAttr_);
+   CLIENT_SYS.ADD_TO_ATTR('TO_COMMODITY_CODE', to_commodity_code, parameterAttr_);
+   CLIENT_SYS.ADD_TO_ATTR('SITE', site, parameterAttr_);
+   &REP1METHOD(reportAttr_, parameterAttr_);
+END test;
+
+-----------------------------------------------------------------------------
+-------------------- FOUNDATION1 METHODS ------------------------------------
+-----------------------------------------------------------------------------
+-- Init
+--   Dummy procedure that can be called at database startup to ensure that
+--   this package is loaded into memory for performance reasons only.
+-----------------------------------------------------------------------------
+
+PROCEDURE Init
+IS
+BEGIN
+   NULL;
+END Init;
+
+
+END &PKG;
+/
+
+-----------------------------------------------------------------------------
+-- REPORT TEXTS               INVENT_TURNO_PRT_REP
+-----------------------------------------------------------------------------
+
+COMMIT
+/
+
+SHOW ERROR
+
+
+UNDEFINE MODULE
+UNDEFINE LU
+UNDEFINE PKG
+UNDEFINE TABLE
+UNDEFINE REP1VIEW
+UNDEFINE REP1METHOD
+UNDEFINE RECORD_TYPE
+UNDEFINE ISSUED_VALUE_TOTAL
+UNDEFINE AVG_INVENTORY_TOTAL
+UNDEFINE TURNOVER_RATE_TOTAL
+UNDEFINE PHRASE_ID
+UNDEFINE FROM_STAT_YEAR
+UNDEFINE FROM_STAT_PERIOD
+UNDEFINE TO_STAT_YEAR
+UNDEFINE TO_STAT_PERIOD
+UNDEFINE COMMODITY_CODE
+UNDEFINE DESCRIPTION
+UNDEFINE ISSUED_VALUE
+UNDEFINE AVG_INVENTORY
+UNDEFINE TURNOVER_RATE
+UNDEFINE VIEW_RPV
+UNDEFINE DOCUMENT_PHRASE

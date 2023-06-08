@@ -1,0 +1,1723 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: EquipmentObjectNavigatorHandling
+--  Component:    EQUIP
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  181023  SHEPLK  SAUXXW4-10600, Added Get_Object_Image___
+--  210504  LASSLK  AM21R2-1339, Modified the Get_Navigation_Url___ 
+--  211025  RUSSLK  AM21R2-2534, Modified the Get_Navigation_Url___
+-----------------------------------------------------------------------------
+
+layer Core;
+
+
+
+-- Fetch Default structure for the navigator
+FUNCTION Get_Default_Values_For_Tree_Filter___
+   RETURN Tree_Filter_Structure_Rec
+IS
+   tree_filter_values_ Tree_Filter_Structure_Rec;
+BEGIN
+   tree_filter_values_.structure_in_tree     := Structure_Types_API.DB_FUNCTION;
+   tree_filter_values_.mch_code_list := 'nav_obj';
+   tree_filter_values_.mch_code_contract_list := 'nav_obj';
+   tree_filter_values_.equipment_object_seq_list := 'nav_obj';
+   
+   RETURN tree_filter_values_;
+END Get_Default_Values_For_Tree_Filter___;
+
+-- This filter is use as a dictionary to read mandatory information form the pages 
+FUNCTION Get_Default_Values_For_Page_Filter___
+   RETURN Nav_Page_Filter_Structure_Rec
+IS
+   page_filter_values_ Nav_Page_Filter_Structure_Rec;
+BEGIN
+   page_filter_values_.equipment_object_seq              := NULL;
+   page_filter_values_.mch_code              := NULL;
+   page_filter_values_.contract              := NULL;
+   page_filter_values_.child_contract        := NULL;
+   page_filter_values_.location_id           := NULL;
+   page_filter_values_.mch_type              := NULL;
+   page_filter_values_.tree_view_id          := NULL;
+   page_filter_values_.structure_in_tree     := 'F';
+   
+   RETURN page_filter_values_;
+END Get_Default_Values_For_Page_Filter___;
+
+
+FUNCTION Get_Measurements_Filtered___(
+   equipment_object_seq_  IN NUMBER,
+   filter_by_ IN VARCHAR2 )  RETURN Objid_Arr
+IS
+   base_collection_ Objid_Arr := Objid_Arr();
+   
+   CURSOR this_week IS
+      SELECT objid 
+        FROM equipment_object_meas 
+       WHERE equipment_object_seq = equipment_object_seq_
+         AND TRUNC(SYSDATE, 'DAY') < reg_date;
+   
+   CURSOR last_week IS
+      SELECT objid
+        FROM equipment_object_meas 
+       WHERE equipment_object_seq = equipment_object_seq_
+         AND TRUNC(SYSDATE, 'DAY') - 7 < reg_date AND  TRUNC(SYSDATE, 'DAY') > reg_date;
+   
+   CURSOR two_week_ago IS
+      SELECT objid
+        FROM equipment_object_meas 
+       WHERE equipment_object_seq = equipment_object_seq_
+         AND TRUNC(SYSDATE, 'DAY') - 14 < reg_date AND  TRUNC(SYSDATE, 'DAY') - 7 > reg_date;
+   
+   CURSOR three_week_ago IS
+      SELECT objid
+        FROM equipment_object_meas 
+       WHERE equipment_object_seq = equipment_object_seq_
+         AND TRUNC(SYSDATE, 'DAY') - 21 < reg_date AND  TRUNC(SYSDATE, 'DAY') - 14 > reg_date;
+   
+   CURSOR older IS
+      SELECT objid
+        FROM equipment_object_meas 
+       WHERE equipment_object_seq = equipment_object_seq_
+         AND TRUNC(SYSDATE, 'DAY') - 21 > reg_date;
+   
+BEGIN
+   IF (filter_by_ = 'THIS') THEN
+      FOR rec_ IN this_week LOOP
+         base_collection_.extend;
+         base_collection_(base_collection_.last) := rec_.objid;
+      END LOOP;
+   ELSIF(filter_by_ = 'LAST') THEN
+      FOR rec_ IN last_week LOOP
+         base_collection_.extend;
+         base_collection_(base_collection_.last) := rec_.objid;
+      END LOOP;
+   ELSIF(filter_by_ = 'TWO') THEN
+      FOR rec_ IN two_week_ago LOOP
+         base_collection_.extend;
+         base_collection_(base_collection_.last) := rec_.objid;
+      END LOOP;
+   ELSIF(filter_by_ = 'THREE') THEN
+      FOR rec_ IN three_week_ago LOOP
+         base_collection_.extend;
+         base_collection_(base_collection_.last) := rec_.objid;
+      END LOOP;
+   ELSIF(filter_by_ = 'OLDER') THEN
+      FOR rec_ IN older LOOP
+         base_collection_.extend;
+         base_collection_(base_collection_.last) := rec_.objid;
+      END LOOP;
+   END IF;
+   
+   RETURN base_collection_;
+END Get_Measurements_Filtered___;
+
+FUNCTION Get_Object_Image___(
+   equipment_object_seq_ IN NUMBER) RETURN BLOB
+IS
+BEGIN
+   RETURN Media_Library_API.Get_Default_Media(Media_Library_Api.Get_Library_Id_From_Ref('EquipmentObject',
+                                                                                        Equipment_Object_API.Get_Contract(equipment_object_seq_),
+                                                                                        Equipment_Object_API.Get_Mch_Code(equipment_object_seq_)));
+END Get_Object_Image___;
+
+FUNCTION Get_Comp_Value___(
+   contract_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+BEGIN
+   RETURN Site_API.Get_Company(contract_);
+END Get_Comp_Value___;
+
+FUNCTION Has_Mch_Type_Tec_Spec___(
+   mch_type_ IN VARCHAR2 ) RETURN VARCHAR2
+IS   
+BEGIN
+   RETURN EQUIPMENT_OBJ_TYPE_Api.Has_Technical_Spec_No(mch_type_);
+END Has_Mch_Type_Tec_Spec___;
+
+FUNCTION Get_Default_Contract___ RETURN VARCHAR2
+IS
+   ret_  VARCHAR2(2000); 
+BEGIN
+   Maintenance_Spare_API.Get_Default_Contract(ret_);
+   RETURN ret_;
+END Get_Default_Contract___;
+
+FUNCTION Get_Navigation_Url___ (
+   equipment_object_seq_ IN NUMBER,
+   navigating_form_   IN VARCHAR2,
+   type_of_obj_       IN VARCHAR2,
+   structure_in_tree_ IN VARCHAR2) RETURN CLOB
+IS
+   first_iter_     NUMBER;
+   navigation_url_ VARCHAR2(32000);
+   page_           VARCHAR2(200);
+   inv_url_        EXCEPTION;
+   
+   CURSOR get_obj IS
+      SELECT equipment_object_seq
+        FROM EQUIPMENT_OBJECT_UIV
+       WHERE functional_object_seq = equipment_object_seq_;
+   
+   CURSOR get_location_obj IS
+      SELECT equipment_object_seq
+        FROM EQUIPMENT_OBJECT_UIV
+       WHERE location_object_seq = equipment_object_seq_;
+   
+   CURSOR get_from_obj IS
+      SELECT equipment_object_seq
+        FROM EQUIPMENT_OBJECT_UIV
+       WHERE from_object_seq = equipment_object_seq_;
+   
+   CURSOR get_to_obj IS
+      SELECT equipment_object_seq
+        FROM EQUIPMENT_OBJECT_UIV
+       WHERE to_object_seq = equipment_object_seq_;
+   
+   CURSOR get_process_obj IS
+      SELECT equipment_object_seq
+        FROM EQUIPMENT_OBJECT_UIV
+       WHERE process_object_seq = equipment_object_seq_;
+   
+   CURSOR get_pipe_obj IS
+      SELECT equipment_object_seq
+        FROM EQUIPMENT_OBJECT_UIV
+       WHERE pipe_object_seq = equipment_object_seq_;
+   
+   CURSOR get_circuit_obj IS
+      SELECT equipment_object_seq
+        FROM EQUIPMENT_OBJECT_UIV
+       WHERE circuit_object_seq = equipment_object_seq_;
+   
+   CURSOR get_all_pipe_obj IS
+      SELECT equipment_object_seq
+        FROM EQUIPMENT_OBJECT_UIV
+       START WITH pipe_object_seq = equipment_object_seq_
+      CONNECT BY PRIOR equipment_object_seq = pipe_object_seq;
+   
+   CURSOR get_all_function_obj IS
+      SELECT equipment_object_seq
+        FROM EQUIPMENT_OBJECT_UIV
+       START WITH functional_object_seq = equipment_object_seq_
+      CONNECT BY PRIOR equipment_object_seq = functional_object_seq;
+   
+   CURSOR get_all_location_obj IS
+      SELECT equipment_object_seq
+        FROM EQUIPMENT_OBJECT_UIV
+       START WITH location_object_seq = equipment_object_seq_
+      CONNECT BY PRIOR equipment_object_seq  = location_object_seq;
+   
+   CURSOR get_all_from_obj IS
+      SELECT equipment_object_seq
+        FROM EQUIPMENT_OBJECT_UIV
+       START WITH from_object_seq = equipment_object_seq_
+      CONNECT BY PRIOR equipment_object_seq = from_object_seq;
+   
+   CURSOR get_all_to_obj IS
+      SELECT equipment_object_seq
+        FROM EQUIPMENT_OBJECT_UIV
+       START WITH to_object_seq = equipment_object_seq_
+      CONNECT BY PRIOR equipment_object_seq = to_object_seq;
+   
+   CURSOR get_all_process_obj IS
+      SELECT equipment_object_seq
+        FROM EQUIPMENT_OBJECT_UIV
+       START WITH process_object_seq = equipment_object_seq_
+      CONNECT BY PRIOR equipment_object_seq = process_object_seq;
+   
+   CURSOR get_all_circuit_obj IS
+      SELECT equipment_object_seq
+        FROM EQUIPMENT_OBJECT_UIV
+       START WITH circuit_object_seq = equipment_object_seq_
+      CONNECT BY PRIOR equipment_object_seq = circuit_object_seq;
+   
+   $IF Component_Pm_SYS.INSTALLED $THEN
+      CURSOR get_all_function_pm IS
+         SELECT pm.pm_no, pm.pm_revision
+           FROM Pm_Action_UIV pm
+          WHERE objstate IN ('Active', 'Preliminary')
+            and ((equipment_object_seq = equipment_object_seq_) or
+                ((equipment_object_seq) IN
+                (SELECT equipment_object_seq
+                     FROM Equipment_All_Object_UIV
+                    START WITH functional_object_seq = equipment_object_seq_
+                   CONNECT BY PRIOR equipment_object_seq = functional_object_seq)));
+      
+      CURSOR get_all_location_pm IS
+         SELECT pm.pm_no, pm.pm_revision
+           FROM Pm_Action_UIV pm
+          WHERE objstate IN ('Active', 'Preliminary')
+            and ((equipment_object_seq = equipment_object_seq_) or
+                ((equipment_object_seq) IN
+                (SELECT equipment_object_seq
+                     FROM Equipment_All_Object_UIV
+                    START WITH location_object_seq = equipment_object_seq_
+                   CONNECT BY PRIOR equipment_object_seq = location_object_seq)));
+      
+      CURSOR get_all_from_pm IS
+         SELECT pm.pm_no, pm.pm_revision
+           FROM Pm_Action_UIV pm
+          WHERE objstate IN ('Active', 'Preliminary')
+            and ((equipment_object_seq = equipment_object_seq_) or
+                ((equipment_object_seq) IN
+                (SELECT equipment_object_seq
+                     FROM Equipment_All_Object_UIV
+                    START WITH from_object_seq = equipment_object_seq_
+                   CONNECT BY PRIOR equipment_object_seq = from_object_seq)));
+      
+      CURSOR get_all_to_pm IS
+         SELECT pm.pm_no, pm.pm_revision
+           FROM Pm_Action_UIV pm
+          WHERE objstate IN ('Active', 'Preliminary')
+            and ((equipment_object_seq = equipment_object_seq_) or
+                ((equipment_object_seq) IN
+                (SELECT equipment_object_seq
+                     FROM Equipment_All_Object_UIV
+                    START WITH to_object_seq = equipment_object_seq_
+                   CONNECT BY PRIOR equipment_object_seq = to_object_seq)));
+      
+      CURSOR get_all_process_pm IS
+         SELECT pm.pm_no, pm.pm_revision
+           FROM Pm_Action_UIV pm
+          WHERE objstate IN ('Active', 'Preliminary')
+            and ((equipment_object_seq = equipment_object_seq_) or
+                ((equipment_object_seq) IN
+                (SELECT equipment_object_seq
+                     FROM Equipment_All_Object_UIV
+                    START WITH process_object_seq = equipment_object_seq_
+                   CONNECT BY PRIOR equipment_object_seq = process_object_seq)));
+      
+      CURSOR get_all_pipe_pm IS
+         SELECT pm.pm_no, pm.pm_revision
+           FROM Pm_Action_UIV pm
+          WHERE objstate IN ('Active', 'Preliminary')
+            and ((equipment_object_seq = equipment_object_seq_) or
+                ((equipment_object_seq) IN
+                (SELECT equipment_object_seq
+                     FROM Equipment_All_Object_UIV
+                    START WITH pipe_object_seq = equipment_object_seq_
+                   CONNECT BY PRIOR equipment_object_seq = pipe_object_seq)));
+      
+      CURSOR get_all_circuit_pm IS
+         SELECT pm.pm_no, pm.pm_revision
+           FROM Pm_Action_UIV pm
+          WHERE objstate IN ('Active', 'Preliminary')
+            and ((equipment_object_seq = equipment_object_seq_) or
+                ((equipment_object_seq) IN
+                (SELECT equipment_object_seq
+                     FROM Equipment_All_Object_UIV
+                    START WITH circuit_object_seq = equipment_object_seq_
+                   CONNECT BY PRIOR equipment_object_seq = circuit_object_seq)));
+      
+      CURSOR get_std_pm IS
+         SELECT pm.pm_no, pm.pm_revision
+           FROM Pm_Action_UIV pm
+          WHERE objstate IN ('Active', 'Preliminary')
+            AND (equipment_object_seq = equipment_object_seq_);
+      
+      CURSOR get_maint_plan IS
+         SELECT  
+         DISTINCT pm.pm_no, pm.pm_revision
+           FROM PM_ACTION_CAL_PLAN pm
+          WHERE equipment_object_seq = equipment_object_seq_;
+   $END
+   $IF Component_Wo_SYS.INSTALLED $THEN
+      CURSOR get_active_wo IS
+         SELECT wo.wo_no
+           FROM ACTIVE_SEPARATE_OVERVIEW wo
+          WHERE equipment_object_seq = equipment_object_seq_;
+      
+      CURSOR get_all_active_function_wo IS
+         SELECT wo.wo_no
+           FROM ACTIVE_SEPARATE_OVERVIEW wo
+          WHERE ((equipment_object_seq) IN
+                (SELECT equipment_object_seq
+                    FROM EQUIPMENT_OBJECT_UIV e
+                   START WITH e.equipment_object_seq = equipment_object_seq_
+                  CONNECT BY PRIOR e.equipment_object_seq = e.functional_object_seq));
+      
+      CURSOR get_all_active_location_wo IS
+        SELECT wo.wo_no
+           FROM ACTIVE_SEPARATE_OVERVIEW wo
+          WHERE ((equipment_object_seq) IN
+                (SELECT equipment_object_seq
+                    FROM EQUIPMENT_OBJECT_UIV e
+                   START WITH e.equipment_object_seq = equipment_object_seq_
+                  CONNECT BY PRIOR e.equipment_object_seq = e.location_object_seq));
+      
+      CURSOR get_all_active_from_wo IS
+         SELECT wo.wo_no
+           FROM ACTIVE_SEPARATE_OVERVIEW wo
+          WHERE ((equipment_object_seq) IN
+                (SELECT equipment_object_seq
+                    FROM EQUIPMENT_OBJECT_UIV e
+                   START WITH e.equipment_object_seq = equipment_object_seq_
+                  CONNECT BY PRIOR e.equipment_object_seq = e.from_object_seq));
+      
+      CURSOR get_all_active_to_wo IS
+         SELECT wo.wo_no
+           FROM ACTIVE_SEPARATE_OVERVIEW wo
+          WHERE ((equipment_object_seq) IN
+                (SELECT equipment_object_seq
+                    FROM EQUIPMENT_OBJECT_UIV e
+                   START WITH e.equipment_object_seq = equipment_object_seq_
+                  CONNECT BY PRIOR e.equipment_object_seq = e.to_object_seq));
+      
+      CURSOR get_all_active_process_wo IS
+         SELECT wo.wo_no
+           FROM ACTIVE_SEPARATE_OVERVIEW wo
+          WHERE ((equipment_object_seq) IN
+                (SELECT equipment_object_seq
+                    FROM EQUIPMENT_OBJECT_UIV e
+                   START WITH e.equipment_object_seq = equipment_object_seq_
+                  CONNECT BY PRIOR e.equipment_object_seq = e.process_object_seq));
+      
+      CURSOR get_all_active_pipe_wo IS
+         SELECT wo.wo_no
+           FROM ACTIVE_SEPARATE_OVERVIEW wo
+          WHERE ((equipment_object_seq) IN
+                (SELECT equipment_object_seq
+                    FROM EQUIPMENT_OBJECT_UIV e
+                   START WITH e.equipment_object_seq = equipment_object_seq_
+                  CONNECT BY PRIOR e.equipment_object_seq = e.pipe_object_seq));
+      
+      CURSOR get_all_active_circuit_wo IS
+         SELECT wo.wo_no
+           FROM ACTIVE_SEPARATE_OVERVIEW wo
+          WHERE ((equipment_object_seq) IN
+                (SELECT equipment_object_seq
+                    FROM EQUIPMENT_OBJECT_UIV e
+                   START WITH e.equipment_object_seq = equipment_object_seq_
+                  CONNECT BY PRIOR e.equipment_object_seq = e.circuit_object_seq));
+      
+      CURSOR get_all_hist_wo IS
+         SELECT wo.wo_no
+           FROM HISTORICAL_SEPARATE_OVERVIEW wo
+          WHERE (equipment_object_seq = equipment_object_seq_);
+      
+      CURSOR get_active_work_task IS
+         SELECT jt.task_seq
+           FROM JT_TASK_UIV jt
+          WHERE (actual_object_seq = equipment_object_seq_ AND
+                objstate NOT IN ('FINISHED', 'CANCELLED'));
+      
+      CURSOR get_all_active_function_work_task IS
+         SELECT t.task_seq
+        FROM Jt_Task_Uiv t
+       WHERE t.actual_obj_conn_lu_name_db = 'EquipmentObject'
+         AND t.objstate NOT IN ('FINISHED', 'CANCELLED')
+         AND (t.duplicate_type_db = 'MASTER' OR t.duplicate_type_db IS NULL)
+         AND t.actual_obj_conn_rowkey IN
+             (SELECT e.objkey
+                FROM equipment_object_uiv e
+                  START WITH e.equipment_object_seq = equipment_object_seq_
+                 CONNECT BY PRIOR e.equipment_object_seq = e.functional_object_seq);
+      
+      CURSOR get_all_active_location_work_task IS
+         SELECT t.task_seq
+        FROM Jt_Task_Uiv t
+       WHERE t.actual_obj_conn_lu_name_db = 'EquipmentObject'
+         AND t.objstate NOT IN ('FINISHED', 'CANCELLED')
+         AND (t.duplicate_type_db = 'MASTER' OR t.duplicate_type_db IS NULL)
+         AND t.actual_obj_conn_rowkey IN
+             (SELECT e.objkey
+                FROM equipment_object_uiv e
+                  START WITH e.equipment_object_seq = equipment_object_seq_
+                 CONNECT BY PRIOR e.equipment_object_seq = e.location_object_seq);
+      
+      CURSOR get_all_active_from_work_task IS
+         SELECT t.task_seq
+        FROM Jt_Task_Uiv t
+       WHERE t.actual_obj_conn_lu_name_db = 'EquipmentObject'
+         AND t.objstate NOT IN ('FINISHED', 'CANCELLED')
+         AND (t.duplicate_type_db = 'MASTER' OR t.duplicate_type_db IS NULL)
+         AND t.actual_obj_conn_rowkey IN
+             (SELECT e.objkey
+                FROM equipment_object_uiv e
+                  START WITH e.equipment_object_seq = equipment_object_seq_
+                 CONNECT BY PRIOR e.equipment_object_seq = e.from_object_seq);
+      
+      CURSOR get_all_active_to_work_task IS
+         SELECT t.task_seq
+        FROM Jt_Task_Uiv t
+       WHERE t.actual_obj_conn_lu_name_db = 'EquipmentObject'
+         AND t.objstate NOT IN ('FINISHED', 'CANCELLED')
+         AND (t.duplicate_type_db = 'MASTER' OR t.duplicate_type_db IS NULL)
+         AND t.actual_obj_conn_rowkey IN
+             (SELECT e.objkey
+                FROM equipment_object_uiv e
+                  START WITH e.equipment_object_seq = equipment_object_seq_
+                 CONNECT BY PRIOR e.equipment_object_seq = e.to_object_seq);
+      
+      CURSOR get_all_active_pipe_work_task IS
+         SELECT t.task_seq
+        FROM Jt_Task_Uiv t
+       WHERE t.actual_obj_conn_lu_name_db = 'EquipmentObject'
+         AND t.objstate NOT IN ('FINISHED', 'CANCELLED')
+         AND (t.duplicate_type_db = 'MASTER' OR t.duplicate_type_db IS NULL)
+         AND t.actual_obj_conn_rowkey IN
+             (SELECT e.objkey
+                FROM equipment_object_uiv e
+                  START WITH e.equipment_object_seq = equipment_object_seq_
+                 CONNECT BY PRIOR e.equipment_object_seq = e.pipe_object_seq);
+      
+      CURSOR get_all_active_process_work_task IS
+         SELECT t.task_seq
+        FROM Jt_Task_Uiv t
+       WHERE t.actual_obj_conn_lu_name_db = 'EquipmentObject'
+         AND t.objstate NOT IN ('FINISHED', 'CANCELLED')
+         AND (t.duplicate_type_db = 'MASTER' OR t.duplicate_type_db IS NULL)
+         AND t.actual_obj_conn_rowkey IN
+             (SELECT e.objkey
+                FROM equipment_object_uiv e
+                  START WITH e.equipment_object_seq = equipment_object_seq_
+                 CONNECT BY PRIOR e.equipment_object_seq = e.process_object_seq);
+      
+      CURSOR get_all_active_circuit_work_task IS
+         SELECT t.task_seq
+        FROM Jt_Task_Uiv t
+       WHERE t.actual_obj_conn_lu_name_db = 'EquipmentObject'
+         AND t.objstate NOT IN ('FINISHED', 'CANCELLED')
+         AND (t.duplicate_type_db = 'MASTER' OR t.duplicate_type_db IS NULL)
+         AND t.actual_obj_conn_rowkey IN
+             (SELECT e.objkey
+                FROM equipment_object_uiv e
+                  START WITH e.equipment_object_seq = equipment_object_seq_
+                 CONNECT BY PRIOR e.equipment_object_seq = e.circuit_object_seq);
+      
+      CURSOR get_all_hist_work_task IS
+         SELECT jt.task_seq
+           FROM JT_TASK_UIV jt
+          WHERE (actual_object_seq = equipment_object_seq_ AND
+                objstate IN ('FINISHED', 'CANCELLED'));                
+                
+      CURSOR get_active_work_task_step IS
+         SELECT jt.task_step_seq
+           FROM JT_TASK_STEP_UIV jt
+          WHERE (object_seq = equipment_object_seq_ AND
+                objstate IN ('NOTDONE'));
+                
+      CURSOR get_all_active_function_work_task_step IS
+         SELECT t.task_step_seq
+        FROM JT_TASK_STEP_UIV t
+       WHERE t.object_connection_lu_name_db = 'EquipmentObject'
+         AND t.objstate IN('NOTDONE')
+         AND t.object_connection_rowkey IN
+             (SELECT e.objkey
+                FROM equipment_object_uiv e
+                  START WITH e.equipment_object_seq = equipment_object_seq_
+                 CONNECT BY PRIOR e.equipment_object_seq = e.functional_object_seq);
+                        
+      CURSOR get_all_active_location_work_task_step IS
+         SELECT t.task_step_seq
+        FROM JT_TASK_STEP_UIV t
+       WHERE t.object_connection_lu_name_db = 'EquipmentObject'
+         AND t.objstate IN ('NOTDONE')
+         AND t.object_connection_rowkey IN
+             (SELECT e.objkey
+                FROM equipment_object_uiv e
+                  START WITH e.equipment_object_seq = equipment_object_seq_
+                 CONNECT BY PRIOR e.equipment_object_seq = e.location_object_seq);
+                         
+      CURSOR get_all_active_from_work_task_step IS
+         SELECT t.task_step_seq
+        FROM JT_TASK_STEP_UIV t
+       WHERE t.object_connection_lu_name_db = 'EquipmentObject'
+         AND t.objstate IN ('NOTDONE')
+         AND t.object_connection_rowkey IN
+             (SELECT e.objkey
+                FROM equipment_object_uiv e
+                  START WITH e.equipment_object_seq = equipment_object_seq_
+                 CONNECT BY PRIOR e.equipment_object_seq = e.from_object_seq);
+                         
+      CURSOR get_all_active_to_work_task_step IS
+         SELECT t.task_step_seq
+        FROM JT_TASK_STEP_UIV t
+       WHERE t.object_connection_lu_name_db = 'EquipmentObject'
+         AND t.objstate IN ('NOTDONE')
+         AND t.object_connection_rowkey IN
+             (SELECT e.objkey
+                FROM equipment_object_uiv e
+                  START WITH e.equipment_object_seq = equipment_object_seq_
+                 CONNECT BY PRIOR e.equipment_object_seq = e.to_object_seq);
+                         
+      CURSOR get_all_active_pipe_work_task_step IS
+         SELECT t.task_step_seq
+        FROM JT_TASK_STEP_UIV t
+       WHERE t.object_connection_lu_name_db = 'EquipmentObject'
+         AND t.objstate IN ('NOTDONE')
+         AND t.object_connection_rowkey IN
+             (SELECT e.objkey
+                FROM equipment_object_uiv e
+                  START WITH e.equipment_object_seq = equipment_object_seq_
+                 CONNECT BY PRIOR e.equipment_object_seq = e.pipe_object_seq);
+                         
+      CURSOR get_all_active_process_work_task_step IS
+         SELECT t.task_step_seq
+        FROM JT_TASK_STEP_UIV t
+       WHERE t.object_connection_lu_name_db = 'EquipmentObject'
+         AND t.objstate IN ('NOTDONE')
+         AND t.object_connection_rowkey IN
+             (SELECT e.objkey
+                FROM equipment_object_uiv e
+                  START WITH e.equipment_object_seq = equipment_object_seq_
+                 CONNECT BY PRIOR e.equipment_object_seq = e.process_object_seq);
+                         
+      CURSOR get_all_active_circuit_work_task_step IS
+         SELECT t.task_step_seq
+        FROM JT_TASK_STEP_UIV t
+       WHERE t.object_connection_lu_name_db = 'EquipmentObject'
+         AND t.objstate IN ('NOTDONE')
+         AND t.object_connection_rowkey IN
+             (SELECT e.objkey
+                FROM equipment_object_uiv e
+                  START WITH e.equipment_object_seq = equipment_object_seq_
+                 CONNECT BY PRIOR e.equipment_object_seq = e.circuit_object_seq);
+   $END
+   $IF Component_Pcmsci_SYS.INSTALLED $THEN
+      CURSOR get_service_lines IS
+         SELECT cp.contract_id, cp.line_no
+           FROM PSC_CONTR_PRODUCT_UIV cp
+          WHERE connection_type_db IN ('EQUIPMENT', 'CATEGORY', 'PART')
+            AND (EXISTS (SELECT 1
+                           FROM PSC_SRV_LINE_OBJECTS t
+                          WHERE t.contract_id = cp.contract_id
+                            AND t.line_no = cp.line_no
+                            AND t.equipment_object_seq = equipment_object_seq_))
+          ORDER BY contract_id, line_no;
+      
+      CURSOR get_all_function_service_lines IS
+         SELECT cp.contract_id, cp.line_no
+           FROM PSC_CONTR_PRODUCT_UIV cp
+          WHERE connection_type_db IN ('EQUIPMENT', 'CATEGORY', 'PART')
+            AND (EXISTS
+                 (SELECT 1
+                    FROM PSC_SRV_LINE_OBJECTS t
+                   WHERE t.contract_id = cp.CONTRACT_ID
+                     AND t.line_no = cp.LINE_NO
+                     AND (t.equipment_object_seq) IN
+                         (SELECT equipment_object_seq
+                            FROM Equipment_All_Object_Uiv
+                           START WITH equipment_object_seq = equipment_object_seq_
+                          CONNECT BY PRIOR equipment_object_seq = functional_object_seq)))
+          ORDER BY contract_id, line_no;
+      
+      CURSOR get_all_location_service_lines IS
+         SELECT cp.contract_id, cp.line_no
+           FROM PSC_CONTR_PRODUCT_UIV cp
+          WHERE connection_type_db IN ('EQUIPMENT', 'CATEGORY', 'PART')
+            AND (EXISTS
+                 (SELECT 1
+                    FROM PSC_SRV_LINE_OBJECTS t
+                   WHERE t.contract_id = cp.CONTRACT_ID
+                     AND t.line_no = cp.LINE_NO
+                     AND (t.equipment_object_seq) IN
+                         (SELECT equipment_object_seq
+                            FROM Equipment_All_Object_Uiv
+                           START WITH equipment_object_seq = equipment_object_seq_
+                          CONNECT BY PRIOR equipment_object_seq = location_object_seq)))
+          ORDER BY contract_id, line_no;
+
+      CURSOR get_all_from_service_lines IS
+         SELECT cp.contract_id, cp.line_no
+           FROM PSC_CONTR_PRODUCT_UIV cp
+          WHERE connection_type_db IN ('EQUIPMENT', 'CATEGORY', 'PART')
+            AND (EXISTS
+                 (SELECT 1
+                    FROM PSC_SRV_LINE_OBJECTS t
+                   WHERE t.contract_id = cp.CONTRACT_ID
+                     AND t.line_no = cp.LINE_NO
+                     AND (t.equipment_object_seq) IN
+                         (SELECT equipment_object_seq
+                            FROM Equipment_All_Object_Uiv
+                           START WITH equipment_object_seq = equipment_object_seq_
+                          CONNECT BY PRIOR equipment_object_seq = from_object_seq)))
+          ORDER BY contract_id, line_no;
+
+      CURSOR get_all_to_service_lines IS
+         SELECT cp.contract_id, cp.line_no
+           FROM PSC_CONTR_PRODUCT_UIV cp
+          WHERE connection_type_db IN ('EQUIPMENT', 'CATEGORY', 'PART')
+            AND (EXISTS
+                 (SELECT 1
+                    FROM PSC_SRV_LINE_OBJECTS t
+                   WHERE t.contract_id = cp.CONTRACT_ID
+                     AND t.line_no = cp.LINE_NO
+                     AND (t.equipment_object_seq) IN
+                         (SELECT equipment_object_seq
+                            FROM Equipment_All_Object_Uiv
+                           START WITH equipment_object_seq = equipment_object_seq_
+                          CONNECT BY PRIOR equipment_object_seq = to_object_seq)))
+          ORDER BY contract_id, line_no;
+
+      CURSOR get_all_process_service_lines IS
+         SELECT cp.contract_id, cp.line_no
+           FROM PSC_CONTR_PRODUCT_UIV cp
+          WHERE connection_type_db IN ('EQUIPMENT', 'CATEGORY', 'PART')
+            AND (EXISTS
+                 (SELECT 1
+                    FROM PSC_SRV_LINE_OBJECTS t
+                   WHERE t.contract_id = cp.CONTRACT_ID
+                     AND t.line_no = cp.LINE_NO
+                     AND (t.equipment_object_seq) IN
+                         (SELECT equipment_object_seq
+                            FROM Equipment_All_Object_Uiv
+                           START WITH equipment_object_seq = equipment_object_seq_
+                          CONNECT BY PRIOR equipment_object_seq = process_object_seq)))
+          ORDER BY contract_id, line_no;
+
+      CURSOR get_all_pipe_service_lines IS
+         SELECT cp.contract_id, cp.line_no
+           FROM PSC_CONTR_PRODUCT_UIV cp
+          WHERE connection_type_db IN ('EQUIPMENT', 'CATEGORY', 'PART')
+            AND (EXISTS
+                 (SELECT 1
+                    FROM PSC_SRV_LINE_OBJECTS t
+                   WHERE t.contract_id = cp.CONTRACT_ID
+                     AND t.line_no = cp.LINE_NO
+                     AND (t.equipment_object_seq) IN
+                         (SELECT equipment_object_seq
+                            FROM Equipment_All_Object_Uiv
+                           START WITH equipment_object_seq = equipment_object_seq_
+                          CONNECT BY PRIOR equipment_object_seq = pipe_object_seq)))
+          ORDER BY contract_id, line_no;
+
+      CURSOR get_all_circuit_service_lines IS
+         SELECT cp.contract_id, cp.line_no
+           FROM PSC_CONTR_PRODUCT_UIV cp
+          WHERE connection_type_db IN ('EQUIPMENT', 'CATEGORY', 'PART')
+            AND (EXISTS
+                 (SELECT 1
+                    FROM PSC_SRV_LINE_OBJECTS t
+                   WHERE t.contract_id = cp.CONTRACT_ID
+                     AND t.line_no = cp.LINE_NO
+                     AND (t.equipment_object_seq) IN
+                         (SELECT equipment_object_seq
+                            FROM Equipment_All_Object_Uiv
+                           START WITH equipment_object_seq = equipment_object_seq_
+                          CONNECT BY PRIOR equipment_object_seq = circuit_object_seq)))
+          ORDER BY contract_id, line_no;
+   $END
+BEGIN
+   first_iter_ := 0;
+   IF navigating_form_ = '1EquipmentObject' THEN
+      navigation_url_ := 'page/EquipmentAllObjects/List?$filter=';
+      page_ := 'Objects';
+      IF structure_in_tree_ = 'L' THEN
+         FOR rec_ IN get_location_obj LOOP
+            IF first_iter_ = 0 THEN
+               navigation_url_ := navigation_url_ || '(' || ' EquipmentObjectSeq eq ' ||
+                               rec_.equipment_object_seq   || ')';
+            ELSE
+               navigation_url_ := navigation_url_ || ' or ' || '(' || ' EquipmentObjectSeq eq ' ||
+                               rec_.equipment_object_seq  || ')';
+            END IF;
+            first_iter_ := 1;
+            IF (LENGTH(navigation_url_)> 30000) THEN
+               RAISE inv_url_;
+            END IF;
+         END LOOP;
+      ELSIF structure_in_tree_ = 'R' THEN
+         FOR rec_ IN get_from_obj LOOP
+            IF first_iter_ = 0 THEN
+               navigation_url_ := navigation_url_ || '(' || ' EquipmentObjectSeq eq ' ||
+                               rec_.equipment_object_seq   || ')';
+            ELSE
+               navigation_url_ := navigation_url_ || ' or ' || '(' || ' EquipmentObjectSeq eq ' ||
+                               rec_.equipment_object_seq  || ')';
+            END IF;
+            first_iter_ := 1;
+            IF (LENGTH(navigation_url_)> 30000) THEN
+               RAISE inv_url_;
+            END IF;
+         END LOOP;
+      ELSIF structure_in_tree_ = 'T' THEN
+         FOR rec_ IN get_to_obj LOOP
+            IF first_iter_ = 0 THEN
+               navigation_url_ := navigation_url_ || '(' || ' EquipmentObjectSeq eq ' ||
+                               rec_.equipment_object_seq   || ')';
+            ELSE
+               navigation_url_ := navigation_url_ || ' or ' || '(' || ' EquipmentObjectSeq eq ' ||
+                               rec_.equipment_object_seq  || ')';
+            END IF;
+            first_iter_ := 1;
+            IF (LENGTH(navigation_url_)> 30000) THEN
+               RAISE inv_url_;
+            END IF;
+         END LOOP;
+         
+      ELSIF structure_in_tree_ = 'P' THEN
+         FOR rec_ IN get_process_obj LOOP
+            IF first_iter_ = 0 THEN
+               navigation_url_ := navigation_url_ || '(' || ' EquipmentObjectSeq eq ' ||
+                               rec_.equipment_object_seq   || ')';
+            ELSE
+               navigation_url_ := navigation_url_ || ' or ' || '(' || ' EquipmentObjectSeq eq ' ||
+                               rec_.equipment_object_seq  || ')';
+            END IF;
+            first_iter_ := 1;
+            IF (LENGTH(navigation_url_)> 30000) THEN
+               RAISE inv_url_;
+            END IF;
+         END LOOP;
+         
+      ELSIF structure_in_tree_ = 'S' THEN
+         FOR rec_ IN get_pipe_obj LOOP
+            IF first_iter_ = 0 THEN
+               navigation_url_ := navigation_url_ || '(' || ' EquipmentObjectSeq eq ' ||
+                               rec_.equipment_object_seq   || ')';
+            ELSE
+               navigation_url_ := navigation_url_ || ' or ' || '(' || ' EquipmentObjectSeq eq ' ||
+                               rec_.equipment_object_seq  || ')';
+            END IF;
+            first_iter_ := 1;
+            IF (LENGTH(navigation_url_)> 30000) THEN
+               RAISE inv_url_;
+            END IF;
+         END LOOP;
+         
+      ELSIF structure_in_tree_ = 'E' THEN
+         FOR rec_ IN get_circuit_obj LOOP
+            IF first_iter_ = 0 THEN
+               navigation_url_ := navigation_url_ || '(' || ' EquipmentObjectSeq eq ' ||
+                               rec_.equipment_object_seq   || ')';
+            ELSE
+               navigation_url_ := navigation_url_ || ' or ' || '(' || ' EquipmentObjectSeq eq ' ||
+                               rec_.equipment_object_seq  || ')';
+            END IF;
+            first_iter_ := 1;
+            IF (LENGTH(navigation_url_)> 30000) THEN
+               RAISE inv_url_;
+            END IF;
+         END LOOP;
+      ELSE
+         FOR rec_ IN get_obj LOOP
+            IF first_iter_ = 0 THEN
+               navigation_url_ := navigation_url_ || '(' || ' EquipmentObjectSeq eq ' ||
+                               rec_.equipment_object_seq   || ')';
+            ELSE
+               navigation_url_ := navigation_url_ || ' or ' || '(' || ' EquipmentObjectSeq eq ' ||
+                               rec_.equipment_object_seq  || ')';
+            END IF;
+            first_iter_ := 1;
+            IF (LENGTH(navigation_url_)> 30000) THEN
+               RAISE inv_url_;
+            END IF;
+         END LOOP;
+      END IF;
+   END IF;
+   IF navigating_form_ = '2EquipmentObject' THEN
+      navigation_url_ := 'page/EquipmentAllObjects/List?$filter='; 
+      page_ := 'Objects';
+      IF structure_in_tree_ = 'L' THEN
+         FOR rec_ IN get_all_location_obj LOOP
+            
+            IF first_iter_ = 0 THEN
+               navigation_url_ := navigation_url_ || '(' || ' EquipmentObjectSeq eq ' ||
+                               rec_.equipment_object_seq   || ')';
+            ELSE
+               navigation_url_ := navigation_url_ || ' or ' || '(' || ' EquipmentObjectSeq eq ' ||
+                               rec_.equipment_object_seq  || ')';
+            END IF;
+            first_iter_ := 1;
+            IF (LENGTH(navigation_url_)> 30000) THEN
+               RAISE inv_url_;
+            END IF;
+            
+         END LOOP;
+         
+         
+      ELSIF structure_in_tree_ = 'R' THEN
+         FOR rec_ IN get_all_from_obj LOOP
+            
+            IF first_iter_ = 0 THEN
+               navigation_url_ := navigation_url_ || '(' || ' EquipmentObjectSeq eq ' ||
+                               rec_.equipment_object_seq   || ')';
+            ELSE
+               navigation_url_ := navigation_url_ || ' or ' || '(' || ' EquipmentObjectSeq eq ' ||
+                               rec_.equipment_object_seq  || ')';
+            END IF;
+            first_iter_ := 1;
+            IF (LENGTH(navigation_url_)> 30000) THEN
+               RAISE inv_url_;
+            END IF;
+            
+         END LOOP;
+      ELSIF structure_in_tree_ = 'T' THEN
+         FOR rec_ IN get_all_to_obj LOOP
+            
+            IF first_iter_ = 0 THEN
+               navigation_url_ := navigation_url_ || '(' || ' EquipmentObjectSeq eq ' ||
+                               rec_.equipment_object_seq   || ')';
+            ELSE
+               navigation_url_ := navigation_url_ || ' or ' || '(' || ' EquipmentObjectSeq eq ' ||
+                               rec_.equipment_object_seq  || ')';
+            END IF;
+            first_iter_ := 1;
+            IF (LENGTH(navigation_url_)> 30000) THEN
+               RAISE inv_url_;
+            END IF;
+            
+         END LOOP;
+         
+      ELSIF structure_in_tree_ = 'P' THEN
+         FOR rec_ IN get_all_process_obj LOOP
+            
+            IF first_iter_ = 0 THEN
+               navigation_url_ := navigation_url_ || '(' || ' EquipmentObjectSeq eq ' ||
+                               rec_.equipment_object_seq   || ')';
+            ELSE
+               navigation_url_ := navigation_url_ || ' or ' || '(' || ' EquipmentObjectSeq eq ' ||
+                               rec_.equipment_object_seq  || ')';
+            END IF;
+            first_iter_ := 1;
+            IF (LENGTH(navigation_url_)> 30000) THEN
+               RAISE inv_url_;
+            END IF;
+            
+         END LOOP;
+         
+      ELSIF structure_in_tree_ = 'S' THEN
+         FOR rec_ IN get_all_pipe_obj LOOP
+            
+            IF first_iter_ = 0 THEN
+               navigation_url_ := navigation_url_ || '(' || ' EquipmentObjectSeq eq ' ||
+                               rec_.equipment_object_seq   || ')';
+            ELSE
+               navigation_url_ := navigation_url_ || ' or ' || '(' || ' EquipmentObjectSeq eq ' ||
+                               rec_.equipment_object_seq  || ')';
+            END IF;
+            first_iter_ := 1;
+            IF (LENGTH(navigation_url_)> 30000) THEN
+               RAISE inv_url_;
+            END IF;
+            
+         END LOOP;
+         
+      ELSIF structure_in_tree_ = 'E' THEN
+         FOR rec_ IN get_all_circuit_obj LOOP
+            IF first_iter_ = 0 THEN
+                navigation_url_ := navigation_url_ || '(' || ' EquipmentObjectSeq eq ' ||
+                               rec_.equipment_object_seq   || ')';
+            ELSE
+               navigation_url_ := navigation_url_ || ' or ' || '(' || ' EquipmentObjectSeq eq ' ||
+                               rec_.equipment_object_seq  || ')';
+            END IF;
+            first_iter_ := 1;
+            IF (LENGTH(navigation_url_)> 30000) THEN
+               RAISE inv_url_;
+            END IF;
+            
+         END LOOP;
+      ELSE
+         FOR rec_ IN get_all_function_obj LOOP
+            
+            IF first_iter_ = 0 THEN
+               navigation_url_ := navigation_url_ || '(' || ' EquipmentObjectSeq eq ' ||
+                               rec_.equipment_object_seq   || ')';
+            ELSE
+               navigation_url_ := navigation_url_ || ' or ' || '(' || ' EquipmentObjectSeq eq ' ||
+                               rec_.equipment_object_seq  || ')';
+            END IF;
+            first_iter_ := 1;
+            IF (LENGTH(navigation_url_)> 30000) THEN
+               RAISE inv_url_;
+            END IF;
+            
+         END LOOP;
+      END IF;
+   END IF;   
+   IF navigating_form_ = '2PmAction' THEN
+      $IF Component_Pm_SYS.INSTALLED $THEN
+         IF type_of_obj_ = 'Single' THEN
+            navigation_url_ := 'page/PmActions/List?$filter=';
+            page_ := 'PM Actions';
+            FOR rec_ IN get_std_pm LOOP
+               IF first_iter_ = 0 THEN
+                  navigation_url_ := navigation_url_ || '(' || ' PmNo eq ' ||
+                                     rec_.pm_no || ' and PmRevision eq ''' ||
+                                     rec_.pm_revision || '''' || ')';
+               ELSE
+                  navigation_url_ := navigation_url_ || ' or ' || '(' || ' PmNo eq ' ||
+                                     rec_.pm_no || ' and PmRevision eq ''' ||
+                                     rec_.pm_revision || '''' || ')';
+               END IF;
+               first_iter_ := 1;
+               IF (LENGTH(navigation_url_)> 30000) THEN
+                  RAISE inv_url_;
+               END IF;
+            END LOOP;
+         ELSE
+            navigation_url_ := 'page/PmActions/List?$filter=';
+            page_ := 'PM Actions';
+            IF structure_in_tree_ = 'L' THEN
+               FOR rec_ IN get_all_location_pm LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || '(' || 'PmNo eq ' ||
+                                     rec_.pm_no || ' and PmRevision eq ''' ||
+                                     rec_.pm_revision || '''' || ')';
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or ' || '(' || ' PmNo eq ' ||
+                                     rec_.pm_no || ' and PmRevision eq ''' ||
+                                     rec_.pm_revision || '''' || ')';
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+               
+            ELSIF structure_in_tree_ = 'R' THEN
+               FOR rec_ IN get_all_from_pm LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || '(' || ' PmNo eq ' ||
+                                     rec_.pm_no || ' and PmRevision eq ''' ||
+                                     rec_.pm_revision || '''' || ')';
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or ' || '(' || ' PmNo eq ' ||
+                                     rec_.pm_no || ' and PmRevision eq ''' ||
+                                     rec_.pm_revision || '''' || ')';
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+            ELSIF structure_in_tree_ = 'T' THEN
+               FOR rec_ IN get_all_to_pm LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || '(' || ' PmNo eq ' ||
+                                     rec_.pm_no || ' and PmRevision eq ''' ||
+                                     rec_.pm_revision || '''' || ')';
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or ' || '(' || ' PmNo eq ' ||
+                                     rec_.pm_no || ' and PmRevision eq ''' ||
+                                     rec_.pm_revision || '''' || ')';
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+               
+            ELSIF structure_in_tree_ = 'P' THEN
+               FOR rec_ IN get_all_process_pm LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || '(' || ' PmNo eq ' ||
+                                     rec_.pm_no || ' and PmRevision eq ''' ||
+                                     rec_.pm_revision || '''' || ')';
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or ' || '(' || ' PmNo eq ' ||
+                                     rec_.pm_no || ' and PmRevision eq ''' ||
+                                     rec_.pm_revision || '''' || ')';
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+               
+            ELSIF structure_in_tree_ = 'S' THEN
+               FOR rec_ IN get_all_pipe_pm LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || '(' || ' PmNo eq ' ||
+                                     rec_.pm_no || ' and PmRevision eq ''' ||
+                                     rec_.pm_revision || '''' || ')';
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or ' || '(' || ' PmNo eq ' ||
+                                     rec_.pm_no || ' and PmRevision eq ''' ||
+                                     rec_.pm_revision || '''' || ')';
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+               
+            ELSIF structure_in_tree_ = 'E' THEN
+               FOR rec_ IN get_all_circuit_pm LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || '(' || ' PmNo eq ' ||
+                                     rec_.pm_no || ' and PmRevision eq ''' ||
+                                     rec_.pm_revision || '''' || ')';
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or ' || '(' || ' PmNo eq ' ||
+                                     rec_.pm_no || ' and PmRevision eq ''' ||
+                                     rec_.pm_revision || '''' || ')';
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+               
+            ELSE
+               FOR rec_ IN get_all_function_pm LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || '(' || ' PmNo eq ' ||
+                                     rec_.pm_no || ' and PmRevision eq ''' ||
+                                     rec_.pm_revision || '''' || ')';
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or ' || '(' || ' PmNo eq ' ||
+                                     rec_.pm_no || ' and PmRevision eq ''' ||
+                                     rec_.pm_revision || '''' || ')';
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+            END IF;
+            
+         END IF;
+      $ELSE
+         navigation_url_ := '';
+      $END
+   END IF;
+   IF navigating_form_ = '3PmAction' THEN
+      $IF Component_Pm_SYS.INSTALLED $THEN
+         navigation_url_ := 'page/MaintenancePlanAnalysis/List?$filter=';
+         page_ := 'Maintenance Plan Analysis';
+         FOR rec_ IN get_maint_plan LOOP
+            IF first_iter_ = 0 THEN
+               navigation_url_ := navigation_url_ || '(' || ' PmNo eq ' ||
+                                     rec_.pm_no || ' and PmRevision eq ''' ||
+                                     rec_.pm_revision || '''' || ')';
+            ELSE
+               navigation_url_ := navigation_url_ || ' or ' || '(' || ' PmNo eq ' ||
+                                     rec_.pm_no || ' and PmRevision eq ''' ||
+                                     rec_.pm_revision || '''' || ')';
+            END IF;
+            first_iter_ := 1;
+            IF (LENGTH(navigation_url_)> 30000) THEN
+               RAISE inv_url_;
+            END IF;
+         END LOOP;
+      $ELSE
+         navigation_url_ := '';
+      $END
+   END IF;
+   IF navigating_form_ = '5WorkOrder' THEN
+      IF type_of_obj_ = 'Single' THEN
+         $IF Component_Wo_SYS.INSTALLED $THEN
+            navigation_url_ := 'page/ActiveWorkOrders/List?$filter=';
+            page_ := 'Active Work Orders';
+            FOR rec_ IN get_active_wo LOOP
+               IF first_iter_ = 0 THEN
+                  navigation_url_ := navigation_url_ || ' WoNo eq ' ||
+                                     rec_.wo_no;
+               ELSE
+                  navigation_url_ := navigation_url_ || ' or WoNo eq ' ||
+                                     rec_.wo_no;
+               END IF;
+               first_iter_ := 1;
+               IF (LENGTH(navigation_url_)> 30000) THEN
+                  RAISE inv_url_;
+               END IF;
+            END LOOP;
+         $ELSE
+            navigation_url_ := '';
+         $END
+      ELSE
+         $IF Component_Wo_SYS.INSTALLED $THEN
+            navigation_url_ := 'page/ActiveWorkOrders/List?$filter=';
+            page_ := 'Active Work Orders';
+            IF structure_in_tree_ = 'L' THEN
+               FOR rec_ IN get_all_active_location_wo LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || ' WoNo eq ' ||
+                                        rec_.wo_no;
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or WoNo eq ' ||
+                                        rec_.wo_no;
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+               
+            ELSIF structure_in_tree_ = 'R' THEN
+               FOR rec_ IN get_all_active_from_wo LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || 'WoNo eq ' ||
+                                        rec_.wo_no;
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or WoNo eq ' ||
+                                        rec_.wo_no;
+                  END IF;
+                  first_iter_ := 1;
+               END LOOP;
+            ELSIF structure_in_tree_ = 'T' THEN
+               FOR rec_ IN get_all_active_to_wo LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || ' WoNo eq ' ||
+                                        rec_.wo_no;
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or WoNo eq ' ||
+                                        rec_.wo_no;
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+               
+            ELSIF structure_in_tree_ = 'P' THEN
+               FOR rec_ IN get_all_active_process_wo LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || ' WoNo eq ' ||
+                                        rec_.wo_no;
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or WoNo eq ' ||
+                                        rec_.wo_no;
+                  END IF;
+                  first_iter_ := 1;
+               END LOOP;
+               
+            ELSIF structure_in_tree_ = 'S' THEN
+               FOR rec_ IN get_all_active_pipe_wo LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || ' WoNo eq ' ||
+                                        rec_.wo_no;
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or WoNo eq ' ||
+                                        rec_.wo_no;
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+               
+            ELSIF structure_in_tree_ = 'E' THEN
+               FOR rec_ IN get_all_active_circuit_wo LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || ' WoNo eq ' ||
+                                        rec_.wo_no;
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or WoNo eq ' ||
+                                        rec_.wo_no;
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+               
+            ELSE
+               FOR rec_ IN get_all_active_function_wo LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || ' WoNo eq ' ||
+                                        rec_.wo_no;
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or WoNo eq ' ||
+                                        rec_.wo_no;
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+            END IF;
+            
+         $ELSE
+            navigation_url_ := '';
+         $END
+      END IF;
+   END IF;
+   IF navigating_form_ = '6WorkOrder' THEN
+      $IF Component_Wo_SYS.INSTALLED $THEN
+         navigation_url_ := 'page/HistoricalWorkOrders/List?$filter=';
+         page_ := 'Historical Work Orders';
+         FOR rec_ IN get_all_hist_wo LOOP
+            IF first_iter_ = 0 THEN
+               navigation_url_ := navigation_url_ || ' WoNo eq ' || rec_.wo_no;
+            ELSE
+               navigation_url_ := navigation_url_ || ' or WoNo eq ' ||
+                                  rec_.wo_no;
+            END IF;
+            first_iter_ := 1;
+            IF (LENGTH(navigation_url_)> 30000) THEN
+               RAISE inv_url_;
+            END IF;
+         END LOOP;
+      $ELSE
+         navigation_url_ := '';
+      $END
+   END IF;
+   IF navigating_form_ = '7JtTask' THEN
+      $IF Component_Wo_SYS.INSTALLED $THEN
+         navigation_url_ := 'page/WorkTasks/List?$filter=';
+         page_ := 'Work Tasks';
+         FOR rec_ IN get_active_work_task LOOP
+            IF first_iter_ = 0 THEN
+               navigation_url_ := navigation_url_ || ' TaskSeq eq ' ||
+                                  rec_.task_seq;
+            ELSE
+               navigation_url_ := navigation_url_ || ' or TaskSeq eq ' ||
+                                  rec_.task_seq;
+            END IF;
+            first_iter_ := 1;
+            IF (LENGTH(navigation_url_)> 30000) THEN
+               RAISE inv_url_;
+            END IF;
+         END LOOP;
+      $ELSE
+         navigation_url_ := '';
+      $END
+   END IF;
+   IF navigating_form_ = '8JtTask' THEN
+      IF type_of_obj_ = 'Single' THEN
+         $IF Component_Wo_SYS.INSTALLED $THEN
+            navigation_url_ := 'page/WorkTasks/List?$filter=';
+            page_ := 'Work Tasks';
+            FOR rec_ IN get_active_work_task LOOP
+               IF first_iter_ = 0 THEN
+                  navigation_url_ := navigation_url_ || ' TaskSeq eq ' ||
+                                     rec_.task_seq;
+               ELSE
+                  navigation_url_ := navigation_url_ || ' or TaskSeq eq ' ||
+                                     rec_.task_seq;
+               END IF;
+               first_iter_ := 1;
+               IF (LENGTH(navigation_url_)> 30000) THEN
+                  RAISE inv_url_;
+               END IF;
+            END LOOP;
+         $ELSE
+            navigation_url_ := '';
+         $END
+      ELSE
+         $IF Component_Wo_SYS.INSTALLED $THEN
+            navigation_url_ := 'page/WorkTasks/List?$filter=';
+            page_ := 'Work Tasks';
+            IF structure_in_tree_ = 'L' THEN
+               FOR rec_ IN get_all_active_location_work_task LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || ' TaskSeq eq ' ||
+                                        rec_.task_seq;
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or TaskSeq eq ' ||
+                                        rec_.task_seq;
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+               
+            ELSIF structure_in_tree_ = 'R' THEN
+               FOR rec_ IN get_all_active_from_work_task LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || ' TaskSeq eq ' ||
+                                        rec_.task_seq;
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or TaskSeq eq ' ||
+                                        rec_.task_seq;
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+            ELSIF structure_in_tree_ = 'T' THEN
+               FOR rec_ IN get_all_active_to_work_task LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || ' TaskSeq eq ' ||
+                                        rec_.task_seq;
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or TaskSeq eq ' ||
+                                        rec_.task_seq;
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+               
+            ELSIF structure_in_tree_ = 'P' THEN
+               FOR rec_ IN get_all_active_process_work_task LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || ' TaskSeq eq ' ||
+                                        rec_.task_seq;
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or TaskSeq eq ' ||
+                                        rec_.task_seq;
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+               
+            ELSIF structure_in_tree_ = 'S' THEN
+               FOR rec_ IN get_all_active_pipe_work_task LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || ' TaskSeq eq ' ||
+                                        rec_.task_seq;
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or TaskSeq eq ' ||
+                                        rec_.task_seq;
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+               
+            ELSIF structure_in_tree_ = 'E' THEN
+               FOR rec_ IN get_all_active_circuit_work_task LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || ' TaskSeq eq ' ||
+                                        rec_.task_seq;
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or TaskSeq eq ' ||
+                                        rec_.task_seq;
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+               
+            ELSE
+               FOR rec_ IN get_all_active_function_work_task LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || ' TaskSeq eq ' ||
+                                        rec_.task_seq;
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or TaskSeq eq ' ||
+                                        rec_.task_seq;
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+            END IF;
+            
+         $ELSE
+            navigation_url_ := '';
+         $END
+      END IF;
+   END IF;
+   IF navigating_form_ = '90JtTask' THEN
+      $IF Component_Wo_SYS.INSTALLED $THEN
+         navigation_url_ := 'page/WorkTasks/List?$filter=';
+         page_ := 'Work Tasks';
+         FOR rec_ IN get_all_hist_work_task LOOP
+            IF first_iter_ = 0 THEN
+               navigation_url_ := navigation_url_ || ' TaskSeq eq ' ||
+                                  rec_.task_seq;
+            ELSE
+               navigation_url_ := navigation_url_ || ' or TaskSeq eq ' ||
+                                  rec_.task_seq;
+            END IF;
+            first_iter_ := 1;
+            IF (LENGTH(navigation_url_)> 30000) THEN
+               RAISE inv_url_;
+            END IF;
+         END LOOP;
+      $ELSE
+         navigation_url_ := '';
+      $END
+   END IF;
+   IF navigating_form_ = '92WorkOrder' THEN
+      IF type_of_obj_ = 'Single' THEN
+         $IF Component_Pcmsci_SYS.INSTALLED $THEN
+            navigation_url_ := 'page/EquipmentObjectNavigator/PscServicesList?$filter=';
+            page_ := 'Service Lines';
+            FOR rec_ IN get_service_lines LOOP
+               IF first_iter_ = 0 THEN 
+                  navigation_url_ := navigation_url_ || '(' || ' ContractId eq ''' ||
+                               rec_.contract_id || '''' || ' and LineNo eq ' ||
+                                     rec_.line_no || ')' ;
+               ELSE
+                  navigation_url_ := navigation_url_ || ' or ' || '(' || ' ContractId eq ''' ||
+                               rec_.contract_id || '''' || ' and LineNo eq ' ||
+                                     rec_.line_no || ')';
+               END IF;
+               first_iter_ := 1;
+               IF (LENGTH(navigation_url_)> 30000) THEN
+                  RAISE inv_url_;
+               END IF;
+            END LOOP;
+         $ELSE
+            navigation_url_ := '';
+         $END
+      ELSE
+         $IF Component_Pcmsci_SYS.INSTALLED $THEN
+            navigation_url_ := 'page/EquipmentObjectNavigator/PscServicesList?$filter=';
+            page_ := 'Service Lines';
+            IF structure_in_tree_ = 'L' THEN
+               FOR rec_ IN get_all_location_service_lines LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || '(' || ' ContractId eq ''' ||
+                               rec_.contract_id || '''' || ' and LineNo eq ' ||
+                                     rec_.line_no || ')' ;
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or ' || '(' || ' ContractId eq ''' ||
+                               rec_.contract_id || '''' || ' and LineNo eq ' ||
+                                     rec_.line_no || ')';
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+               
+            ELSIF structure_in_tree_ = 'R' THEN
+               FOR rec_ IN get_all_from_service_lines LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || '(' || ' ContractId eq ''' ||
+                               rec_.contract_id || '''' || ' and LineNo eq ' ||
+                                     rec_.line_no || ')' ;
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or ' || '(' ||' ContractId eq ''' ||
+                               rec_.contract_id || '''' || ' and LineNo eq ' ||
+                                     rec_.line_no || ')';
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+            ELSIF structure_in_tree_ = 'T' THEN
+               FOR rec_ IN get_all_to_service_lines LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || '(' || ' ContractId eq ''' ||
+                               rec_.contract_id || '''' || ' and LineNo eq ' ||
+                                     rec_.line_no || ')' ;
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or ' || '(' || ' ContractId eq ''' ||
+                               rec_.contract_id || '''' || ' and LineNo eq ' ||
+                                     rec_.line_no || ')';
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+               
+            ELSIF structure_in_tree_ = 'P' THEN
+               FOR rec_ IN get_all_process_service_lines LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || '(' || ' ContractId eq ''' ||
+                               rec_.contract_id || '''' || ' and LineNo eq ' ||
+                                     rec_.line_no || ')' ;
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or ' || '(' || ' ContractId eq ''' ||
+                               rec_.contract_id || '''' || ' and LineNo eq ' ||
+                                     rec_.line_no || ')';
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+               
+            ELSIF structure_in_tree_ = 'S' THEN
+               FOR rec_ IN get_all_pipe_service_lines LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || '(' || ' ContractId eq ''' ||
+                               rec_.contract_id || '''' || ' and LineNo eq ' ||
+                                     rec_.line_no || ')' ;
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or ' || '(' || ' ContractId eq ''' ||
+                               rec_.contract_id || '''' || ' and LineNo eq ' ||
+                                     rec_.line_no || ')';
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+               
+            ELSIF structure_in_tree_ = 'E' THEN
+               FOR rec_ IN get_all_circuit_service_lines LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || '(' || ' ContractId eq ''' ||
+                               rec_.contract_id || '''' || ' and LineNo eq ' ||
+                                     rec_.line_no || ')' ;
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or ' || '(' || ' ContractId eq ''' ||
+                               rec_.contract_id || '''' || ' and LineNo eq ' ||
+                                     rec_.line_no || ')';
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;    
+            ELSE
+               FOR rec_ IN get_all_function_service_lines LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || '(' || ' ContractId eq ''' ||
+                               rec_.contract_id || '''' || ' and LineNo eq ' ||
+                                     rec_.line_no || ')' ;
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or ' || '(' || ' ContractId eq ''' ||
+                               rec_.contract_id || '''' || ' and LineNo eq ' ||
+                                     rec_.line_no || ')';
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+            END IF;
+            
+         $ELSE
+            navigation_url_ := '';
+         $END
+      END IF;
+   END IF;
+   IF navigating_form_ = '93JtTaskStep' THEN
+      IF type_of_obj_ = 'Single' THEN
+         $IF Component_Wo_SYS.INSTALLED $THEN
+            navigation_url_ := 'page/WorkTaskSteps/List?$filter=';
+            page_ := 'Work Task Steps';
+            FOR rec_ IN get_active_work_task_step LOOP
+               IF first_iter_ = 0 THEN
+                  navigation_url_ := navigation_url_ || ' TaskStepSeq eq ' ||
+                                     rec_.task_step_seq;
+               ELSE
+                  navigation_url_ := navigation_url_ || ' or TaskStepSeq eq ' ||
+                                     rec_.task_step_seq;
+               END IF;
+               first_iter_ := 1;
+               IF (LENGTH(navigation_url_)> 30000) THEN
+                  RAISE inv_url_;
+               END IF;
+            END LOOP;
+         $ELSE
+            navigation_url_ := '';
+         $END
+      ELSE
+         $IF Component_Wo_SYS.INSTALLED $THEN
+            navigation_url_ := 'page/WorkTaskSteps/List?$filter=';
+            page_ := 'Work Task Steps';
+            IF structure_in_tree_ = 'L' THEN
+               FOR rec_ IN get_all_active_location_work_task_step LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || ' TaskStepSeq eq ' ||
+                                        rec_.task_step_seq;
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or TaskStepSeq eq ' ||
+                                        rec_.task_step_seq;
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+               
+            ELSIF structure_in_tree_ = 'R' THEN
+               FOR rec_ IN get_all_active_from_work_task_step LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || ' TaskStepSeq eq ' ||
+                                        rec_.task_step_seq;
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or TaskStepSeq eq ' ||
+                                        rec_.task_step_seq;
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+            ELSIF structure_in_tree_ = 'T' THEN
+               FOR rec_ IN get_all_active_to_work_task_step LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || ' TaskStepSeq eq ' ||
+                                        rec_.task_step_seq;
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or TaskStepSeq eq ' ||
+                                        rec_.task_step_seq;
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+               
+            ELSIF structure_in_tree_ = 'P' THEN
+               FOR rec_ IN get_all_active_process_work_task_step LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || ' TaskStepSeq eq ' ||
+                                        rec_.task_step_seq;
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or TaskStepSeq eq ' ||
+                                        rec_.task_step_seq;
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+               
+            ELSIF structure_in_tree_ = 'S' THEN
+               FOR rec_ IN get_all_active_pipe_work_task_step LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || ' TaskStepSeq eq ' ||
+                                        rec_.task_step_seq;
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or TaskStepSeq eq ' ||
+                                        rec_.task_step_seq;
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+               
+            ELSIF structure_in_tree_ = 'E' THEN
+               FOR rec_ IN get_all_active_circuit_work_task_step LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || ' TaskStepSeq eq ' ||
+                                        rec_.task_step_seq;
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or TaskStepSeq eq ' ||
+                                        rec_.task_step_seq;
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+               
+            ELSE
+               FOR rec_ IN get_all_active_function_work_task_step LOOP
+                  IF first_iter_ = 0 THEN
+                     navigation_url_ := navigation_url_ || ' TaskStepSeq eq ' ||
+                                        rec_.task_step_seq;
+                  ELSE
+                     navigation_url_ := navigation_url_ || ' or TaskStepSeq eq ' ||
+                                        rec_.task_step_seq;
+                  END IF;
+                  first_iter_ := 1;
+                  IF (LENGTH(navigation_url_)> 30000) THEN
+                     RAISE inv_url_;
+                  END IF;
+               END LOOP;
+            END IF;
+            
+         $ELSE
+            navigation_url_ := '';
+         $END
+      END IF;
+   END IF;
+   RETURN navigation_url_;
+EXCEPTION 
+   WHEN inv_url_ THEN
+      IF type_of_obj_ = 'Single' THEN
+         Error_SYS.Appl_General(lu_name_, 'EXCCEDTYPESINGLE: Query exceeds the character limit, try from the :P1 page.', page_);
+      ELSE
+         Error_SYS.Appl_General(lu_name_, 'EXCCEDTYPESTRUCT: Query exceeds the character limit, try from a lower level of the object structure.'); 
+      END IF;
+END Get_Navigation_Url___;

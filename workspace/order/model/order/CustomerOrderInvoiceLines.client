@@ -1,0 +1,465 @@
+
+--------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  ---------------------------------------------------------------
+-- 2021-10-18  NiDalk  SC21R2-5004, Implemented current data filter to page.
+-- 2021-09-30  NiDalk  SC21R2-2984, Removed InvoiceRef and set to fetch PayTermBaseDate and DueDate from the attributes.
+-- 2021-03-05  ErFelk  Bug 156198(SCZ-12927), Modified OverviewCustomerInvoiceItemList by making InvoicedQty editable even when ChargePercent is null.
+-- 2019-08-12  RaVdlk  SCUXXW4-13659, Moved some of the validation related code to commands
+-- 2019-06-02  KhVese  SCUXXW4-22764, Added preserveprecision to fields SaleUnitPrice, UnitPriceInclTax, ChargePercent and ChargePercentBasis.
+-- 2019-03-12  ErRalk  SCUXXW4-17228, Added Dependency Annotation for the relevant fields.
+-- 2018-12-14  RaVdlk  SCUXXW4-1059, Added the messagebox instead of confirm message
+-- 2018-06-25  HPetse  SCUXXW4-1059, Added fieldranking, changed field sizes
+-- 2018-06-19  RaVdlk  SCUXXW4-1059, Addedwidget for customer no and concatenated Invoice Type and Description
+-- 2018-06-18  RaVdlk  SCUXXW4-1059, Added field validations
+-- 2018-06-11  RaVdlk  SCUXXW4-1059, Converted from tbwOverviewCustomerInvoiceItem using MTG Version: 1.16
+--------------------------------------------------------------------------------------
+
+client CustomerOrderInvoiceLines;
+component ORDER;
+layer Core;
+projection CustomerOrderInvoiceLinesHandling;
+
+include fragment TaxCalcStructureActiveSelector;
+include fragment TaxCodeRestrictedSelector;
+include fragment OrdDeliveryTypeLovSelector;
+include fragment UserAllowedSiteLovSelector;
+include fragment CustOrdCust1Selector;
+include fragment OrdInvoiceTypeLovSelector;
+include fragment OrdInvoiceSeriesLovSelector;
+-- gelr: acquisition_origin, begin
+include fragment AcquisitionOriginSelector;
+-- gelr: acquisition_origin, end
+-- gelr:good_service_statistical_code, begin
+include fragment StatisticalCodeSelector;
+-- gelr:good_service_statistical_code, end
+------------------------------ NAVIGATOR ENTRY ------------------------------
+
+navigator {
+   entry OverviewCustomerInvoiceItemNavEntry parent OrderNavigator.SalesInvoicing at index 300 {
+      label = "Customer Invoice Lines";
+      page List home CustomerOrderInvItem;
+   }
+}
+-------------------------------- MAIN PAGES ---------------------------------
+
+page List using CustomerOrderInvItemSet {
+   label = "Customer Invoice Lines";
+   startupmode = search;
+   currentdatafilter {
+      label = "Show only current results";
+      description = "Lines of customer invoices in Preliminary, Posted, Printed, Posted Auth, Partly Paid Posted and Paid Posted (within last 100 days).";
+   }
+   list OverviewCustomerInvoiceItemList;
+}
+--------------------------------- COMMANDS ----------------------------------
+command CustomerInvoiceCommand for CustomerOrderInvItem {
+   label = "Customer Invoice";
+   mode = SelectedRecords;
+   enabled = [true];
+   bulkexecute {
+      bulknavigate "page/CustomerOrderInvoice/Form?$filter=Company eq $[Company] and InvoiceId eq $[InvoiceId]";
+   }
+}
+
+@DynamicComponentDependency CFGCHR
+command ViewConfigurationCommand for CustomerOrderInvItem {
+   label = "View Configuration";
+   enabled = [ConfigurationId != "*" and OrderNo != null];
+   mode = SingleRecord;
+   execute {
+      set Usage = "CustomerOrder";
+      navigate "assistant/PartConfigurationAssistant/EditConfiguration?$action=InitConfiguration{  VarUsage:$[Usage],
+                                                                                                   VarMode:'View',
+                                                                                                   VarIdentity1:$[OrderNo],
+                                                                                                   VarIdentity2:$[LineNo],
+                                                                                                   VarIdentity3:$[ReleaseNo],
+                                                                                                   VarIdentity4:$[LineItemNo]}";
+   }
+}
+---------------------------- VALIDATION COMMANDS ----------------------------
+
+command AmountsValidationCommand for CustomerOrderInvItem {
+   execute {
+      call CalculateInvoiceAmounts(Company, InvoiceId, ItemId, InvoicedQty, UnitPriceInclTax, SaleUnitPrice, ChargePercentBasis, ChargePercent, OrderDiscount,
+      Discount, AdditionalDiscount, NetCurrAmount, GrossCurrAmount, VatCurrAmount, VatDomAmount, VatCode, TaxCalcStructureId)into InvoiceItem;
+      set VatCurrAmount = InvoiceItem.VatCurrAmount;
+      set GrossCurrAmount = InvoiceItem.GrossCurrAmount;
+      set NetCurrAmount = InvoiceItem.NetCurrAmount;
+      set VatCodeRef = InvoiceItem.TaxCode;
+      set TaxCalcStructureIdRef = InvoiceItem.TaxCalcStrucId;
+   }
+}
+
+command InvoicedQtyValidationCommand for CustomerOrderInvItem clone AmountsValidationCommand {
+   execute {
+      set QtyPrice = "#{(InvoicedQty * PriceConv)}";
+      super;
+   }
+}
+
+command SaleUnitPriceValidationCommand for CustomerOrderInvItem clone AmountsValidationCommand {
+   variable UsePiv {
+      type = Text;
+   }
+   execute {
+      if [SaleUnitPrice = null] {
+         set UnitPriceInclTax = null;
+      }
+      else {
+         set UsePiv = "FALSE";
+         call CalculatePriceInformation(SaleUnitPrice, UnitPriceInclTax, MultipleTaxLines, VatCode, TaxCalcStructureId, InvoiceId, ItemId, Contract, InvoiceDate, Currency, UsePiv)into PriceInfo;
+         set SaleUnitPrice = PriceInfo.NetCurrPrice;
+         set UnitPriceInclTax = PriceInfo.GrossCurrPrice;
+         set MultipleTaxLines = PriceInfo.MultipleTaxLines;
+         set VatCodeRef = PriceInfo.TaxCode;
+         set TaxCalcStructureIdRef = PriceInfo.TaxCalcStructId;
+      }
+      super;
+   }
+}
+
+command UnitPriceInclTaxValidationCommand for CustomerOrderInvItem clone AmountsValidationCommand {
+   variable UsePiv {
+      type = Text;
+   }
+   execute {
+      if [UnitPriceInclTax = null] {
+         set  SaleUnitPrice = null;
+      }
+      else {
+         set UsePiv = "TRUE";
+         call CalculatePriceInformation(SaleUnitPrice, UnitPriceInclTax, MultipleTaxLines, VatCode, TaxCalcStructureId, InvoiceId, ItemId, Contract, InvoiceDate, Currency, UsePiv)into PriceInfo;
+         set SaleUnitPrice = PriceInfo.NetCurrPrice;
+         set UnitPriceInclTax = PriceInfo.GrossCurrPrice;
+         set MultipleTaxLines = PriceInfo.MultipleTaxLines;
+         set VatCodeRef = PriceInfo.TaxCode;
+         set TaxCalcStructureIdRef = PriceInfo.TaxCalcStructId;
+      }
+      super;
+   }
+}
+----------------------------------- LISTS -----------------------------------
+
+list OverviewCustomerInvoiceItemList for CustomerOrderInvItem {
+   orderby = Company, InvoiceId, ItemId;
+   field Company;
+   lov SeriesIdRef with ReferenceOrdInvoiceSeriesLovSelector;
+   field InvoiceNo;
+   field Currency {
+      size = Small;
+   }
+   lov InvoiceTypeRef with ReferenceOrdInvoiceTypeLovSelector {
+      description = InvoiceTypeDescription;
+      size = Large;
+   }
+   badge CustomerOrderInvoiceState {
+      label = "Invoice Status";
+      emphasis Progress1 = [CustomerOrderInvoiceState = "Preliminary"];
+      emphasis Progress3 = [CustomerOrderInvoiceState = "Printed"];
+      emphasis StateCancelled = [CustomerOrderInvoiceState = "Cancelled"];
+      emphasis Progress5 = [CustomerOrderInvoiceState = "Posted"];
+      emphasis Progress7 = [CustomerOrderInvoiceState = "PostedAuth"];
+      emphasis Progress9 = [CustomerOrderInvoiceState = "PartlyPaidPosted"];
+      emphasis Progress12 = [CustomerOrderInvoiceState = "PaidPosted"];
+      style = TextOnly;
+   }
+
+   field Pos {
+      size = Small;
+   }
+   field OrderNoRef;
+   field LineNo {
+      size = Small;
+   }
+   field ReleaseNo {
+      size = Small;
+   }
+   lov IdentityRef with ReferenceCustOrdCust1Selector {
+      description = CustomerName;
+      contactwidget {
+         enabled = [Identity != null];
+         source = Customer;
+      }
+   }
+   field ChargeSeqNo;
+   field Charge {
+      size = Small;
+   }
+   field RmaNo;
+   field RmaLineNo;
+   field RmaChargeNo;
+   lov ContractRef with ReferenceUserAllowedSiteLovSelector;
+   field CatalogNoRef;
+   field Description;
+   field InvoicedQty {
+      validate command InvoicedQtyValidationCommand;
+   }
+   field SaleUmRef;
+   field PriceUmRef;
+   field SaleUnitPrice {
+      editable = [ChargePercentBasis = null and UsePriceInclTax = "FALSE"];
+      preserveprecision = [true];
+      validate command SaleUnitPriceValidationCommand;
+   }
+   field UnitPriceInclTax {
+      editable = [ChargePercentBasis = null and UsePriceInclTax = "TRUE"];
+      preserveprecision = [true];
+      validate command UnitPriceInclTaxValidationCommand;
+   }
+   field ChargePercent {
+      editable = [SaleUnitPrice = null and UnitPriceInclTax = null];
+      preserveprecision = [true];
+      validate command AmountsValidationCommand;
+   }
+   field ChargePercentBasis {
+      preserveprecision = [true];
+   }
+   field Discount;
+   field OrderDiscount {
+      editable = [not Charge];
+      validate command AmountsValidationCommand;
+   }
+   field AdditionalDiscount;
+   field TotalOrderLineDiscount;
+   lov DelivTypeIdRef with ReferenceOrdDeliveryTypeLovSelector {
+      editable = [true];
+   }
+   lov VatCodeRef with ReferenceTaxCodeRestrictedSelector using  TaxCodeLov(Company, InvoiceDate) {
+      validate command {
+         variable TaxRateValue {
+            type = Number;
+         }
+         execute {
+            if [TaxCalcStructureId != null] {
+               messagebox("", question, "This will overwrite the existing tax calculation structure. Do you want to continue ?") {
+                  when "Yes" {
+                     refresh;
+                  }
+                  when "No" {
+                     set VatCode = original.VatCode;
+                     exit;
+                  }
+               }
+            }
+            if [MultipleTaxLines and TaxCalcStructureId = null] {
+               messagebox("", question, "This will overwrite the existing multiple tax lines. Do you want to continue ?") {
+                  when "Yes" {
+                     refresh;
+                  }
+                  when "No" {
+                     set VatCode = original.VatCode;
+                     exit;
+                  }
+               }
+            }
+            set TaxCalcStructureId = null;
+            call GetTaxRate(Company, VatCode)into TaxRateValue;
+            set TaxRate = TaxRateValue;
+
+            if [UsePriceInclTax = "TRUE" and UnitPriceInclTax = null] {
+               set SaleUnitPrice = null;
+            }
+            else {
+               if [UsePriceInclTax = "FALSE" and SaleUnitPrice = null] {
+                  set UnitPriceInclTax = null;
+               }
+               else {
+                  set UsePiv = UsePriceInclTax;
+                  call CalculatePriceInformation(SaleUnitPrice, UnitPriceInclTax, MultipleTaxLines, VatCode, TaxCalcStructureId,
+                  InvoiceId, ItemId, Contract, InvoiceDate, Currency, UsePiv)into PriceInfo;
+
+                  set SaleUnitPrice = PriceInfo.NetCurrPrice;
+                  set UnitPriceInclTax = PriceInfo.GrossCurrPrice;
+                  set MultipleTaxLines = PriceInfo.MultipleTaxLines;
+                  set VatCodeRef = PriceInfo.TaxCode;
+                  set TaxCalcStructureIdRef = PriceInfo.TaxCalcStructId;
+               }
+            }
+            call CalculateInvoiceAmounts(Company, InvoiceId, ItemId, InvoicedQty, UnitPriceInclTax, SaleUnitPrice, ChargePercentBasis, ChargePercent, OrderDiscount,
+            Discount, AdditionalDiscount, NetCurrAmount, GrossCurrAmount, VatCurrAmount, VatDomAmount, VatCode, TaxCalcStructureId)into InvoiceItem;
+            set VatCurrAmount = InvoiceItem.VatCurrAmount;
+            set GrossCurrAmount = InvoiceItem.GrossCurrAmount;
+            set NetCurrAmount = InvoiceItem.NetCurrAmount;
+            set VatCodeRef = InvoiceItem.TaxCode;
+            set TaxCalcStructureIdRef = InvoiceItem.TaxCalcStrucId;
+         }
+
+      }
+
+   }
+   lov TaxCalcStructureIdRef with ReferenceTaxCalcStructureActiveSelector {
+      validate command {
+         variable UsePiv {
+            type = Text;
+         }
+         execute {
+            if [VatCode != null] {
+               messagebox("", question, "This will overwrite the the existing tax code. Do you want to continue ?") {
+                  when "Yes" {
+                     refresh;
+                  }
+                  when "No" {
+                     set TaxCalcStructureId = original.TaxCalcStructureId;
+                     exit;
+                  }
+               }
+               set VatCode = null;
+               set TaxRate = null;
+            }
+
+            if [MultipleTaxLines] {
+               messagebox("", question, "This will overwrite the the existing multiple tax lines. Do you want to continue ?") {
+                  when "Yes" {
+                     refresh;
+                  }
+                  when "No" {
+                     set TaxCalcStructureId = original.TaxCalcStructureId;
+                     exit;
+                  }
+               }
+            }
+            if [UsePriceInclTax = "FALSE"] {
+               if [SaleUnitPrice = null] {
+                  set UnitPriceInclTax = null;
+               }
+               else {
+                  set UsePiv = "FALSE";
+
+                  call CalculatePriceInformation(SaleUnitPrice, UnitPriceInclTax, MultipleTaxLines, VatCode, TaxCalcStructureId,
+                  InvoiceId, ItemId, Contract, InvoiceDate, Currency, UsePiv)into PriceInfo;
+
+                  set SaleUnitPrice = PriceInfo.NetCurrPrice;
+                  set UnitPriceInclTax = PriceInfo.GrossCurrPrice;
+                  set MultipleTaxLines = PriceInfo.MultipleTaxLines;
+                  set VatCodeRef = PriceInfo.TaxCode;
+                  set TaxCalcStructureIdRef = PriceInfo.TaxCalcStructId;
+
+                  call CalculateInvoiceAmounts(Company, InvoiceId, ItemId, InvoicedQty, UnitPriceInclTax, SaleUnitPrice, ChargePercentBasis, ChargePercent, OrderDiscount,
+                  Discount, AdditionalDiscount, NetCurrAmount, GrossCurrAmount, VatCurrAmount, VatDomAmount, VatCode, TaxCalcStructureId)into InvoiceItem;
+                  set VatCurrAmount = InvoiceItem.VatCurrAmount;
+                  set GrossCurrAmount = InvoiceItem.GrossCurrAmount;
+                  set NetCurrAmount = InvoiceItem.NetCurrAmount;
+                  set VatCodeRef = InvoiceItem.TaxCode;
+                  set TaxCalcStructureIdRef = InvoiceItem.TaxCalcStrucId;
+               }
+            }
+
+         }
+
+      }
+   }
+   field TaxRate;
+   field MultipleTaxLines;
+   field CustomerPoNo;
+   field NetCurrAmount;
+   field VatCurrAmount;
+   field GrossCurrAmount;
+   field BaseCompBearingTaxAmt;
+   field InvoiceId;
+   field AdvancePrepaymBasedInvoice;
+   field CorrectionInvoice;
+   field PaymentReference;
+   field ConfigurationId;
+   field ConditionCode;
+   field ConditionCodeDescription;
+   field SalesPartRebateGroup;
+   field AssortmentId;
+   field AssortmentNodeId;
+   field PrelUpdateAllowed;
+   @DynamicComponentDependency PROJ
+   field ProgramID;
+   @DynamicComponentDependency PROJ
+   field ProgramDescription;
+   field ProjectId {
+      label = "Project ID";
+   }
+   @DynamicComponentDependency PROJ
+   field ProjectName;
+   @DynamicComponentDependency PROJ
+   field SubProjectID;
+   @DynamicComponentDependency PROJ
+   field SubProjectDescription;
+   @DynamicComponentDependency PROJ
+   field ActivityID;
+   @DynamicComponentDependency PROJ
+   field ActivityDescription;
+   @DynamicComponentDependency PROJ
+   field ActivitySequenceRef;
+   field QtyPrice {
+      columnexclude = [true];
+   }
+   field PriceConv {
+      columnexclude = [true];
+   }
+   field Reconsume {
+      columnexclude = [true];
+   }
+   field Rounding {
+      columnexclude = [true];
+   }
+   field UsePriceInclTax {
+      columnexclude = [true];
+   }
+   @DynamicComponentDependency RENTAL
+   field RentalTransactionRef.TransactionDate {
+      label = "Transaction Start Date";
+   }
+   @DynamicComponentDependency RENTAL
+   field RentalTransactionRef.TransactionEndDate {
+      label = "Transaction End Date";
+   }
+   @DynamicComponentDependency RENTAL
+   field InvoicedDurationDays;
+   @DynamicComponentDependency RENTAL
+   field RentalTransactionRef.OnRentalQty {
+      label = "On Rental Qty";
+   }
+   field InvoiceDate;
+   field PayTermBaseDate;
+   field DueDate;
+   @DynamicComponentDependency RENTAL
+   field RentalTransactionRef.RentalModeId {
+      size = Small;
+      label = "Rental Mode ID";
+   }
+   @DynamicComponentDependency RENTAL
+   field RentalModeDescription;
+   -- gelr: acquisition_origin, begin
+   lov AcquisitionOriginRef with ReferenceAcquisitionOriginSelector {
+      editable = [AcquisitionOriginEnabled];
+      description = AcquisitionOriginRef.Description;
+   }
+   -- gelr: acquisition_origin, end
+   -- gelr:good_service_statistical_code, begin
+   lov StatisticalCodeRef with ReferenceStatisticalCodeSelector {
+      editable = [GoodServiceStatisticalCodeEnabled];
+      description = StatisticalCodeRef.Description;
+   }
+   -- gelr:good_service_statistical_code, end
+   fieldranking InvoiceNo, InvoiceTypeRef, CustomerOrderInvoiceState, IdentityRef, CatalogNoRef, Description, InvoicedQty, SaleUnitPrice, NetCurrAmount, VatCurrAmount, GrossCurrAmount, InvoiceDate;
+
+   command CustomerInvoiceCommand;
+   @DynamicComponentDependency CFGCHR
+   command ViewConfigurationCommand;
+}
+
+@Override
+list OrdInvoiceSeriesLovLovList for OrdInvoiceSeriesLov {
+   label = "";
+   static Company;
+   static SeriesId;
+   static Description {
+      size = Large;
+   }
+}
+
+@Override
+list OrdInvoiceTypeLovLovList for OrdInvoiceTypeLov {
+   label = "";
+   static Company;
+   static TypeId;
+   static Description {
+      size = Large;
+   }
+}

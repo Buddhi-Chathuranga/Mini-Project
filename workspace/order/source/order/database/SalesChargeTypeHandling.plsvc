@@ -1,0 +1,163 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: SalesChargeTypeHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign    History
+--  ------     ------  ---------------------------------------------------------
+-- 2021-02-24  WaSalk  SC2020R1-12573, Modified contract_info_rec_ by adding enabled_lcc_params to Validate_Contract___().
+-- 2020-02-18  RaVdlk  SCXTEND-2222, Overridden the CRUD_Default_Copy
+-- 2018-11-12  IzShlk  SCUXXW4-9382, Converted from frmSalesChargeType using MTG Version: 1.32
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Get_Tax_Percentage___(
+   tax_code_         IN VARCHAR2,
+   company_          IN VARCHAR2
+   ) RETURN NUMBER
+IS
+BEGIN
+   RETURN Statutory_Fee_API.Get_Fee_Rate(company_, tax_code_);
+END Get_Tax_Percentage___;
+
+FUNCTION Calculate_Price_Incl_Tax___(
+   charge_amount_    IN NUMBER,
+   taxable_          IN BOOLEAN,
+   tax_code_         IN VARCHAR2,
+   company_          IN VARCHAR2 )  RETURN NUMBER
+IS
+   charge_price_incl_tax_ NUMBER;
+   tax_percentage_        NUMBER;
+BEGIN
+   IF charge_amount_ IS NULL THEN
+      charge_price_incl_tax_ := NULL;
+   ELSIF taxable_ THEN
+      IF tax_code_ IS NOT NULL THEN
+         tax_percentage_ := Get_Tax_Percentage___(tax_code_, company_);
+         charge_price_incl_tax_ := charge_amount_ * ((tax_percentage_ / 100) + 1);
+      ELSE
+         charge_price_incl_tax_ := charge_amount_;
+      END IF; 
+   ELSE
+      charge_price_incl_tax_ := charge_amount_;
+   END IF;
+   RETURN charge_price_incl_tax_;
+END Calculate_Price_Incl_Tax___;
+
+FUNCTION Calculate_Price___(
+   charge_price_incl_tax_ IN NUMBER,
+   taxable_               IN BOOLEAN,
+   tax_code_              IN VARCHAR2,
+   company_               IN VARCHAR2 )  RETURN NUMBER
+IS
+   charge_amount_   NUMBER;
+   tax_percentage_  NUMBER;
+BEGIN
+   IF charge_price_incl_tax_ IS NULL THEN
+      charge_amount_ := NULL;
+   ELSIF taxable_ THEN
+      IF tax_code_ IS NOT NULL THEN
+         tax_percentage_ := Get_Tax_Percentage___(tax_code_, company_);
+         charge_amount_ := charge_price_incl_tax_ / ((tax_percentage_ / 100) + 1);
+      ELSE
+         charge_amount_ := charge_price_incl_tax_;
+      END IF; 
+   ELSE
+      charge_amount_ := charge_price_incl_tax_;
+   END IF;
+   RETURN charge_amount_;
+END Calculate_Price___;
+
+FUNCTION Get_External_Tax_Cal_Method___(
+   company_ IN VARCHAR2 )  RETURN VARCHAR2
+IS
+BEGIN
+   RETURN Company_Tax_Control_API.Get_External_Tax_Cal_Method_Db(company_);
+END Get_External_Tax_Cal_Method___;
+
+FUNCTION Validate_Contract___(
+   contract_  IN VARCHAR2,
+   tax_class_ IN VARCHAR2)  RETURN Contract_Info_Struct_Rec
+IS
+   company_   VARCHAR2(100);
+   currency_  VARCHAR2(20);
+   vat_code_  VARCHAR2(50) := NULL;
+   taxable_   BOOLEAN := FALSE;
+   use_price_incl_tax_ BOOLEAN := FALSE;
+   contract_info_struct_rec_ Contract_Info_Struct_Rec;
+BEGIN
+   company_  := Site_API.Get_Company(contract_);
+   currency_ := Company_Finance_API.Get_Currency_Code(company_);
+   taxable_  := (Company_Tax_Discom_Info_API.Get_Order_Taxable_Db(company_) = 'TRUE');
+   
+   IF tax_class_ IS NULL THEN
+      IF taxable_ THEN
+         vat_code_ := Company_Tax_Discom_Info_API.Get_Tax_Code(company_);
+      ELSE
+         vat_code_ := Company_Tax_Discom_Info_API.Get_Tax_Free_Tax_Code(company_);
+      END IF;
+   END IF;
+   use_price_incl_tax_ := (Site_Discom_Info_API.Get_Use_Price_Incl_Tax_Ord_Db(contract_) = 'TRUE');
+   
+   contract_info_struct_rec_.company  := company_;
+   contract_info_struct_rec_.currency := currency_;
+   contract_info_struct_rec_.tax_code := vat_code_;
+   contract_info_struct_rec_.taxable  := taxable_;
+   contract_info_struct_rec_.use_price_incl_tax := use_price_incl_tax_;
+   -- gelr:localization_control_center, begin
+   contract_info_struct_rec_.enabled_lcc_params := Company_Localization_Info_API.Get_Enabled_Params_per_Company(company_);
+   -- gelr:localization_control_center, end
+   RETURN contract_info_struct_rec_;
+END Validate_Contract___;
+
+FUNCTION Get_Group_Description___(
+   charge_group_ IN VARCHAR2 )  RETURN VARCHAR2
+IS
+BEGIN
+   RETURN Sales_Charge_Group_API.Get_Lang_Description(charge_group_);
+END Get_Group_Description___;
+
+@Override
+PROCEDURE CRUD_Default_Copy___ (
+   rec_  IN OUT Sales_Charge_Type_Rec )
+IS
+   contract_info_struct_rec_ Contract_Info_Struct_Rec;
+BEGIN
+   super(rec_);
+   contract_info_struct_rec_ :=  Validate_Contract___(rec_.contract, rec_.tax_class_id);
+   rec_.company              := contract_info_struct_rec_.Company;
+   rec_.currency_code        := contract_info_struct_rec_.currency;
+   rec_.tax_code             := contract_info_struct_rec_.tax_code;
+   rec_.use_price_incl_tax   := contract_info_struct_rec_.use_price_incl_tax;
+   rec_.taxable              := contract_info_struct_rec_.taxable;
+   
+   rec_.charge_group_description := Get_Group_Description___ (rec_.charge_group);
+   IF (rec_.charge_group IS NULL) THEN
+      rec_.sales_chg_type_category := NULL;
+   ELSE
+      rec_.sales_chg_type_category := Sales_Charge_Group_API.Get_Sales_Chg_Type_Category_Db(rec_.charge_group);
+   END IF;
+   
+   IF (rec_.charge_cost_percent IS NOT NULL) THEN
+      rec_.charge_cost := NULL;
+   END IF;
+   
+   IF (rec_.tax_class_id IS NOT NULL) THEN
+      rec_.tax_code := NULL;      
+   END IF;
+   
+   IF (rec_.use_price_incl_tax) THEN
+      rec_.charge_amount := Calculate_Price___(rec_.charge_amount_incl_tax,
+                                               rec_.taxable,
+                                               rec_.tax_code,
+                                               rec_.company);
+   ELSE
+      rec_.charge_amount_incl_tax := Calculate_Price_Incl_Tax___(rec_.charge_amount,
+                                                                 rec_.taxable,
+                                                                 rec_.tax_code ,
+                                                                 rec_.company);
+   END IF;   
+END CRUD_Default_Copy___;

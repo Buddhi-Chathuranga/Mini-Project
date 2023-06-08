@@ -1,0 +1,440 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: SourceOrderLinesManuallyHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  220110  ShWtlk  MF21R2-6257, Added Refresh_Header___ to refresh the PurchasePartSupplierHeaderVirtual to show the mark down text.
+--  210729  ManWlk  MF21R2-2668, Modified Launch_Capability_Check_Info___ set required_date_ = planned_due_date_ instead of
+--  210729          setting it to previous work day. 
+--  190416  JaThlk  SCUXXW4-9522, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Get_Total_Sourced_Qty___ (
+	order_no_     IN VARCHAR2,
+	line_no_      IN VARCHAR2,
+	rel_no_       IN VARCHAR2,
+	line_item_no_ IN NUMBER ) RETURN NUMBER
+IS
+
+BEGIN
+   RETURN Sourced_Cust_Order_Line_API.Get_Total_Sourced_Qty(order_no_, line_no_, rel_no_, line_item_no_);
+END Get_Total_Sourced_Qty___;
+
+
+FUNCTION Get_Src_Own_Invent_Values___ (
+   order_no_                  IN VARCHAR2,
+   wanted_delivery_date_      IN DATE,
+   customer_no_               IN VARCHAR2,
+   ship_address_no_           IN VARCHAR2,
+   addr_flag_                 IN VARCHAR2,
+   ship_via_code_             IN VARCHAR2,
+   delivery_lead_time_        IN NUMBER,
+   picking_lead_time_         IN NUMBER,
+   ext_transport_calendar_id_ IN VARCHAR2,
+   supply_code_db_            IN VARCHAR2,
+   contract_                  IN VARCHAR2,
+   inventory_part_no_         IN VARCHAR2,
+   route_id_                  IN VARCHAR2,
+   catalog_type_db_           IN VARCHAR2,
+   revised_qty_due_           IN NUMBER,
+   init_                      IN BOOLEAN) RETURN Src_Own_Invent_Values_Structure_Rec
+IS
+   rec_                     Src_Own_Invent_Values_Structure_Rec;
+   earliest_delivery_date_  DATE;
+   planned_due_date_        DATE;
+   total_shipping_time_     NUMBER;
+   total_distance_          NUMBER;
+   total_expected_cost_     NUMBER;
+   supply_code_db_temp_     VARCHAR2(2);
+BEGIN
+   IF init_ THEN
+      supply_code_db_temp_ := Order_Supply_Type_API.Get_Db_Value(0);
+      rec_.supply_code := supply_code_db_temp_;
+   ELSE
+      supply_code_db_temp_ := supply_code_db_;
+   END IF;
+   Source_Order_Lines_API.Get_Src_Own_Invent_Values( earliest_delivery_date_, 
+                                                     planned_due_date_, 
+                                                     total_shipping_time_, 
+                                                     total_distance_, 
+                                                     total_expected_cost_, 
+                                                     wanted_delivery_date_, 
+                                                     customer_no_, 
+                                                     ship_address_no_, 
+                                                     addr_flag_, 
+                                                     ship_via_code_, 
+                                                     delivery_lead_time_, 
+                                                     picking_lead_time_, 
+                                                     ext_transport_calendar_id_, 
+                                                     supply_code_db_temp_,
+                                                     contract_, 
+                                                     inventory_part_no_, 
+                                                     route_id_, 
+                                                     revised_qty_due_ );
+                                                     
+   IF wanted_delivery_date_ >= earliest_delivery_date_ THEN
+      rec_.fulfills_demand := 'TRUE';  
+   ELSE
+      rec_.fulfills_demand := 'FALSE';
+   END IF;                                                                                                    
+   rec_.plannable_qty := Source_Order_Lines_API.Get_Atp_Quantity(contract_, inventory_part_no_, planned_due_date_);                                                  
+   rec_.earliest_delivery_date := earliest_delivery_date_;
+   rec_.planned_due_date:= planned_due_date_;
+   rec_.total_shipping_time := total_shipping_time_;
+   rec_.total_distance := total_distance_;
+   rec_.total_expected_cost := total_expected_cost_;
+   rec_.delivery_mode_transit := Sourcing_Delivery_Option_API.Decode('TRANSIT');
+   rec_.order_obj_state := Customer_Order_API.Get_Objstate(order_no_);
+   
+   RETURN rec_; 
+END Get_Src_Own_Invent_Values___;
+
+
+FUNCTION Convert_To_Date___(
+   wanted_delivery_date_     IN DATE,
+   planned_due_date_         IN DATE,
+   latest_release_date_temp_ IN DATE )  RETURN Source_Order_Date_Structure_Rec
+IS
+   rec_   Source_Order_Date_Structure_Rec;   
+BEGIN
+   rec_.wanted_delivery_date     := wanted_delivery_date_;
+   rec_.planned_due_date         := planned_due_date_;
+   rec_.latest_release_date_temp := latest_release_date_temp_;
+   
+   RETURN rec_;
+END Convert_To_Date___;
+
+
+PROCEDURE Create_Sourcing_Lines___ (
+   order_no_             IN VARCHAR2,
+   line_no_              IN VARCHAR2,
+   rel_no_               IN VARCHAR2,
+   line_item_no_         IN NUMBER,
+	sourced_qty_          IN NUMBER,
+	ship_via_code_        IN VARCHAR2,
+   supply_code_db_       IN VARCHAR2,
+	wanted_delivery_date_ IN DATE,
+	planned_due_date_     IN DATE,
+	latest_release_date_  IN DATE)
+IS
+   info_ VARCHAR2(32000);
+BEGIN
+   Source_Order_Lines_API.Create_Sourcing_Lines(info_, order_no_, line_no_, rel_no_, line_item_no_, sourced_qty_, ship_via_code_, supply_code_db_, wanted_delivery_date_, NULL, NULL, planned_due_date_, latest_release_date_);
+END Create_Sourcing_Lines___;
+
+
+@DynamicComponentDependency PURCH
+PROCEDURE Create_Src_Lines_From_Suppliers___ (
+   parent_objkey_        IN VARCHAR2,
+   order_no_             IN VARCHAR2,
+   line_no_              IN VARCHAR2,
+   rel_no_               IN VARCHAR2,
+   line_item_no_         IN NUMBER)
+IS
+   parent_key_       Purchase_Part_Supplier_Header_Virtual_Key;
+   child_key_        Purchase_Part_Supplier_Virtual_Key; 
+   child_rec_        Purchase_Part_Supplier_Virtual_Rec;
+   info_             VARCHAR2(32000);
+BEGIN
+   parent_key_.objkey := parent_objkey_;
+   FOR line_rec_ IN Get_Purchase_Part_Suppliers_Array___(parent_key_) LOOP
+      child_key_.objkey := line_rec_.objkey;
+      child_rec_ := Get_Record___(child_key_); 
+      IF child_rec_.sourced_qty IS NOT NULL THEN
+         Source_Order_Lines_API.Create_Sourcing_Lines(info_, order_no_, line_no_, rel_no_, line_item_no_, child_rec_.sourced_qty, child_rec_.supplier_ship_via_transit, child_rec_.supply_code_db, child_rec_.wanted_delivery_date, child_rec_.supply_site_due_date, child_rec_.vendor_no, child_rec_.planned_due_date, child_rec_.supplier_latest_release_date);
+      END IF;
+   END LOOP;   
+END Create_Src_Lines_From_Suppliers___;
+
+
+@DynamicComponentDependency PURCH
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Purchase_Part_Supplier_Header_Virtual_Rec )
+IS
+   line_rec_              Purchase_Part_Supplier_Virtual_Rec;
+   supplier_rec_          Src_Supplier_Values_Structure_Rec;
+   CURSOR get_purchase_part_suppliers IS
+      SELECT contract, part_no, vendor_no
+      FROM PURCHASE_PART_SUPPLIER
+      WHERE part_no = rec_.part_no AND rec_.part_no IS NOT NULL AND contract = rec_.contract AND status_code = '2' AND Supplier_Address_API.Get_Address_No(vendor_no, Address_Type_Code_API.Decode('INVOICE')) IS NOT NULL;
+BEGIN
+   Super(rec_);
+      OPEN get_purchase_part_suppliers;
+      LOOP
+         FETCH get_purchase_part_suppliers INTO line_rec_.contract, line_rec_.part_no, line_rec_.vendor_no;
+         EXIT WHEN get_purchase_part_suppliers%NOTFOUND;
+         line_rec_.objkey               := sys_guid();
+         line_rec_.parent_objkey        := rec_.objkey; 
+         line_rec_.wanted_delivery_date := rec_.wanted_delivery_date;
+         line_rec_.currency_code        := Customer_Order_API.Get_Currency_Code(rec_.order_no);
+         line_rec_.delivery_mode        := 'TRANSIT';
+         line_rec_.delivery_mode_transit := line_rec_.delivery_mode;
+         supplier_rec_ := Get_Src_Supplier_Values___( rec_.ship_via_code,
+                                                      rec_.ship_via_code,
+                                                      rec_.wanted_delivery_date,
+                                                      rec_.customer_no,
+                                                      rec_.ship_addr_no,
+                                                      rec_.addr_flag_db,
+                                                      line_rec_.vendor_no,
+                                                      line_rec_.contract,
+                                                      rec_.catalog_no,
+                                                      rec_.part_no,
+                                                      rec_.route_id,
+                                                      rec_.revised_qty_due,
+                                                      rec_.delivery_leadtime,
+                                                      rec_.picking_leadtime,
+                                                      rec_.ext_transport_calendar_id,
+                                                      line_rec_.currency_code,
+                                                      line_rec_.delivery_mode,
+                                                      line_rec_.delivery_mode,
+                                                      TRUE);
+         IF supplier_rec_.fulfills_demand = 'TRUE' THEN
+            line_rec_.fulfills_demand := TRUE;
+         ELSE
+            line_rec_.fulfills_demand := FALSE;
+         END IF;                                          
+         line_rec_.desired_time_to_delivery        := supplier_rec_.ddd_total_del_leadtime;
+         line_rec_.earliest_possible_delivery_date := supplier_rec_.earliest_possible_delivery_date;
+         line_rec_.ep_due_date                     := supplier_rec_.epdd_at_supplier;
+         line_rec_.min_time_to_delivery            := supplier_rec_.epdd_total_del_leadtime;
+         line_rec_.total_distance                  := supplier_rec_.total_distance;
+         line_rec_.total_shipping_time             := supplier_rec_.total_shipping_time;
+         line_rec_.expected_additional_cost        := supplier_rec_.tot_exp_additional_cost;    
+         line_rec_.planned_due_date                := supplier_rec_.supplier_planned_due_date;
+         line_rec_.supplier_ship_via_transit       := supplier_rec_.ship_via_code;
+         line_rec_.co_plannable_quantity           := supplier_rec_.available_to_promise_qty;
+         line_rec_.supply_site_due_date            := supplier_rec_.supply_site_due_date;
+         line_rec_.supply_code_db                  := supplier_rec_.supply_code_db;
+         line_rec_.supply_site                     := Supplier_API.Get_Acquisition_Site(line_rec_.vendor_no);
+         line_rec_.order_obj_state                 := Customer_Order_API.Get_Objstate(rec_.order_no);
+         CRUD_Create___(line_rec_);
+      END LOOP;
+   CLOSE get_purchase_part_suppliers;
+END CRUD_Create___;
+
+   
+
+
+@DynamicComponentDependency PURCH
+FUNCTION Get_Src_Supplier_Values___ (
+   header_ship_via_code_        IN VARCHAR2,
+   col_ship_via_code_           IN VARCHAR2,
+   wanted_delivery_date_        IN DATE,
+   customer_no_                 IN VARCHAR2,
+   ship_addr_no_                IN VARCHAR2,
+   addr_flag_db_                IN VARCHAR2,
+   vendor_no_                   IN VARCHAR2,
+   contract_                    IN VARCHAR2,
+   catalog_no_                  IN VARCHAR2,
+   inventory_part_no_           IN VARCHAR2,
+   route_id_                    IN VARCHAR2,
+   revised_quantity_due_        IN NUMBER,
+   delivery_leadtime_           IN NUMBER,
+   picking_leadtime_            IN NUMBER,
+   ext_transport_calendar_id_   IN VARCHAR2,
+   currency_code_               IN VARCHAR2,
+   delivery_mode_               IN VARCHAR2,
+   delivery_mode_transit_       IN VARCHAR2,
+   retrieve_ship_via_           IN BOOLEAN) RETURN Src_Supplier_Values_Structure_Rec
+IS
+   rec_                         Src_Supplier_Values_Structure_Rec;
+   earliest_                    DATE;
+   epdd_at_supplier_            DATE;
+   supplier_planned_due_date_   DATE;
+   supply_site_due_date_        DATE;
+   site_date_                   DATE;  
+   total_shipping_time_         NUMBER;
+   total_distance_              NUMBER;
+   tot_exp_additional_cost_     NUMBER;
+   sup_ship_via_transit_temp_   VARCHAR2(3);
+   aqc_contract_                VARCHAR2(5);
+   ship_via_code_temp_          VARCHAR2(3);
+   supply_code_db_temp_         VARCHAR2(3); 
+BEGIN
+   aqc_contract_ := Supplier_API.Get_Acquisition_Site(vendor_no_);
+   sup_ship_via_transit_temp_ := col_ship_via_code_;
+   supply_code_db_temp_ := Translate_Delivery_Mode___(aqc_contract_, delivery_mode_, delivery_mode_transit_);
+   IF retrieve_ship_via_ THEN
+      ship_via_code_temp_ := NULL;
+   ELSE
+      IF delivery_mode_ = delivery_mode_transit_ THEN
+         ship_via_code_temp_        := header_ship_via_code_;
+         sup_ship_via_transit_temp_ := col_ship_via_code_;
+      ELSE
+         ship_via_code_temp_        := col_ship_via_code_;
+         sup_ship_via_transit_temp_ := NULL;
+      END IF; 
+   END IF;
+
+   site_date_ := Site_API.Get_Site_Date(contract_);
+   Source_Order_Lines_API.Get_Src_Supplier_Values(earliest_,
+                                                  supplier_planned_due_date_,
+                                                  epdd_at_supplier_,
+                                                  supply_site_due_date_,
+                                                  total_shipping_time_,
+                                                  total_distance_,
+                                                  tot_exp_additional_cost_,
+                                                  ship_via_code_temp_,
+                                                  sup_ship_via_transit_temp_,
+                                                  wanted_delivery_date_,
+                                                  customer_no_,
+                                                  ship_addr_no_,
+                                                  addr_flag_db_,
+                                                  vendor_no_,
+                                                  supply_code_db_temp_,
+                                                  contract_,
+                                                  catalog_no_,
+                                                  inventory_part_no_,
+                                                  inventory_part_no_,
+                                                  route_id_,
+                                                  revised_quantity_due_,
+                                                  header_ship_via_code_,
+                                                  delivery_leadtime_,
+                                                  picking_leadtime_,
+                                                  ext_transport_calendar_id_,
+                                                  currency_code_);    
+
+   IF retrieve_ship_via_ THEN
+      IF delivery_mode_ = delivery_mode_transit_ THEN
+         rec_.ship_via_code := sup_ship_via_transit_temp_;
+      ELSE
+         rec_.ship_via_code := ship_via_code_temp_;
+      END IF; 
+   END IF;
+   IF wanted_delivery_date_ >= earliest_ THEN
+      rec_.fulfills_demand := 'TRUE';
+   END IF;
+   rec_.available_qty                   := Get_Current_Qty___(aqc_contract_, inventory_part_no_, contract_);
+   rec_.earliest_possible_delivery_date := earliest_;
+   rec_.supplier_planned_due_date       := supplier_planned_due_date_;
+   rec_.epdd_at_supplier                := epdd_at_supplier_;
+   rec_.supply_site_due_date            := supply_site_due_date_;
+   rec_.total_shipping_time             := total_shipping_time_;
+   rec_.total_distance                  := total_distance_;
+   rec_.tot_exp_additional_cost         := tot_exp_additional_cost_;
+   rec_.epdd_total_del_leadtime         := CEIL(earliest_ - site_date_);
+   rec_.ddd_total_del_leadtime          := CEIL(wanted_delivery_date_ - site_date_);
+   rec_.supply_code_db                  := supply_code_db_temp_;
+   rec_.available_to_promise_qty        := Source_Order_Lines_API.Get_Site_Converted_Qty__( aqc_contract_, 
+                                                                                            inventory_part_no_, 
+                                                                                            Source_Order_Lines_API.Get_Atp_Quantity(aqc_contract_, inventory_part_no_, supply_site_due_date_),
+                                                                                            contract_,
+                                                                                            'REMOVE');                                          
+	RETURN rec_;
+END Get_Src_Supplier_Values___;
+
+
+FUNCTION Translate_Delivery_Mode___ (
+   supply_contract_       IN VARCHAR2,
+   delivery_mode_         IN VARCHAR2,
+   delivery_mode_transit_ IN VARCHAR2) RETURN VARCHAR2
+IS
+BEGIN
+	IF supply_contract_ IS NULL THEN
+      IF delivery_mode_ = delivery_mode_transit_ THEN
+         RETURN 'PT';
+      ELSE
+         RETURN 'PD';
+      END IF;
+   ELSE
+      IF delivery_mode_ = delivery_mode_transit_ THEN
+         RETURN 'IPT';
+      ELSE
+         RETURN 'IPD';
+      END IF;
+   END IF;
+END Translate_Delivery_Mode___;
+
+
+FUNCTION Get_Current_Qty___ (
+   supply_site_ IN VARCHAR2,
+   part_no_     IN VARCHAR2,
+   contract_    IN VARCHAR2) RETURN NUMBER
+IS
+   onhand_                NUMBER;
+   reserved_              NUMBER;
+   qty_available_today_   NUMBER;
+BEGIN
+   IF supply_site_ IS NULL THEN
+      qty_available_today_ := NULL;
+   ELSE   
+      IF Inventory_Part_API.Part_Exist(supply_site_, part_no_) = 0 THEN
+         qty_available_today_ := NULL;
+      ELSIF Inventory_Part_API.Get_Onhand_Analysis_Flag(supply_site_, part_no_) = Inventory_Part_Onh_Analys_API.Decode('N') THEN
+         qty_available_today_ := NULL;
+      ELSE
+         onhand_ := Inventory_Part_In_Stock_API.Get_Plannable_Qty_Onhand(supply_site_, part_no_, NULL);
+         reserved_ := Inventory_Part_In_Stock_API.Get_Plannable_Qty_Reserved(supply_site_, part_no_, NULL);
+         qty_available_today_ := Inventory_Part_API.Get_Site_Converted_Qty(supply_site_, part_no_, (onhand_ - reserved_), contract_, 'REMOVE');
+      END IF; 
+   END IF;
+
+	RETURN qty_available_today_;
+END Get_Current_Qty___;
+
+
+@DynamicComponentDependency PURCH 
+FUNCTION Validate_Supplier_Site_Info___ (
+	parent_ship_via_code_      IN VARCHAR2,
+	supplier_ship_via_transit_ IN VARCHAR2,
+	wanted_delivery_date_      IN DATE,
+	customer_no_               IN VARCHAR2,
+	ship_addr_no_              IN VARCHAR2,
+	addr_flag_db_              IN VARCHAR2,
+	vendor_no_                 IN VARCHAR2,
+	contract_                  IN VARCHAR2,
+	catalog_no_                IN VARCHAR2,
+	part_no_                   IN VARCHAR2,
+	route_id_                  IN VARCHAR2,
+	revised_qty_due_           IN NUMBER,
+	delivery_leadtime_         IN NUMBER,
+	picking_leadtime_          IN NUMBER,
+	ext_transport_calendar_id_ IN VARCHAR2,
+	currency_code_             IN VARCHAR2,
+	delivery_mode_             IN VARCHAR2,
+	delivery_mode_transit_     IN VARCHAR2,
+   retrieve_ship_via_         IN BOOLEAN,
+   validate_ship_via_         IN BOOLEAN ) RETURN Src_Supplier_Values_Structure_Rec
+IS
+   supplier_rec_   Src_Supplier_Values_Structure_Rec;
+BEGIN
+   IF validate_ship_via_ THEN
+      Mpccom_Ship_Via_API.Exist(supplier_ship_via_transit_, TRUE); 
+   END IF;
+   supplier_rec_ := Get_Src_Supplier_Values___( parent_ship_via_code_,
+                                                supplier_ship_via_transit_,
+                                                wanted_delivery_date_,
+                                                customer_no_,
+                                                ship_addr_no_,
+                                                addr_flag_db_,
+                                                vendor_no_,
+                                                contract_,
+                                                catalog_no_,
+                                                part_no_,
+                                                route_id_,
+                                                revised_qty_due_,
+                                                delivery_leadtime_,
+                                                picking_leadtime_,
+                                                ext_transport_calendar_id_,
+                                                currency_code_,
+                                                delivery_mode_,
+                                                delivery_mode_transit_,
+                                                TRUE);
+   RETURN supplier_rec_;                                              
+END Validate_Supplier_Site_Info___;
+
+
+PROCEDURE Validate_Ship_Via___ (
+	ship_via_code_ IN VARCHAR2)
+IS
+BEGIN
+	Mpccom_Ship_Via_API.Exist(ship_via_code_, TRUE);
+END Validate_Ship_Via___;
+

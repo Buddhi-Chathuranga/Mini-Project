@@ -1,0 +1,390 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: IntrastatHandling
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign    History
+--  ---------  ------  -------------------------------------------------------------------
+-- 2022-01-28  ErFelk  Bug 162143(SC21R2-7321), Revert the correction done by bug 159019.
+-- 2021-06-09  ErFelk  Bug 159019(SCZ-14501), Added function Invalid_Notc_Direction___.
+-- 2021-03-04  ApWilk  Bug 156696(SCZ-13937), Modified Create_New_File___ to handle pre_intrastat_id_.
+-- 2020-11-10  SBalLK  SC2020R1-10590, Added CRUD_Default_Copy___() method to avoid error during duplicate records.
+-- 2020-09-07  SBalLK  GESPRING20-537, Added Is_Prev_Period_Invoic_Date___() function.
+-- 2019-06-27  ErFelk  SCUXXW4-21910, Modified Create_New_File___() to handle INFO.  
+-- 2019-03-22  ErFelk  SCUXXW4-6146, Added method Create_New_File___ to download a file. Added Create_File_Name___()
+-- 2019-03-22          Added Check_Line_Exist___(). 
+-- 2019-02-19  Asawlk  SCUXXW4-6146, Added method Modify_Intrastat_Lines___. 
+-- 2018-11-28  ErFelk  SCUXXW4-6146, Created.
+------------------------------------------------------------------------------------------
+
+layer Core;
+
+@Override
+PROCEDURE CRUD_Default_Copy___ (
+   objid_  IN     VARCHAR2,
+   key_    IN     Intrastat_Line_Key,
+   values_ IN     Copy_Values_Rec,
+   attr_      OUT VARCHAR2,
+   info_      OUT VARCHAR2 )
+IS
+BEGIN
+   super(objid_, key_, values_, attr_, info_);
+   Client_SYS.Set_Item_Value('INTRASTAT_ORIGIN_DB', Intrastat_Origin_API.DB_MANUAL, attr_);
+END CRUD_Default_Copy___;
+
+
+FUNCTION Get_Intrastat_Result_Key___ (
+   intrastat_id_        IN NUMBER,
+   intrastat_direction_ IN VARCHAR2,
+   country_code_        IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   parameter_attr_      VARCHAR2(32000);
+   report_attr_         VARCHAR2(1000);
+   result_key_          NUMBER;
+   report_view_name_    VARCHAR2(2000);
+BEGIN
+   
+   report_view_name_:= Intrastat_Manager_API.Get_Report_Name(country_code_);
+   
+   Client_SYS.Clear_Attr(report_attr_);
+   Client_SYS.Add_To_Attr('REPORT_ID', report_view_name_, report_attr_);
+   
+   Client_SYS.Clear_Attr(parameter_attr_);
+   
+   Client_SYS.Add_To_Attr('INTRASTAT_ID', intrastat_id_, parameter_attr_); 
+   Client_SYS.Add_To_Attr('INTRASTAT_DIRECTION', Intrastat_Direction_API.Decode(intrastat_direction_), parameter_attr_);   
+      
+      
+   result_key_ := Report_Format_API.Create_New_Report(report_attr_, parameter_attr_, Fnd_Session_API.Get_Fnd_User);
+   RETURN result_key_;
+END Get_Intrastat_Result_Key___;
+
+PROCEDURE Set_Print_Transferred_Buttons___ (
+   intrastat_id_  IN NUMBER,
+   description_   IN VARCHAR2,
+	info$_         OUT VARCHAR2)
+IS
+BEGIN
+	Set_Print_Transferred___(intrastat_id_, description_, NULL, NULL, info$_);
+END Set_Print_Transferred_Buttons___;
+
+PROCEDURE Set_Print_Transferred___ (
+   intrastat_id_       IN NUMBER,
+   description_        IN VARCHAR2,
+   import_progress_no_ IN NUMBER,
+   export_progress_no_ IN NUMBER,
+	info$_              OUT VARCHAR2)
+IS
+   attr_       VARCHAR2(2000);  
+   objid_      VARCHAR2(2000);
+   objversion_ VARCHAR2(2000); 
+   country_code_   VARCHAR2(2);
+   
+   CURSOR get_details IS
+      SELECT objid, objversion, country_code
+      FROM INTRASTAT
+      WHERE intrastat_id = intrastat_id_;
+BEGIN
+   OPEN get_details;
+   FETCH get_details INTO objid_, objversion_, country_code_;
+   CLOSE get_details;
+   
+   Client_SYS.Clear_Attr(attr_);
+   IF (description_ = 'IMPORT DOC PRINTED') THEN
+      Client_SYS.Add_To_Attr('DOC_PRINT_IMPORT_DB', 'IMPORT DOC PRINTED', attr_);
+   ELSIF (description_ = 'EXPORT DOC PRINTED') THEN
+      Client_SYS.Add_To_Attr('DOC_PRINT_EXPORT_DB', 'EXPORT DOC PRINTED', attr_);
+   ELSIF (description_ = 'IMPORT FILE PRINTED') THEN       
+      Client_SYS.Add_To_Attr('FILE_PRINT_IMPORT_DB', 'IMPORT FILE PRINTED', attr_);
+   ELSIF (description_ = 'EXPORT FILE PRINTED') THEN
+      Client_SYS.Add_To_Attr('FILE_PRINT_EXPORT_DB', 'EXPORT FILE PRINTED', attr_);
+   ELSIF (description_ = 'EXPORT FILE PRINTED_IMPORT FILE PRINTED') THEN
+      Client_SYS.Add_To_Attr('FILE_PRINT_EXPORT_DB', 'EXPORT FILE PRINTED', attr_);   
+      Client_SYS.Add_To_Attr('FILE_PRINT_IMPORT_DB', 'IMPORT FILE PRINTED', attr_);
+   END IF;
+
+   IF (country_code_ IN ('IT', 'FI', 'PL')) THEN
+      IF(import_progress_no_ IS NOT NULL) THEN
+         Client_SYS.Add_To_Attr( 'IMPORT_PROGRESS_NO', import_progress_no_, attr_);
+      END IF;
+      IF(export_progress_no_ IS NOT NULL) THEN
+         Client_SYS.Add_To_Attr( 'EXPORT_PROGRESS_NO', export_progress_no_, attr_);
+      END IF;
+   END IF;
+   Intrastat_API.Modify__(info$_, objid_, objversion_, attr_, 'DO'); 
+END Set_Print_Transferred___;
+
+PROCEDURE Modify_Intrastat_Lines___ (
+   selection_                    IN VARCHAR2,
+   quantity_                     IN NUMBER,
+   net_unit_weight_              IN NUMBER,
+   customs_statistic_number_     IN VARCHAR2,
+   intrastat_alt_quantity_       IN NUMBER,
+   intrastat_alt_unit_meas_      IN VARCHAR2,
+   notc_                         IN VARCHAR2,
+   country_of_origin_            IN VARCHAR2,
+   opposite_country_             IN VARCHAR2,
+   opponent_tax_id_              IN VARCHAR2,
+   order_unit_price_             IN NUMBER,
+   unit_add_cost_amount_         IN NUMBER,
+   unit_charge_amount_           IN NUMBER,
+   invoiced_unit_price_          IN NUMBER,
+   unit_add_cost_amount_inv_     IN NUMBER,
+   unit_charge_amount_inv_       IN NUMBER,
+   unit_statistical_charge_diff_ IN NUMBER,
+   mode_of_transport_            IN VARCHAR2,
+   delivery_terms_               IN VARCHAR2,
+   region_port_                  IN VARCHAR2,
+   statistical_procedure_        IN VARCHAR2,
+   triangulation_                IN VARCHAR2,
+   region_of_origin_             IN VARCHAR2,
+   special_code_of_movement_     IN VARCHAR2,
+   invoice_date_                 IN DATE,
+   service_statistical_code_     IN VARCHAR2,
+   service_way_                  IN VARCHAR2,
+   service_payment_way_          IN VARCHAR2,
+--   opposite_country_curr_code_   IN VARCHAR2,
+--   opposite_country_curr_amt_    IN NUMBER,
+   adjust_to_prev_intrastat_     IN BOOLEAN,
+   prev_intrastat_invoic_date_   IN DATE,
+   advance_transaction_          IN BOOLEAN,
+   payment_method_               IN VARCHAR2,
+   reference_invoice_serie_      IN VARCHAR2,
+   reference_invoice_number_     IN VARCHAR2,
+   reference_invoice_date_       IN DATE,
+   protocol_no_                  IN NUMBER,
+   italy_intrastat_enabled_      IN BOOLEAN ) 
+IS
+   key_list_      VARCHAR2(32000):= selection_||';';
+   key_record_    VARCHAR2(2000);
+   dummy_info_    VARCHAR2(32000);
+   
+   objid_         VARCHAR2(2000);
+   objversion_    VARCHAR2(2000);   
+   attr_          VARCHAR2(32000);
+   local_attr_    VARCHAR2(32000);
+   intrastat_line_key_  Intrastat_Line_Key;
+   
+BEGIN
+   
+   IF quantity_ IS NOT NULL THEN
+      Client_SYS.Add_To_Attr('QUANTITY', quantity_, attr_);              
+   END IF;
+   IF net_unit_weight_ IS NOT NULL THEN
+      Client_SYS.Add_To_Attr('NET_UNIT_WEIGHT', net_unit_weight_, attr_);      
+   END IF;
+   IF customs_statistic_number_ IS NOT NULL THEN
+      Client_SYS.Add_To_Attr('CUSTOMS_STAT_NO', customs_statistic_number_, attr_);      
+   END IF;
+   IF intrastat_alt_quantity_ IS NOT NULL THEN
+      Client_SYS.Add_To_Attr('INTRASTAT_ALT_QTY', intrastat_alt_quantity_, attr_);      
+   END IF;    
+   IF intrastat_alt_unit_meas_ IS NOT NULL THEN
+      Client_SYS.Add_To_Attr('INTRASTAT_ALT_UNIT_MEAS', intrastat_alt_unit_meas_, attr_);      
+   END IF;
+   IF notc_ IS NOT NULL THEN
+      Client_SYS.Add_To_Attr('NOTC', notc_, attr_);      
+   END IF;   
+   IF country_of_origin_ IS NOT NULL THEN
+      Client_SYS.Add_To_Attr('COUNTRY_OF_ORIGIN', country_of_origin_, attr_);      
+   END IF;
+   IF opposite_country_ IS NOT NULL THEN
+      Client_SYS.Add_To_Attr('OPPOSITE_COUNTRY', opposite_country_, attr_);      
+   END IF;
+   IF opponent_tax_id_ IS NOT NULL THEN
+      Client_SYS.Add_To_Attr('OPPONENT_TAX_ID', opponent_tax_id_, attr_);      
+   END IF;
+   IF order_unit_price_ IS NOT NULL THEN
+      Client_SYS.Add_To_Attr('ORDER_UNIT_PRICE', order_unit_price_, attr_);      
+   END IF;
+   IF unit_add_cost_amount_ IS NOT NULL THEN
+      Client_SYS.Add_To_Attr('UNIT_ADD_COST_AMOUNT', unit_add_cost_amount_, attr_);            
+   END IF;
+   IF unit_charge_amount_ IS NOT NULL THEN
+      Client_SYS.Add_To_Attr('UNIT_CHARGE_AMOUNT', unit_charge_amount_, attr_);      
+   END IF;
+   IF invoiced_unit_price_ IS NOT NULL THEN
+      Client_SYS.Add_To_Attr('INVOICED_UNIT_PRICE', invoiced_unit_price_, attr_);      
+   END IF;
+   IF unit_add_cost_amount_inv_ IS NOT NULL THEN
+      Client_SYS.Add_To_Attr('UNIT_ADD_COST_AMOUNT_INV', unit_add_cost_amount_inv_, attr_);      
+   END IF;
+   IF unit_charge_amount_inv_ IS NOT NULL THEN
+      Client_SYS.Add_To_Attr('UNIT_CHARGE_AMOUNT_INV', unit_charge_amount_inv_, attr_);      
+   END IF;
+   IF unit_statistical_charge_diff_ IS NOT NULL THEN
+      Client_SYS.Add_To_Attr('UNIT_STATISTICAL_CHARGE_DIFF', unit_statistical_charge_diff_, attr_);      
+   END IF;   
+   IF mode_of_transport_ IS NOT NULL THEN
+      Client_SYS.Add_To_Attr('MODE_OF_TRANSPORT_DB', mode_of_transport_, attr_);      
+   END IF;
+   IF delivery_terms_ IS NOT NULL THEN
+      Client_SYS.Add_To_Attr('DELIVERY_TERMS', delivery_terms_, attr_);      
+   END IF;    
+   IF region_port_ IS NOT NULL THEN
+      Client_SYS.Add_To_Attr('REGION_PORT', region_port_, attr_);      
+   END IF;   
+   IF statistical_procedure_ IS NOT NULL THEN
+      Client_SYS.Add_To_Attr('STATISTICAL_PROCEDURE_DB', statistical_procedure_, attr_);      
+   END IF;
+   IF triangulation_ IS NOT NULL THEN
+      Client_SYS.Add_To_Attr('TRIANGULATION_DB', triangulation_, attr_);      
+   END IF;
+   IF region_of_origin_ IS NOT NULL THEN
+      Client_SYS.Add_To_Attr('REGION_OF_ORIGIN', region_of_origin_, attr_);      
+   END IF;
+   IF special_code_of_movement_ IS NOT NULL THEN
+      Client_SYS.Add_To_Attr('MOVEMENT_CODE', special_code_of_movement_, attr_);      
+   END IF;
+   -- gelr:italy_intrastat, start
+   IF (italy_intrastat_enabled_ IS NOT NULL AND italy_intrastat_enabled_) THEN
+      IF invoice_date_ IS NOT NULL THEN
+         Client_SYS.Add_To_Attr('INVOICE_DATE', invoice_date_, attr_);      
+      END IF;
+      IF service_statistical_code_ IS NOT NULL THEN
+         Client_SYS.Add_To_Attr('SERVICE_STATISTICAL_CODE', service_statistical_code_, attr_);      
+      END IF;
+      IF service_way_ IS NOT NULL THEN
+         Client_SYS.Add_To_Attr('SERVICE_WAY_DB', service_way_, attr_);      
+      END IF;
+      IF service_payment_way_ IS NOT NULL THEN
+         Client_SYS.Add_To_Attr('SERVICE_PAYMENT_WAY_DB', service_payment_way_, attr_);      
+      END IF;
+      IF adjust_to_prev_intrastat_ IS NOT NULL THEN
+         IF( adjust_to_prev_intrastat_ ) THEN
+            Client_SYS.Add_To_Attr('ADJUST_TO_PREV_INTRASTAT_DB', Fnd_Boolean_API.DB_TRUE, attr_);
+         ELSE
+            Client_SYS.Add_To_Attr('ADJUST_TO_PREV_INTRASTAT_DB', Fnd_Boolean_API.DB_FALSE, attr_);
+         END IF;
+      END IF;
+      IF prev_intrastat_invoic_date_ IS NOT NULL THEN
+         Client_SYS.Add_To_Attr('PREV_INTRASTAT_INVOIC_DATE', prev_intrastat_invoic_date_, attr_);      
+      END IF;
+      IF advance_transaction_ IS NOT NULL THEN
+         IF (advance_transaction_) THEN
+            Client_SYS.Add_To_Attr('ADVANCE_TRANSACTION_DB', Fnd_Boolean_API.DB_TRUE, attr_);
+         ELSE
+            Client_SYS.Add_To_Attr('ADVANCE_TRANSACTION_DB', Fnd_Boolean_API.DB_FALSE, attr_);
+         END IF;
+      END IF;
+      IF payment_method_ IS NOT NULL THEN
+         Client_SYS.Add_To_Attr('PAYMENT_METHOD', payment_method_, attr_);      
+      END IF;
+      IF reference_invoice_serie_ IS NOT NULL THEN
+         Client_SYS.Add_To_Attr('REFERENCE_INVOICE_SERIE', reference_invoice_serie_, attr_);      
+      END IF;
+      IF reference_invoice_number_ IS NOT NULL THEN
+         Client_SYS.Add_To_Attr('REFERENCE_INVOICE_NUMBER', reference_invoice_number_, attr_);      
+      END IF;
+      IF reference_invoice_date_ IS NOT NULL THEN
+         Client_SYS.Add_To_Attr('REFERENCE_INVOICE_DATE', reference_invoice_date_, attr_);      
+      END IF;
+      IF protocol_no_ IS NOT NULL THEN
+         Client_SYS.Add_To_Attr('PROTOCOL_NO', protocol_no_, attr_);      
+      END IF;
+   END IF;
+   -- gelr:italy_intrastat, start
+   
+   local_attr_ := attr_;
+   
+   WHILE (INSTR(key_list_, ';') > 0) LOOP      
+      attr_ := local_attr_;
+      key_record_    := SUBSTR(key_list_, 0, INSTR(key_list_, ';'));
+      intrastat_line_key_.intrastat_id  :=  Client_SYS.Get_Key_Reference_Value(key_record_, 'INTRASTAT_ID');
+      Intrastat_Initial_Check___(Client_SYS.Get_Key_Reference_Value(key_record_, 'INTRASTAT_ID'));
+      intrastat_line_key_.line_no       :=  Client_SYS.Get_Key_Reference_Value(key_record_, 'LINE_NO');  
+      Get_Objid_Objversion___(objid_, objversion_, intrastat_line_key_);
+      Intrastat_Line_API.Modify__(dummy_info_, objid_, objversion_, attr_, 'DO');      
+      Client_SYS.Clear_Attr(attr_);
+      key_list_ := SUBSTR(key_list_, (INSTR(key_list_, ';') + 1));
+   END LOOP;      
+END Modify_Intrastat_Lines___;
+
+FUNCTION Create_New_File___ (
+	key_              IN Intrastat_Virtual_Key,
+	intrastat_id_     IN NUMBER,
+	country_code_ref_ IN VARCHAR2,
+	import_           IN VARCHAR2,
+	export_           IN VARCHAR2,
+	report_style_     IN NUMBER,
+   pre_intrastat_id_ IN NUMBER,
+	file_name_        IN VARCHAR2,
+	info$_            OUT VARCHAR2) RETURN Create_Result_Structure_Rec   
+IS
+   msg_in_clob_ CLOB;
+   file_lines_  External_File_Utility_API.LineTabType;
+   i_           NUMBER := 1;
+   rec_         Intrastat_Virtual_Rec;   
+   new_rec_     Intrastat_Virtual_Rec;
+   return_rec_  Create_Result_Structure_Rec;
+BEGIN
+   rec_ := Get_Record___(key_);
+   new_rec_ := rec_;
+   
+	msg_in_clob_ := Intrastat_File_Util_API.Create_New_File(country_code_ref_, intrastat_id_, export_, import_, report_style_, pre_intrastat_id_, file_name_);
+  
+   Message_SYS.Get_Attribute(msg_in_clob_, 'FILE_CONTENT', file_lines_(i_));
+   
+   new_rec_.file_data       := External_File_Utility_API.Pack_To_Blob(file_lines_);   
+   Message_SYS.Get_Attribute(msg_in_clob_, 'IMPORT_PROGRESS_NO', new_rec_.import_progress_no);
+   Message_SYS.Get_Attribute(msg_in_clob_, 'EXPORT_PROGRESS_NO', new_rec_.export_progress_no);
+   Message_SYS.Get_Attribute(msg_in_clob_, 'INFO', info$_);
+   
+   CRUD_Update___(rec_, new_rec_);
+   
+   return_rec_.import_progress_no := new_rec_.import_progress_no;
+   return_rec_.export_progress_no := new_rec_.export_progress_no;  
+   RETURN return_rec_;
+END Create_New_File___;
+
+FUNCTION Check_Line_Exist___ (
+	intrastat_id_ IN NUMBER) RETURN BOOLEAN
+IS
+   dummy_ NUMBER;
+   CURSOR check_lines IS
+      SELECT 1
+      FROM INTRASTAT_LINE
+      WHERE intrastat_id = intrastat_id_;
+BEGIN
+	OPEN check_lines;
+   FETCH check_lines INTO dummy_;
+   CLOSE check_lines;
+   
+   IF (dummy_ = 1) THEN
+      RETURN (TRUE);
+   ELSE
+     RETURN (FALSE);
+   END IF;   
+END Check_Line_Exist___;
+
+
+FUNCTION Create_File_Name___ (
+	input_file_name_ IN VARCHAR2,
+	file_extension_  IN VARCHAR2) RETURN VARCHAR2
+IS
+   full_file_name_ VARCHAR2(200);
+BEGIN  
+   full_file_name_ := (input_file_name_ || '.' || file_extension_);
+    
+	RETURN (full_file_name_);
+END Create_File_Name___;
+
+
+-- gelr:italy_intrastat, start
+FUNCTION Is_Prev_Period_Invoic_Date___ (
+   contract_                   IN VARCHAR2,
+   prev_intrastat_invoic_date_ IN DATE) RETURN BOOLEAN
+IS
+   site_date_             DATE;
+   prev_intrastat_period_ BOOLEAN := FALSE;
+BEGIN
+	site_date_ := Site_API.Get_Site_Date(contract_);
+   IF ( TRUNC(site_date_, 'MM') > prev_intrastat_invoic_date_ ) THEN
+      prev_intrastat_period_ := TRUE;
+   END IF;
+   RETURN prev_intrastat_period_;
+END Is_Prev_Period_Invoic_Date___;
+-- gelr:italy_intrastat, end
+

@@ -1,0 +1,116 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: CustomerOrderStagedBillingProfileHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+-- 190313   SBalLK  SCUXXW4-9552, Restructed with new Aurena changes.
+-- 180608   RoJalk  SCUXXW4-9552, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Get_Expected_Approval_Date___ (
+	order_no_     IN VARCHAR2,
+   line_no_      IN VARCHAR2,
+   rel_no_       IN VARCHAR2,
+   line_item_no_ IN NUMBER,
+   milestone_id_ IN VARCHAR2) RETURN DATE
+IS
+BEGIN
+	RETURN Customer_Order_Milestone_API.Get_Date_Expected(order_no_, line_no_, rel_no_, line_item_no_, milestone_id_);
+END Get_Expected_Approval_Date___;
+
+FUNCTION Get_Calculated_Amounts___ (
+	amount_           IN NUMBER,
+	amount_incl_tax_  IN NUMBER,
+	source_ref_type_  IN VARCHAR2,
+	order_no_         IN VARCHAR2,
+	line_no_          IN VARCHAR2,
+	rel_no_           IN VARCHAR2,
+	line_item_no_     IN NUMBER ) RETURN Amount_Structure_Rec
+IS
+   amount_rec_             Amount_Structure_Rec;
+   company_                VARCHAR2(20);
+   currency_code_          VARCHAR2(3);
+   currency_rounding_      NUMBER;
+   tax_amount_base_        NUMBER;
+   net_amount_base_        NUMBER;
+   gross_amount_base_      NUMBER;
+   tax_amount_currency_    NUMBER;
+   net_amount_currency_    NUMBER;
+   gross_amount_currency_  NUMBER;
+BEGIN
+	company_           := Site_API.Get_Company(Customer_Order_API.Get_Contract(order_no_));
+   currency_code_     := Customer_Order_API.Get_Currency_Code(order_no_);
+   currency_rounding_ := Currency_Code_API.Get_Currency_Rounding(company_, currency_code_);
+   
+   net_amount_currency_   := ROUND(amount_, NVL(currency_rounding_, 2));
+   gross_amount_currency_ := ROUND(amount_incl_tax_, NVL(currency_rounding_, 2));
+   Tax_Handling_Order_Util_API.Get_Amounts(tax_amount_base_, net_amount_base_, gross_amount_base_, tax_amount_currency_, net_amount_currency_, gross_amount_currency_,
+                                           company_,         source_ref_type_, order_no_,          line_no_,             rel_no_,                line_item_no_,         '*');
+   
+   amount_rec_.tax_amount_base       := tax_amount_base_;
+   amount_rec_.net_amount_base       := net_amount_base_;
+   amount_rec_.gross_amount_base     := gross_amount_base_;
+   amount_rec_.tax_amount_currency   := tax_amount_currency_;
+   amount_rec_.net_amount_currency   := net_amount_currency_;
+   amount_rec_.gross_amount_currency := gross_amount_currency_;
+   
+   RETURN amount_rec_;
+END Get_Calculated_Amounts___;
+
+FUNCTION Check_All_Milestone_Closed___(
+   full_selection_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+  selection_            VARCHAR2(32000) := CONCAT(full_selection_, ';');
+  current_selection_    VARCHAR2(32000); 
+  order_no_             VARCHAR2(12);  
+  line_no_              VARCHAR2(4); 
+  rel_no_               VARCHAR2(4); 
+  line_item_no_         NUMBER;
+  stage_                NUMBER; 
+  milestone_id_         VARCHAR2(5);  
+  all_milestone_closed_ VARCHAR2(5) := Fnd_Boolean_API.DB_TRUE;
+BEGIN
+   WHILE (INSTR(selection_, ';') > 0) LOOP
+      current_selection_ := substr(selection_, 0, INSTR(selection_, ';'));
+      order_no_          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');
+      line_no_           := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_NO');
+      rel_no_            := Client_SYS.Get_Key_Reference_Value(current_selection_, 'REL_NO');
+      line_item_no_      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_ITEM_NO');
+      stage_             := Client_SYS.Get_Key_Reference_Value(current_selection_, 'STAGE');
+      milestone_id_      := Order_Line_Staged_Billing_API.Get_Milestone_Id(order_no_, line_no_, rel_no_, line_item_no_, stage_);
+      IF (Customer_Order_Milestone_API.Get_Objstate(order_no_, line_no_, rel_no_, line_item_no_, milestone_id_) != 'Closed' ) THEN
+         all_milestone_closed_ := Fnd_Boolean_API.DB_FALSE;
+         EXIT;
+      END IF;
+      selection_ := substr(selection_, INSTR(selection_, ';')+1); 
+   END LOOP;   
+   RETURN all_milestone_closed_;
+END Check_All_Milestone_Closed___;
+
+PROCEDURE Create_Invoice___ (
+	order_no_ IN VARCHAR2)
+IS
+   attr_ VARCHAR2(32000);
+BEGIN
+   Client_SYS.Clear_Attr(attr_);
+   Client_SYS.Add_To_Attr('START_EVENT', '500',     attr_);
+   Client_SYS.Add_To_Attr('ORDER_NO',    order_no_, attr_);
+   Client_SYS.Add_To_Attr('END',         '',      attr_);
+   
+   Customer_Order_Flow_API.Start_Create_Invoice__(attr_);
+END Create_Invoice___;
+
+@Override
+PROCEDURE CRUD_Default_Copy___ (
+   rec_  IN OUT Order_Line_Staged_Billing_Rec )
+IS
+BEGIN
+   super (rec_);
+   rec_.company := NULL; 
+END CRUD_Default_Copy___;

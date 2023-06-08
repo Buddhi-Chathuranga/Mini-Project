@@ -1,0 +1,374 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: SalesPartHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign    History
+--  ------     ------  ---------------------------------------------------------
+-- 2021-12-06  NiRalk  SC21R2-5958, Modified Validate_Part_No___ methodd to get StatisticalCode,AcquisitionOrigin and AcquisitionReasonId from inventory part.
+-- 2021-05-24  ChFolk  SCZ-14841(Bug 159133), Modified Get_Catalog_Desc___ to use new method Get_Desc_For_New_Sales_Part to get the catalog description.
+-- 2021-02-24  WaSalk  SC2020R1-12580, Modified contract_info_rec_ by adding enabled_lcc_params to Validate_Contract___().
+-- 2020-10-27  RavDlk  SC2020R1-10862, Overidden the CRUD_Default_Copy___ with different method signature
+-- 2020-02-17  MaEelk  SCXTEND-2223, Made Duplicate functionality work
+-- 2019-05-26  NiDalk  SCUXXW4-20682, Added Get_Project_Id___.
+--  20-12-2018 IzShlk  SCUXXW4-9392, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+-- This method can be used to calculate price
+FUNCTION Calculate_Price___(
+   use_price_incl_tax_ IN BOOLEAN,
+   price_incl_tax_     IN NUMBER,
+   price_              IN NUMBER,
+   taxable_            IN BOOLEAN,
+   tax_code_           IN VARCHAR2,
+   company_            IN VARCHAR2 )  RETURN Calculate_Price_Structure_Rec
+IS
+   price_temp_          NUMBER;
+   price_incl_tax_temp_ NUMBER;
+   tax_percentage_      NUMBER;
+   calculate_price_     BOOLEAN := TRUE;
+   tax_calc_base_       VARCHAR2(100);
+   calculate_price_rec_ Calculate_Price_Structure_Rec;
+   -- TODO: Fetch the ifs curr rounding from profile
+   ifs_curr_rounding_   NUMBER := 16;
+BEGIN
+  IF use_price_incl_tax_ THEN
+      tax_calc_base_ := 'GROSS_BASE';
+      IF (price_incl_tax_ IS NULL  OR taxable_ = FALSE OR tax_code_ IS NULL) THEN
+         calculate_price_rec_.price := price_incl_tax_;
+         calculate_price_rec_.price_incl_tax := price_incl_tax_;
+         calculate_price_ := FALSE;       
+      END IF;
+   ELSE
+      tax_calc_base_ := 'NET_BASE';
+      IF (price_ IS NULL OR taxable_ = FALSE OR tax_code_ IS NULL) THEN
+         calculate_price_rec_.price_incl_tax := price_;
+         calculate_price_rec_.price := price_;
+         calculate_price_ := FALSE;
+      END IF;
+   END IF;
+   
+   IF calculate_price_ THEN
+      price_temp_          := price_;
+      price_incl_tax_temp_ := price_incl_tax_;
+      tax_percentage_      := Statutory_Fee_API.Get_Fee_Rate(company_, tax_code_);
+      
+      Tax_Handling_Util_API.Calculate_Prices(price_temp_, price_incl_tax_temp_, tax_calc_base_, tax_percentage_, ifs_curr_rounding_); 
+    
+      calculate_price_rec_.price := price_temp_;
+      calculate_price_rec_.price_incl_tax := price_incl_tax_temp_;
+   END IF;
+   RETURN calculate_price_rec_;
+END Calculate_Price___;
+
+-- This method can be used to calculate both rental and  price
+FUNCTION Calculate_Prices___(
+   use_price_incl_tax_    IN BOOLEAN,
+   price_incl_tax_        IN NUMBER,
+   price_                 IN NUMBER,
+   rental_price_incl_tax_ IN NUMBER,
+   rental_price_          IN NUMBER,
+   taxable_               IN BOOLEAN,
+   tax_code_              IN VARCHAR2,
+   company_               IN VARCHAR2 )  RETURN Calculate_Prices_Structure_Rec
+IS
+   calculate_prices_structure_rec_ Calculate_Prices_Structure_Rec;
+   price_rec_                      Calculate_Price_Structure_Rec;
+   rental_price_rec_               Calculate_Price_Structure_Rec;
+BEGIN
+   price_rec_        := Calculate_Price___(use_price_incl_tax_, price_incl_tax_, price_, taxable_, tax_code_, company_);
+   rental_price_rec_ := Calculate_Price___(use_price_incl_tax_, rental_price_incl_tax_, rental_price_, taxable_, tax_code_, company_);
+   
+   calculate_prices_structure_rec_.price := price_rec_.price;
+   calculate_prices_structure_rec_.price_incl_tax := price_rec_.price_incl_tax;
+   calculate_prices_structure_rec_.rental_price := rental_price_rec_.price;
+   calculate_prices_structure_rec_.rental_price_incl_tax := rental_price_rec_.price_incl_tax;
+   
+   RETURN calculate_prices_structure_rec_;
+END Calculate_Prices___;
+
+FUNCTION Validate_Unit_Meas___(
+   inventory_unit_meas_ IN VARCHAR2,
+   sales_unit_meas_     IN VARCHAR2,
+   price_unit_meas_     IN VARCHAR2 )  RETURN Conversion_Factor_Struct_Rec
+IS
+   conversion_factor_struct_rec_ Conversion_Factor_Struct_Rec;
+BEGIN
+   conversion_factor_struct_rec_.inventory_conv_factor :=  Technical_Unit_Conv_API.Get_Valid_Conv_Factor(sales_unit_meas_, inventory_unit_meas_);
+   conversion_factor_struct_rec_.price_conv_factor     :=  Technical_Unit_Conv_API.Get_Valid_Conv_Factor(sales_unit_meas_, price_unit_meas_);
+   
+   RETURN conversion_factor_struct_rec_;
+END Validate_Unit_Meas___;
+
+FUNCTION Validate_Part_No___(
+   part_no_  IN VARCHAR2,
+   contract_ IN VARCHAR2,
+   part_description_in_use_ IN VARCHAR2,
+   validate_from_catalog_ IN BOOLEAN)  RETURN Invent_Part_Info_Rec
+IS
+   invent_part_info_rec_ Invent_Part_Info_Rec;
+   iprec_                Inventory_Part_API.Public_Rec;
+   pcrec_                Part_Catalog_API.Public_Rec;
+   order_requisition_db_     VARCHAR2(3);
+   invent_unit_meas_         VARCHAR2(5);
+   catch_unit_code_          VARCHAR2(5);
+   catch_unit_enabled_       BOOLEAN := FALSE;
+   part_catalog_unit_meas_   VARCHAR2(5);
+   part_description_         VARCHAR2(200) := NULL;
+   inventory_unit_meas_      VARCHAR2(5) := NULL;
+   catch_unit_meas_          VARCHAR2(5) := NULL;
+   configurable_             BOOLEAN := FALSE;
+   dop_                      BOOLEAN := FALSE;
+   --sourcing_option_          VARCHAR2(200) := Sourcing_Option_API.Decode('INVENTORYORDER');
+   sourcing_option_          VARCHAR2(20) := 'INVENTORYORDER';
+   condition_code_usage_     VARCHAR2(20);
+   part_not_exist_flag_      BOOLEAN := FALSE;
+   part_catalog_description_ VARCHAR2(200);
+   statistical_code_         VARCHAR2(15);
+   acquisition_origin_       NUMBER; 
+   acquisition_reason_id_    VARCHAR2(20);
+BEGIN
+   IF part_no_ IS NOT NULL THEN
+      iprec_ := Inventory_Part_API.Get(contract_, part_no_);
+      pcrec_ := Part_Catalog_API.Get(part_no_);
+      
+      part_description_         := Inventory_Part_API.Get_Description(contract_, part_no_);
+      part_catalog_unit_meas_   := pcrec_.unit_code; 
+      part_catalog_description_ := Part_Catalog_API.Get_Description(part_no_);
+      configurable_             := CASE pcrec_.configurable WHEN 'CONFIGURED' THEN TRUE ELSE FALSE END;
+      invent_unit_meas_         := iprec_.unit_meas;
+      catch_unit_enabled_       := CASE pcrec_.catch_unit_enabled WHEN 'TRUE' THEN TRUE ELSE FALSE END;
+      catch_unit_code_          := iprec_.catch_unit_meas; 
+      order_requisition_db_     := Inventory_Part_Supply_Type_API.Encode(Inventory_Part_Planning_API.Get_Order_Requisition(contract_, part_no_));
+      dop_                      := CASE order_requisition_db_ WHEN 'D' THEN TRUE ELSE FALSE END;
+      condition_code_usage_     := pcrec_.condition_code_usage;
+      sourcing_option_          := CASE order_requisition_db_ WHEN 'D' THEN 'DOPORDER' ELSE 'INVENTORYORDER' END;
+      statistical_code_         := iprec_.statistical_code;
+      acquisition_origin_       := iprec_.acquisition_origin;
+      acquisition_reason_id_    := iprec_.acquisition_reason_id;
+      
+      IF part_description_ IS NULL THEN
+         IF NOT(validate_from_catalog_) THEN
+            part_not_exist_flag_ := TRUE;
+         END IF;
+   
+         IF part_catalog_unit_meas_ IS NOT NULL THEN
+            inventory_unit_meas_ := part_catalog_unit_meas_;
+         END IF;
+         
+         IF part_catalog_description_ IS NOT NULL THEN
+            part_description_ := part_catalog_description_;
+         END IF;
+         
+         IF part_description_ IS NULL THEN
+            part_description_ := part_description_in_use_;
+         END IF;
+      ELSE
+         inventory_unit_meas_ := invent_unit_meas_;    
+      END IF;
+      
+      IF catch_unit_enabled_ THEN
+         catch_unit_meas_ := catch_unit_code_;
+      END IF;
+     
+   END IF;
+   
+   invent_part_info_rec_.part_description       := part_description_;
+   invent_part_info_rec_.inventory_unit_meas    := inventory_unit_meas_;
+   invent_part_info_rec_.catch_unit_meas        := catch_unit_meas_;
+   invent_part_info_rec_.catch_unit_enabled     := catch_unit_enabled_;
+   invent_part_info_rec_.configurable           := configurable_;
+   invent_part_info_rec_.dop                    := dop_;
+   invent_part_info_rec_.sourcing_option        := sourcing_option_;
+   invent_part_info_rec_.condition_code_usage   := condition_code_usage_;
+   invent_part_info_rec_.part_not_exist_flag    := part_not_exist_flag_;
+   invent_part_info_rec_.statistical_code       := statistical_code_;
+   invent_part_info_rec_.acquisition_origin     := acquisition_origin_;
+   invent_part_info_rec_.acquisition_reason_id  := acquisition_reason_id_;
+   
+   RETURN invent_part_info_rec_;
+END Validate_Part_No___;
+
+FUNCTION Validate_Contract___(
+   contract_ IN VARCHAR2 )  RETURN Contract_Info_Rec
+IS
+   contract_info_rec_  Contract_Info_Rec;
+   company_            VARCHAR2(20);
+   taxable_            VARCHAR2(10);
+   tax_code_           VARCHAR2(20);
+BEGIN
+   company_                              := Site_API.Get_Company(contract_);
+   contract_info_rec_.currency           := Company_Finance_API.Get_Currency_Code(company_);
+   contract_info_rec_.use_price_incl_tax := (Site_Discom_Info_API.Get_Use_Price_Incl_Tax_Ord_Db(contract_) = 'TRUE');
+   contract_info_rec_.company            := company_;
+   
+   Tax_Handling_Order_Util_API.Get_Tax_Info_For_Sales_Object(tax_code_, taxable_, company_);
+   
+   contract_info_rec_.taxable            := (taxable_ = 'TRUE');
+   contract_info_rec_.tax_code           := tax_code_;
+   -- gelr:localization_control_center, begin
+   contract_info_rec_.enabled_lcc_params := Company_Localization_Info_API.Get_Enabled_Params_per_Company(company_);
+   -- gelr:localization_control_center, end
+   RETURN contract_info_rec_;
+END Validate_Contract___;
+
+
+FUNCTION Get_Catalog_Desc___(
+   catalog_no_ IN VARCHAR2,
+   contract_   IN VARCHAR2 )  RETURN Catalog_Desc_Struct_Rec
+IS
+  -- use_part_catalog_desc_checked_ VARCHAR2(10);
+  -- catalog_desc_                  VARCHAR2(200);
+   info_msg_                      BOOLEAN := FALSE;
+   catalog_desc_struct_rec_       Catalog_Desc_Struct_Rec;
+BEGIN
+   -- Commented out the below code as setting up info message is already commented out. Keep this code incase it will need to support future.
+ --  use_part_catalog_desc_checked_ := Site_Discom_Info_API.Get_Use_Partca_Desc_Order_Db(contract_);
+ --  catalog_desc_                  := Sales_Part_API.Get_Catalog_Desc(contract_, catalog_no_);
+ 
+--      IF catalog_desc_ IS NOT NULL AND use_part_catalog_desc_checked_ = 'FALSE' THEN
+--         catalog_desc_struct_rec_.info_msg     := TRUE;
+--         RETURN catalog_desc_struct_rec_;
+--      END IF;
+      
+   catalog_desc_struct_rec_.catalog_desc := Sales_Part_API.Get_Desc_For_New_Sales_Part(contract_, catalog_no_);
+   catalog_desc_struct_rec_.info_msg     := info_msg_;
+   RETURN catalog_desc_struct_rec_;
+END Get_Catalog_Desc___;
+
+FUNCTION Inventory_Part_Desc___(
+   part_no_  IN VARCHAR2,
+   contract_ IN VARCHAR2 )  RETURN VARCHAR2
+IS
+BEGIN
+   RETURN Inventory_Part_API.Get_Description(contract_, part_no_);
+END Inventory_Part_Desc___;
+
+@Override
+PROCEDURE CRUD_Default___ (
+   key_  IN  Sales_Part_Key,
+   attr_ IN OUT VARCHAR2,
+   info_ OUT VARCHAR2 )
+IS
+BEGIN
+   Client_SYS.Set_Item_Value('CATALOG_TYPE_DB', 'INV' ,attr_ );
+   super(key_, attr_, info_);
+END CRUD_Default___;
+
+FUNCTION Execute_New_Sales_Part___(
+   contract_        IN VARCHAR2,
+   part_no_         IN VARCHAR2,
+   catalog_no_      IN VARCHAR2,
+   sourcing_option_ IN VARCHAR2 )  RETURN Create_Purchase_Part_Rec
+IS
+   inv_part_exist_ NUMBER := 0;
+   catch_unit_enabled_ VARCHAR2(10);
+   create_purchase_part_rec_ Create_Purchase_Part_Rec;
+BEGIN
+   inv_part_exist_     := Inventory_Part_API.Part_Exist(contract_, part_no_);
+   catch_unit_enabled_ := Part_Catalog_API.Get_Catch_Unit_Enabled_Db(catalog_no_);
+   
+   IF inv_part_exist_ = 0 THEN
+      IF catch_unit_enabled_ = 'TRUE' THEN
+         create_purchase_part_rec_.alert_message := 'CreateInvPartFirst';
+         RETURN create_purchase_part_rec_;
+      END IF;
+   END IF;
+   
+   IF inv_part_exist_ = 0 THEN
+      IF sourcing_option_ = 'PRIMARYSUPPTRANSIT' OR sourcing_option_ = 'PRIMARYSUPPDIRECT' THEN
+         create_purchase_part_rec_.alert_message := 'PurchasePartCreated';
+         create_purchase_part_rec_.create_purchase_part := TRUE;
+         RETURN create_purchase_part_rec_;
+      ELSE
+         create_purchase_part_rec_.alert_message := 'PurchasePartMsg';
+      END IF;
+   ELSE
+      create_purchase_part_rec_.create_purchase_part := FALSE;
+      create_purchase_part_rec_.alert_message := NULL;
+   END IF;
+   
+   RETURN create_purchase_part_rec_;
+END Execute_New_Sales_Part___;
+
+FUNCTION Check_Characteristic_Code_Exist___(
+   objkey_              IN VARCHAR2,
+   part_no_             IN VARCHAR2,
+   characteristic_code_ IN VARCHAR2 )  RETURN BOOLEAN
+IS
+   CURSOR getCharacteristics IS
+   SELECT 1
+   FROM sales_part_handling_copy_characteristics_template_virtual_vrt t
+   WHERE t.parent_objkey = objkey_ AND t.characteristic_code = characteristic_code_ AND t.catalog_no = part_no_;
+   
+   dummy_ NUMBER;
+   exist_ BOOLEAN;
+BEGIN                            
+      OPEN getCharacteristics;
+      FETCH getCharacteristics INTO dummy_;
+      exist_ := getCharacteristics%FOUND;
+      CLOSE getCharacteristics;
+
+   RETURN exist_;
+END Check_Characteristic_Code_Exist___;
+
+FUNCTION Get_Project_Id___(
+   contract_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   open_projects_exist_    VARCHAR2(5) := 'FALSE';
+BEGIN
+   open_projects_exist_ := Order_Supply_Demand_API.Open_Projects_Exist(contract_);
+   
+   IF open_projects_exist_ = 'TRUE' THEN
+      RETURN '#';
+   ELSE
+      return '*';
+   END IF;
+END Get_Project_Id___;
+
+@Override
+PROCEDURE CRUD_Default_Copy___ (
+   objid_      IN  VARCHAR2,
+   key_        IN  Sales_Part_Key,
+   values_     IN  Copy_Values_Rec,
+   attr_       OUT VARCHAR2,
+   info_       OUT VARCHAR2 )
+IS
+   part_desc_in_use_     VARCHAR2(200);
+   part_no_              VARCHAR2(25);
+   dummy_text_           VARCHAR2(20) := NULL;
+   invent_part_info_rec_ Invent_Part_Info_Rec;
+BEGIN  
+   super(objid_,key_, values_, attr_,info_ );
+   part_desc_in_use_ := Sales_Part_API.Get_Catalog_Desc(key_.contract, key_.catalog_no); 
+   Client_SYS.Set_Item_Value('CONTRACT',key_.contract,attr_);
+   Client_SYS.Set_Item_Value('PART_DESCRIPTION_IN_USE',part_desc_in_use_,attr_);   
+   
+   part_no_ := Sales_Part_API.Get_Part_No(key_.contract, key_.catalog_no);
+   invent_part_info_rec_ := Validate_Part_No___(part_no_,key_.contract,part_desc_in_use_,FALSE);
+   Client_SYS.Set_Item_Value('INVENTORY_PART_DESC', invent_part_info_rec_.part_description,attr_);  
+   
+   Client_SYS.Set_Item_Value('SOURCING_OPTION_DB',invent_part_info_rec_.sourcing_option,attr_);
+   Client_SYS.Set_Item_Value('CONDITION_CODE_USAGE',invent_part_info_rec_.condition_code_usage,attr_);
+   Client_SYS.Set_Item_Value('UNIT_MEAS',invent_part_info_rec_.inventory_unit_meas,attr_);
+   Client_SYS.Set_Item_Value('RULE_ID',dummy_text_,attr_);
+   Client_SYS.Set_Item_Value('ENG_ATTRIBUTE',dummy_text_, attr_);
+   
+   IF (part_no_ IS NOT NULL) AND (invent_part_info_rec_.inventory_unit_meas IS NOT NULL) THEN
+      IF (Client_SYS.Get_Item_Value('SALES_UNIT_MEAS', values_.modified_source) IS NULL) THEN
+         Client_SYS.Set_Item_Value('SALES_UNIT_MEAS',invent_part_info_rec_.inventory_unit_meas,attr_); 
+      END IF;      
+      IF (Client_SYS.Get_Item_Value('PRICE_UNIT_MEAS', values_.modified_source) IS NULL) THEN
+         Client_SYS.Set_Item_Value('PRICE_UNIT_MEAS',invent_part_info_rec_.inventory_unit_meas,attr_); 
+      END IF;
+   END IF;   
+   
+   IF (part_no_ IS NOT NULL) AND (invent_part_info_rec_.catch_unit_enabled) THEN
+      Client_SYS.Set_Item_Value('CATCH_UOM',invent_part_info_rec_.catch_unit_meas,attr_); 
+      Client_SYS.Set_Item_Value('PRICE_UNIT_MEAS',invent_part_info_rec_.catch_unit_meas,attr_); 
+   END IF;   
+END CRUD_Default_Copy___;

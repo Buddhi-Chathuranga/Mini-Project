@@ -1,0 +1,1751 @@
+-------------------------------------------------------------------------------------------------------------------------------
+-- Date        Sign       History
+-- ----------  ------   -------------------------------------------------------------------------------------------------------
+-- 2021-10-21  Inaklk   SC21R2-5216, Modified command ValidateFreeOfChargeCommand to set vlaue for IsNew
+-- 2021-07-26  ChFolk   SCZ-15615(Bug-160007), Modified AfterCrud to pass values for the newly added parameters in SalesComplementaryParts.
+-- 2021-04-08  Skanlk   SCZ-14204, Modified ValidateFreeOfChargeCommand, ValidatePartCatalogNoCommand and ValidatePartBuyQtyDueCommand by passing Discount to the CalculateLineTotal method.
+-- 2021-03-03  DhAplk   SC2020R1-10890, Disabled duplicate functionality when line is in isNew state.
+-- 2021-02-17  RaNhlk   MF2020R1-8692, Added attributes EstimateId and EstimateRevision in entity OrderQuotationLine.
+-- 2021-02-05  DhAplk   SC2020R1-12435, Correct the parameter to PriceEffectivityDate in ValidateFreeOfChargeCommand
+-- 2020-11-16  MaEelk   SC2020R1-11302, Configurable was set to be Boolean("TRUE", "FALSE")
+-- 2020-10-20  RaVdlk   SC2020R1-10434, Added CriticalPathId attribute to handle enabling of CapabilityCheckViewCriticalPathCommand command
+-- 2020-09-17  MaEelk   GESPRING20-5399, Added OriginalDiscount, OriginalAddDiscount and OriginalQuotationDiscount to OrderQuotationLine entity.
+-- 2020-09-17           Discount was assigned to OriginalDiacount when fetching Price and Discounts.
+-- 2020-07-10  NiDalk   SCXTEND-4445, Fixed type conversion error in TaxLiabilityType.
+-- 2020-06-08  MalLlk   GESPRING20-4617, Added parameter PartPrice to the method CalcFreeOfChargeTaxBasis and passed the value in validation methods accordingly.
+-- 2020-06-09  ErFelk   Bug 154240(SCZ-10309), Modified OrderQuotationLineList by removing the SupplyCode and displaying the OrderSupplyType
+-- 2020-06-09           which is getting inherted from OrderQuotationLineBaseList.
+-- 2020-01-13  RaVdlk   SCXTEND-2705,Changed the selector for CatalogNoRef to remove contract from the LOV
+-- 2019-11-13  ChJalk   Su-518, Added parameter RentalDb into the call GetAvailableQuantity.
+-- 2019-10-16  Hairlk   SCXTEND-800, Avalara integration, Added refrence and lov CustomerTaxUsageTypeRef to quotation line.
+-- 2019-09-19  chlelk   SCXTEND-408, Field ranking was done for 40 fields
+-- 2019-07-31  RasDlk   SCUXXW4-23422, Corrected an issue related to prices not being fetched when using InputUoM.
+-- 2019-07-05  RasDlk   SCUXXW4-15881, Corrected few issues related to InputUoM.
+-- 2019-07-01  SucPlk   SCUXXW4-20576, Modified if condition of validatecommand for Input UoM to merge corrections from support bug SCZ-3466.
+-- 2019-06-21  RasDlk   SCUXXW4-15881, Corrected few issues related to InputUoM.
+-- 2019-05-30  RasDlk   SCUXXW4-21898, Overrided the ReferenceInputUnitMeasSelector to show only the required information for InputUnitMeasRef field.
+-- 2019-05-05  RasDlk   SCUXXW4-15881, Implemented the code related to InputUoM.
+-- 2019-03-29  MaEelk   SCUXXW4-18093, Removed dynami Component dependency given to AvailableQty.
+-- 2019-03-20  ChBnlk   SCUXXW4-8517, Modified parameters passed to SuggestedSalesPartAssistant.
+-- 2018-12-12  SeJalk   SCUXXW4-986, Converted from tbwOrderQuotationLine using MTG Version: 1.34
+---------------------------------------------------------------------------------------------------------------------------------
+fragment SalesQuotationLineTab;
+component ORDER;
+layer Core;
+description "Use this fragment to enter the parts, quantities, and price breaks on the quotation. You can also enter the desired date of delivery for every line on the quotation.";
+
+
+//
+//include fragment SalesPartGtinNoLovSelector;
+//include fragment SalesPartClassificationLovSelector;
+//include fragment CustomerAssortmentStructLovSelector;
+//include fragment OrderDeliveryTermLovSelector;
+//include fragment CustAddressShipLovSelector;
+//include fragment TaxCalcStructureActiveSelector;
+//include fragment TaxCodeRestrictedSelector;
+//include fragment TaxLiabilityLovSelector;
+//@DynamicComponentDependency PURCH
+//include fragment PurchasePartSupplierLovSelector;
+//include fragment SalesPriceListJoinLovSelector;
+//@DynamicComponentDependency CFGCHR
+//include fragment ConfigSpecOrderUsageSelector;
+//include fragment SalesPartPriceTaxLovSelector;
+include fragment InputUnitOfMeasure;
+----------------------------- CLIENT FRAGMENTS ------------------------------
+--------------------------------- COMMANDS ----------------------------------
+command AfterCrud for OrderQuotationLine {
+   variable ParentPartListVar;
+   bulkexecute {
+
+      ifany[SuggestedPartExists = 1 and CreateCount >= 1] {
+         stringify(records, keyref, JSON) into ParentPartListVar;
+         assistant SalesComplementaryParts.ComplementaryPartsAssistant(ParentPartListVar, "QUOTE", null, null, false) {
+            when CANCEL {
+               exit CANCEL;
+            }
+         }
+      }
+   }
+}
+
+command StatusReleaseQuotationLineCommand for OrderQuotationLine {
+   label = "Release Quotation Line";
+   mode = SelectedRecords;
+   enabled = [substring(Condition, 1, 1) != "*"];
+   bulkexecute {
+      confirm("Do you want to release the selected line(s)?") {
+         when OK {
+            bulkcall Release();
+         }
+      }
+   }
+}
+
+command ValidateFreeOfChargeCommand for OrderQuotationLine {
+   variable CustomerNoVar Text;
+   variable IsNew Boolean;
+   execute {
+      if [isNew] {
+         set IsNew = true;
+      }
+      else {
+         set IsNew = false;
+      }
+      call GetQuotePrice(QuotationNo,
+      LineNo,
+      RelNo,
+      LineItemNo,
+      CatalogNo,
+      BuyQtyDue,
+      PriceListNo,
+      parent.PriceEffectivityDate,
+      ConditionCode,
+      CustomerLevel,
+      CustomerLevelId,
+      UnformattedDiscount,
+      CharPrice,
+      ConfiguredLinePriceId,
+      PartNo,
+      ConfigurationId,
+      PriceFreeze,
+      SaleUnitPrice,
+      BaseSaleUnitPrice,
+      BaseUnitPriceInclTax,
+      IsNew,
+      true,
+      DemandCode,
+      DemandOrderRef1,
+      DemandOrderRef2,
+               --calc line param
+      MultipleTaxLines,
+      TaxCode,
+      TaxCalcStructureId,
+      TaxClassId,
+      Contract,
+      CustomerNo,
+      ShipAddrNo,
+      PlannedDueDate,
+      parent.SupplyCountry,
+      DeliveryType,
+      TaxLiability,
+      TaxLiabilityType,
+      parent.CurrencyCode,
+      CurrencyRate,
+      "FALSE",
+      Rental,
+      1,
+      DuplicatedLine)  into QuotePriceVar {
+         when FAIL {
+            exit;
+         }
+      }
+
+      -- SetZeroPrices start
+      if [FreeOfCharge] {
+         set PartPrice = 0;
+         set CalcPriceCurr = 0;
+         set BaseUnitPriceInclTax = 0;
+         set BaseSaleUnitPrice = 0;
+         set SaleUnitPrice = 0;
+         set UnitPriceInclTax = 0;
+         if [CalcCharPrice != null] {
+            set CalcCharPrice = 0;
+         }
+         if [CharPrice != null] {
+            set CharPrice = 0;
+         }
+         set Discount = 0;
+         -- gelr:disc_price_rounded, begin
+         set OriginalDiscount = 0;
+         -- gelr:disc_price_rounded, end
+         set PriceSource = "Unspecified";
+         set PriceSourceId = null;
+         set PartLevel = null;
+         set PartLevelId = null;
+         set CustomerLevel = null;
+         set CustomerLevelId = null;
+
+         set CustomerNoVar = parent.CustomerNoPay;
+         if [CustomerNoVar = null] {
+            set CustomerNoVar = parent.CustomerNo;
+         }
+         call  GetCurrencyRate(CustomerNoVar, Contract, parent.CurrencyCode, BaseSaleUnitPrice) into CurrRate;
+         -- SetZeroPrices end
+      }
+      else {
+         set PriceSource = QuotePriceVar.PriceSource;
+         set PriceSourceId = QuotePriceVar.PriceSourceId;
+         set PartPrice = QuotePriceVar.PartPrice;
+         set CurrencyRate = QuotePriceVar.CurrencyRate;
+         set Discount = QuotePriceVar.Discount;
+         -- gelr:disc_price_rounded, begin
+         if [parent.DiscPriceRound and not(parent.UsePriceInclTax)] {
+            set OriginalDiscount = QuotePriceVar.Discount;
+         }
+         -- gelr:disc_price_rounded, end
+         set PartLevel = QuotePriceVar.PartLevelDb;
+         set PartLevelId = QuotePriceVar.PartLevelId;
+         set CustomerLevel = QuotePriceVar.CustomerLevelDb;
+         set CustomerLevelId = QuotePriceVar.CustomerLevelId;
+         set PriceSourceNetPrice = QuotePriceVar.PriceSourceNetPrice;
+         set SaleUnitPrice = QuotePriceVar.SaleUnitPrice;
+         set UnitPriceInclTax = QuotePriceVar.UnitPriceInclTax;
+         set BaseSaleUnitPrice = QuotePriceVar.BaseSaleUnitPrice;
+         set BaseUnitPriceInclTax = QuotePriceVar.BaseUnitPriceInclTax;
+         set CalcPriceCurr = QuotePriceVar.CalcPriceCurr;
+         set CharPrice = QuotePriceVar.CharPrice;
+         set CalcCharPrice = QuotePriceVar.CalcCharPrice;
+
+         set MultipleTaxLines = QuotePriceVar.MultipleTaxLines;
+         set TaxCode = QuotePriceVar.TaxCode;
+         set TaxCalcStructureId = QuotePriceVar.TaxCalcStructureId;
+         set TaxClassId = QuotePriceVar.TaxClassId;
+         set FetchTaxFromDefaults = QuotePriceVar.FetchTaxFromDefaults;
+      }
+      --  SetFreeOfChargeTaxBasis start
+      if [BuyQtyDue != null and InvertedConvFactor != 0] {
+         set RevisedQtyDue = "#{BuyQtyDue * ConvFactor/InvertedConvFactor}";
+      }
+      call CalcFreeOfChargeTaxBasis(
+      FreeOfChargeTaxBasis,
+      QuotationNo,
+      LineNo,
+      RelNo,
+      LineItemNo,
+      Cost,
+      RevisedQtyDue,
+      CustomerNoPay,
+      Contract,
+      parent.CurrencyCode,
+      QuotePriceVar.PartPrice,
+      FreeOfCharge) into FreeOfChargeTaxBasis;
+      --  SetFreeOfChargeTaxBasis end
+
+      -- Calculate Line Total start
+      call CalculateLineTotal(
+      QuotationNo,
+      LineNo,
+      RelNo,
+      LineItemNo,
+      "FALSE",
+      true,
+      IsNew,
+      false,
+      true,
+      TaxCalcStructureId,
+      TaxCode,
+      Contract,
+      CustomerNo,
+      ShipAddrNo,
+      PlannedDueDate,
+      parent.SupplyCountry,
+      DeliveryType,
+      CatalogNo,
+      TaxLiability,
+      TaxLiabilityType,
+      parent.CurrencyCode,
+      CurrencyRate,
+      BuyQtyDue,
+      PriceConvFactor,
+      SaleUnitPrice,
+      UnitPriceInclTax,
+      AdditionalDiscount,
+      QuoteDiscount,
+      1,
+      FreeOfChargeTaxBasis,
+      Discount) into DiscontVar;
+      copy DiscontVar into this skip nulls;
+      if [parent.FreeOfChgTaxPayParty = "Company"] {
+         set CompanyBearingTaxAmountBase = TaxAmountBase;
+         set TaxAmountBase = 0;
+         set TaxAmountCurrency = 0;
+         set GrossAmtBase = 0;
+         set GrossAmtCurr = 0;
+      }
+      else {
+         set CompanyBearingTaxAmountBase = null;
+      }
+      -- Calculate Line Total end
+   }
+}
+
+command ValidateFreeOfChargeTaxBasCommand for OrderQuotationLine clone CalculateLineTotalCommand {
+   execute {
+      super;
+      if [parent.FreeOfChgTaxPayParty = "Company"] {
+         set CompanyBearingTaxAmountBase = TaxAmountBase;
+         set TaxAmountBase = 0;
+         set TaxAmountCurrency = 0;
+         set GrossAmtBase = 0;
+         set GrossAmtCurr = 0;
+      }
+      else {
+         set CompanyBearingTaxAmountBase = null;
+      }
+   }
+}
+
+command ValidatePartCatalogNoCommand for OrderQuotationLine clone ValidateCatalogNoCommand {
+   variable CustomerNoVar Text;
+   variable PartPriceVar Number;
+   execute {
+      super;
+      set PartPriceVar = PartPrice;
+      -- SetZeroPrices start
+      if [FreeOfCharge] {
+         set PartPrice = 0;
+         set CalcPriceCurr = 0;
+         set BaseUnitPriceInclTax = 0;
+         set BaseSaleUnitPrice = 0;
+         set SaleUnitPrice = 0;
+         set UnitPriceInclTax = 0;
+         if [CalcCharPrice != null] {
+            set CalcCharPrice = 0;
+         }
+         if [CharPrice != null] {
+            set CharPrice = 0;
+         }
+         set Discount = 0;
+         -- gelr:disc_price_rounded, begin
+         set OriginalDiscount = 0;
+         -- gelr:disc_price_rounded, end
+
+         set PriceSource = "Unspecified";
+         set PriceSourceId = null;
+         set PartLevel = null;
+         set PartLevelId = null;
+         set CustomerLevel = null;
+         set CustomerLevelId = null;
+
+         set CustomerNoVar = parent.CustomerNoPay;
+         if [CustomerNoVar = null] {
+            set CustomerNoVar = parent.CustomerNo;
+         }
+         call  GetCurrencyRate(CustomerNoVar, Contract, parent.CurrencyCode, BaseSaleUnitPrice) into CurrRate;
+         -- SetZeroPrices end
+
+         --  SetFreeOfChargeTaxBasis start
+         if [BuyQtyDue != null and InvertedConvFactor != 0] {
+            set RevisedQtyDue = "#{BuyQtyDue * ConvFactor/InvertedConvFactor}";
+         }
+         call CalcFreeOfChargeTaxBasis(
+         FreeOfChargeTaxBasis,
+         QuotationNo,
+         LineNo,
+         RelNo,
+         LineItemNo,
+         Cost,
+         RevisedQtyDue,
+         CustomerNoPay,
+         Contract,
+         parent.CurrencyCode,
+         PartPriceVar,
+         FreeOfCharge) into FreeOfChargeTaxBasis;
+         --  SetFreeOfChargeTaxBasis end
+
+         -- Calculate Line Total start
+         call CalculateLineTotal(
+         QuotationNo,
+         LineNo,
+         RelNo,
+         LineItemNo,
+         "FALSE",
+         true,
+         IsNew,
+         false,
+         true,
+         TaxCalcStructureId,
+         TaxCode,
+         Contract,
+         CustomerNo,
+         ShipAddrNo,
+         PlannedDueDate,
+         parent.SupplyCountry,
+         DeliveryType,
+         CatalogNo,
+         TaxLiability,
+         TaxLiabilityType,
+         parent.CurrencyCode,
+         CurrencyRate,
+         BuyQtyDue,
+         PriceConvFactor,
+         SaleUnitPrice,
+         UnitPriceInclTax,
+         AdditionalDiscount,
+         QuoteDiscount,
+         1,
+         FreeOfChargeTaxBasis,
+         Discount) into DiscontVar;
+         copy DiscontVar into this skip nulls;
+         if [parent.FreeOfChgTaxPayParty = "Company"] {
+            set CompanyBearingTaxAmountBase = TaxAmountBase;
+            set TaxAmountBase = 0;
+            set TaxAmountCurrency = 0;
+            set GrossAmtBase = 0;
+            set GrossAmtCurr = 0;
+         }
+         else {
+            set CompanyBearingTaxAmountBase = null;
+         }
+         -- Calculate Line Total end
+      }
+   }
+}
+
+command ValidatePartBuyQtyDueCommand for OrderQuotationLine clone ValidateBuyQtyDueCommand {
+   variable CustomerNoVar Text;
+   variable PartPriceVar Number;
+   execute {
+      super;
+      set PartPriceVar = PartPrice;
+      -- SetZeroPrices start
+      if [FreeOfCharge] {
+         set PartPrice = 0;
+         set CalcPriceCurr = 0;
+         set BaseUnitPriceInclTax = 0;
+         set BaseSaleUnitPrice = 0;
+         set SaleUnitPrice = 0;
+         set UnitPriceInclTax = 0;
+         if [CalcCharPrice != null] {
+            set CalcCharPrice = 0;
+         }
+         if [CharPrice != null] {
+            set CharPrice = 0;
+         }
+         set Discount = 0;
+         -- gelr:disc_price_rounded, begin
+         set OriginalDiscount = QuotePriceVar.Discount;
+         -- gelr:disc_price_rounded, end
+         set PriceSource = "Unspecified";
+         set PriceSourceId = null;
+         set PartLevel = null;
+         set PartLevelId = null;
+         set CustomerLevel = null;
+         set CustomerLevelId = null;
+         set CustomerNoVar = parent.CustomerNoPay;
+         if [CustomerNoVar = null] {
+            set CustomerNoVar = parent.CustomerNo;
+         }
+
+         call  GetCurrencyRate(CustomerNoVar, Contract, parent.CurrencyCode, BaseSaleUnitPrice) into CurrRate;
+         -- SetZeroPrices end
+
+         --  SetFreeOfChargeTaxBasis start
+         if [BuyQtyDue != null and InvertedConvFactor != 0] {
+            set RevisedQtyDue = "#{BuyQtyDue * ConvFactor/InvertedConvFactor}";
+         }
+         call CalcFreeOfChargeTaxBasis(
+         FreeOfChargeTaxBasis,
+         QuotationNo,
+         LineNo,
+         RelNo,
+         LineItemNo,
+         Cost,
+         RevisedQtyDue,
+         CustomerNoPay,
+         Contract,
+         parent.CurrencyCode,
+         PartPriceVar,
+         FreeOfCharge) into FreeOfChargeTaxBasis;
+         --  SetFreeOfChargeTaxBasis end
+
+         -- Calculate Line Total start
+         call CalculateLineTotal(
+         QuotationNo,
+         LineNo,
+         RelNo,
+         LineItemNo,
+         "FALSE",
+         true,
+         IsNew,
+         false,
+         true,
+         TaxCalcStructureId,
+         TaxCode,
+         Contract,
+         CustomerNo,
+         ShipAddrNo,
+         PlannedDueDate,
+         parent.SupplyCountry,
+         DeliveryType,
+         CatalogNo,
+         TaxLiability,
+         TaxLiabilityType,
+         parent.CurrencyCode,
+         CurrencyRate,
+         BuyQtyDue,
+         PriceConvFactor,
+         SaleUnitPrice,
+         UnitPriceInclTax,
+         AdditionalDiscount,
+         QuoteDiscount,
+         1,
+         FreeOfChargeTaxBasis,
+         Discount) into DiscontVar;
+         copy DiscontVar into this skip nulls;
+
+         if [parent.FreeOfChgTaxPayParty = "Company"] {
+            set CompanyBearingTaxAmountBase = TaxAmountBase;
+            set TaxAmountBase = 0;
+            set TaxAmountCurrency = 0;
+            set GrossAmtBase = 0;
+            set GrossAmtCurr = 0;
+         }
+         else {
+            set CompanyBearingTaxAmountBase = null;
+         }
+      }
+      -- Calculate Line Total end
+   }
+}
+
+command ValidateBuyQtyDueForPartCommand for OrderQuotationLine clone ValidatePartBuyQtyDueCommand {
+   execute {
+      -- Clear UOM parameters
+      -- Need to clear UOM parameters here as ValidatePartBuyQtyDueCommand is used for ValidateInputQtyCommand as well.
+      -- In ValidateInputQtyCommand it should not be cleared the UOM parameters
+      set InputUnitMeas = null;
+      set InputQty = null;
+      set InputConvFactor = null;
+      set InputVariableValues = null;
+      super;
+   }
+}
+
+command ValidateInputQtyCommand for OrderQuotationLine clone ValidatePartBuyQtyDueCommand {
+   variable CustomerNoVar Text;
+   variable UnitTypeVar Structure(UnitTypeStructure);
+   variable InputUomInfoVar Structure(InputUomInfoStructure);
+   execute {
+      call ValidateInputQty(InputUnitMeas, InputQty) into UnitTypeVar;
+
+      if [UnitTypeVar.UnitType = "DISCRETE" and UnitTypeVar.TruncatedInputQty < InputQty] {
+         info("The Input UoM ${InputUnitMeas} is of type Discrete, and is therefore rounded down to the nearest integer.");
+         set InputQty = UnitTypeVar.TruncatedInputQty;
+      }
+
+      call GetDirectOutputQty(InputQty, InputUnitMeas, InputUnitMeasGroupId, InputConvFactor) into InputUomInfoVar;
+
+      if [InputUomInfoVar.OutputQty != InputUomInfoVar.OutputQtyWithPrecision] {
+         info("Rounded quantity is greater than the corresponding input quantity. Please review the rounded quantity again.");
+      }
+      set BuyQtyDue = InputUomInfoVar.OutputQty;
+      set InputVariableValues = InputUomInfoVar.InputValueString;
+
+      super;
+   }
+}
+
+command ValidateInputUoMCommand for OrderQuotationLine clone ValidateInputQtyCommand {
+   variable ShowUomDialog Text;
+   variable ConversionFactor Number;
+   variable InputUomInfoVar Structure(InputUomInfoStructure);
+   execute {
+      call ShowInputUomDialog(InputUnitMeasGroupId, InputUnitMeas) into ShowUomDialog;
+      if [ShowUomDialog = "TRUE"] {
+         assistant EnterInputUomParameters.EnterInputUnitParamAssistant(InputUnitMeasGroupId, InputVariableValues, null, null, InputUnitMeas, InputConvFactor, "ORDER") into(InputVariableValues, BuyQtyDue, InputQty, InputUnitMeas, InputConvFactor) {
+            when CANCEL {
+               exit CANCEL;
+            }
+         }
+      }
+      else {
+         call GetConversionFactor(InputUnitMeasGroupId, InputUnitMeas) into ConversionFactor;
+         set InputConvFactor = ConversionFactor;
+         if [InputQty != null] {
+            call GetDirectOutputQty(InputQty, InputUnitMeas, InputUnitMeasGroupId, InputConvFactor) into InputUomInfoVar;
+
+            if [InputUomInfoVar.OutputQty > InputUomInfoVar.OutputQtyWithPrecision] {
+               info("Rounded quantity is greater than the corresponding input quantity. Please review the rounded quantity again.");
+            }
+
+            set BuyQtyDue = InputUomInfoVar.OutputQty;
+         }
+      }
+      super;
+   }
+}
+
+--------------------------------- SELECTORS ---------------------------------
+@Override
+selector ReferenceInputUnitMeasSelector for InputUnitMeas {
+   static UnitCode {
+      label = "";
+   }
+   static CustUsageAllowed {
+      visible = [false];
+   }
+   static InputUnitMeasType {
+      visible = [false];
+   }
+   static DefaultInputUom {
+      visible = [false];
+   }
+}
+
+
+----------------------------------- LISTS -----------------------------------
+@Overtake Base
+list InputUnitMeasLovList for InputUnitMeas {
+   label = "";
+   static UnitCode {
+      label = "Input UoM";
+   }
+   static Description;
+   static ConversionFactor;
+   static InputUnitMeasType;
+   static DefaultInputUom;
+}
+
+list OrderQuotationLineList clone OrderQuotationLineBaseList {
+   crudactions {
+      after command AfterCrud;
+
+      duplicate {
+         enabled = [not isNew];
+      }
+   }
+
+   lov CustomerTaxUsageTypeRef with ReferenceCustomerTaxUsageTypeSelector {
+      description = CustomerTaxUsageTypeRef.Description;
+   }
+   lov CatalogNoRef with OrderLineCatalogNoSelector {
+      initialfocus = [true];
+      validate command ValidatePartCatalogNoCommand;
+   }
+   field BuyQtyDue {
+      validate command ValidateBuyQtyDueForPartCommand;
+   }
+   field Configurable {
+      size = Small;
+   }
+   -- currntly dissable the lov since it pop ups the copy configuration dialog
+   @DynamicComponentDependency CFGCHR
+   field ConfigurationId {
+      editable = [false];
+   }
+//   lov ConfigurationIdRef with ReferenceConfigSpecOrderUsageSelector {
+//      size = Small;
+//      validate command {
+//         execute {
+//            call GetConfigSpecStatus(PartNo, ConfigurationId) into ConfigurationStatus;
+//         }
+//      }
+//   }
+   field ConfigurationStatus {
+      size = Small;
+   }
+   field InterimOrder {
+      size = Small;
+   }
+   field Cost {
+      //make uneditable since in EE it is not enable
+      editable = [false];
+   }
+   field InputUnitMeasGroupId {
+      size = Small;
+      searchable = false;
+      columnexclude = [true];
+   }
+   field InputUomGroup {
+      size = Small;
+   }
+   lov InputUnitMeasRef with ReferenceInputUnitMeasSelector using GetUomValues(InputUnitMeasGroupId, "ORDER") {
+      size = Small;
+      editable = [InputUomGroup];
+      validate command ValidateInputUoMCommand;
+   }
+   field InputQty {
+      editable = [InputUomGroup];
+      validate command ValidateInputQtyCommand;
+   }
+   field InputConvFactor;
+   field InputVariableValues {
+      size = Small;
+   }
+   field CalcCharPrice {
+      editable = [false];
+   }
+   field CharPrice {
+      editable = [false];
+   }
+   field FreeOfCharge {
+      size = Small;
+      editable = [not Objstate in("Cancelled", "CO Created", "Lost")];
+      validate command ValidateFreeOfChargeCommand;
+   }
+   field FreeOfChargeTaxBasis {
+      editable = [not Objstate in("Cancelled", "CO Created", "Lost") and not(parent.FreeOfChgTaxPayParty = "NoTax")];
+      validate command ValidateFreeOfChargeTaxBasCommand;
+   }
+   field CompanyBearingTaxAmountBase;
+   @DynamicComponentDependency PURCH
+   lov VendorNoRef with ReferencePurchasePartSupplierLovSelector using GetSupplierNo(OrderSupplyType, SalesPartRef.PurchasePartNo) {
+      editable = [OrderSupplyType in("PurchOrderTrans", "PurchOrderDir", "IntPurchTrans", "IntPurchDir")];
+
+      contactwidget {
+         enabled = [VendorNo != null];
+         source = Supplier;
+      }
+      validate command {
+         execute {
+            call GetAvailableQuantity(CatalogNo,
+            PartNo,
+            Contract,
+            VendorNo,
+            ConfigurationId,
+            OrderSupplyType,
+            ConditionCode,
+            Rental) into AvailableQty;
+         }
+      }
+   }
+   field ChargedItem {
+      size = Small;
+      enumerationtrue = "ChargedItem";
+      enumerationfalse = "ItemNotCharged";
+      truelabel = "Yes";
+      falselabel = "No";
+   }
+   field ContribMarginBase;
+   computedfield ContribMarginRate {
+      label = " Contribution Margin Rate";
+      value = "#{ContribMarginBase/NetAmountBase * 100}";
+   }
+   field CustomerWarranty {
+      size = Small;
+   }
+   field WantedDeliveryDate {
+      validate command {
+         execute {
+            set PlannedDeliveryDate = WantedDeliveryDate;
+         }
+      }
+   }
+   field FreightMapIdRef;
+   field ZoneIdRef {
+      editable = [FreightMapId != null];
+   }
+   field FreightPriceListNoRef;
+   field ReleasePlanning {
+      size = Medium;
+      enumerationtrue = "PlanningReleased";
+      enumerationfalse = "NotReleased";
+      truelabel = "Yes";
+      falselabel = "No";
+   }
+   field CtpPlanned {
+      size = Small;
+      enumerationtrue = "Yes";
+      enumerationfalse = "No";
+      truelabel = "Yes";
+      falselabel = "No";
+   }
+   field SelfBilling {
+      size = Small;
+      enumerationtrue = "SelfBilling";
+      enumerationfalse = "NotSelfBilling";
+      truelabel = "Yes";
+      falselabel = "No";
+   }
+   field FreightFactor;
+   field FreightFree {
+      size = Small;
+   }
+   field TaxAmountCurrency;
+   field GrossAmtCurr;
+  // field SupplyCode;
+   field PartOwnership;
+
+   fieldranking LineNo, RelNo, CatalogNoRef, CatalogDesc, BuyQtyDue, SalesUnitMeasureRef, Objstate, SaleUnitPrice, UnitPriceInclTax, PriceUnitMeas, CalcPriceCurr, DiscountAmountCurr, TotalOrderLineDiscount, NetAmountCurr, TaxAmountCurrency, GrossAmtCurr, WantedDeliveryDate, PlannedDeliveryDate, PlannedDueDate, LatestReleaseDate, OrderSupplyType, VendorNoRef, DefaultAddrFlag, SingleOccAddrFlag, ShipAddrNo, ShipViaCodeRef, DeliveryTermsRef, ForwardAgentIdRef, ProbabilityToWin, CustomerPartNoRef, CustomerPartBuyQty, CustomerPartUnitMeas, Cost, NetAmountBase, TaxAmountBase, GrossAmtBase, TaxCodeRef, Configurable, ConfigurationId, PartOwnership;
+   fieldorder = LineNo, RelNo, CatalogNoRef, CatalogDesc, BuyQtyDue, SalesUnitMeasureRef, Objstate, SaleUnitPrice, UnitPriceInclTax, PriceUnitMeas, CalcPriceCurr, DiscountAmountCurr, TotalOrderLineDiscount, NetAmountCurr, TaxAmountCurrency, GrossAmtCurr, WantedDeliveryDate, PlannedDeliveryDate, PlannedDueDate, LatestReleaseDate, OrderSupplyType, VendorNoRef, DefaultAddrFlag, SingleOccAddrFlag, ShipAddrNo, ShipViaCodeRef, DeliveryTermsRef, ForwardAgentIdRef, ProbabilityToWin, CustomerPartNoRef, CustomerPartBuyQty, CustomerPartUnitMeas, Cost, NetAmountBase, TaxAmountBase, GrossAmtBase, TaxCodeRef, Configurable, ConfigurationId, PartOwnership;
+
+
+//   fieldorder {
+//      anchor RelNo;
+//      followedby CatalogNoRef;
+//      followedby CatalogDesc;
+//      followedby BuyQtyDue;
+//   }
+//   fieldorder {
+//      anchor CustomerPartUnitMeas;
+//      followedby Configurable;
+//      followedby ConfigurationId;
+//      followedby ConfigurationStatus;
+//   }
+//   fieldorder {
+//      anchor ConditionCodeRef;
+//      followedby InterimOrder;
+//      followedby InputUomGroup;
+//      followedby InputUnitMeasRef;
+//      followedby InputQty;
+//      followedby InputConvFactor;
+//      followedby InputVariableValues;
+//      followedby Cost;
+//   }
+//   fieldorder {
+//      anchor PartPrice;
+//      followedby CalcCharPrice;
+//      followedby CharPrice;
+//   }
+//   fieldorder {
+//      anchor BaseUnitPriceInclTax;
+//      followedby FreeOfChargeDb;
+//      followedby FreeOfChargeTaxBasis;
+//      followedby CompanyBearingTaxAmountBase;
+//   }
+//   fieldorder {
+//      anchor OrderSupplyType;
+//      followedby VendorNoRef;
+//   }
+//   fieldorder {
+//      anchor InventoryUom;
+//      followedby ChargedItemDb;
+//   }
+//   fieldorder {
+//      anchor NetAmountBase;
+//      followedby ContribMarginBase;
+//      followedby ContribMarginRate;
+//   }
+//   fieldorder {
+//      anchor DocumentText;
+//      followedby CustomerWarranty;
+//   }
+//   fieldorder {
+//      anchor GrossAmtCurr;
+//      followedby WantedDeliveryDate;
+//   }
+//   fieldorder {
+//      anchor DelTermsLocation;
+//      followedby FreightMapIdRef;
+//      followedby ZoneIdRef;
+//      followedby FreightPriceListNoRef;
+//   }
+//   fieldorder {
+//      anchor ShipViaCodeRef;
+//      followedby ReleasePlanningDb;
+//   }
+//   fieldorder {
+//      anchor LatestReleaseDate;
+//      followedby CtpPlannedDb;
+//      followedby SelfBillingDb;
+//   }
+//   fieldorder {
+//      anchor GtinNoRef;
+//      followedby FreightFactor;
+//   }
+//   fieldorder {
+//      anchor AdjustedVolume;
+//      followedby FreightFreeDb;
+//   }
+}
+
+
+--------------------------------- SELECTORS ---------------------------------
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+
+----------------------------- MAIN ENTRY POINTS -----------------------------
+
+------------------------------ ENTITY DETAILS -------------------------------
+@DynamicComponentDependency PURCH
+entityset PurchasePartSupplierLovSet for PurchasePartSupplierLov;
+
+@Override
+entity OrderQuotationLine {
+   keys = QuotationNo, LineNo, RelNo, LineItemNo {
+      where = "QUOTATION_NO = :QuotationNo and LINE_NO = :LineNo and REL_NO = :RelNo and LINE_ITEM_NO = :LineItemNo";
+   }
+   ludependencies = OrderQuotation, OrderQuotationGradPrice, OrderQuoteLineDiscount, DocumentText, OrderQuotationLine;
+   where = "LINE_ITEM_NO <= 0 AND RENTAL_DB = 'FALSE'";
+   //! TODO: Uncomment and adjust the where statement as required
+   // where = "LINE_ITEM_NO <= 0 AND RENTAL_DB = 'FALSE'";
+   -- gelr:disc_price_rounded, added OriginalDiscount, OriginalAddDiscount, OriginalQuotationDiscount
+   use attributes = CustomerPartNo, CustomerPartBuyQty, CustomerPartUnitMeas, CatalogNo, CatalogDesc, BuyQtyDue, DesiredQty, ConfigurationId, ConditionCode,
+   Cost, PriceListNo, SalesUnitMeasure, InputUnitMeas, InputQty, InputConvFactor, InputVariableValues, PartPrice, PriceSourceId, CalcCharPrice,
+   CharPrice, SaleUnitPrice, UnitPriceInclTax, PriceUnitMeas, BaseSaleUnitPrice, BaseUnitPriceInclTax, Discount, QuotationDiscount, AdditionalDiscount,
+   FreeOfChargeTaxBasis, OrderSupplyType, VendorNo, DeliveryType, TaxLiability, TaxCode, TaxClassId, TaxCalcStructureId, OriginalPartNo, ConOrderNo, ConLineNo,
+   ConRelNo, DateEntered, WantedDeliveryDate, PlannedDeliveryDate, PromisedDeliveryDate, ChrOptionsDb, SingleOccAddrFlag, ShipAddrNo, EndCustomerId, ShipViaCode,
+   DeliveryTerms, DelTermsLocation, FreightMapId, ZoneId, FreightPriceListNo, ForwardAgentId, PickingLeadtime, DeliveryLeadtime, ExtTransportCalendarId, ProbabilityToWin,
+   LostTo, ReasonId, LoseWinNote, LatestReleaseDate, CancelReason, ClassificationStandard, ClassificationPartNo, ClassificationUnitMeas, AdjustedWeightNet, AdjustedWeightGross,
+   AdjustedVolume, ConLineItemNo, CustPartInvertConvFact, CustomerPartConvFactor, NoteId, CatalogType, Contract, PartNo, CurrencyRate, PriceConvFactor, ConvFactor,
+   InvertedConvFactor, NoteText, CustomerNo, RevisedQtyDue, Company, ConfiguredLinePriceId, CustWarrantyId, PartLevelId, CustomerLevel, CustomerLevelId, DemandCode,
+   DemandOrderRef1, DemandOrderRef2, EvaluateDefaultInfo, PlannedDueDate, CustomerTaxUsageType, OriginalDiscount, OriginalAddDiscount, OriginalQuotationDiscount;
+
+   attribute ConfigurationRequiredDate Date {
+      fetch = "planned_delivery_date";
+   }
+   attribute LineNo Text {
+      required = [false];
+   }
+   -- Can remove if SCUXXW4-16405 fixed
+   attribute LineNumber Text {
+      fetch = "LPAD(line_no,4)";
+   }
+   attribute LineItemNo Number {
+      required = [false];
+   }
+   attribute RelNo Text {
+      label = "Del No";
+      required = [false];
+   }
+   -- Can remove if SCUXXW4-16405 fixed
+   attribute RelNumber Text {
+      fetch = "LPAD(rel_no,4)";
+   }
+   attribute CustomerPartNo Text {
+      label = "Customer's Part No";
+      format = uppercase;
+   }
+   attribute CustomerPartBuyQty Number {
+      label = "Customer Sales Qty";
+   }
+   attribute CustomerPartUnitMeas Text {
+      label = "Customer's UoM";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute ShipAddrInCity Text;
+   attribute CatalogNo Text {
+      label = "Sales Part No";
+   }
+   attribute CatalogDesc Text {
+      label = "Sales Part Description";
+   }
+   attribute BuyQtyDue Number {
+      label = "Sales Qty";
+   }
+   attribute DesiredQty Number {
+      required = [false];
+   }
+   attribute AvailableQty Number {
+      fetch = "Reserve_Customer_Order_API.Get_Avail_Qty_For_Quotation(contract, vendor_no, NVL(part_no,catalog_no), configuration_id, order_supply_type_db, condition_code)";
+      label = "Available Qty";
+   }
+   attribute PriceBreaks Boolean("TRUE", "FALSE") {
+      fetch = "Order_Quotation_Grad_Price_API.Grad_Price_Exist(quotation_no, line_no, rel_no, line_item_no)";
+      label = "Price Breaks";
+      editable = [false];
+   }
+   attribute Configurable Boolean("TRUE", "FALSE") {
+      fetch = "DECODE(Sales_Part_API.Get_Configurable_Db(contract, catalog_no), 'CONFIGURED', 'TRUE', 'FALSE')";
+      label = "Configurable";
+      editable = [false];
+   }
+   attribute ConfigurationId Text {
+      editable = [ETag != null];
+   }
+   attribute ConfigurationStatus Text {
+      fetch = "Order_Config_Util_API.Get_Config_Spec_Status(part_no, configuration_id)";
+      label = "Configuration Status";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute InterimOrder Text {
+      fetch = "Order_Quotation_Line_API.Get_Interim_Order_No(quotation_no, line_no, rel_no, line_item_no, ctp_planned_db)";
+      label = "Interim Order Header";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute Cost Number {
+      format = ifscurrency;
+   }
+   attribute SalesUnitMeasure Text {
+      label = "Sales UoM";
+      editable = [false];
+   }
+   attribute InputUnitMeasGroupId Text {
+      fetch = "Inventory_Part_API.Get_Input_Unit_Meas_Group_Id( contract, Sales_Part_API.Get_Part_No(contract, catalog_no))";
+      label = "Customer's Part No";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute InputUomGroup Boolean("TRUE", "FALSE") {
+      fetch = "Input_Unit_Meas_Group_API.Is_Usage_Allowed(Inventory_Part_API.Get_Input_Unit_Meas_Group_Id( contract,Sales_Part_API.Get_Part_No( contract, catalog_no) ), 'ORDER' )";
+      label = "Input UoM Group";
+      editable = [false];
+   }
+   attribute InputUnitMeas Text {
+      label = "Input UoM";
+   }
+   attribute InputConvFactor Number {
+      editable = [false];
+   }
+   attribute InputVariableValues Text {
+      label = "Input Values";
+      editable = [false];
+   }
+   attribute PartPrice Number {
+      label = "Source Price/Curr";
+      format = ifscurrency;
+   }
+   attribute PriceSource Enumeration(PricingSource) {
+      fetch = "price_source_db";
+      label = "Price Source";
+      maxlength = 200;
+   }
+   attribute PriceSourceId Text {
+      editable = [false];
+   }
+   attribute CalcCharPrice Number {
+      label = "Calculated Characteristics Price/Curr";
+      fetch = "DECODE(demand_code_db,'EST', DECODE(demand_order_ref1,NULL, calc_char_price, DECODE(demand_order_ref2, NULL, calc_char_price, NULL)), calc_char_price)";
+      format = ifscurrency;
+   }
+   attribute CharPrice Number {
+      label = "Characteristic Price/Curr";
+      fetch = "DECODE(demand_code_db,'EST', DECODE(demand_order_ref1,NULL, char_price, DECODE(demand_order_ref2, NULL, char_price, NULL)), char_price)";
+      format = ifscurrency;
+   }
+   attribute CalcPriceCurr Number {
+      label = "Calculated Price/Curr";
+      fetch = "DECODE(demand_code_db,'EST', DECODE(demand_order_ref1,char_price + calc_char_price , sale_unit_price, DECODE(demand_order_ref2, char_price + calc_char_price, sale_unit_price, char_price + calc_char_price)), sale_unit_price)";
+      format = ifscurrency;
+   }
+   attribute SaleUnitPrice Number {
+      label = "Price/Curr";
+   }
+   attribute UnitPriceInclTax Number {
+      label = "Price Incl Tax/Curr";
+   }
+   attribute PriceFreeze Enumeration(FreezeFlag) {
+      fetch = "price_freeze_db";
+      label = "Price Freeze";
+      required = [true];
+   }
+   attribute PriceUnitMeas Text {
+      label = "Price UoM";
+      editable = [false];
+   }
+   attribute BaseSaleUnitPrice Number {
+      label = "Price/Base";
+      format = ifscurrency;
+   }
+   attribute BaseUnitPriceInclTax Number {
+      label = "Price incl Tax/Base";
+      format = ifscurrency;
+   }
+   attribute DiscountAmountCurr Number {
+      fetch = "Order_Quote_Line_Discount_API.Get_Total_Line_Discount__(quotation_no,line_no,rel_no,line_item_no,buy_qty_due,price_conv_factor)";
+      label = "Discount Amount/Curr";
+      format = ifscurrency;
+   }
+   attribute UnformattedDiscount Number {
+      fetch = "Order_Quotation_Line_API.Get_Discount(quotation_no,line_no,rel_no,line_item_no)";
+      label = "Unformated Discount";
+   }
+   attribute Discount Number {
+      label = "Discount (%)";
+   }
+   attribute QuotationDiscount Number {
+      label = "Group Discount (%)";
+      editable = [false];
+   }
+   attribute AdditionalDiscount Number {
+      label = "Additional Discount (%)";
+      editable = [false];
+   }
+   attribute TotalOrderLineDiscount Number {
+      fetch = "Order_Quotation_Line_API.Get_Total_Discount(quotation_no,line_no,rel_no,line_item_no)";
+      label = "Total Order Line Discount (%)";
+      editable = [false];
+   }
+   attribute FreeOfCharge Boolean("TRUE", "FALSE") {
+      fetch = "free_of_charge_db";
+      label = "Free of Charge";
+      required = [true];
+   }
+   attribute FreeOfChargeTaxBasis Number {
+      label = "Tax Basis for FOC/Curr";
+      format = ifscurrency;
+   }
+   attribute CompanyBearingTaxAmountBase Number {
+      fetch = "Order_Quotation_Line_API.Get_Comp_Bearing_Tax_Amount(quotation_no,line_no,rel_no,line_item_no)";
+      label = "Company Bearing Tax Amount/Base ";
+      maxlength = 2000;
+      editable = [false];
+      updatable = [false];
+      insertable = [false];
+      format = ifscurrency;
+   }
+   attribute OrderSupplyType Enumeration(OrderSupplyType) {
+      fetch = "order_supply_type_db";
+      label = "Supply Code";
+   }
+//   attribute OrderSupplyTypeDb Text {
+//      fetch = "order_supply_type_db";
+//      label = "Supply Code";
+//      maxlength = 3;
+//      editable = [ETag != null];
+//   }
+   -- this attribute needed for Common fragment SalesInterimOrderCommands
+   attribute SupplyCode Enumeration(OrderSupplyType) {
+      fetch = "order_supply_type_db";
+      label = "Supply Code";
+   }
+   attribute InventoryUom Text {
+      fetch = "Inventory_Part_API.Get_Unit_Meas(contract, part_no)";
+      label = "Inventory UoM";
+      maxlength = 100;
+   }
+   @DynamicComponentDependency PURCH
+   attribute SupplySiteInventoryUom Text {
+      fetch = "Inventory_Part_API.Get_Unit_Meas(Supplier_API.Get_Acquisition_Site(vendor_no), part_no)";
+      label = "Supply Site Inventory UoM";
+      maxlength = 100;
+      editable = [false];
+   }
+
+   @DynamicComponentDependency PURCH
+   attribute SupplySite Text {
+      fetch = "Supplier_API.Get_Acquisition_Site(vendor_no)";
+      maxlength = 100;
+   }
+   attribute ChargedItem Enumeration(ChargedItem) {
+      fetch = "charged_item_db";
+      label = "Charged Item";
+      editable = [false];
+      required = [true];
+   }
+   attribute NetAmountBase Number {
+      fetch = "Nvl(Order_Quotation_Line_API.Get_Base_Sale_Price_Total(quotation_no, line_no, rel_no, line_item_no), 0)";
+      label = "Net Amount/Base";
+      format = ifscurrency;
+   }
+   attribute ContribMarginBase Number {
+      fetch = "Order_Quotation_Line_API.Get_Quot_Line_Contribution(quotation_no, line_no, rel_no, line_item_no)";
+      label = "Contrib Margin/Base";
+      editable = [false];
+      format = ifscurrency;
+   }
+   attribute TaxAmountBase Number {
+      fetch = "Order_Quotation_Line_API.Get_Total_Tax_Amount_Base(quotation_no, line_no, rel_no, line_item_no)";
+      label = "Tax Amount/Base";
+      format = ifscurrency;
+   }
+   attribute GrossAmtBase Number {
+      fetch = "Order_Quotation_Line_API.Get_Base_Price_Incl_Tax_Total(quotation_no, line_no, rel_no, line_item_no)";
+      label = "Gross Amt/Base";
+      format = ifscurrency;
+   }
+   attribute TaxCode Text {
+      format = uppercase;
+   }
+   attribute TaxClassId Text {
+      label = "Tax Class";
+      editable = [false];
+   }
+   attribute TaxClassDescription Text {
+      fetch = "Tax_Class_API.Get_Description(company, tax_class_id)";
+      label = "Tax Class Description";
+      editable = [false];
+      insertable = [false];
+      updatable = [false];
+   }
+   attribute NetAmountCurr Number {
+      fetch = "Order_Quotation_Line_API.Get_Sale_Price_Total(quotation_no, line_no, rel_no, line_item_no)";
+      label = "Net Amount/Curr";
+      format = ifscurrency;
+   }
+   attribute GrossAmtCurr Number {
+      fetch = "Order_Quotation_Line_API.Get_Sale_Price_Incl_Tax_Total(quotation_no, line_no, rel_no, line_item_no)";
+      label = "Gross Amt/Curr";
+      format = ifscurrency;
+   }
+   attribute MultipleTaxLines Boolean("TRUE", "FALSE") {
+      fetch = "Source_Tax_Item_API.Multiple_Tax_Items_Exist(company, 'ORDER_QUOTATION_LINE', quotation_no,line_no,rel_no,line_item_no, '*')";
+      label = "Multiple Tax Lines";
+      editable = [false];
+      insertable = [true];
+      updatable = [true];
+//      required = [true];
+   }
+   attribute Note Boolean("TRUE", "FALSE") {
+      fetch = "DECODE( note_text, null, 'FALSE', 'TRUE' )";
+      label = "Note";
+      editable = [false];
+   }
+   attribute DocumentText Boolean {
+      fetch = "DECODE(Document_Text_API.Note_Id_Exist(note_id), '1', 'TRUE', 'FALSE')";
+      label = "Document Text";
+      editable = [false];
+   }
+   attribute CustomerWarranty Boolean("TRUE", "FALSE") {
+      fetch = "DECODE(cust_warranty_id,null,'FALSE','TRUE')";
+      label = "Customer Warranty";
+      editable = [false];
+   }
+   attribute OriginalPartNo Text {
+      label = "Original Sales Part No";
+      editable = [false];
+   }
+   attribute ConOrderNo Text {
+      label = "CO No";
+      editable = [false];
+   }
+   attribute ConLineNo Text {
+      label = "CO Line No";
+      editable = [false];
+      format = uppercase;
+   }
+   attribute ConRelNo Text {
+      label = "CO Rel No";
+      editable = [false];
+      format = uppercase;
+   }
+   attribute DateEntered Timestamp {
+      label = "Created";
+   }
+   attribute WantedDeliveryDate Timestamp {
+      label = "Wanted Delivery Date/Time";
+   }
+   attribute PlannedDeliveryDate Timestamp {
+      label = "Planned Delivery Date/Time";
+   }
+   attribute DefaultAddrFlag Enumeration(GenYesNo) {
+      fetch = "default_addr_flag_db";
+      label = "Default Info";
+      required = [true];
+   }
+   attribute SingleOccAddrFlag Boolean("TRUE", "FALSE") {
+      label = "Single Occurrence";
+      editable = [ETag = null];
+      required = [true];
+   }
+   attribute ShipAddrNo Text {
+      label = "Delivery Address";
+      format = uppercase;
+   }
+   attribute EndCustomerId Text {
+      label = "End Customer";
+   }
+   attribute ShipViaCode Text {
+      label = "Ship-Via Code";
+   }
+   attribute ShipViaDesc Text {
+      fetch = "Mpccom_Ship_Via_API.Get_Description(ship_via_code)";
+      label = "Ship Via Desc";
+      maxlength = 100;
+   }
+   attribute DeliveryTermsDesc Text {
+      fetch = "Order_Delivery_Term_API.Get_Description(delivery_terms)";
+      label = "Delivery Terms Desc";
+      maxlength = 100;
+   }
+   attribute FreightMapId Text {
+      editable = [false];
+   }
+   attribute ZoneId Text {
+      editable = [ETag != null];
+   }
+   attribute FreightPriceListNo Text {
+      label = "Freight Price List Number";
+      editable = [false];
+   }
+   attribute ForwardAgentId Text {
+      label = "Forwarder ID";
+      format = uppercase;
+   }
+   attribute PickingLeadtime Number {
+      required = [false];
+   }
+   attribute DeliveryLeadtime Number {
+      required = [false];
+   }
+   attribute ExtTransportCalendarId Text {
+      label = "External Transport Calendar";
+   }
+   attribute ProbabilityToWin Number {
+      label = "Probability (%)";
+   }
+   attribute ReleasePlanning Enumeration(ReleasePlanning) {
+      fetch = "release_planning_db";
+      label = "Release for Planning";
+      required = [true];
+   }
+   attribute LostTo Text {
+      editable = [ETag != null];
+      format = uppercase;
+   }
+   attribute ReasonId Text {
+      editable = [ETag != null];
+      format = uppercase;
+   }
+   attribute ReasonDescription Text {
+      fetch = "Lose_Win_Reason_API.Get_Reason_Description(reason_id)";
+      label = "Reason Description";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute LoseWinNote Text {
+      label = "Won or Lost Note";
+      editable = [ETag != null];
+   }
+   attribute LatestReleaseDate Date {
+      editable = [false];
+   }
+   attribute CtpPlanned Enumeration(GenYesNo) {
+      fetch = "ctp_planned_db";
+      label = "Capability Check";
+      editable = [false];
+      required = [true];
+   }
+   @DynamicComponentDependency ORDSTR
+   attribute CriticalPathId Number {
+      fetch = "Interim_Ctp_Critical_Path_API.Get_Ctp_Run_Id('CUSTOMERQUOTE',quotation_no,line_no,rel_no,line_item_no)";
+   }
+   attribute SelfBilling Enumeration(SelfBillingType) {
+      fetch = "self_billing_db";
+      label = "Self-Billing";
+      editable = [false];
+      required = [true];
+   }
+   attribute CancelReason Text {
+      label = "Cancellation Reason";
+      editable = [ETag != null];
+   }
+   attribute CancellationReasonDescription Text {
+      fetch = "Order_Cancel_Reason_API.Get_Reason_Description(cancel_reason)";
+      label = "Cancellation Reason Description";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute ClassificationStandard Text {
+      editable = [ETag = null];
+   }
+   attribute ClassificationPartNo Text {
+      editable = [ETag = null];
+      format = uppercase;
+   }
+   attribute ClassificationUnitMeas Text {
+      label = "Classification UoM";
+      editable = [ETag = null];
+   }
+   attribute GtinNo Text {
+      fetch = "Sales_Part_API.Get_Gtin_No(contract, catalog_no, input_unit_meas)";
+      label = "GTIN";
+      maxlength = 14;
+      editable = [ETag = null];
+   }
+   attribute FreightFactor Number {
+      fetch = "Part_Catalog_API.Get_Freight_Factor(NVL(part_no,catalog_no))";
+      label = "Freight Factor";
+      editable = [false];
+   }
+   attribute AdjustedWeightNet Number {
+      label = "Adjusted Net Weight";
+      editable = [false];
+   }
+   attribute AdjustedWeightGross Number {
+      label = "Adjusted Gross Weight";
+      editable = [false];
+   }
+   attribute AdjustedVolume Number {
+      label = "Adjusted Volume";
+      editable = [false];
+   }
+   attribute FreightFree Boolean("TRUE", "FALSE") {
+      fetch = "freight_free_db";
+      label = "Freight Free";
+      editable = [false];
+   }
+   attribute CostLevelDb Text {
+      fetch = "Inventory_Part_API.Get_Invent_Part_Cost_Level_Db(contract, part_no)";
+      label = "Inventory Part Cost Level";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute ConLineItemNo Number {
+      label = "Line Item No";
+      default = "0";
+   }
+   attribute CustPartInvertConvFact Number {
+      label = "Invert Conv Fact";
+      editable = [false];
+   }
+   attribute CustomerPartConvFactor Number {
+      editable = [false];
+   }
+   attribute NoteId Number {
+      maxlength = 10;
+   }
+   attribute CatalogType Enumeration(SalesPartType) {
+      label = "Sales Part Type";
+      required = [false];
+   }
+   attribute Contract Text {
+      editable = [ETag = null];
+   }
+   attribute CurrencyRate Number {
+      label = "Curr Rate";
+      maxlength = 11;
+   }
+   attribute CustomerNo Text {
+      editable = [false];
+   }
+   attribute RevisedQtyDue Number {
+      label = "Inventory Qty";
+      required = [false];
+   }
+   attribute Condition Text {
+      fetch = "Order_Quotation_Line_API.Get_Allowed_Operations__( quotation_no, line_no, rel_no, line_item_no)";
+      label = "Condition";
+      maxlength = 6;
+      editable = [false];
+   }
+   attribute ConfiguredLinePriceId Number {
+      label = "(Untitled)";
+      editable = [ETag != null];
+   }
+   attribute Tax Number {
+      fetch = "Source_Tax_Item_API.Get_Total_Tax_Percentage(company, 'ORDER_QUOTATION_LINE',quotation_no,line_no,rel_no,line_item_no, '*')";
+      label = "Tax (%)";
+      editable = [false];
+   }
+   attribute PriceSourceNetPrice Boolean("TRUE", "FALSE") {
+      fetch = "price_source_net_price_db";
+      label = "Net Price";
+   }
+   attribute PartLevel Enumeration(PriceDiscountPartLevel) {
+      fetch = "part_level_db";
+      label = "Part Level";
+      maxlength = 30;
+   }
+//   attribute DemandCodeDb Text {
+//      fetch = "demand_code_db";
+//      label = "Demand Code Db";
+//      maxlength = 100;
+//      editable = [false];
+//   }
+   attribute CustomerLevel Enumeration(PriceDiscountCustLevel) {
+      fetch = "customer_level_db";
+      label = "Level";
+      maxlength = 30;
+   }
+   attribute CustomerLevelId Text {
+      label = "Level";
+   }
+   attribute DemandCode Enumeration(OrderSupplyType) {
+      editable = [false];
+   }
+   attribute DemandOrderRef1 Text {
+      label = "Demand Ref 1";
+      editable = [ETag = null];
+   }
+   attribute DemandOrderRef2 Text {
+      label = "Demand Ref 2";
+      editable = [ETag = null];
+   }
+   attribute TaxLiabilityType Enumeration(TaxLiabilityType) {
+      label = "Tax Liability Type";
+   }
+
+   attribute Rental Boolean("TRUE", "FALSE") {
+      fetch = "rental_db";
+      required = [true];
+   }
+   attribute TaxAmountCurrency Number {
+      fetch = "Order_Quotation_Line_API.Get_Total_Tax_Amount_Curr(quotation_no, line_no, rel_no, line_item_no)";
+      label = "Tax Amount/Currency";
+      format = ifscurrency;
+   }
+   attribute EvaluateDefaultInfo Text {
+      maxlength = 100;
+   }
+   -- these dummy attributes are for the RMB related to Interim Order
+   attribute Source Text {
+      fetch = "'CUSTOMERQUOTE'";
+   }
+   attribute Identity1 Text {
+      fetch = "quotation_no";
+   }
+   attribute Identity2 Text {
+      fetch = "line_no";
+   }
+   attribute Identity3 Text {
+      fetch = "rel_no";
+   }
+   attribute Identity4 Number {
+      fetch = "line_item_no";
+   }
+   attribute PartOwnership Text {
+      fetch = "''";
+   }
+   attribute SuggestedPartExists Number {
+      fetch = "Suggested_Sales_Part_API.Suggested_Sales_Part_Exists(CONTRACT, CATALOG_NO)";
+   }
+   attribute UpdateConfigRev Text {
+      fetch = "'N'";
+   }
+   attribute ShipAddrName Text {
+      label = "Name";
+   }
+   attribute ShipAddress1 Text {
+      label = "Address 1";
+   }
+   attribute ShipAddress2 Text {
+      label = "Address 2";
+   }
+   attribute ShipAddress3 Text {
+      label = "Address 3";
+   }
+   attribute ShipAddress4 Text {
+      label = "Address 4";
+   }
+   attribute ShipAddress5 Text {
+      label = "Address 5";
+   }
+   attribute ShipAddress6 Text {
+      label = "Address 6";
+   }
+   attribute ShipAddrZipCode Text {
+      label = "Zip Code";
+   }
+   attribute ShipAddrCity Text {
+      label = "City";
+   }
+   attribute ShipAddrState Text {
+      label = "State";
+   }
+   attribute ShipAddrCounty Text {
+      label = "County";
+   }
+   attribute ShipAddrCountryCode Text {
+      fetch = "ship_addr_country_code";
+      label = "Country Code";
+   }
+   attribute TaxLiability Text {
+      editable = [false];
+   }
+   attribute PartNo Text {
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute CountryDesc Text {
+      fetch = "Iso_Country_API.Get_Description(ship_addr_country_code)";
+      label = "Country";
+      maxlength = 2000;
+   }
+   attribute FetchTaxFromDefaults Text {
+      fetch = "'TRUE'";
+      insertable = [true];
+      updatable = [true];
+   }
+   attribute FetchTaxCodes Text {
+      fetch = "'TRUE'";
+      editable = [false];
+      insertable = [true];
+      updatable = [true];
+      default = "'TRUE'";
+   }
+   -- this field is used in crud update
+   attribute SetPriceSource Text {
+      fetch = "'FALSE'";
+      insertable = [true];
+      updatable = [true];
+      default = "'FALSE'";
+   }
+   attribute DuplicatedLine Text {
+      fetch = "'FALSE'";
+   }
+   attribute SetTaxFromOrigin Text {
+      fetch = "'FALSE'";
+   }
+   -- gelr:disc_price_rounded, begin
+   attribute OriginalDiscount Number {
+      label = "Discount (%)";
+
+   }
+   attribute OriginalAddDiscount Number {
+      label = "Additional Discount (%)";
+      editable = [false];
+   }
+   attribute OriginalQuotationDiscount Number {
+      label = "Group Discount (%)";
+      editable = [false];
+   }
+   @DynamicComponentDependency ESTMAN
+   attribute EstimateId Number {
+      fetch = "Estimate_Deliverable_API.Get_Estimate_Id(quotation_no,line_no,rel_no,line_item_no)";
+      editable = [false];
+   }
+   @DynamicComponentDependency ESTMAN
+   attribute EstimateRevision Number {
+      fetch = "Estimate_Deliverable_API.Get_Estimate_Revision(quotation_no,line_no,rel_no,line_item_no)";
+      editable = [false];
+   }
+   -- gelr:disc_price_rounded, end
+   reference InputUnitMeasRef(InputUnitMeas) to InputUnitMeas(UnitCode) {
+      label = "Input UoM";
+   }
+
+   reference SalesPartRef(Contract, CatalogNo) to SalesPart(Contract, CatalogNo);
+   reference CompetitorRef(LostTo) to Competitor(CompetitorId);
+   reference CustomerPartNoRef(CustomerNo, Contract, CustomerPartNo) to SalesPartCrossReference(CustomerNo, Contract, CustomerPartNo) {
+      label = "Customer's Part No";
+   }
+   reference CatalogNoRef(Contract, CatalogNo) to SalesPartPriceTaxLov(Contract, CatalogNo) {
+      label = "Sales Part";
+   }
+   @DynamicComponentDependency CFGCHR
+   reference ConfigurationIdRef(ConfigurationId) to ConfigSpecOrderUsage(ConfigurationId) {
+      label = "Configuration ID";
+   }
+   reference ConditionCodeRef(ConditionCode) to ConditionCode(ConditionCode) {
+      label = "Condition Code";
+   }
+   reference PriceListNoRef(PriceListNo) to SalesPriceList(PriceListNo) {
+      label = "Price List";
+   }
+   reference SalesUnitMeasureRef(SalesUnitMeasure) to IsoUnit(UnitCode) {
+      label = "Sales UoM";
+   }
+   @DynamicComponentDependency PURCH
+   reference VendorNoRef(Contract, VendorNo) to PurchasePartSupplierLov(Contract, VendorNo) {
+      label = "Supplier";
+   }
+   reference DeliveryTypeRef(Company, DeliveryType) to DeliveryType(Company, DelivTypeId) {
+      label = "Delivery Type";
+   }
+   reference TaxLiabilityRef(TaxLiability) to TaxLiabilityLov(TaxLiability) {
+      label = "Tax Liability";
+   }
+   reference TaxCodeRef(Company, TaxCode) to StatutoryFee(Company, FeeCode) {
+      label = "Tax Code";
+   }
+   reference TaxCalcStructureIdRef(Company, TaxCalcStructureId) to TaxCalcStructureActive(Company, TaxCalcStructureId) {
+      label = "Tax Calculation Structure";
+   }
+   reference ShipAddrNoRef(CustomerNo, ShipAddrNo) to CustAddressShipLov(CustomerNo, AddrNo) {
+      label = "Delivery Address";
+   }
+   reference ShipAddrNoforPospectRef(CustomerNo, ShipAddrNo) to CustomerInfoAddrDelPubLov(CustomerId, AddressId) {
+      label = "Delivery Address";
+   }
+   reference ShipViaCodeRef(ShipViaCode) to MpccomShipVia(ShipViaCode) {
+      label = "Ship-Via Code";
+   }
+   reference DeliveryTermsRef(DeliveryTerms) to OrderDeliveryTermLov(DeliveryTerms) {
+      label = "Delivery Terms";
+   }
+   reference FreightMapIdRef(FreightMapId) to FreightMap(FreightMapId) {
+      label = "Freight Map ID";
+   }
+   reference ZoneIdRef(FreightMapId, ZoneId) to FreightZone(FreightMapId, ZoneId) {
+      label = "Zone ID";
+   }
+   reference FreightPriceListNoRef(FreightPriceListNo) to FreightPriceListBase(PriceListNo) {
+      label = "Freight Price List Number";
+   }
+   reference ForwardAgentIdRef(ForwardAgentId) to ForwarderInfo(ForwarderId) {
+      label = "Forwarder";
+   }
+   reference ExtTransportCalendarIdRef(ExtTransportCalendarId) to WorkTimeCalendar(CalendarId) {
+      label = "External Transport Calendar";
+   }
+   reference LostToRef(LostTo) to Competitor(CompetitorId) {
+      label = "Lost To";
+   }
+   reference ReasonIdRef(ReasonId) to LoseWinReason(ReasonId) {
+      label = "Reason";
+   }
+   reference CancelReasonRef(CancelReason) to OrderCancelReason(CancelReason) {
+      label = "Cancellation Reason";
+   }
+   reference ClassificationStandardRef(CustomerNo, ClassificationStandard) to CustomerAssortmentStructLov(CustomerNo, ClassificationStandard) {
+      label = "Classification Standard";
+   }
+   reference ClassificationPartNoRef(Contract, ClassificationStandard, ClassificationPartNo) to SalesPartClassificationLov(Contract, ClassificationStandard, ClassificationPartNo) {
+      label = "Classification Part No";
+   }
+   reference ClassificationUnitMeasRef(ClassificationUnitMeas) to IsoUnit(UnitCode) {
+      label = "Classification UoM";
+   }
+   reference GtinNoRef(Contract, GtinNo) to SalesPartGtinNoLov(Contract, GtinNo) {
+      label = "GTIN";
+   }
+   reference EndCustomerIdRef(EndCustomerId) to CustomerInfo(CustomerId) {
+      label = "End Customer";
+   }
+   reference CustomerTaxUsageTypeRef(CustomerTaxUsageType) to CustomerTaxUsageType(CustomerTaxUsageType) {
+      label = "Customer Tax Usage Type";
+
+   }
+}
+
+
+------------------------------- ENUMERATIONS --------------------------------
+
+---------------------------------- QUERIES ----------------------------------
+
+---------------------------------- ACTIONS ----------------------------------
+
+--------------------------------- FUNCTIONS ---------------------------------
+function ValidateInputQty Structure(UnitTypeStructure) {
+   parameter InputUnitMeas Text;
+   parameter InputQty Number;
+}
+
+@DynamicComponentDependency PURCH
+function GetSupplierNo List < Entity(PurchasePartSupplierLov) > {
+   parameter OrderSupplyType Enumeration(OrderSupplyType);
+   parameter PurchasePartNo Text;
+   where = "PART_NO = :PurchasePartNo AND (VENDOR_CATEGORY = Supplier_Category_API.Decode(DECODE(:OrderSupplyType,'PT', 'E','PD', 'E', 'IPT', 'I','IPD', 'I', '')))";
+   basedon PurchasePartSupplierLovSet;
+}
+
+function GetCurrencyRate Number {
+   parameter CustomerNoPay Text;
+   parameter Contract Text;
+   parameter CurrencyCode Text;
+   parameter BaseSaleUnitPrice Number;
+}
+
+function CalcFreeOfChargeTaxBasis Number {
+   parameter FreeOfChargeTaxBasis Number;
+   parameter QuotationNo    Text;
+   parameter LineNo     Text;
+   parameter RelNo      Text;
+   parameter LineItemNo   Number;
+   parameter Cost   Number;
+   parameter RevisedQtyDue  Number;
+   parameter CustomerNoPay  Text;
+   parameter Contract  Text;
+   parameter CurrencyCode Text;
+   parameter PartPrice   Number;
+   parameter FreeOfChargeDb Boolean;
+}
+
+
+-------------------------------- STRUCTURES ---------------------------------
+structure UnitTypeStructure {
+   attribute UnitType Text;
+   attribute TruncatedInputQty Number;
+}
+
+
+--------------------------------- VIRTUALS ----------------------------------
+
+--------------------------------- SUMMARIES ---------------------------------
+
+-------------------------------- SINGLETONS ---------------------------------
+
+--------------------------------- CHECKLIST ---------------------------------
+// This need to recheck after SCUXXW4-16049
+query InputUnitMeasLov {
+   from = "input_unit_meas";
+   lu = InputUnitMeas;
+   keys = UnitCode, InputUnitMeasGroupId;
+   ludependencies = InputUnitMeas;
+   attribute UnitCode Text {
+      lovcolumn = [true];
+   }
+   attribute InputUnitMeasGroupId Text {
+      label = "Input Unit Meas Group ID";
+      format = uppercase;
+      lovcolumn = [false];
+   }
+   attribute Description Text {
+      lovcolumn = [true];
+   }
+}

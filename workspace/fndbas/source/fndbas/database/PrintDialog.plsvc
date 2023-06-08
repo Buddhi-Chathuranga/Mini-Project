@@ -1,0 +1,426 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: PrintDialog
+--  Component:    FNDBAS
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  011220  MABALK  Update Print Job record with Physical Printer Id 
+--  190821  MABALK  RRE Set Default Property is not working on Aurena
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Report_Direct_Print_Request___ (
+   result_key_ IN NUMBER,
+   layout_name_ IN VARCHAR2,
+   language_code_ IN VARCHAR2,
+   number_formatting_ IN VARCHAR2,
+   is_preview_ IN BOOLEAN) RETURN Preview_Result_Rec
+IS
+BEGIN
+	RETURN Report_Format_Request(result_key_, layout_name_, language_code_, number_formatting_, is_preview_);
+END Report_Direct_Print_Request___;
+
+FUNCTION Report_Format_Request_Plap___ (
+   result_key_ IN NUMBER,
+   layout_name_ IN VARCHAR2,
+   language_code_ IN VARCHAR2,
+   number_formatting_ IN VARCHAR2) RETURN Preview_Result_Rec
+IS
+BEGIN
+	RETURN Report_Format_Request(result_key_, layout_name_, language_code_, number_formatting_);
+END Report_Format_Request_Plap___;
+
+FUNCTION Enumerate_Layout___(
+   report_id_ IN VARCHAR2 ) RETURN Objid_Arr
+IS
+   arr_layouts_ Objid_Arr := Objid_Arr();  
+   list_ VARCHAR2(32000);
+   start_pos_ NUMBER;
+   end_pos_ NUMBER;
+   full_layout_ VARCHAR2(2000);
+   objid_ ROWID;
+   layout_name_ VARCHAR2(2000);
+   
+   
+   CURSOR objidget(rpt_id_ IN VARCHAR2,layout_name_ IN VARCHAR2) IS
+   SELECT objid FROM report_layout_definition 
+   WHERE report_id = rpt_id_
+   AND   layout_name LIKE layout_name_||'%';
+   
+BEGIN
+   
+   Report_Layout_Definition_API.Enumerate_Layout(list_, report_id_); --droped the result key for the moment 
+   start_pos_ := 1;
+   IF list_ IS NOT NULL THEN
+      
+      WHILE INSTR(list_,client_sys.record_separator_,start_pos_,1) > 0 LOOP            
+            arr_layouts_.extend;
+            end_pos_ :=  INSTR(list_,client_sys.record_separator_,start_pos_,1);
+            full_layout_  := SUBSTR(list_,start_pos_,end_pos_);
+            layout_name_ := SUBSTR(full_layout_,1,INSTR(full_layout_ ,client_sys.field_separator_,1,1)-1);
+            OPEN objidget(report_id_,layout_name_);
+            LOOP
+               FETCH objidget INTO objid_;
+               EXIT WHEN objidget%NOTFOUND;              
+               arr_layouts_(arr_layouts_.last) := objid_;
+            END LOOP;
+            CLOSE objidget;
+            start_pos_ := end_pos_ +1;
+           
+      END LOOP;
+   END IF;
+   RETURN arr_layouts_;
+END Enumerate_Layout___;
+
+
+FUNCTION Enumerate_Report_Languages___(
+   report_id_ IN VARCHAR2 ) RETURN Objid_Arr
+IS
+   language_code_arr_ Objid_Arr := Objid_Arr();
+   list_ VARCHAR2(4000);
+   lang_code_long_ VARCHAR2(12);
+   lang_code_short_ VARCHAR2(3);
+   start_pos_ NUMBER ;
+   end_pos_ NUMBER;
+   objid_ ROWID;
+   CURSOR langcodeobjids(lng_ IN VARCHAR2) IS  
+      SELECT objid FROM LANGUAGE_CODE
+      WHERE lang_code = lng_;
+   
+BEGIN
+   start_pos_ :=1;
+   language_sys.enumerate_report_languages_(list_, report_id_);
+   dbms_output.Put_Line(''||list_);
+   IF list_ IS NOT NULL THEN
+      WHILE( INSTR(list_,client_sys.record_separator_,start_pos_,1) > 0) LOOP
+         language_code_arr_.extend;
+         end_pos_ := INSTR(list_,client_sys.record_separator_,start_pos_,1);        
+         lang_code_long_ := SUBSTR(list_,start_pos_,(end_pos_-start_pos_));         
+         lang_code_short_:= SUBSTR(lang_code_long_,1,INSTR(lang_code_long_,client_sys.field_separator_,1,1)-1);         
+         OPEN langcodeobjids(lang_code_short_);
+         LOOP
+            FETCH langcodeobjids INTO  objid_;            
+            EXIT WHEN langcodeobjids%NOTFOUND ;
+            Dbms_Output.Put_Line('Objid'|| objid_);
+            language_code_arr_(language_code_arr_.last) := objid_;
+         END LOOP;
+         CLOSE langcodeobjids;
+         start_pos_ := end_pos_ +1;
+      END LOOP;
+   END IF;
+   RETURN language_code_arr_;
+  
+END Enumerate_Report_Languages___;
+
+PROCEDURE Report_Print_Request___ (
+   result_key_        IN NUMBER,
+   layout_name_       IN VARCHAR2,
+   language_code_     IN VARCHAR2,
+   number_formatting_ IN VARCHAR2,
+   logical_printer_   IN VARCHAR2,
+   copies_            IN NUMBER,
+   pages_             IN VARCHAR2,
+   email_             IN VARCHAR2 ) 
+IS instance_attr_ VARCHAR2 (2000);
+   print_job_attr_ VARCHAR2(1000);
+   logical_printer_long_ VARCHAR2(1000);
+   email_settings_ VARCHAR2(1000);
+   logical_printer_id_ VARCHAR2(1000);
+   options_       VARCHAR2(100);
+   lang_code_     VARCHAR2(2);
+   country_code_  VARCHAR2(2);
+   print_job_id_  NUMBER;
+   from_page_     VARCHAR2(5);
+   to_page_       VARCHAR2(5);
+   pgs_  VARCHAR2(200);
+   lang_code_rfc3066 VARCHAR2(200) := number_formatting_;
+   
+   CURSOR cur_printer_id(descrip_ IN VARCHAR2) IS
+      SELECT PRINTER_ID FROM LOGICAL_PRINTER
+      WHERE  DESCRIPTION = descrip_;
+BEGIN
+   Archive_API.Check_Authorized(result_key_);   
+   IF logical_printer_ IS NOT NULL THEN
+         OPEN cur_printer_id(logical_printer_);   
+              FETCH cur_printer_id INTO logical_printer_id_;   
+         CLOSE cur_printer_id;   
+         logical_printer_long_ := logical_printer_||',SERVER,'||logical_printer_id_;
+         Client_SYS.Add_To_Attr('PRINTER_ID',logical_printer_long_,print_job_attr_);
+   END IF;
+   
+   IF email_ IS NOT NULL THEN
+       email_settings_ := '!FNDINF.SEND_PDF'||chr(10)||
+                           '$SEND_PDF=TRUE'||chr(10)||
+                           '$SEND_PDF_TO='||email_||chr(10) ||
+                           '$APPLY_DEFAULTS=FALSE';
+   END IF;
+   Client_SYS.Add_To_Attr('SETTINGS','$FLAG_CHECK=TRUE'||chr(10)||email_settings_,print_job_attr_);
+   
+   Print_Job_API.New(print_job_id_ ,print_job_attr_);
+   
+   IF result_key_ IS NOT NULL THEN
+      Client_SYS.Add_To_Attr('PRINT_JOB_ID',print_job_id_,instance_attr_);
+      Client_SYS.Add_To_Attr('RESULT_KEY',result_key_ ,instance_attr_);
+      Client_SYS.Add_To_Attr('LAYOUT_NAME',layout_name_,instance_attr_);
+      Client_SYS.Add_To_Attr('LANG_CODE',language_code_,instance_attr_);
+
+      IF lang_code_rfc3066 IS NULL THEN
+         lang_code_rfc3066 := Language_Code_Api.Get_Lang_Code_Rfc3066(language_code_);         
+      END IF;
+      lang_code_ := SUBSTR(lang_code_rfc3066,1,2);
+      country_code_ := SUBSTR(lang_code_rfc3066,4,2);
+      Client_SYS.Add_To_Attr('LOCALE_LANGUAGE',lang_code_, instance_attr_);
+      Client_SYS.Add_To_Attr('LOCALE_COUNTRY',country_code_ , instance_attr_);        
+      
+      IF pages_ IS NOT NULL THEN
+         pgs_ := trim(pages_);
+         IF  REGEXP_LIKE(pgs_,'\d+-\d+') THEN
+             pgs_:= REGEXP_SUBSTR(pgs_,'\d+-\d+');            
+             from_page_ :=SUBSTR(pgs_,1,(INSTR(pgs_,'-',1,1)-1));             
+             to_page_ := SUBSTR(pgs_,INSTR(pgs_,'-',1,1)+1,(LENGTH(pgs_)-(INSTR(pgs_,'-',1,1))));
+             options_ :='PAGES('||from_page_||','||nvl(to_page_,from_page_)||');';
+         ELSIF REGEXP_LIKE(pgs_,'\d+') THEN
+             pgs_ := REGEXP_SUBSTR(pgs_,'\d+');  
+             options_ :='PAGES('||pgs_||','||pgs_||');';                       
+         END IF;           
+      END IF;
+         
+      IF copies_ IS NOT NULL THEN
+         options_ := options_||'COPIES('||copies_||')';         
+      ELSE
+         options_ := options_||'COPIES(1)';
+      END IF;
+      
+      IF options_ IS NOT NULL THEN
+         Client_SYS.Add_To_Attr('OPTIONS',options_,instance_attr_);
+      END IF;      
+      Print_Job_Contents_API.New_Instance(instance_attr_);    
+      Print_Job_API.Print(print_job_id_);
+   END IF;
+   instance_attr_ := layout_name_;
+  
+   
+END Report_Print_Request___; 
+
+FUNCTION Navigate_To_Applicaiton_Url___(
+   result_key_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   url_ VARCHAR2(4000);
+   CURSOR navpath(rst_key_ IN VARCHAR2) IS
+      SELECT NAVIGATE_TO
+      FROM report_format
+      WHERE result_key = rst_key_;
+BEGIN
+   OPEN navpath(result_key_);
+      FETCH navpath INTO url_;
+      
+   IF navpath%NOTFOUND THEN
+       url_:= 'page/OperationalReports/ReportsOverview';
+   END IF;
+   IF url_ IS NULL THEN
+      url_:= 'page/OperationalReports/ReportsOverview';
+   END IF;
+  
+   CLOSE navpath;
+   RETURN url_;
+END Navigate_To_Applicaiton_Url___;
+
+
+
+FUNCTION Report_Format_Request(
+   result_key_        IN NUMBER,
+   layout_name_       IN VARCHAR2,
+   language_code_     IN VARCHAR2,
+   number_formatting_ IN VARCHAR2,
+   is_preview_        IN BOOLEAN DEFAULT FALSE) RETURN Preview_Result_Rec
+IS
+   print_job_id_         NUMBER;
+   rendered_output_id_   VARCHAR2(1000);
+   format_request_       VARCHAR2(2000);
+   lang_code_            VARCHAR2(3);
+   country_code_         VARCHAR2(3);
+   return_rec_           Preview_Result_Rec;
+BEGIN
+   Archive_API.Check_Authorized(result_key_);  
+     
+   Client_SYS.Clear_Attr(format_request_);
+   Client_SYS.Add_To_Attr('RESULT_KEY', result_key_, format_request_);   
+   Client_SYS.Add_To_Attr('LAYOUT_NAME', layout_name_, format_request_);
+   Client_SYS.Add_To_Attr('LANG_CODE', language_code_, format_request_);
+   IF number_formatting_ IS NOT NULL THEN         
+         lang_code_ := SUBSTR(number_formatting_,1,2);
+         country_code_ := SUBSTR(number_formatting_,4,2);
+         Client_SYS.Add_To_Attr('LOCALE_LANGUAGE',lang_code_, format_request_);
+         Client_SYS.Add_To_Attr('LOCALE_COUNTRY',country_code_ , format_request_);        
+   END IF;
+   IF is_preview_ THEN
+      Report_SYS.Request_Formatting_Async(print_job_id_, rendered_output_id_, result_key_, format_request_);
+   ELSE
+      Report_SYS.Request_Formatting_Async(print_job_id_, rendered_output_id_, result_key_, format_request_, TRUE);
+   END IF;
+   return_rec_.print_job_id       := print_job_id_;
+   return_rec_.rendered_output_id := rendered_output_id_;
+   RETURN return_rec_;
+END Report_Format_Request;
+
+FUNCTION Print_Dialog_Init___(
+   result_key_ IN NUMBER ) RETURN Print_Dialog_Struct_Rec
+IS
+BEGIN
+   RETURN Get_Print_Dialog_Struct___(result_key_);
+END Print_Dialog_Init___;
+
+
+FUNCTION Get_Print_Dialog_Struct___(
+   result_key_ IN NUMBER) RETURN Print_Dialog_Struct_Rec
+IS
+   print_rec_  Print_Dialog_Struct_Rec;
+   format_rec_ report_format_api.Public_Rec;
+   field_info_ VARCHAR2(1000);
+   notes_ VARCHAR2(1000);
+BEGIN
+   Archive_API.Check_Authorized(result_key_);
+   Report_Format_API.Update_Report_Format__(result_key_, field_info_, notes_);
+   format_rec_ := Report_Format_API.Get(result_key_);
+   print_rec_ := Dlg_Struct_from_Entity___(format_rec_);
+   IF(print_rec_.printer_id IS NULL)THEN
+      print_rec_.printer_id := 'NO_PRINTOUT';
+   END IF;
+   print_rec_.notes := notes_;
+   print_rec_.field_info := field_info_;
+   print_rec_.lang_code_fixed := Is_Set_Property___('LangCode',field_info_) ;
+   print_rec_.printer_id_fixed := Is_Set_Property___('PrinterId',field_info_) ;
+   print_rec_.layout_name_fixed := Is_Set_Property___('LayoutFile',field_info_) ;
+   print_rec_.copies_fixed := Is_Set_Property___('Copies',field_info_) ;
+   print_rec_.email_fixed := Is_Set_Property___('Email',field_info_) ;
+   print_rec_.pages_fixed := Is_Set_Property___('ToPage',field_info_) OR Is_Set_Property___('FromPage',field_info_) ;
+   print_rec_.lang_code_rfc3066_fixed := Is_Set_Property___('LocaleLanguage',field_info_) AND Is_Set_Property___('LocaleCountry',field_info_) ;  
+
+   RETURN print_rec_;   
+END;
+
+
+   -- this complexity can be solve id dialogs can accept entities
+FUNCTION Dlg_Struct_from_Entity___(
+   format_rec_ report_format_api.Public_Rec ) RETURN Print_Dialog_Struct_Rec
+IS
+   print_rec_ Print_Dialog_Struct_Rec;
+   report_id_ VARCHAR2(500);
+   lang_code_ VARCHAR2(5);
+   user_id_ VARCHAR2(100) := FND_SESSION_API.Get_Fnd_User();
+   default_printer_ VARCHAR2(500);
+   plsql_bloc_dp_ VARCHAR2(500) := 'SELECT  printer_connection_api.get_default_printer(:user_id_,:report_id_, NULL, :language_code_)FROM DUAL';
+
+
+BEGIN
+   print_rec_.result_key := format_rec_.result_key;
+   print_rec_.report_id := format_rec_.report_id;
+   print_rec_.report_title := format_rec_.report_title;
+   print_rec_.layout_name := format_rec_.layout_name;
+   print_rec_.lang_code := format_rec_.lang_code;
+
+   print_rec_.lang_code_rfc3066 := format_rec_.lang_code_rfc3066;
+   IF format_rec_.lang_code_rfc3066 IS NULL THEN
+    print_rec_.lang_code_n_f :=format_rec_.lang_code;
+   ELSE
+    print_rec_.lang_code_n_f :=  Language_Code_API.Get_Lang_Code_From_Rfc3066(format_rec_.lang_code_rfc3066);        
+   END IF;
+   print_rec_.description :=  format_rec_.description;            
+   lang_code_ := format_rec_.lang_code;
+   IF format_rec_.printer_id IS NULL THEN
+      report_id_ :=format_rec_.report_id;
+
+      @ApproveDynamicStatement(2019-06-10)
+      EXECUTE IMMEDIATE plsql_bloc_dp_ INTO default_printer_
+            USING IN user_id_ , report_id_, lang_code_;
+      IF default_printer_ IS NOT NULL  THEN
+          print_rec_.printer_id := substr(default_printer_,instr(default_printer_,',',1,2)+1);
+          print_rec_.description := substr(default_printer_,1,instr(default_printer_,',',1,1)-1);
+      ELSE
+          print_rec_.printer_id := format_rec_.printer_id;
+      END IF;
+   ELSE
+      print_rec_.printer_id := format_rec_.printer_id;
+   END IF;
+
+   IF format_rec_.copies IS NULL THEN
+      print_rec_.copies := 1;
+   ELSE
+      print_rec_.copies := format_rec_.copies;
+   END IF;
+   print_rec_.pages := format_rec_.pages;
+   print_rec_.from_page := format_rec_.from_page;
+   print_rec_.to_page := format_rec_.to_page;
+   print_rec_.address := format_rec_.address;
+   RETURN print_rec_;
+END Dlg_Struct_from_Entity___;
+
+
+FUNCTION Print_Dialog_Bulk_Init___ (
+   result_key_list_ IN VARCHAR2 ) RETURN Print_Dialog_Struct_Arr
+IS
+  arr_print_dialog_struct_  Print_Dialog_Struct_Arr := Print_Dialog_Struct_Arr();
+  start_pos_ NUMBER := 1;
+  end_pos_ NUMBER ;
+  print_rec_  Print_Dialog_Struct_Rec;
+  tmp_result_key_str_ VARCHAR2(20);
+  tmp_result_key_number_ NUMBER;
+BEGIN
+   IF (LENGTH(result_key_list_) > 0 ) THEN
+      IF INSTR(result_key_list_ ,',',start_pos_,1)> 0  THEN
+         WHILE INSTR(result_key_list_ ,',' ,start_pos_,1)> 0 LOOP
+            end_pos_ := INSTR(result_key_list_ ,',',start_pos_,1);            
+            tmp_result_key_str_ := SUBSTR(result_key_list_,start_pos_,end_pos_-start_pos_);  
+            tmp_result_key_number_ := to_number(tmp_result_key_str_,'999999999999');
+            start_pos_ := end_pos_+1;
+            
+            print_rec_ := Get_Print_Dialog_Struct___(tmp_result_key_number_);
+
+            arr_print_dialog_struct_.extend;
+            arr_print_dialog_struct_(arr_print_dialog_struct_.LAST) := print_rec_;
+         END LOOP;
+         end_pos_ := LENGTH( result_key_list_);
+         tmp_result_key_str_ := SUBSTR(result_key_list_,start_pos_,end_pos_);            
+         tmp_result_key_number_ := to_number(tmp_result_key_str_);  
+         
+         print_rec_ := Get_Print_Dialog_Struct___(tmp_result_key_number_);
+
+         arr_print_dialog_struct_.extend;
+         arr_print_dialog_struct_(arr_print_dialog_struct_.LAST) :=  print_rec_;
+      ELSE
+         tmp_result_key_number_ := to_number(result_key_list_);
+         
+         print_rec_ := Get_Print_Dialog_Struct___(tmp_result_key_number_);
+         
+         arr_print_dialog_struct_.extend;
+         arr_print_dialog_struct_(arr_print_dialog_struct_.LAST) :=  print_rec_;
+      END IF;
+   END IF;
+   RETURN arr_print_dialog_struct_;
+END Print_Dialog_Bulk_Init___;
+
+FUNCTION Is_Set_Property___(
+   field_name_ IN VARCHAR2,
+   field_info_ IN VARCHAR2 ) RETURN BOOLEAN
+IS
+   set_property_field_  BOOLEAN ;
+BEGIN
+   set_property_field_ := INSTR(field_info_,field_name_,1,1) > 0;
+   RETURN set_property_field_;
+END Is_Set_Property___;
+  
+PROCEDURE Update_Printer_Id___ (
+   result_key_ IN NUMBER,
+   rendered_output_id_ IN VARCHAR2,
+   printer_id_ IN VARCHAR2)
+IS
+   print_job_id_        NUMBER;
+BEGIN
+   Archive_API.Check_Authorized(result_key_);
+   print_job_id_ := Pdf_Archive_API.Get_Print_Job_Id(result_key_, rendered_output_id_);
+	Print_Job_API.Set_Printer_Id(print_job_id_, printer_id_);
+END Update_Printer_Id___;

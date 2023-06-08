@@ -1,0 +1,117 @@
+-------------------------------------------------------------------------------------------- 
+-- Export file for Task SOURCE_ORDER_LINES_API.SOURCE_ORDER_LINES__.
+-- 
+--  Date    Sign    History
+--  ------  ------  -----------------------------------------------------------
+--  100710  SudJlk  Bug 91834, Added log_user to Upgrade_Background_Job to set the correct
+--  100710	         user on converted scheduled tasks.
+--  050323  IFSAPP  Export file for task SOURCE_ORDER_LINES_API.SOURCE_ORDER_LINES__.
+-------------------------------------------------------------------------------------------- 
+
+PROMPT Register Batch Schedule Method "SOURCE_ORDER_LINES_API.SOURCE_ORDER_LINES__"
+DECLARE
+   schedule_method_id_ NUMBER          := NULL;
+   seq_no_             NUMBER          := NULL;
+   info_msg_           VARCHAR2(32000) := NULL;
+BEGIN
+-- Construct Main Message
+   info_msg_    := Message_SYS.Construct('');
+   Message_SYS.Add_Attribute(info_msg_, 'METHOD_NAME', 'SOURCE_ORDER_LINES_API.SOURCE_ORDER_LINES__');
+   Message_SYS.Add_Attribute(info_msg_, 'DESCRIPTION', 'Source Order Lines Automatically');
+   Message_SYS.Add_Attribute(info_msg_, 'MODULE', 'ORDER');
+   Message_SYS.Add_Attribute(info_msg_, 'SINGLE_EXECUTION_DB', 'FALSE');
+   Message_SYS.Add_Attribute(info_msg_, 'ARGUMENT_TYPE_DB', 'PARAMETER');
+   Message_SYS.Add_Attribute(info_msg_, 'VALIDATION_METHOD', 'SOURCE_ORDER_LINES_API.VALIDATE_PARAMS');
+-- Register Batch Schedule Method
+   Batch_SYS.Register_Batch_Schedule_Method(schedule_method_id_, info_msg_);
+-- Adding parameters
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'CONTRACT_', to_char(NULL), 'TRUE', 'User_Allowed_Site_API.Get_Default_Site');
+END;
+/
+
+
+------------------------------------------------------------------------------------------
+-- Upgraded from background jobs
+------------------------------------------------------------------------------------------
+DECLARE   
+   PROCEDURE Upgrade_Background_Job (
+      method_name_ IN VARCHAR2,
+      schedule_name_  IN VARCHAR2)
+   IS
+      parameters_          VARCHAR2(4000);
+      execution_plan_      VARCHAR2(4000);
+      param_start_         NUMBER;
+      param_stop_          NUMBER;
+      next_execution_date_ DATE;
+      start_date_          DATE := sysdate;
+
+      seq_no_              NUMBER;
+      schedule_id_         NUMBER;
+      ptr_                 NUMBER;      
+      count_               INTEGER;
+      values_              Message_SYS.line_table;
+      names_               Message_SYS.name_table; 
+      
+      CURSOR get_jobs IS
+         SELECT what, interval, log_user 
+         FROM   user_jobs
+         WHERE  UPPER(what) like '%'||method_name_||'%';
+   BEGIN
+      FOR rec IN get_jobs LOOP
+         execution_plan_ := rec.interval;
+         param_start_ := instr(execution_plan_, '(');
+         param_stop_  := instr(execution_plan_, ')');
+         execution_plan_ := substr(execution_plan_, param_start_ + 2, param_stop_ - param_start_- 3);
+           
+         Batch_SYS.New_Batch_Schedule(schedule_id_, next_execution_date_, start_date_, NULL, schedule_name_, 'SOURCE_ORDER_LINES_API.SOURCE_ORDER_LINES__', 'TRUE', execution_plan_);
+         -- Update batch schedule with correct user name 
+         UPDATE batch_schedule_tab SET username = rec.log_user WHERE schedule_id = schedule_id_; 
+
+         parameters_ := rec.what;
+         param_start_ := instr(parameters_, '(''');
+         param_stop_  := instr(parameters_, ''')');
+         parameters_  := substr(parameters_, param_start_ + 3, param_stop_ - param_start_- 3);
+         
+         ptr_ := NULL;
+         IF Message_SYS.Is_Message(parameters_ ) THEN
+         -- Get attributes from message.
+            Message_SYS.Get_Attributes(parameters_, count_, names_, values_);            
+               IF (names_(1) = 'SCHEDULED_CONTRACT') THEN                  
+                  Batch_SYS.New_Batch_Schedule_Param(seq_no_, schedule_id_, 'CONTRACT_', values_(1));
+               END IF;               
+         END IF;        
+      END LOOP;
+   END Upgrade_Background_Job;
+   
+   PROCEDURE Remove_Server_Process (
+      method_name_ IN VARCHAR2 )
+   IS
+      job_   NUMBER;
+      CURSOR get_job IS
+         SELECT job
+         FROM   user_jobs
+         WHERE  UPPER(what) like '%'||method_name_||'%';
+   BEGIN
+      FOR rec_ IN get_job LOOP
+         dbms_job.remove(rec_.job);
+      END LOOP;
+      
+   EXCEPTION
+      WHEN OTHERS THEN
+         NULL;
+   END Remove_Server_Process;
+
+BEGIN
+   ------------------------------------------------------------------------------------------
+   -- Upgrading Background Jobs to Scheduled Tasks
+   ------------------------------------------------------------------------------------------
+   
+   Upgrade_Background_Job('SOURCE_ORDER_LINES_API.SCHEDULE_SOURCING__', 'Source Order Lines Automatically');
+   Remove_Server_Process('SOURCE_ORDER_LINES_API.SCHEDULE_SOURCING__');
+END;
+/
+
+COMMIT
+/
+
+

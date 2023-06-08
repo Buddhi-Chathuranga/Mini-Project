@@ -1,0 +1,1001 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     ReassignShipmentLineAssistant
+--  Component:    SHPMNT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  220509  RoJalk  SCDEV-9142, Modified CRUD_Create___ to fetch a value for newrec_.source_demand_code.
+--  191125  Aabalk  SCSPRING20-1279, Added sender type, id and receiver type to Get_Destination_Shipment_Id_Lov_User_Where___
+--                  to include sender and receiver information in destination shipment lov filterations.
+--  191118  Aabalk  SCSPRING20-279, Added sender information in CRUD_Create___ get_reassign_ship_connected_qty cursor.
+--  190822  ErRalk  SCUXXW4-23992, Added Refresh_Available_Source_Line___. 
+--  190705  fandse  SCUXXW4-20604, Keep select qty assigned for reserved components when changing not reserved qty in header. When multiple components reservation, include when possible.
+--  190423  fandse  SCUXXW4-4759: To make it clearer for user, some quantity fields will be NULL when the same component is repeated, 
+--                                added the total required quantity for component, message that reassign was successful.
+--                                When more than one reservation for component, reservations must be included manually. 
+--                                When Include All of the total quantity is selected then all components are included.
+--  190415  fandse  SCUXXW4-4759: Implementation of reassign of Package Part
+--  190313  fandse  SCUXXW4-4759: Implementation of frmReassignShipConnectedQty and tbwSingleReassignShipConQty
+-----------------------------------------------------------------------------
+
+layer Core;
+
+@Override
+PROCEDURE CRUD_Create___ (
+   rec_ IN Reassign_Shipment_Line_Virtual_Rec)
+IS
+   newrec_              Reassign_Shipment_Line_Virtual_Rec;
+   line_rec_            Reassign_Shipment_Line_Reservations_Virtual_Rec;
+   handling_unit_rec_   Handling_Unit_API.Public_Rec;
+   
+   $IF Component_Proj_SYS.INSTALLED $THEN
+      activity_rec_     Activity_API.Public_Rec;
+   $END
+
+   $IF Component_Order_SYS.INSTALLED $THEN   
+      source_ref4_old_   VARCHAR2(50);
+   $END  
+   
+   CURSOR get_reassign_ship_connected_qty IS
+      SELECT contract, shipment_type, sender_type, sender_id, sender_name, receiver_type, receiver_id, receiver_name, source_ref_type, source_ref1, source_ref2, source_ref3, source_ref4, 
+             source_part_no, source_part_description, planned_delivery_date, planned_ship_date, line_planned_del_date, line_planned_ship_date,
+             line_planned_due_date, connected_source_qty, source_unit_meas, inventory_qty, 
+             NVL(Inventory_Part_API.Get_Unit_Meas(contract, inventory_part_no), source_unit_meas), max_to_reassign, not_reserved_qty,
+             decode(source_ref_type_db||source_ref4, 'CUSTOMER_ORDER-1',qty_assigned,
+             Reserve_Shipment_API.Get_Reserved_And_Picked_Qty(source_ref1, source_ref2, source_ref3, source_ref4, source_ref_type_db, shipment_id)),
+             shipment_state, shipment_rowstate, source_ref_type_db, inventory_part_no, source_demand_code_db
+      FROM   REASSIGN_SHIP_CONNECTED_QTY
+      WHERE  shipment_id = newrec_.shipment_id
+      AND    shipment_line_no = newrec_.shipment_line_no;
+   
+   CURSOR get_reservations IS
+      SELECT qty_assigned_to_reassign, qty_picked, catch_qty, Inventory_Part_API.Get_Enabled_Catch_Unit_Meas(contract, part_no) catch_uom, pick_list_no, 
+             Shipment_Source_Utility_API.Get_Condition_Code__(source_ref1, source_ref2, source_ref3, source_ref4, source_ref_type_db) condition_code,
+             configuration_id, location_no, lot_batch_no, serial_no, eng_chg_level, waiv_dev_rej_no, handling_unit_id, activity_seq,
+             warehouse, bay_no, row_no, tier_no, bin_no, availability_control_id, 
+             Part_Availability_Control_API.Get_Description(availability_control_id) availability_control_description, expiration_date, receipt_date,
+             part_ownership_db, 
+             DECODE(part_ownership_db, 'CUSTOMER OWNED', owning_customer_no, 'CONSIGNMENT', owning_vendor_no, 'SUPPLIER LOANED', owning_vendor_no) owner
+      FROM   SHIP_SOURCE_RESERVATION_STOCK
+      WHERE  shipment_id          = newrec_.shipment_id
+      AND    source_ref1          = newrec_.source_ref1
+      AND    source_ref_type_db   = newrec_.source_ref_type_db
+      AND    NVL(source_ref2,'*') = NVL(newrec_.source_ref2 ,'*') 
+      AND    NVL(source_ref3,'*') = NVL(newrec_.source_ref3 ,'*') 
+      AND    NVL(source_ref4,'*') = NVL(newrec_.source_ref4 ,'*') 
+      AND    qty_assigned_to_reassign > 0;
+
+   CURSOR get_reservation_info IS
+      SELECT count(*), sum(qty_assigned_to_reassign - qty_picked), sum(handling_unit_id), 
+             sum(nvl(catch_qty,0)), sum(activity_seq)
+      FROM   SHIP_SOURCE_RESERVATION_STOCK
+      WHERE  shipment_id            = newrec_.shipment_id
+      AND    source_ref1            = newrec_.source_ref1
+      AND    source_ref_type_db     = newrec_.source_ref_type_db
+      AND    NVL(source_ref2,'*')   = NVL(newrec_.source_ref2 ,'*')
+      AND    NVL(source_ref3,'*')   = NVL(newrec_.source_ref3 ,'*') 
+      AND    ((NVL(source_ref4,'*') = NVL(newrec_.source_ref4 ,'*')) OR 
+             (source_ref_type_db    = 'CUSTOMER_ORDER' AND Utility_SYS.String_To_Number(source_ref4) > 0))
+      AND    qty_assigned_to_reassign > 0;
+
+$IF Component_Order_SYS.INSTALLED $THEN
+   component_rec_             Reassign_Shipment_Line_Components_Virtual_Rec;
+
+   CURSOR get_components IS
+      SELECT shipment_line_no, source_ref4, source_part_no, source_part_description, connected_source_qty, qty_per_assembly, source_unit_meas,
+             not_reserved_qty, location_no, pick_list_no, qty_assigned, qty_picked, Inventory_Part_API.Get_Unit_Meas(contract, inventory_part_no) inventory_uom,
+             catch_qty, inventory_part_api.get_enabled_catch_unit_meas(contract, inventory_part_no) catch_uom, configuration_id,
+             condition_code, handling_unit_id, warehouse, bay_no, row_no, tier_no, bin_no, lot_batch_no, serial_no, eng_chg_level, waiv_dev_rej_no, 
+             inventory_part_in_stock_api.get_availability_control_id(contract,inventory_part_no,configuration_id,location_no,lot_batch_no,serial_no,eng_chg_level,waiv_dev_rej_no,activity_seq,handling_unit_id) availability_control_id,
+             part_availability_control_api.get_description(inventory_part_in_stock_api.get_availability_control_id(contract,inventory_part_no,configuration_id,location_no,lot_batch_no,serial_no,eng_chg_level,waiv_dev_rej_no,activity_seq,handling_unit_id)) availability_control_description,
+             inventory_part_in_stock_api.get_expiration_date(contract, inventory_part_no, configuration_id, location_no, lot_batch_no, serial_no, eng_chg_level, waiv_dev_rej_no, activity_seq, handling_unit_id) expiration_date,
+             inventory_part_in_stock_api.get_receipt_date(contract, inventory_part_no, configuration_id, location_no, lot_batch_no, serial_no, eng_chg_level, waiv_dev_rej_no, activity_seq, handling_unit_id) receipt_date, 
+             part_ownership_db, owner, activity_seq, customer_order_reservation, inventory_part_no, conv_factor, inverted_conv_factor,
+             LPAD(source_ref4, 50) source_ref4_order_by
+      FROM   reassign_connected_comp_qty
+      WHERE  shipment_id = newrec_.shipment_id
+      AND    source_ref1 = newrec_.source_ref1
+      AND    source_ref2 = newrec_.source_ref2
+      AND    source_ref3 = newrec_.source_ref3
+      AND    (not_reserved_qty > 0 OR reserved_to_reassign > 0)
+      ORDER BY source_ref4_order_by, customer_order_reservation;
+$END
+
+BEGIN
+   newrec_ := rec_;
+   OPEN get_reassign_ship_connected_qty;
+   FETCH get_reassign_ship_connected_qty INTO newrec_.contract, newrec_.shipment_type, newrec_.sender_type, newrec_.sender_id, newrec_.sender_name, newrec_.receiver_type, 
+                                              newrec_.receiver_id, newrec_.receiver_name, newrec_.source_ref_type, newrec_.source_ref1, newrec_.source_ref2, newrec_.source_ref3, 
+                                              newrec_.source_ref4, newrec_.source_part_no, newrec_.source_part_description, newrec_.planned_delivery_date, newrec_.planned_ship_date,
+                                              newrec_.line_planned_del_date, newrec_.line_planned_ship_date, newrec_.line_planned_due_date, newrec_.connected_source_qty,
+                                              newrec_.source_unit_meas, newrec_.inventory_qty, newrec_.revised_qty_due_uom, newrec_.total_qty_available_to_reassign, 
+                                              newrec_.not_reserved_qty, newrec_.reserved_qty_available_to_reassign, newrec_.shipment_state, newrec_.shipment_rowstate,
+                                              newrec_.source_ref_type_db, newrec_.inventory_part_no, newrec_.source_demand_code;
+   CLOSE get_reassign_ship_connected_qty;
+   
+   newrec_.release_reservations         := FALSE;
+   newrec_.not_reserved_qty_to_reassign := 0;
+   
+   IF (newrec_.not_reserved_qty = 0) THEN
+      newrec_.include_all_not_reserved_qty := TRUE;
+   ELSE
+      newrec_.include_all_not_reserved_qty := FALSE;
+   END IF;
+   
+   newrec_.reserved_qty_to_reassign := 0;
+   
+   IF (newrec_.reserved_qty_available_to_reassign = 0) THEN
+      newrec_.include_all_reserved_qty := TRUE;
+   ELSE
+      newrec_.include_all_reserved_qty := FALSE;
+   END IF;
+   
+   newrec_.total_qty_to_reassign := 0;
+   
+   IF (newrec_.total_qty_available_to_reassign = 0) THEN
+      newrec_.include_all_qty := TRUE;
+   ELSE
+      newrec_.include_all_qty := FALSE;
+   END IF;
+
+   OPEN get_reservation_info;   
+   FETCH get_reservation_info INTO newrec_.number_of_reservations, newrec_.reserved_qty_not_picked, newrec_.sum_handling_unit_id,
+                                   newrec_.sum_catch_qty, newrec_.sum_activity_seq;
+   CLOSE get_reservation_info;
+   
+   super(newrec_);
+   
+   IF (NOT (newrec_.source_ref_type_db = 'CUSTOMER_ORDER' AND newrec_.source_ref4 = '-1')) THEN
+      FOR reservations_rec_ IN get_reservations LOOP
+         
+         line_rec_.objkey := sys_guid();     
+         line_rec_.parent_objkey := newrec_.objkey;
+         
+         line_rec_.include_all := FALSE;
+         line_rec_.qty_available_to_reassign := reservations_rec_.qty_assigned_to_reassign;
+         line_rec_.qty_picked                := reservations_rec_.qty_picked;
+         line_rec_.catch_qty                 := reservations_rec_.catch_qty;
+         line_rec_.catch_uom                 := reservations_rec_.catch_uom;
+         line_rec_.pick_list_no              := reservations_rec_.pick_list_no;
+         line_rec_.condition_code            := reservations_rec_.condition_code;
+         line_rec_.configuration_id          := reservations_rec_.configuration_id;
+         line_rec_.location_no               := reservations_rec_.location_no;
+         line_rec_.handling_unit_id          := reservations_rec_.handling_unit_id;
+         
+         IF (line_rec_.handling_unit_id > 0) THEN
+            handling_unit_rec_                                  := Handling_Unit_API.Get(line_rec_.handling_unit_id);
+            line_rec_.handling_unit_type_id                     := handling_unit_rec_.handling_unit_type_id;
+            line_rec_.handling_unit_type_description            := Handling_Unit_Type_API.Get_Description(Handling_Unit_API.Get_Handling_Unit_Type_Id(line_rec_.handling_unit_id));
+            line_rec_.sscc                                      := handling_unit_rec_.sscc; 
+            line_rec_.alt_handling_unit_label_id                := handling_unit_rec_.alt_handling_unit_label_id; 
+            line_rec_.top_parent_handling_unit_id               := Handling_Unit_API.Get_Top_Parent_Handl_Unit_Id(line_rec_.handling_unit_id);
+            line_rec_.top_parent_handling_unit_type_id          := Handling_Unit_API.Get_Top_Parent_Hu_Type_Id(line_rec_.handling_unit_id);
+            line_rec_.top_parent_handling_unit_type_description := Handling_Unit_Type_API.Get_Description(Handling_Unit_API.Get_Top_Parent_Hu_Type_Id(line_rec_.handling_unit_id));
+            line_rec_.top_parent_sscc                           := Handling_Unit_API.Get_Top_Parent_Sscc(line_rec_.handling_unit_id);
+            line_rec_.top_parent_alt_handling_unit_label_id     := Handling_Unit_API.Get_Top_Parent_Alt_Hu_Label_Id(line_rec_.handling_unit_id);
+         ELSE
+            line_rec_.handling_unit_type_id                     := NULL;
+            line_rec_.handling_unit_type_description            := NULL;
+            line_rec_.sscc                                      := NULL;
+            line_rec_.alt_handling_unit_label_id                := NULL;
+            line_rec_.top_parent_handling_unit_id               := NULL;
+            line_rec_.top_parent_handling_unit_type_id          := NULL;
+            line_rec_.top_parent_handling_unit_type_description := NULL;
+            line_rec_.top_parent_sscc                           := NULL;
+            line_rec_.top_parent_alt_handling_unit_label_id     := NULL;
+         END IF;
+         
+         line_rec_.warehouse                        := reservations_rec_.warehouse;
+         line_rec_.bay_no                           := reservations_rec_.bay_no;
+         line_rec_.row_no                           := reservations_rec_.row_no;
+         line_rec_.tier_no                          := reservations_rec_.tier_no;
+         line_rec_.bin_no                           := reservations_rec_.bin_no;
+         line_rec_.availability_control_id          := reservations_rec_.availability_control_id;
+         line_rec_.availability_control_description := reservations_rec_.availability_control_description;
+         line_rec_.expiration_date                  := reservations_rec_.expiration_date;
+         line_rec_.receipt_date                     := reservations_rec_.receipt_date;
+         line_rec_.part_ownership                   := reservations_rec_.part_ownership_db;
+         line_rec_.owner                            := reservations_rec_.owner;
+         line_rec_.lot_batch_no                     := reservations_rec_.lot_batch_no;
+         line_rec_.serial_no                        := reservations_rec_.serial_no;
+         line_rec_.eng_chg_level                    := reservations_rec_.eng_chg_level;
+         line_rec_.waiv_dev_rej_no                  := reservations_rec_.waiv_dev_rej_no;
+         line_rec_.activity_seq                     := reservations_rec_.activity_seq;
+         
+         $IF Component_Proj_SYS.INSTALLED $THEN      
+            IF (line_rec_.activity_seq > 0) THEN
+               activity_rec_                     := Activity_API.Get(line_rec_.activity_seq);
+               line_rec_.project_id              := activity_rec_.project_id;
+               line_rec_.project_name            := Activity_API.Get_Project_Name(line_rec_.activity_seq);
+               line_rec_.sub_project_id          := activity_rec_.sub_project_id;
+               line_rec_.sub_project_description := Activity_API.Get_Sub_Project_Description(line_rec_.activity_seq);
+               line_rec_.activity_id             := activity_rec_.Activity_No;
+               line_rec_.activity_description    := activity_rec_.Description;
+            END IF;
+         $END
+         
+         CRUD_Create___(line_rec_);
+         
+      END LOOP;
+   END IF;
+   
+   $IF Component_Order_SYS.INSTALLED $THEN
+   IF (newrec_.source_ref_type_db = 'CUSTOMER_ORDER' AND newrec_.source_ref4 = '-1') THEN
+      FOR components_rec_ IN get_components LOOP
+         
+         component_rec_.objkey        := sys_guid();  
+         component_rec_.parent_objkey := newrec_.objkey;
+         
+         component_rec_.shipment_line_no          := components_rec_.shipment_line_no;
+         component_rec_.source_ref4               := components_rec_.source_ref4;
+         component_rec_.source_ref4_order_by      := components_rec_.source_ref4_order_by;
+         component_rec_.source_part_no            := components_rec_.source_part_no;
+         component_rec_.source_part_description   := components_rec_.source_part_description;
+         component_rec_.qty_per_assembly_internal := components_rec_.qty_per_assembly;    
+         
+         IF (source_ref4_old_ IS NULL OR (components_rec_.source_ref4 != source_ref4_old_)) THEN
+            component_rec_.connected_source_qty := components_rec_.connected_source_qty;
+            component_rec_.qty_per_assembly     := components_rec_.qty_per_assembly;
+         ELSE
+            component_rec_.connected_source_qty := NULL;
+            component_rec_.qty_per_assembly     := NULL;
+         END IF;
+         
+         source_ref4_old_                    := components_rec_.source_ref4;
+         component_rec_.conv_factor          := components_rec_.conv_factor;
+         component_rec_.inverted_conv_factor := components_rec_.inverted_conv_factor;
+         component_rec_.source_unit_meas     := components_rec_.source_unit_meas;
+         component_rec_.not_reserved_qty     := components_rec_.not_reserved_qty;
+         component_rec_.location_no          := components_rec_.location_no;
+         component_rec_.pick_list_no         := components_rec_.pick_list_no;
+         component_rec_.qty_assigned         := components_rec_.qty_assigned;
+         component_rec_.qty_picked           := components_rec_.qty_picked;
+         component_rec_.inventory_uom        := components_rec_.inventory_uom;
+         component_rec_.catch_qty            := components_rec_.catch_qty;
+         component_rec_.catch_uom            := components_rec_.catch_uom;
+         component_rec_.configuration_id     := components_rec_.configuration_id;
+         component_rec_.condition_code       := components_rec_.condition_code;
+         component_rec_.handling_unit_id     := components_rec_.handling_unit_id;
+         
+         IF (component_rec_.handling_unit_id > 0) THEN
+            component_rec_.handling_unit_type_id                     := Handling_Unit_API.Get_Handling_Unit_Type_Id(component_rec_.handling_unit_id);
+            component_rec_.handling_unit_type_description            := Handling_Unit_Type_API.Get_Description(Handling_Unit_API.Get_Handling_Unit_Type_Id(component_rec_.handling_unit_id));
+            component_rec_.sscc                                      := Handling_Unit_API.Get_Sscc(component_rec_.handling_unit_id); 
+            component_rec_.alt_handling_unit_label_id                := Handling_Unit_API.Get_Alt_Handling_Unit_Label_Id(component_rec_.handling_unit_id); 
+            component_rec_.top_parent_handling_unit_id               := Handling_Unit_API.Get_Top_Parent_Handl_Unit_Id(component_rec_.handling_unit_id);
+            component_rec_.top_parent_handling_unit_type_id          := Handling_Unit_API.Get_Top_Parent_Hu_Type_Id(component_rec_.handling_unit_id);
+            component_rec_.top_parent_handling_unit_type_description := Handling_Unit_Type_API.Get_Description(Handling_Unit_API.Get_Top_Parent_Hu_Type_Id(component_rec_.handling_unit_id));
+            component_rec_.top_parent_sscc                           := Handling_Unit_API.Get_Top_Parent_Sscc(component_rec_.handling_unit_id);
+            component_rec_.top_parent_alt_handling_unit_label_id     := Handling_Unit_API.Get_Top_Parent_Alt_Hu_Label_Id(component_rec_.handling_unit_id);
+         ELSE
+            component_rec_.handling_unit_type_id                     := NULL;
+            component_rec_.handling_unit_type_description            := NULL;
+            component_rec_.sscc                                      := NULL;
+            component_rec_.alt_handling_unit_label_id                := NULL;
+            component_rec_.top_parent_handling_unit_id               := NULL;
+            component_rec_.top_parent_handling_unit_type_id          := NULL;
+            component_rec_.top_parent_handling_unit_type_description := NULL;
+            component_rec_.top_parent_sscc                           := NULL;
+            component_rec_.top_parent_alt_handling_unit_label_id     := NULL;
+         END IF;
+         
+         component_rec_.warehouse                        := components_rec_.warehouse;
+         component_rec_.bay_no                           := components_rec_.bay_no;
+         component_rec_.row_no                           := components_rec_.row_no;
+         component_rec_.tier_no                          := components_rec_.tier_no;
+         component_rec_.bin_no                           := components_rec_.bin_no;
+         component_rec_.lot_batch_no                     := components_rec_.lot_batch_no;
+         component_rec_.serial_no                        := components_rec_.serial_no;
+         component_rec_.eng_chg_level                    := components_rec_.eng_chg_level;
+         component_rec_.waiv_dev_rej_no                  := components_rec_.waiv_dev_rej_no;
+         component_rec_.availability_control_id          := components_rec_.availability_control_id;
+         component_rec_.availability_control_description := components_rec_.availability_control_description;
+         component_rec_.expiration_date                  := components_rec_.expiration_date;         
+         component_rec_.receipt_date                     := components_rec_.receipt_date;
+         component_rec_.part_ownership                   := components_rec_.part_ownership_db;
+         component_rec_.owner                            := components_rec_.owner;
+         component_rec_.activity_seq                     := components_rec_.activity_seq;
+         
+         $IF Component_Proj_SYS.INSTALLED $THEN      
+            IF (component_rec_.activity_seq > 0) THEN
+               component_rec_.project_id              := Activity_API.Get_Project_Id(component_rec_.activity_seq);
+               component_rec_.project_name            := Activity_API.Get_Project_Name(component_rec_.activity_seq);
+               component_rec_.sub_project_id          := Activity_API.Get_Sub_Project_Id(component_rec_.activity_seq);
+               component_rec_.sub_project_description := Activity_API.Get_Sub_Project_Description(component_rec_.activity_seq);
+               component_rec_.activity_id             := Activity_API.Get_Activity_No(component_rec_.activity_seq);
+               component_rec_.activity_description    := Activity_API.Get_Description(component_rec_.activity_seq);
+            END IF;
+         $END
+         
+         IF (components_rec_.customer_order_reservation = 'TRUE') THEN
+            component_rec_.customer_order_reservation := TRUE;
+         ELSE
+            component_rec_.customer_order_reservation := FALSE;
+         END IF;
+         
+         component_rec_.inventory_part_no := components_rec_.inventory_part_no;
+         component_rec_.include_all       := FALSE;
+         
+         CRUD_Create___(component_rec_);
+         
+      END LOOP;
+   END IF;
+   $END
+END CRUD_Create___;
+
+@Override
+PROCEDURE CRUD_Update___(
+   old_ IN Reassign_Shipment_Line_Virtual_Rec,
+   new_ IN Reassign_Shipment_Line_Virtual_Rec )
+IS
+   copy_new_ Reassign_Shipment_Line_Virtual_Rec;
+BEGIN
+   copy_new_ := new_;
+   
+   IF (old_.include_all_qty != new_.include_all_qty) THEN
+      NULL;
+      IF (new_.include_all_qty = TRUE) THEN
+         copy_new_.not_reserved_qty_to_reassign := new_.not_reserved_qty;
+         copy_new_.reserved_qty_to_reassign     := new_.reserved_qty_available_to_reassign;
+         copy_new_.include_all_not_reserved_qty := TRUE;
+         copy_new_.include_all_reserved_qty     := TRUE;
+      ELSE
+         copy_new_.not_reserved_qty_to_reassign := 0;
+         copy_new_.reserved_qty_to_reassign     := 0;
+         IF (copy_new_.not_reserved_qty_to_reassign != new_.not_reserved_qty) THEN
+            copy_new_.include_all_not_reserved_qty := FALSE;
+         END IF;
+         IF (copy_new_.reserved_qty_to_reassign != new_.reserved_qty_available_to_reassign) THEN
+            copy_new_.include_all_reserved_qty := FALSE;
+         END IF;
+      END IF;
+   END IF;
+
+   IF (old_.include_all_not_reserved_qty != new_.include_all_not_reserved_qty) THEN
+      IF (new_.include_all_not_reserved_qty = TRUE) THEN
+         copy_new_.not_reserved_qty_to_reassign := new_.not_reserved_qty;
+         IF (new_.reserved_qty_to_reassign = new_.reserved_qty_available_to_reassign) THEN
+            copy_new_.include_all_qty := TRUE;
+         END IF;
+      ELSIF (new_.not_reserved_qty_to_reassign = new_.not_reserved_qty) THEN
+         copy_new_.not_reserved_qty_to_reassign := 0;
+         copy_new_.include_all_qty              := FALSE;
+      END IF;
+   END IF;
+   
+   IF (old_.include_all_reserved_qty != new_.include_all_reserved_qty) THEN
+      IF (new_.include_all_reserved_qty = TRUE) THEN
+         copy_new_.reserved_qty_to_reassign := new_.reserved_qty_available_to_reassign;
+         IF (new_.not_reserved_qty_to_reassign = new_.not_reserved_qty) THEN
+            copy_new_.include_all_qty := TRUE;
+         END IF;
+      ELSIF (new_.reserved_qty_to_reassign = new_.reserved_qty_available_to_reassign) THEN
+         copy_new_.reserved_qty_to_reassign := 0;
+         copy_new_.include_all_qty          := FALSE;
+      END IF;
+   END IF;
+
+   IF (old_.not_reserved_qty_to_reassign != new_.not_reserved_qty_to_reassign) THEN
+      IF (new_.not_reserved_qty_to_reassign = new_.not_reserved_qty) THEN
+         copy_new_.include_all_not_reserved_qty := TRUE;
+         IF (new_.reserved_qty_to_reassign = new_.reserved_qty_available_to_reassign) THEN
+            copy_new_.include_all_qty := TRUE;
+         END IF;
+      ELSIF ((new_.not_reserved_qty_to_reassign < new_.not_reserved_qty)) THEN
+         copy_new_.include_all_not_reserved_qty := FALSE;
+         copy_new_.include_all_qty              := FALSE;
+      ELSIF (new_.not_reserved_qty_to_reassign > new_.not_reserved_qty) THEN
+         Error_SYS.Record_General(lu_name_, 'NOTRESERVEDQTYEXCEEDED: The quantity must not exceed the not reserved quantity available to reassign.');         
+      END IF;
+   END IF;
+
+   IF (old_.reserved_qty_to_reassign != new_.reserved_qty_to_reassign) THEN
+      IF (new_.reserved_qty_to_reassign = new_.reserved_qty_available_to_reassign) THEN
+         copy_new_.include_all_reserved_qty := TRUE;
+         IF (new_.not_reserved_qty_to_reassign = new_.not_reserved_qty) THEN
+            copy_new_.include_all_qty := TRUE;
+         END IF;
+      ELSIF ((new_.reserved_qty_to_reassign < new_.reserved_qty_available_to_reassign)) THEN
+         copy_new_.include_all_reserved_qty := FALSE;
+         copy_new_.include_all_qty          := FALSE;
+      ELSIF (new_.reserved_qty_to_reassign > new_.reserved_qty_available_to_reassign) THEN
+         Error_SYS.Record_General(lu_name_, 'RESERVEDQTYEXCEEDED: The quantity must not exceed the reserved quantity available to reassign.');         
+      END IF;
+   END IF;
+
+   copy_new_.total_qty_to_reassign := copy_new_.reserved_qty_to_reassign + copy_new_.not_reserved_qty_to_reassign;
+
+   IF (NOT (old_.source_ref_type_db = 'CUSTOMER_ORDER' AND old_.source_ref4 = '-1') AND 
+       old_.reserved_qty_to_reassign != copy_new_.reserved_qty_to_reassign) THEN
+      -- Update reservations
+      IF (copy_new_.reserved_qty_to_reassign = copy_new_.reserved_qty_available_to_reassign) THEN
+         -- Include all reservations
+         Update_Reservations_Virtual___(copy_new_.objkey, 'ALL');
+      ELSIF (copy_new_.number_of_reservations = 1) THEN
+         -- Keep the single reservation updated
+         Update_Reservations_Virtual___(copy_new_.objkey, 'ONE',copy_new_.reserved_qty_to_reassign);
+      ELSIF (copy_new_.reserved_qty_to_reassign = 0 OR copy_new_.reserved_qty_to_reassign < copy_new_.reserved_qty_available_to_reassign) THEN
+         -- Set all reservations to NULL
+         Update_Reservations_Virtual___(copy_new_.objkey, 'NULL');
+      END IF;
+   END IF;
+
+   $IF Component_Order_SYS.INSTALLED $THEN
+      IF (old_.source_ref_type_db = 'CUSTOMER_ORDER' AND old_.source_ref4 = '-1' AND
+          ((old_.reserved_qty_to_reassign != copy_new_.reserved_qty_to_reassign) OR 
+           (old_.not_reserved_qty_to_reassign != copy_new_.not_reserved_qty_to_reassign))) THEN
+         Update_Components_Virtual___(copy_new_.objkey, copy_new_.not_reserved_qty_to_reassign, copy_new_.reserved_qty_to_reassign, 
+                                      copy_new_.include_all_qty, old_.reserved_qty_to_reassign);
+      END IF;
+   $END
+
+   super(old_, copy_new_);
+END CRUD_Update___; 
+
+@Override
+PROCEDURE CRUD_Update___(
+   old_ IN Reassign_Shipment_Line_Reservations_Virtual_Rec,
+   new_ IN Reassign_Shipment_Line_Reservations_Virtual_Rec )
+IS
+   copy_new_ Reassign_Shipment_Line_Reservations_Virtual_Rec;
+BEGIN
+   copy_new_ := new_;
+
+   IF (nvl(old_.qty_to_reassign,0) != nvl(new_.qty_to_reassign,0)) THEN
+      IF (nvl(new_.qty_to_reassign,0) > nvl(new_.qty_available_to_reassign,0)) THEN
+         Error_SYS.Record_General(lu_name_, 'RESERVEDQTYEXCEEDED: The quantity must not exceed the reserved quantity available to reassign.');
+      ELSIF (nvl(new_.qty_to_reassign,0) = nvl(new_.qty_available_to_reassign,0)) THEN
+         copy_new_.include_all := TRUE;
+      ELSE
+         copy_new_.include_all := FALSE;
+      END IF;
+   END IF;
+
+   IF (old_.include_all != new_.include_all) THEN
+      IF (new_.include_all = TRUE) THEN
+         copy_new_.qty_to_reassign := new_.qty_available_to_reassign;
+      ELSE
+         copy_new_.qty_to_reassign := NULL;
+      END IF;
+   END IF;
+   
+   IF (nvl(copy_new_.qty_to_reassign,0) != nvl(old_.qty_to_reassign,0)) THEN
+      IF (copy_new_.qty_to_reassign = copy_new_.qty_available_to_reassign) THEN
+         copy_new_.catch_qty_to_reassign := copy_new_.catch_qty;
+      ELSE
+         copy_new_.catch_qty_to_reassign := NULL;
+      END IF;
+   END IF;
+
+   super(old_, copy_new_);
+END CRUD_Update___; 
+
+@DynamicComponentDependency ORDER
+@Override
+PROCEDURE CRUD_Update___(
+   old_ IN Reassign_Shipment_Line_Components_Virtual_Rec,
+   new_ IN Reassign_Shipment_Line_Components_Virtual_Rec )
+IS
+   copy_new_ Reassign_Shipment_Line_Components_Virtual_Rec;
+BEGIN
+   copy_new_ := new_;
+
+   IF (nvl(old_.qty_to_reassign,0) != nvl(new_.qty_to_reassign,0)) THEN
+      IF (nvl(new_.qty_to_reassign,0) > nvl(new_.qty_assigned, new_.not_reserved_qty)) THEN
+         Error_SYS.Record_General(lu_name_, 'COMPONENTQTYEXCEEDED: The quantity must not exceed the quantity available to reassign.');
+      ELSIF (nvl(new_.qty_to_reassign,0) = nvl(new_.qty_assigned, new_.not_reserved_qty)) THEN
+         copy_new_.include_all := TRUE;
+      ELSE
+         copy_new_.include_all := FALSE;
+      END IF;
+   END IF;
+
+   IF (old_.include_all != new_.include_all) THEN
+      IF (new_.include_all = TRUE) THEN
+         copy_new_.qty_to_reassign := nvl(new_.qty_assigned, new_.not_reserved_qty);
+      ELSE
+         copy_new_.qty_to_reassign := NULL;
+      END IF;
+   END IF;
+   
+   IF (nvl(copy_new_.qty_to_reassign,0) != nvl(old_.qty_to_reassign,0)) THEN
+      IF (copy_new_.qty_to_reassign = nvl(new_.qty_assigned, new_.not_reserved_qty)) THEN
+         copy_new_.catch_qty_to_reassign := copy_new_.catch_qty;
+      ELSE
+         copy_new_.catch_qty_to_reassign := NULL;
+      END IF;
+   END IF;
+
+   super(old_, copy_new_);
+END CRUD_Update___; 
+
+PROCEDURE Update_Reservations_Virtual___ (
+   parent_objkey_       IN VARCHAR2,   
+   action_              IN VARCHAR2,
+   qty_one_reservation_ IN NUMBER DEFAULT NULL)
+IS
+   parent_key_             Reassign_Shipment_Line_Virtual_Key;
+   child_key_              Reassign_Shipment_Line_Reservations_Virtual_Key;
+   child_rec_              Reassign_Shipment_Line_Reservations_Virtual_Rec;
+   new_child_rec_          Reassign_Shipment_Line_Reservations_Virtual_Rec;
+BEGIN
+   parent_key_.objkey := parent_objkey_;   
+   FOR reservations_rec_ IN Get_Reservations_To_Reassign_Array___(parent_key_) LOOP
+      child_key_.objkey := reservations_rec_.objkey;
+      child_rec_        := Get_Record___(child_key_);
+      new_child_rec_    := child_rec_;
+      IF (action_ = 'NULL') THEN
+         new_child_rec_.qty_to_reassign := NULL;
+      END IF;
+      IF (action_ = 'ONE') THEN
+         IF (qty_one_reservation_ = 0) THEN
+            new_child_rec_.qty_to_reassign := NULL;
+         ELSE
+            new_child_rec_.qty_to_reassign := qty_one_reservation_;
+         END IF;
+      END IF;
+      IF (action_ = 'ALL') THEN
+         new_child_rec_.qty_to_reassign := child_rec_.qty_available_to_reassign;
+      END IF;
+      CRUD_Update___(child_rec_, new_child_rec_);
+   END LOOP;
+END Update_Reservations_Virtual___;    
+
+@DynamicComponentDependency ORDER
+PROCEDURE Update_Components_Virtual___ (
+   parent_objkey_                               IN VARCHAR2,
+   not_reserved_qty_to_reassign_                IN NUMBER,
+   reserved_qty_to_reassign_                    IN NUMBER,
+   include_all_qty_                             IN BOOLEAN,
+   old_reserved_qty_to_reassign_                IN NUMBER)
+IS
+   parent_key_                         Reassign_Shipment_Line_Virtual_Key;
+   child_key_                          Reassign_Shipment_Line_Components_Virtual_Key;
+   child_rec_                          Reassign_Shipment_Line_Components_Virtual_Rec;
+   new_child_rec_                      Reassign_Shipment_Line_Components_Virtual_Rec;
+   no_of_reservations_for_component_   NUMBER;
+   sum_qty_assigned_for_component_     NUMBER;
+   
+   CURSOR get_no_of_reservations IS
+      SELECT count(*),sum(qty_assigned)
+      FROM   ${PROJECTION}_REASSIGN_SHIPMENT_LINE_COMPONENTS_VIRTUAL_VRT
+      WHERE  parent_objkey = parent_objkey_
+      AND    source_ref4 = child_rec_.source_ref4
+      AND    qty_assigned > 0;
+   
+BEGIN
+   parent_key_.objkey := parent_objkey_;
+   FOR components_rec_ IN Get_Components_To_Reassign_Array___(parent_key_) LOOP
+      
+      child_key_.objkey := components_rec_.objkey;
+      child_rec_        := Get_Record___(child_key_);
+      new_child_rec_    := child_rec_;
+      
+      IF (child_rec_.qty_assigned IS NULL) THEN
+         IF (include_all_qty_) THEN
+            new_child_rec_.qty_to_reassign := child_rec_.not_reserved_qty;
+         ELSE
+            new_child_rec_.qty_to_reassign := LEAST(child_rec_.not_reserved_qty, not_reserved_qty_to_reassign_ * child_rec_.qty_per_assembly_internal * child_rec_.conv_factor / child_rec_.inverted_conv_factor);
+         END IF ;
+      END IF;
+      
+      IF (child_rec_.qty_assigned IS NOT NULL) THEN
+         IF (include_all_qty_) THEN
+            new_child_rec_.qty_to_reassign := child_rec_.qty_assigned;
+         ELSIF (old_reserved_qty_to_reassign_ != reserved_qty_to_reassign_) THEN
+            OPEN get_no_of_reservations;   
+            FETCH get_no_of_reservations INTO no_of_reservations_for_component_, sum_qty_assigned_for_component_;
+            CLOSE get_no_of_reservations;
+            IF (no_of_reservations_for_component_ > 1) THEN
+               IF (sum_qty_assigned_for_component_ = reserved_qty_to_reassign_ * child_rec_.qty_per_assembly_internal * child_rec_.conv_factor / child_rec_.inverted_conv_factor) THEN
+                  new_child_rec_.qty_to_reassign := child_rec_.qty_assigned;
+               ELSE
+                  new_child_rec_.qty_to_reassign := NULL;
+               END IF;
+            ELSE
+               new_child_rec_.qty_to_reassign := LEAST(child_rec_.qty_assigned, reserved_qty_to_reassign_ * child_rec_.qty_per_assembly_internal * child_rec_.conv_factor / child_rec_.inverted_conv_factor);
+            END IF;
+         END IF;            
+      END IF;
+      
+      IF (new_child_rec_.qty_to_reassign = 0) THEN
+         new_child_rec_.qty_to_reassign := NULL;
+      END IF;
+      
+      CRUD_Update___(child_rec_, new_child_rec_);
+      
+   END LOOP;
+END Update_Components_Virtual___;    
+
+PROCEDURE Perform_Reassign___ (
+   key_     IN Reassign_Shipment_Line_Virtual_Key,
+   info$_   OUT VARCHAR2)
+IS     
+   info_                            VARCHAR2(2000);  
+   head_rec_                        Reassign_Shipment_Line_Virtual_Rec;
+   qty_picked_in_ship_inventory_    VARCHAR2(5) := 'FALSE';
+   release_reservations_str_        VARCHAR2(5) := 'FALSE';
+   destination_shipment_id_         NUMBER;
+BEGIN 
+   head_rec_ := Get_Record___(key_);
+   
+   IF (head_rec_.reassign_shipment_method = 'RELEASE_FROM_SHIPMENT') THEN
+      destination_shipment_id_ := 0;
+   ELSIF (head_rec_.reassign_shipment_method = 'CREATE_NEW_SHIPMENT') THEN
+      destination_shipment_id_ := NULL;
+   ELSE
+      destination_shipment_id_ := head_rec_.destination_shipment_id;
+   END IF;
+   
+   Reassign_Shipment_Utility_API.Reassign_Connected_Qty__(info_,
+                                                          destination_shipment_id_,
+                                                          head_rec_.shipment_id,
+                                                          head_rec_.shipment_line_no,
+                                                          head_rec_.not_reserved_qty_to_reassign,
+                                                          head_rec_.reserved_qty_to_reassign,
+                                                          head_rec_.total_qty_to_reassign,
+                                                          head_rec_.reassign_shipment_method,
+                                                          head_rec_.shipment_rowstate
+                                                          );
+   info$_ := info$_ || info_;
+   
+   IF (head_rec_.release_reservations = TRUE) THEN
+      release_reservations_str_ := 'TRUE';
+   END IF;
+
+   IF (NOT (head_rec_.source_ref_type_db = 'CUSTOMER_ORDER' AND head_rec_.source_ref4 = '-1') AND
+       head_rec_.reserved_qty_to_reassign > 0) THEN
+      Perform_Reassign_Reservations___(info_, qty_picked_in_ship_inventory_, key_, destination_shipment_id_, release_reservations_str_);
+   END IF;
+   
+   $IF Component_Order_SYS.INSTALLED $THEN
+      IF (head_rec_.source_ref_type_db = 'CUSTOMER_ORDER' AND head_rec_.source_ref4 = '-1') THEN
+         Perform_Reassign_Package_Components___(info_, qty_picked_in_ship_inventory_, key_, destination_shipment_id_, release_reservations_str_);
+      END IF;
+   $END
+
+   IF (head_rec_.reassign_shipment_method = 'CREATE_NEW_SHIPMENT') THEN
+      Client_SYS.Add_Info(lu_name_, 'NEW_SHIPMENT_ID: The shipment ID :P1 is created.', destination_shipment_id_);
+   END IF;
+   
+   IF (qty_picked_in_ship_inventory_ = 'TRUE') THEN
+      Client_SYS.Add_Info(lu_name_, 'IN_SHIPMENT_INVENTORY: The reserved and picked quantity in the shipment inventory will not be released.');
+   END IF;
+   
+   info$_ := info$_ || Client_SYS.Get_All_Info;
+END Perform_Reassign___;
+
+PROCEDURE Perform_Reassign_Reservations___ (
+   info_                         OUT VARCHAR2,
+   qty_picked_in_ship_inventory_ OUT VARCHAR2,
+   key_                          IN  Reassign_Shipment_Line_Virtual_Key,
+   destination_shipment_id_      IN  NUMBER,
+   release_reservations_str_     IN  VARCHAR2)
+IS
+   head_rec_                        Reassign_Shipment_Line_Virtual_Rec;
+   message_                         VARCHAR2(32000) := Message_SYS.Construct('');
+   reservations_to_be_reassigned_   BOOLEAN := FALSE;
+   sum_reserved_qty_                NUMBER := 0;
+BEGIN
+   head_rec_ := Get_Record___(key_);   
+   
+   FOR reservations_rec_ IN Get_Reservations_To_Reassign_Array___(key_) LOOP
+      IF (reservations_rec_.qty_to_reassign > 0) THEN
+         
+         sum_reserved_qty_ := sum_reserved_qty_ + reservations_rec_.qty_to_reassign;
+         
+         Message_SYS.Add_Attribute(message_, 'LOCATION_NO',           reservations_rec_.location_no);
+         Message_SYS.Add_Attribute(message_, 'LOT_BATCH_NO',          reservations_rec_.lot_batch_no);
+         Message_SYS.Add_Attribute(message_, 'SERIAL_NO',             reservations_rec_.serial_no);
+         Message_SYS.Add_Attribute(message_, 'ENG_CHG_LEVEL',         reservations_rec_.eng_chg_level);
+         Message_SYS.Add_Attribute(message_, 'WAIV_DEV_REJ_NO',       reservations_rec_.waiv_dev_rej_no);
+         Message_SYS.Add_Attribute(message_, 'ACTIVITY_SEQ',          reservations_rec_.activity_seq);
+         Message_SYS.Add_Attribute(message_, 'HANDLING_UNIT_ID',      reservations_rec_.handling_unit_id);
+         Message_SYS.Add_Attribute(message_, 'PICK_LIST_NO',          reservations_rec_.pick_list_no);
+         Message_SYS.Add_Attribute(message_, 'CONFIGURATION_ID',      reservations_rec_.configuration_id);
+         Message_SYS.Add_Attribute(message_, 'CATCH_QTY_TO_REASSIGN', reservations_rec_.catch_qty_to_reassign);
+         Message_SYS.Add_Attribute(message_, 'QTY_TO_REASSIGN',       reservations_rec_.qty_to_reassign);
+         
+         reservations_to_be_reassigned_ := TRUE;
+         
+         IF (LENGTH(message_) > 30000) THEN
+            Reassign_Reservations___(info_,
+                                     qty_picked_in_ship_inventory_,
+                                     head_rec_.shipment_id,
+                                     head_rec_.shipment_line_no,
+                                     head_rec_.source_ref1,
+                                     head_rec_.source_ref2,
+                                     head_rec_.source_ref3,
+                                     head_rec_.source_ref4,
+                                     head_rec_.source_ref_type_db,
+                                     destination_shipment_id_,
+                                     head_rec_.contract,
+                                     head_rec_.inventory_part_no,
+                                     message_,
+                                     release_reservations_str_);
+            info_    := info_ || info_;
+            message_ := Message_SYS.Construct('');                                 
+            reservations_to_be_reassigned_ := FALSE;
+            
+         END IF;
+      END IF;
+   END LOOP;
+   
+   IF (sum_reserved_qty_ != head_rec_.reserved_qty_to_reassign) THEN
+      Error_SYS.Record_General(lu_name_, 'RESERVEDQTYINCORRECT: Currently a reserved quantity of :P1 is included, included reserved quantity must sum up to :P2.', sum_reserved_qty_, head_rec_.reserved_qty_to_reassign);
+   END IF;
+   
+   IF (reservations_to_be_reassigned_) THEN
+      Reassign_Reservations___(info_,
+                               qty_picked_in_ship_inventory_,
+                               head_rec_.shipment_id,
+                               head_rec_.shipment_line_no,
+                               head_rec_.source_ref1,
+                               head_rec_.source_ref2,
+                               head_rec_.source_ref3,
+                               head_rec_.source_ref4,
+                               head_rec_.source_ref_type_db,
+                               destination_shipment_id_,
+                               head_rec_.contract,
+                               head_rec_.inventory_part_no,
+                               message_,
+                               release_reservations_str_);
+      info_ := info_ || info_;
+   END IF;
+   
+END Perform_Reassign_Reservations___;
+
+@DynamicComponentDependency ORDER
+PROCEDURE Perform_Reassign_Package_Components___ (
+   info_                         OUT VARCHAR2,
+   qty_picked_in_ship_inventory_ OUT VARCHAR2,
+   key_                          IN  Reassign_Shipment_Line_Virtual_Key,
+   destination_shipment_id_      IN  NUMBER,
+   release_reservations_str_     IN  VARCHAR2)
+IS
+   head_rec_          Reassign_Shipment_Line_Virtual_Rec;
+   message_           VARCHAR2(32000) := Message_SYS.Construct('');
+   do_complete_pkg_   VARCHAR2(5)     := 'FALSE';
+   
+   CURSOR get_components IS
+      SELECT qty_to_reassign, source_ref4, customer_order_reservation, inventory_part_no, location_no, lot_batch_no, serial_no, 
+             eng_chg_level, waiv_dev_rej_no, activity_seq, handling_unit_id, pick_list_no, configuration_id, catch_qty_to_reassign
+      FROM   ${PROJECTION}_REASSIGN_SHIPMENT_LINE_COMPONENTS_VIRTUAL_VRT
+      WHERE  parent_objkey = head_rec_.OBJKEY
+      AND    QTY_TO_REASSIGN > 0;
+
+   TYPE Component_Collection_Tab IS TABLE OF get_components%ROWTYPE INDEX BY PLS_INTEGER;
+   component_tab_        Component_Collection_Tab;
+   
+BEGIN
+   head_rec_ := Get_Record___(key_);   
+   
+   OPEN  get_components;
+   FETCH get_components BULK COLLECT INTO component_tab_;
+   CLOSE get_components;
+   
+   IF (component_tab_.count > 0) THEN
+      FOR i IN component_tab_.FIRST..component_tab_.LAST LOOP
+         IF (component_tab_(i).qty_to_reassign > 0) THEN
+            
+            Message_SYS.Add_Attribute(message_, 'SOURCE_REF4',     component_tab_(i).source_ref4);            
+            Message_SYS.Add_Attribute(message_, 'QTY_TO_REASSIGN', component_tab_(i).qty_to_reassign);            
+            Message_SYS.Add_Attribute(message_, 'RESERVATION',     component_tab_(i).customer_order_reservation);
+            
+            IF (component_tab_(i).customer_order_reservation = 'TRUE') THEN
+               Message_SYS.Add_Attribute(message_, 'INVENTORY_PART_NO',     component_tab_(i).inventory_part_no);
+               Message_SYS.Add_Attribute(message_, 'LOCATION_NO',           component_tab_(i).location_no);
+               Message_SYS.Add_Attribute(message_, 'LOT_BATCH_NO',          component_tab_(i).lot_batch_no);
+               Message_SYS.Add_Attribute(message_, 'SERIAL_NO',             component_tab_(i).serial_no);
+               Message_SYS.Add_Attribute(message_, 'ENG_CHG_LEVEL',         component_tab_(i).eng_chg_level);
+               Message_SYS.Add_Attribute(message_, 'WAIV_DEV_REJ_NO',       component_tab_(i).waiv_dev_rej_no);
+               Message_SYS.Add_Attribute(message_, 'ACTIVITY_SEQ',          component_tab_(i).activity_seq);
+               Message_SYS.Add_Attribute(message_, 'HANDLING_UNIT_ID',      component_tab_(i).handling_unit_id);
+               Message_SYS.Add_Attribute(message_, 'PICK_LIST_NO',          component_tab_(i).pick_list_no);
+               Message_SYS.Add_Attribute(message_, 'CONFIGURATION_ID',      component_tab_(i).configuration_id);
+               Message_SYS.Add_Attribute(message_, 'CATCH_QTY_TO_REASSIGN', component_tab_(i).catch_qty_to_reassign);
+            END IF;
+            
+            IF (LENGTH(message_) > 30000) THEN
+               
+               IF (component_tab_.LAST = i) THEN
+                  do_complete_pkg_ := 'TRUE';
+               END IF;
+               
+               Reassign_Pkg_Comp_Qty___(info_,
+                                        qty_picked_in_ship_inventory_,
+                                        head_rec_.shipment_id,
+                                        head_rec_.shipment_line_no,
+                                        head_rec_.source_ref1,
+                                        head_rec_.source_ref2,
+                                        head_rec_.source_ref3,
+                                        head_rec_.contract,
+                                        destination_shipment_id_,
+                                        head_rec_.not_reserved_qty_to_reassign,
+                                        head_rec_.reserved_qty_to_reassign,
+                                        head_rec_.total_qty_to_reassign,
+                                        message_,
+                                        release_reservations_str_,
+                                        do_complete_pkg_);
+                                        
+               info_    := info_ || info_;
+               message_ := Message_SYS.Construct('');
+               
+            END IF;
+         END IF;
+      END LOOP;
+   END IF;         
+   
+   IF (do_complete_pkg_ = 'FALSE') THEN
+      do_complete_pkg_ := 'TRUE';
+      Reassign_Pkg_Comp_Qty___(info_,
+                               qty_picked_in_ship_inventory_,
+                               head_rec_.shipment_id,
+                               head_rec_.shipment_line_no,
+                               head_rec_.source_ref1,
+                               head_rec_.source_ref2,
+                               head_rec_.source_ref3,
+                               head_rec_.contract,
+                               destination_shipment_id_,
+                               head_rec_.not_reserved_qty_to_reassign,
+                               head_rec_.reserved_qty_to_reassign,
+                               head_rec_.total_qty_to_reassign,
+                               message_,
+                               release_reservations_str_,
+                               do_complete_pkg_);
+      info_ := info_ || info_;                              
+   END IF;
+   
+END Perform_Reassign_Package_Components___;
+
+PROCEDURE Reassign_Reservations___ (
+   info_                         OUT VARCHAR2,
+   qty_picked_in_ship_inventory_ OUT VARCHAR2,
+   shipment_id_                  IN  NUMBER,
+   shipment_line_no_             IN  NUMBER,
+   source_ref1_                  IN  VARCHAR2,
+   source_ref2_                  IN  VARCHAR2,
+   source_ref3_                  IN  VARCHAR2,
+   source_ref4_                  IN  VARCHAR2,
+   source_ref_type_db_           IN  VARCHAR2, 
+   new_shipment_id_              IN  NUMBER,
+   contract_                     IN  VARCHAR2,
+   part_no_                      IN  VARCHAR2,   
+   message_                      IN  VARCHAR2,
+   release_reservations_         IN  VARCHAR2 )
+IS
+BEGIN
+   Reassign_Shipment_Utility_API.Reassign_Reservations__(info_,
+                                                         qty_picked_in_ship_inventory_,
+                                                         shipment_id_,
+                                                         shipment_line_no_,
+                                                         source_ref1_,
+                                                         source_ref2_,
+                                                         source_ref3_,
+                                                         source_ref4_,
+                                                         source_ref_type_db_,
+                                                         new_shipment_id_,
+                                                         contract_,
+                                                         part_no_,
+                                                         message_,
+                                                         release_reservations_);
+END Reassign_Reservations___;
+
+@DynamicComponentDependency ORDER
+PROCEDURE Reassign_Pkg_Comp_Qty___ (
+   info_                         OUT VARCHAR2,
+   qty_picked_in_ship_inventory_ OUT VARCHAR2,
+   shipment_id_                  IN  NUMBER,
+   shipment_line_no_             IN  NUMBER,
+   order_no_                     IN  VARCHAR2,
+   line_no_                      IN  VARCHAR2,
+   rel_no_                       IN  VARCHAR2,
+   contract_                     IN  VARCHAR2, 
+   new_shipment_id_              IN  NUMBER,
+   pkg_qty_to_reassign_          IN  NUMBER,
+   pkg_reserved_qty_to_reassign_ IN  NUMBER,
+   pkg_revised_qty_reassigned_   IN  NUMBER,
+   message_                      IN  VARCHAR2,
+   release_reservations_         IN  VARCHAR2,
+   do_complete_                  IN  VARCHAR2 )
+IS
+BEGIN
+   Reassign_Shipment_Utility_API.Reassign_Pkg_Comp_Qty__(info_,
+                                                         qty_picked_in_ship_inventory_,
+                                                         shipment_id_,
+                                                         shipment_line_no_,
+                                                         order_no_,
+                                                         line_no_,
+                                                         rel_no_,
+                                                         contract_,
+                                                         new_shipment_id_,
+                                                         pkg_qty_to_reassign_,
+                                                         pkg_reserved_qty_to_reassign_,
+                                                         pkg_revised_qty_reassigned_,
+                                                         message_,
+                                                         release_reservations_,
+                                                         do_complete_);
+END Reassign_Pkg_Comp_Qty___;
+
+FUNCTION Get_Destination_Shipment_Id_Lov_User_Where___ (
+	source_shipment_id_ IN NUMBER) RETURN Objid_Arr
+IS
+   objid_list_              Objid_Arr := Objid_Arr();
+   shipment_rec_            Shipment_API.Public_Rec;
+   supply_country_db_       VARCHAR2(2);
+   use_price_incl_tax_db_   VARCHAR2(20);
+   string_null_             VARCHAR2(15) := Database_SYS.string_null_;
+   
+   CURSOR get_valid_objid_list(
+      shipment_type_          IN VARCHAR2,
+      sender_type_            IN VARCHAR2,
+      sender_id_              IN VARCHAR2,
+      receiver_type_          IN VARCHAR2,
+      receiver_id_            IN VARCHAR2,
+      receiver_addr_id_       IN VARCHAR2,
+      receiver_address1_      IN VARCHAR2, 
+      receiver_address2_      IN VARCHAR2, 
+      receiver_address3_      IN VARCHAR2, 
+      receiver_address4_      IN VARCHAR2, 
+      receiver_address5_      IN VARCHAR2, 
+      receiver_address6_      IN VARCHAR2,
+      receiver_zip_code_      IN VARCHAR2,
+      receiver_city_          IN VARCHAR2,
+      receiver_state_         IN VARCHAR2,
+      receiver_county_        IN VARCHAR2,
+      receiver_country_       IN VARCHAR2,
+      receiver_address_name_  IN VARCHAR2,
+      ship_via_code_          IN VARCHAR2,
+      delivery_terms_         IN VARCHAR2,
+      address_flag_db_        IN VARCHAR2 ) IS
+      SELECT objid
+      FROM   shipment_to_reassin_lov
+      WHERE  NVL(shipment_type,         string_null_) = NVL( shipment_type_,         string_null_)
+      AND    sender_type                              = sender_type_
+      AND    sender_id                                = sender_id_
+      AND    NVL(receiver_type,         string_null_) = NVL( receiver_type_,         string_null_)
+      AND    NVL(receiver_id,           string_null_) = NVL( receiver_id_,           string_null_)
+      AND    NVL(receiver_address1,     string_null_) = NVL( receiver_address1_,     string_null_)
+      AND    NVL(receiver_address2 ,    string_null_) = NVL( receiver_address2_,     string_null_)
+      AND    NVL(receiver_address3,     string_null_) = NVL( receiver_address3_,     string_null_)
+      AND    NVL(receiver_address4 ,    string_null_) = NVL( receiver_address4_,     string_null_)
+      AND    NVL(receiver_address5,     string_null_) = NVL( receiver_address5_,     string_null_)
+      AND    NVL(receiver_address6 ,    string_null_) = NVL( receiver_address6_,     string_null_)
+      AND    NVL(receiver_zip_code,     string_null_) = NVL( receiver_zip_code_,     string_null_)
+      AND    NVL(receiver_city,         string_null_) = NVL( receiver_city_,         string_null_)
+      AND    NVL(receiver_state,        string_null_) = NVL( receiver_state_,        string_null_)
+      AND    NVL(receiver_county,       string_null_) = NVL( receiver_county_,       string_null_)
+      AND    NVL(receiver_country,      string_null_) = NVL( receiver_country_,      string_null_)
+      AND    NVL(receiver_address_name, string_null_) = NVL( receiver_address_name_, string_null_)
+      AND    NVL(ship_via_code,         string_null_) = NVL( ship_via_code_,         string_null_)
+      AND    NVL(delivery_terms,        string_null_) = NVL( delivery_terms_,        string_null_)
+      AND    NVL(supply_country_db,     string_null_) = NVL( supply_country_db_,     string_null_)
+      AND    NVL(use_price_incl_tax_db, 'FALSE')      = NVL( use_price_incl_tax_db_, 'FALSE')
+      AND    (( address_flag_db_ = 'Y' AND addr_flag_db = 'Y') OR 
+             (( address_flag_db_ = 'N') AND (addr_flag_db = 'N') AND NVL(receiver_addr_id, string_null_) = NVL( receiver_addr_id_, string_null_)))
+      AND    (shipment_id != source_shipment_id_);
+   
+BEGIN
+   shipment_rec_ := Shipment_API.Get(source_shipment_id_);
+   IF shipment_rec_.shipment_id IS NOT NULL THEN
+      supply_country_db_      := Shipment_Source_Utility_API.Get_Supply_Country_Db(source_shipment_id_);
+      use_price_incl_tax_db_  := Shipment_Source_Utility_API.Get_Use_Price_Incl_Tax_Db(source_shipment_id_);
+      OPEN  get_valid_objid_list(shipment_rec_.shipment_type,     shipment_rec_.sender_type,       shipment_rec_.sender_id,             shipment_rec_.receiver_type,     shipment_rec_.receiver_id,       
+                                 shipment_rec_.receiver_addr_id,  shipment_rec_.receiver_address1, shipment_rec_.receiver_address2,     shipment_rec_.receiver_address3, shipment_rec_.receiver_address4, 
+                                 shipment_rec_.receiver_address5, shipment_rec_.receiver_address6, shipment_rec_.receiver_zip_code,     shipment_rec_.receiver_city,     shipment_rec_.receiver_state,    
+                                 shipment_rec_.receiver_county,   shipment_rec_.receiver_country,  shipment_rec_.receiver_address_name, shipment_rec_.ship_via_code,     shipment_rec_.delivery_terms,    
+                                 shipment_rec_.addr_flag );
+      FETCH get_valid_objid_list bulk COLLECT INTO objid_list_;
+      CLOSE get_valid_objid_list;
+   END IF;
+	RETURN objid_list_;
+END Get_Destination_Shipment_Id_Lov_User_Where___;
+
+PROCEDURE Refresh_Available_Source_Line___
+IS
+BEGIN
+	NULL;
+END Refresh_Available_Source_Line___;

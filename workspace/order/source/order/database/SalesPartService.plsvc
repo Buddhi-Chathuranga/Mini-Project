@@ -1,0 +1,151 @@
+---------------------------------------------------------------------------------
+--
+--  Logical unit: SalesPartService
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date        Sign    History
+--  ----------  ------  ---------------------------------------------------------
+--  2021-07-06  NiDalk  SC21R2-1783, Modifoed Get_Part_Availability___ and Get_Customer_Price___ to support empty arrays.
+--  2021-02-28  ChBnlk  SC21R2-1412, Modified Get_Sales_Part___(), Get_Customer_Price___() and Get_Part_Availability___()
+--  2021-02-28          to properly handle the exception.  
+--  2021-02-19  NiDalk  SC2020R1-12530, Added Cust_Ord_Customer_Initial_Check___ to check customer exists.
+--  2021-02-16  DhAplk  SC2020R1-12399, Moved Get_Customer_Price_Info___ and Get_Catalog_Sale_Price_Info___ to SalesPartUtil.plsql
+--  2020-10-09  DhAplk  SC2020R1-10230, Moved Onhand_Analysis condition checking logic from Get_Part_Availability_Info___ to Check_Inv_Availability___.
+--  2020-10-07  DhAplk  SC2020R1-9964, Changed effectivity_date attribute name to effective_date.
+--  2020-09-22  NiDalk  SC2020R1-9657,  Added ORDSRV installed check.
+--  2020-04-27  Erlise  SC2020R1-52, Conversion of BizApi GetSalesPart from ORDSRV/SalesPartHandling.serverpackage. 
+--                      Added interface support method Get_Sales_Part___().
+--  2019-10-09  AyAmlk  SCSPRING20-54, Moved from ORDSRV/OrdsrvPartUtil.plsql.
+---------------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Get_Sales_Part___ (
+	request_ IN Sales_Part_Util_API.Sales_Part_Params_Structure_Rec) RETURN Sales_Part_Util_API.Sales_Part_Structure_Arr
+IS
+   sales_part_struc_arr_      Sales_Part_Util_API.Sales_Part_Structure_Arr := Sales_Part_Util_API.Sales_Part_Structure_Arr();
+BEGIN
+   IF Dictionary_SYS.Component_Is_Active('ORDSRV') THEN
+      sales_part_struc_arr_ := Sales_Part_Util_API.Get_Sales_Part(request_);
+   ELSE
+      Error_SYS.Record_General(lu_name_, 'NOORDSRV: Component ORDSRV need to be installed to proceed with this request.');
+   END IF;
+   
+   RETURN sales_part_struc_arr_;
+END Get_Sales_Part___;
+
+
+FUNCTION Get_Customer_Price___ (
+	customer_price_params_ IN Customer_Price_Request_Structure_Rec) RETURN Customer_Price_Response_Structure_Rec
+IS
+   response_rec_        Customer_Price_Response_Structure_Rec;
+   parts_response_arr_  Sales_Part_Price_Response_Data_Structure_Arr := Sales_Part_Price_Response_Data_Structure_Arr();
+   parts_request_arr_   Sales_Part_Price_Request_Data_Structure_Arr := Sales_Part_Price_Request_Data_Structure_Arr();
+   i_                   NUMBER := 0;
+   error_text_          VARCHAR2(2000);
+BEGIN
+   IF Dictionary_SYS.Component_Is_Active('ORDSRV') THEN
+      BEGIN
+         Cust_Ord_Customer_Initial_Check___(customer_price_params_.customer_no);
+         response_rec_.site          := customer_price_params_.site;
+         response_rec_.customer_no   := customer_price_params_.customer_no;
+         response_rec_.currency_code := customer_price_params_.currency_code;
+         parts_request_arr_          := customer_price_params_.parts;
+         
+         IF parts_request_arr_ IS NOT NULL AND parts_request_arr_.COUNT > 0 THEN 
+            FOR j_ IN parts_request_arr_.FIRST .. parts_request_arr_.LAST LOOP
+               i_ := i_ + 1;
+               parts_response_arr_.extend();
+               parts_response_arr_(i_).product_no := parts_request_arr_(j_).product_no;
+               parts_response_arr_(i_).quantity   := parts_request_arr_(j_).quantity;
+               Sales_Part_Util_API.Get_Customer_Price_Info(parts_response_arr_(i_).sale_unit_price,
+                                          parts_response_arr_(i_).sale_unit_price_inc_vat,
+                                          parts_response_arr_(i_).currency_rate,
+                                          parts_response_arr_(i_).discount,
+                                          parts_response_arr_(i_).sale_net_price,
+                                          parts_response_arr_(i_).price_source,
+                                          parts_response_arr_(i_).price_source_id,
+                                          parts_response_arr_(i_).price_source_description,
+                                          parts_response_arr_(i_).minimum_qty,
+                                          customer_price_params_.site,
+                                          customer_price_params_.customer_no,
+                                          customer_price_params_.currency_code,
+                                          customer_price_params_.agreement_id,
+                                          parts_request_arr_(j_).product_no,
+                                          parts_request_arr_(j_).quantity,
+                                          parts_request_arr_(j_).price_list_no,
+                                          customer_price_params_.effective_date,
+                                          parts_request_arr_(j_).condition_code);
+            END LOOP;
+         END IF;
+         response_rec_.parts := parts_response_arr_;
+      EXCEPTION
+         WHEN OTHERS THEN
+            error_text_ := sqlerrm;
+            response_rec_.error_text := error_text_;
+      END;
+   ELSE
+      Error_SYS.Record_General(lu_name_, 'NOORDSRV: Component ORDSRV need to be installed to proceed with this request.');
+   END IF;
+   
+	RETURN response_rec_;
+EXCEPTION
+   WHEN OTHERS THEN
+      response_rec_.error_text := SQLERRM;
+      RETURN response_rec_;
+END Get_Customer_Price___;
+
+
+FUNCTION Get_Part_Availability___ (
+	part_availability_params_ IN Part_Availability_Request_Structure_Rec) RETURN Part_Availability_Response_Structure_Rec
+IS
+   response_rec_        Part_Availability_Response_Structure_Rec;
+   parts_response_arr_  Part_Availability_Response_Data_Structure_Arr := Part_Availability_Response_Data_Structure_Arr();
+   parts_request_arr_   Part_Availability_Request_Data_Structure_Arr := Part_Availability_Request_Data_Structure_Arr();
+   i_                   NUMBER := 0;
+   error_text_          VARCHAR2(2000);
+BEGIN
+   IF Dictionary_SYS.Component_Is_Active('ORDSRV') THEN
+      BEGIN
+         response_rec_.site        := part_availability_params_.site;
+         IF part_availability_params_.customer_no IS NOT NULL THEN 
+            Cust_Ord_Customer_Initial_Check___(part_availability_params_.customer_no);
+         END IF;
+         response_rec_.customer_no := part_availability_params_.customer_no;
+         parts_request_arr_        := part_availability_params_.parts_available;
+         
+         IF parts_request_arr_ IS NOT NULL AND parts_request_arr_.COUNT > 0 THEN 
+            FOR j_ IN parts_request_arr_.FIRST .. parts_request_arr_.LAST LOOP
+               i_ := i_ + 1;
+               parts_response_arr_.extend();
+               parts_response_arr_(i_).product_no := parts_request_arr_(j_).product_no;
+               parts_response_arr_(i_).parts_available_site := response_rec_.site;
+               Sales_Part_Util_API.Get_Part_Availability_Info(parts_response_arr_(i_).quantity_available,
+                                             parts_response_arr_(i_).first_available_date,
+                                             parts_response_arr_(i_).parts_available_site,
+                                             part_availability_params_.customer_no,
+                                             part_availability_params_.address_id,
+                                             part_availability_params_.cust_own_address_id,
+                                             parts_request_arr_(j_).product_no,
+                                             parts_request_arr_(j_).wanted_quantity,
+                                             parts_request_arr_(j_).wanted_delivery_date);
+            END LOOP;
+         END IF;
+         response_rec_.parts_available := parts_response_arr_;
+      EXCEPTION
+         WHEN OTHERS THEN
+            error_text_ := sqlerrm;
+            response_rec_.error_text := error_text_;
+      END;
+   ELSE
+      Error_SYS.Record_General(lu_name_, 'NOORDSRV: Component ORDSRV need to be installed to proceed with this request.');
+   END IF;
+	RETURN response_rec_;
+EXCEPTION
+   WHEN OTHERS THEN
+      response_rec_.error_text := SQLERRM;
+      RETURN response_rec_;
+END Get_Part_Availability___;
+

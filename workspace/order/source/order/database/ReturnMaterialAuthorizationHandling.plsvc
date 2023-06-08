@@ -1,0 +1,1024 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: ReturnMaterialAuthorizationHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign    History
+--  ------     ------  ---------------------------------------------------------
+-- 2021-10-12  Inaklk  SC21R2-2325, Moved RMA creation logic in Create_Rma___ to Create_Rma___ function and added RMA line creation
+-- 2021-08-01  ChFolk  SC21R2-2159, Modified Create_Rma___  to handle retrun to supplier where return_to_contract must be null only for the external supplier.
+-- 2021-07-27  ChFolk  SCTA-10097, Modified Create_Rma___ to avoid error in fetching return address when when return to a different site.
+-- 2021-07-15  Hahalk  SC21R2-517, Overridden the CRUD_Default_Copy method
+-- 2021-07-02  Inaklk  SC21R2-1601, Moved RMA creation logic in CRUD_Create___ to Create_Rma___, modified CRUD_Create___,CRUD_Update___,Connect_Lines_To_Rma___ 
+--                     for error handling
+-- 2021-03-03  WaSalk  SC2020R1-12579, Added EnabledLccParams to DefaultValueStruc in Validate_Contract___().
+-- 2021-03-02  RoJalk  Bug 156929(SCZ-13820), Added SingleOccReturnAddressInfo()and SingleOccDeliveryAddressInfo()to fetch single occurance address related 
+-- 2021-03-02          information and added ExpctrConnected() to check whether RMA is coonected to export control.
+-- 2020-12-16  ErRalk  SC2020R1-11705, Added function Get_Customer_No___ to fetch CustomerNo during the validation of OrderId and ShipmentId.
+-- 2020-12-03  ErRalk  Bug 154854(SCZ-12479), Added Ord_Connected_Lines_Exist___() to check whether the order connected RMA lines are exist for a given RMA.
+-- 2020-10-15  Maeelk  SC2020R1-10639, Passed CATALOG_DESC when creating RMA lines from Connect_Lines_To_Rma___ .
+-- 2020-10-15          Otherswise Sales Part Description will be shown as null  in Return Material Lines.
+-- 2020-10-07  WaSalk  SC2020R1-9584, Added action Refreshpage to refresh after state change to release.
+-- 2020-07-28  UdGnlk  SCXTEND-4675, Modified Get_Customer_Info___() by adding additional parameter template_shipment_id_ to fetch customer information.    
+-- 2020-04-23  JaThlk  AP10-2224, Added ConfigurationId to support configured parts.
+-- 2020-03-26  JaThlk  SCXTEND-3932, Added the procedure Get_Customer_Info___ to fetch customer info.
+-- 2020-03-23  JaThlk  SCXTEND-4030, Overrode CRUD_Update___ to re-fetch the order lines and moved the common logic to Create_Rma_Lines___.
+-- 2020-03-02  ChFolk  SCXTEND-2146, Override CRUD_Default___ and CRUD_Create___ of Create_Rma_Virtual to enter new RMA.
+-- 2020-03-02          Added methods Connect_Lines_To_Rma___ and Get_Currency_Code___.
+-- 2019-07-23  MaEelk  SCUXXW4-20211, Restructured Approve_Normal_Lines_For_Credit___ to skip the call to Invoice_Customer_Order_API.Get_Credited_Amt_Per_Ord_Line
+-- 2019-07-23          when the order_no has a null value.
+-- 2019-07-12  MaEelk  SCUXXW4-20211, Re-structured the logic in . Validate_Customer___, Validate_Contract___ and Validate_Address_Related_Details___          
+-- 2019_04-30  MaEelk  SCUXXW4-18521, Moved Cancel_Reasons___ logic to the Projection.
+-- 2019-02-01  RaVdlk  SCUXXW4-1389, Added Calculate_Price_Conversion_Factor___(), Get_Inspection_Default___() and Validate_Delivery_Type___()
+-- 2019-02-01  MaEelk  SCUXXW4-9372, Added RMB-approve for Credit.
+-- 2019-01-30  RaVdlk  SCUXXW4-1389,  Added the methods Get_Order_Info_From_Lov___ ,Get_Order_Info_From_Attr___ and Get_Price_Conversion_Factor___
+-- 2019-01-14  RaVdlk  SCUXXW4-1389, Added the methods Find_And_Conn_Exp_License___(),Check_Create_Credit_Invoice___(),Check_Quantity___(),
+-- 2019-01-14  RaVdlk                Is_Debit_Invoice_Connected___(), Is_Not_Base_Currency___() and Create_Invoice_From_Return___()
+-- 2019-01-10  RaVdlk  SCUXXW4-1389, Added the methods Check_Connected_Promo___ , Cancel_Return_Material_Line___
+-- 2019-01-08  RaVdlk  SCUXXW4-1389, Added the method Remove_Credit_Approval_In_Lines___()
+-- 2018-11-13  RaVdlk  SCUXXW4-1389, Added Get_Sales_Part_Defaults___,Get_Price_Info___,Calculate_Line_Prices___ and Calculate_Line_Total___
+-- 2018-10-08  MaEelk  SCUXXW4-9372, Added Return_Material_History_List___ to fetch records to RMA History.
+-- 2018-08-03  MaEelk  SCUXXW4-9372, Implemented RMB Cancel in RMA Header.
+-- 2018-06-26  IZSHLK  SCUXXW4-9372, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+-------------------------- RMA HEADER START-----------------------------
+FUNCTION Cust_Contact_Name___(
+   customer_no_         IN VARCHAR2,
+   customer_no_addr_no_ IN VARCHAR2,
+   cust_ref_            IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   
+BEGIN
+   RETURN Contact_Util_API.Get_Cust_Contact_Name(customer_no_, customer_no_addr_no_, cust_ref_);
+END Cust_Contact_Name___;
+
+FUNCTION Document_Addr_Name___(
+   customer_no_         IN VARCHAR2,
+   customer_no_addr_no_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+BEGIN
+  RETURN Customer_Info_Address_API.Get_Name(customer_no_,customer_no_addr_no_);
+END Document_Addr_Name___;
+
+FUNCTION Check_Line_Conn_Promo_Exist___(
+   rma_no_ IN NUMBER ) RETURN NUMBER
+IS
+   
+BEGIN
+   RETURN Return_Material_API.Check_Line_Conn_Promo_Exist(rma_no_);
+END Check_Line_Conn_Promo_Exist___;
+
+FUNCTION Get_Credit_Approve_Line_Status___(
+   rma_no_ IN NUMBER )  RETURN Credit_Approve_Line_Status_Structure_Rec
+IS
+   credit_approve_line_status_structure_ Credit_Approve_Line_Status_Structure_Rec;  
+BEGIN
+   Return_Material_API.Get_Credit_Approve_Line_Status (credit_approve_line_status_structure_.has_credited_lines_to_approve,
+                                                       credit_approve_line_status_structure_.has_normal_lines_to_approve,  
+                                                       rma_no_);
+   RETURN credit_approve_line_status_structure_;                                                     
+END Get_Credit_Approve_Line_Status___;
+   
+PROCEDURE Approve_Charges___ (
+	key_ IN Return_Material_Key)
+IS
+BEGIN
+   Return_Material_API.Approve_Charges__(key_.rma_no); 
+END Approve_Charges___;
+
+PROCEDURE Approve_Normal_Lines_For_Credit___ (
+   key_     IN Return_Material_Key,
+   info$_   OUT VARCHAR2 ) 
+IS
+   error_msg_          VARCHAR2(2000):= '';
+   approver_           VARCHAR2(200);
+   session_user_       VARCHAR2(200);
+   approve_for_credit_ BOOLEAN := FALSE;
+   CURSOR get_lines IS
+      SELECT rma_line_no, order_no, line_no, rel_no, line_item_no
+      FROM   RETURN_MATERIAL_LINE_TAB
+      WHERE  rma_no = key_.rma_no
+      AND    credit_invoice_no IS NULL
+      AND    credit_approver_id IS NULL
+      AND    rowstate NOT IN ('Denied', 'Planned', 'Cancelled')
+      AND    rental = Fnd_Boolean_API.DB_FALSE;   
+BEGIN
+   session_user_ := Fnd_Session_API.Get_Fnd_User;
+   approver_     := Person_Info_API.Get_Id_For_User(session_user_);
+   
+   IF (approver_ IS NULL) THEN
+      Error_SYS.Record_General(lu_name_, 'NOPERCOORD: Logon user :P1 is not connected to an application person id.', session_user_);
+   ELSE
+      IF (Order_Coordinator_API.Check_Exist(approver_)= 'FALSE') THEN
+         Error_SYS.Record_General(lu_name_, 'APPROVER_NOT_REG: You need to be registered as a coordinator in order to approve the return material authorization.');
+      END IF;
+   END IF;
+ 
+   FOR line_rec_ IN get_lines LOOP
+      IF (line_rec_.order_no IS NOT NULL) THEN
+         IF (Invoice_Customer_Order_API.Get_Credited_Amt_Per_Ord_Line(line_rec_.order_no, line_rec_.line_no, line_rec_.rel_no, line_rec_.line_item_no) = 0) THEN
+            approve_for_credit_ := TRUE;
+         END IF;
+      ELSE
+         approve_for_credit_ := TRUE;
+      END IF;
+      IF (approve_for_credit_) THEN
+         BEGIN         
+            Return_Material_Line_API.Approve_For_Credit__(key_.rma_no,line_rec_.rma_line_no);         
+         EXCEPTION
+            WHEN OTHERS THEN            
+               error_msg_ := Language_SYS.Translate_Constant(lu_name_,sqlerrm);
+               Client_SYS.Add_Warning(lu_name_, error_msg_); 
+               info$_ := info$_ || Client_SYS.Get_All_Info;
+         END;                       
+      END IF;
+   END LOOP; 
+   BEGIN
+   Approve_Charges___(key_);
+   EXCEPTION
+      WHEN OTHERS THEN            
+         error_msg_ := Language_SYS.Translate_Constant(lu_name_,sqlerrm);
+         Client_SYS.Add_Warning(lu_name_, error_msg_); 
+         info$_ := info$_ || Client_SYS.Get_All_Info;
+   END;                          
+END Approve_Normal_Lines_For_Credit___;
+
+PROCEDURE Remove_Credit_Approval___ (
+   key_  IN Return_Material_Key ) 
+IS
+   
+BEGIN
+   Return_Material_API.Remove_Credit_Approval__(key_.rma_no);
+END Remove_Credit_Approval___;
+
+PROCEDURE Cancel_Return_Material___ (
+   key_              IN Return_Material_Key,
+   cancel_reason_    IN VARCHAR2 ) 
+IS
+   receipt_rma_no_   NUMBER;  
+   attr_             VARCHAR2(4000);
+   info_             VARCHAR2(2000);
+   objid_            VARCHAR2(2000);
+   objversion_       VARCHAR2(2000);
+   
+BEGIN
+   Return_Material_API.Set_Cancel_Reason(key_.rma_no, cancel_reason_);
+   receipt_rma_no_ := Return_Material_API.Get_Receipt_Rma_No(key_.rma_no);
+   
+   IF (receipt_rma_no_ IS NOT NULL) THEN
+      Return_Material_API.Set_Cancel_Reason(receipt_rma_no_, cancel_reason_);
+   END IF;
+
+   Get_Objid_Objversion___(objid_, objversion_, key_);
+   Client_SYS.Clear_Attr(attr_);
+   Return_Material_API.Cancel__(info_, objid_, objversion_, attr_, 'DO');  
+END Cancel_Return_Material___;
+
+FUNCTION Get_Result_Key___ (
+   key_  IN Return_Material_Key ) RETURN VARCHAR2
+IS
+   report_attr_       VARCHAR2(32000);
+   param_attr_        VARCHAR2(32000);   
+BEGIN
+   Client_SYS.Clear_Attr(report_attr_);
+   Client_SYS.Clear_Attr(param_attr_);
+   Client_SYS.Add_To_Attr('REPORT_ID', 'RETURN_MATERIAL_REP', report_attr_);
+   Client_SYS.Add_To_Attr('RMA_NO', key_.rma_no, param_attr_);
+   RETURN Report_Format_API.Create_New_Report(report_attr_, param_attr_, Fnd_Session_API.Get_Fnd_User);
+END Get_Result_Key___;
+
+FUNCTION Create_Credit_Invoice_Allowed___(
+   rma_no_ IN NUMBER )  RETURN BOOLEAN
+IS
+   create_credit_invoice_allowed_ BOOLEAN := FALSE;
+BEGIN
+   create_credit_invoice_allowed_ := Return_Material_API.Is_Create_Credit_Allowed__(rma_no_, 'CORRECTION') = 'TRUE';
+   RETURN create_credit_invoice_allowed_;
+END Create_Credit_Invoice_Allowed___;
+
+PROCEDURE Create_Correction_Invoice_From_Return___ (
+   key_  IN Return_Material_Key ) 
+IS
+   
+BEGIN
+   Invoice_Customer_Order_API.Create_Corr_Inv_From_Return(key_.rma_no);
+END Create_Correction_Invoice_From_Return___;
+
+
+FUNCTION Fetch_Address_Related_Details___(
+   rma_no_                  IN NUMBER,   
+   customer_no_             IN VARCHAR2,
+   return_from_customer_no_ IN VARCHAR2,
+   order_no_                IN VARCHAR2,
+   shipment_id_             IN NUMBER,
+   ship_addr_no_            IN  VARCHAR2,
+   customer_no_addr_no_     IN VARCHAR2)  RETURN Address_Detail_Struc_Rec
+IS
+   address_detail_structure_ Address_Detail_Struc_Rec;
+   single_occ_address_rec_   Return_Material_API.Address_Rec;
+   address_rec_              Return_Material_API.Address_Rec;
+BEGIN
+   address_detail_structure_.customer_no := customer_no_;
+   address_detail_structure_.ship_addr_no := ship_addr_no_;
+   address_detail_structure_.customer_no_addr_no := customer_no_addr_no_;
+   Return_Material_API.Get_Address_Related_Details__(single_occ_address_rec_,
+                                                     address_rec_,  
+                                                     address_detail_structure_.ship_addr_name,
+                                                     address_detail_structure_.document_address_name,
+                                                     address_detail_structure_.address_name,
+                                                     address_detail_structure_.ship_addr_flag,
+                                                     address_detail_structure_.ship_addr_no,
+                                                     address_detail_structure_.customer_no_addr_no,
+                                                     address_detail_structure_.customer_no,
+                                                     return_from_customer_no_,
+                                                     order_no_,
+                                                     shipment_id_);
+                                                     
+   address_detail_structure_.ship_address1 :=  single_occ_address_rec_.address1;
+   address_detail_structure_.ship_address2 :=  single_occ_address_rec_.address2;
+   address_detail_structure_.ship_address3 :=  single_occ_address_rec_.address3;
+   address_detail_structure_.ship_address4 :=  single_occ_address_rec_.address4;
+   address_detail_structure_.ship_address5 :=  single_occ_address_rec_.address5;
+   address_detail_structure_.ship_address6 :=  single_occ_address_rec_.address6;
+   address_detail_structure_.ship_addr_city := single_occ_address_rec_.city;
+   address_detail_structure_.ship_addr_state := single_occ_address_rec_.state;
+   address_detail_structure_.ship_addr_zip_code := single_occ_address_rec_.zip_code;
+   address_detail_structure_.ship_addr_county := single_occ_address_rec_.county;
+   address_detail_structure_.ship_addr_country_code := single_occ_address_rec_.country;
+   address_detail_structure_.address1 :=  address_rec_.address1;
+   address_detail_structure_.address2 :=  address_rec_.address2;
+   address_detail_structure_.address3 :=  address_rec_.address3;
+   address_detail_structure_.address4 :=  address_rec_.address4;
+   address_detail_structure_.address5 :=  address_rec_.address5;
+   address_detail_structure_.address6 :=  address_rec_.address6;
+   address_detail_structure_.city := address_rec_.city;
+   address_detail_structure_.state := address_rec_.state;
+   address_detail_structure_.zip_code := address_rec_.zip_code;
+   address_detail_structure_.county := address_rec_.county;
+   address_detail_structure_.country_code := address_rec_.country;
+   RETURN address_detail_structure_;
+END Fetch_Address_Related_Details___;
+
+PROCEDURE Get_Cust_Tax_Liability_Info___ (
+   tax_liablity_       OUT VARCHAR2,
+   tax_liability_type_ OUT VARCHAR2,
+   customer_no_        IN  VARCHAR2,
+   ship_addr_no_       IN  VARCHAR2,
+   company_            IN  VARCHAR2,
+   supply_country_db_  IN  VARCHAR2)
+IS
+BEGIN
+   Tax_Handling_Util_API.Get_Cust_Tax_Liability_Info(tax_liablity_, tax_liability_type_, customer_no_, ship_addr_no_, company_, supply_country_db_, supply_country_db_);      
+END Get_Cust_Tax_Liability_Info___;
+
+FUNCTION Validate_Address_Related_Details___(
+   customer_no_                IN VARCHAR2,
+   customer_no_addr_no_        IN VARCHAR2,
+   ship_addr_no_               IN VARCHAR2,
+   customer_no_credit_addr_no_ IN VARCHAR2,
+   customer_no_credit_         IN VARCHAR2,
+   company_                    IN VARCHAR2,
+   supply_country_db_          IN VARCHAR2,
+   rma_addr_                   IN BOOLEAN,
+   ship_addr_                  IN BOOLEAN,
+   credit_addr_                IN BOOLEAN )  RETURN Address_Detail_Struc_Rec
+IS   
+   default_value_structure_  Return_Material_API.Default_Value_Struc_Rec; 
+   address_detail_structure_ Address_Detail_Struc_Rec;   
+
+BEGIN
+   default_value_structure_.customer_no := customer_no_;
+   default_value_structure_.customer_no_addr_no := customer_no_addr_no_;
+   default_value_structure_.ship_addr_no := ship_addr_no_;
+   default_value_structure_.customer_no_credit_addr_no := customer_no_credit_addr_no_;
+   default_value_structure_.customer_no_credit := customer_no_credit_;   
+   default_value_structure_.supply_country_db := supply_country_db_;
+   default_value_structure_.company := company_;   
+   
+   Return_Material_API.Get_Customer_Address_Details__(default_value_structure_, rma_addr_, ship_addr_, credit_addr_);
+   address_detail_structure_.customer_no_addr_no := default_value_structure_.customer_no_addr_no;
+   address_detail_structure_.document_address_name := default_value_structure_.document_address_name;  
+   address_detail_structure_.ship_addr_no := default_value_structure_.ship_addr_no;
+   address_detail_structure_.address_name := default_value_structure_.address_name;
+   address_detail_structure_.customer_no_credit := default_value_structure_.customer_no_credit;
+   address_detail_structure_.customer_no_credit_addr_no := default_value_structure_.customer_no_credit_addr_no;
+   address_detail_structure_.credit_address_name := default_value_structure_.credit_address_name;
+   address_detail_structure_.cust_ref := default_value_structure_.cust_ref;      
+   address_detail_structure_.reference_name := default_value_structure_.reference_name;
+   IF (ship_addr_) THEN
+      address_detail_structure_.delivery_country := default_value_structure_.delivery_country;
+   END IF;
+   address_detail_structure_.tax_liability := default_value_structure_.tax_liability;
+   address_detail_structure_.intrastat_exempt := default_value_structure_.intrastat_exempt;
+
+   address_detail_structure_.address1 := default_value_structure_.address1;
+   address_detail_structure_.address2 := default_value_structure_.address2;
+   address_detail_structure_.address3 := default_value_structure_.address3;
+   address_detail_structure_.address4 := default_value_structure_.address4;
+   address_detail_structure_.address5 := default_value_structure_.address5;
+   address_detail_structure_.address6 := default_value_structure_.address6;
+   address_detail_structure_.city := default_value_structure_.city;
+   address_detail_structure_.state := default_value_structure_.state;
+   address_detail_structure_.zip_code := default_value_structure_.zip_code;
+   address_detail_structure_.county := default_value_structure_.county;
+   address_detail_structure_.country_code := default_value_structure_.country_code;
+
+   RETURN address_detail_structure_;
+END Validate_Address_Related_Details___;
+
+FUNCTION Fetch_Return_To_Information___(
+   return_to_vendor_no_ IN VARCHAR2,
+   return_to_contract_  IN VARCHAR2,
+   contract_            IN VARCHAR2,
+   company_             IN VARCHAR2 ) RETURN Return_Information_Struc_Rec
+IS
+   return_information_structure_ Return_Information_Struc_Rec;
+   address_rec_                  Return_Material_API.Address_Rec;
+   info_                         VARCHAR2(2000);
+   
+BEGIN
+   return_information_structure_.return_to_contract := return_to_contract_;
+   Return_Material_API.Get_Return_To_Information__(return_information_structure_.return_to_company,
+                                                   return_information_structure_.return_addr_no,
+                                                   return_information_structure_.return_addr_name,
+                                                   address_rec_,
+                                                   info_,
+                                                   return_information_structure_.return_to_contract,   
+                                                   return_to_vendor_no_,   
+                                                   contract_,
+                                                   company_);
+   return_information_structure_.return_address1 := address_rec_.address1; 
+   return_information_structure_.return_address2 := address_rec_.address2;
+   return_information_structure_.return_address3 := address_rec_.address3; 
+   return_information_structure_.return_address4 := address_rec_.address4;
+   return_information_structure_.return_address5 := address_rec_.address5; 
+   return_information_structure_.return_address6 := address_rec_.address6;
+   return_information_structure_.return_addr_zip_code := address_rec_.zip_code; 
+   return_information_structure_.return_addr_city := address_rec_.city; 
+   return_information_structure_.return_addr_state := address_rec_.state; 
+   return_information_structure_.return_addr_county := address_rec_.county; 
+   return_information_structure_.return_addr_country_code := address_rec_.country; 
+   return_information_structure_.info_message := info_;
+   RETURN return_information_structure_;
+END Fetch_Return_To_Information___;
+
+FUNCTION Validate_Return_Addr_No___(
+   return_addr_no_      IN VARCHAR2,
+   return_to_vendor_no_ IN VARCHAR2,
+   return_to_contract_  IN VARCHAR2,
+   return_to_company_   IN VARCHAR2 )  RETURN VARCHAR2
+IS
+   address_rec_                  Return_Material_API.Address_Rec; 
+   return_addr_name_             VARCHAR2(100);
+BEGIN
+   Return_Material_API.Get_Return_Address__(return_addr_name_,
+                                            address_rec_,
+                                            return_addr_no_,
+                                            return_to_vendor_no_,
+                                            return_to_contract_,
+                                            return_to_company_);
+   RETURN return_addr_name_;
+END Validate_Return_Addr_No___;
+
+
+FUNCTION Validate_Contract___(
+   contract_        IN VARCHAR2,
+   customer_no_     IN VARCHAR2,
+   order_no_        IN VARCHAR2,
+   shipment_id_     IN NUMBER,
+   ship_addr_no_    IN VARCHAR2 )  RETURN Return_Material_API.Default_Value_Struc_Rec
+IS
+   default_value_structure_     Return_Material_API.Default_Value_Struc_Rec;
+BEGIN
+   Return_Material_API.Get_Rma_Contract_Defaults__( default_value_structure_,
+                                                    contract_,
+                                                    customer_no_,
+                                                    order_no_,
+                                                    shipment_id_,
+                                                    ship_addr_no_);
+   default_value_structure_.enabled_lcc_params := Company_Localization_Info_API.Get_Enabled_Params_per_Company(Site_API.Get_Company(contract_)); 
+   RETURN default_value_structure_;
+END Validate_Contract___;
+
+FUNCTION Validate_Customer___(
+   contract_           IN VARCHAR2,
+   customer_no_        IN VARCHAR2,
+   supply_country_db_  IN VARCHAR2,
+   company_            IN VARCHAR2,
+   order_no_           IN VARCHAR2,
+   shipment_id_        IN NUMBER,
+   ship_addr_no_       IN VARCHAR2 )  RETURN Return_Material_API.Default_Value_Struc_Rec
+IS
+   default_value_structure_   Return_Material_API.Default_Value_Struc_Rec;
+
+BEGIN
+   IF (customer_no_ IS NOT NULL) THEN 
+      Return_Material_API.Get_Rma_Customer_Defaults__ (default_value_structure_,
+                                                      contract_,
+                                                      customer_no_,
+                                                      supply_country_db_,
+                                                      company_,
+                                                      order_no_,
+                                                      shipment_id_,
+                                                      ship_addr_no_);                                                     
+   END IF;
+   default_value_structure_.customer_tax_usage_type := Customer_Info_API.Get_Customer_Tax_Usage_Type(customer_no_);
+   
+   RETURN default_value_structure_;
+
+END Validate_Customer___;
+
+FUNCTION Get_Tax_Liability___(
+   customer_no_        IN VARCHAR2,
+   ship_addr_no_      IN VARCHAR2,
+   company_           IN VARCHAR2,
+   supply_country_db_ IN VARCHAR2 )  RETURN VARCHAR2
+IS
+   tax_liability_   VARCHAR2(20);   
+BEGIN
+   tax_liability_ := Tax_Handling_Util_API.Get_Customer_Tax_Liability(customer_no_, ship_addr_no_, company_, supply_country_db_);
+   RETURN tax_liability_;
+END Get_Tax_Liability___;
+
+FUNCTION Get_Return_To_Vendor_No___(
+   return_to_contract_ IN VARCHAR2 )  RETURN VARCHAR2
+IS
+   return_to_vendor_no_ VARCHAR2(20);
+BEGIN
+   $IF (Component_Purch_SYS.INSTALLED) $THEN
+      return_to_vendor_no_ := Supplier_API.Get_Vendor_No_From_Contract(return_to_contract_);
+   $END
+   RETURN return_to_vendor_no_;
+END Get_Return_To_Vendor_No___;
+
+FUNCTION Get_Currency_Code___(
+   customer_no_ IN VARCHAR2 )  RETURN VARCHAR2
+IS
+   
+BEGIN
+   RETURN Cust_Ord_Customer_API.Get_Currency_Code(customer_no_);
+END Get_Currency_Code___;
+
+
+--@Override
+PROCEDURE CRUD_Default___ (
+   rec_  IN OUT Create_Rma_Virtual_Rec )
+IS
+BEGIN
+   rec_.contract := User_Default_API.Get_Contract; 
+   rec_.coordinator := User_Default_API.Get_Authorize_Code;
+   rec_.return_to_contract := User_Default_API.Get_Contract;
+   super(rec_);
+END CRUD_Default___;
+
+@Override 
+PROCEDURE CRUD_Create___(
+   rec_ IN Create_Rma_Virtual_Rec )
+IS
+BEGIN
+   super(rec_);
+
+   IF(rec_.template_order_no IS NOT NULL OR rec_.template_shipment_id IS NOT NULL) THEN 
+      Create_Rma_Lines___(rec_);
+   END IF;
+END CRUD_Create___;
+
+@Override
+PROCEDURE CRUD_Update___(
+   old_ IN Create_Rma_Virtual_Rec,
+   new_ IN Create_Rma_Virtual_Rec )
+IS
+BEGIN
+   super(old_, new_);
+
+   DELETE FROM ${PROJECTION}_ORDER_LINES_TO_RETURN_VIRTUAL_VRT;
+   
+   IF(new_.template_order_no IS NOT NULL OR new_.template_shipment_id IS NOT NULL) THEN 
+      Create_Rma_Lines___(new_); 
+   END IF;
+END CRUD_Update___;
+
+PROCEDURE Create_Rma_Lines___ (
+   parent_rec_           IN Create_Rma_Virtual_Rec) 
+IS
+   order_no_                     VARCHAR2(12);
+   total_qty_returned_           NUMBER;
+   possible_qty_return_          NUMBER; 
+   lines_rec_                    Order_Lines_To_Return_Virtual_Rec;   
+   use_price_incl_tax_           VARCHAR2(20); 
+   
+   CURSOR get_order_lines IS
+      SELECT line_no, rel_no, line_item_no, catalog_no, qty_shipped, conv_factor, inverted_conv_factor, configuration_id
+      FROM   customer_order_line_tab
+      WHERE order_no = order_no_
+      AND line_item_no >= 0
+      AND rental = Fnd_Boolean_API.DB_FALSE
+      AND part_ownership IN (Part_Ownership_API.DB_COMPANY_OWNED, Part_Ownership_API.DB_COMPANY_RENTAL_ASSET)
+      AND rowstate IN ('PartiallyDelivered', 'Delivered', 'Invoiced')
+      AND NVL(demand_code, '*') != 'CRE';
+      
+   CURSOR get_total_qty_returned(line_no_ VARCHAR2, rel_no_ VARCHAR2, line_item_no_ NUMBER) IS
+      SELECT SUM(qty_to_return)
+      FROM RETURN_MATERIAL_LINE_TAB
+      WHERE order_no   = order_no_
+      AND line_no      = line_no_
+      AND rel_no       = rel_no_
+      AND line_item_no = line_item_no_
+      AND rowstate NOT IN ('Denied', 'Cancelled');
+      
+   CURSOR ship_conn_order_lines(contract_ VARCHAR2, customer_no_ VARCHAR2, currency_code_ VARCHAR2, shipment_id_ NUMBER ) IS
+      SELECT co.order_no, co.line_no, co.rel_no, co.line_item_no, co.catalog_no, co.configuration_id, sol.qty_shipped, sol.conv_factor, sol.inverted_conv_factor
+      FROM CUSTOMER_ORDER_LINE_RMA_LOV co, SHIPMENT_LINE sol
+      WHERE contract = contract_
+      AND customer_no = customer_no_
+      AND currency_code = currency_code_
+      AND (co.qty_shipped - co.qty_returned > 0)
+      AND co.use_price_incl_tax = use_price_incl_tax_      
+      AND sol.source_ref1 = co.order_no
+      AND sol.source_ref2 = co.line_no
+      AND sol.source_ref3 = co.rel_no
+      AND sol.source_ref4 = co.line_item_no
+      AND sol.shipment_id = shipment_id_;
+      
+BEGIN
+   use_price_incl_tax_ := Customer_Tax_Calc_Basis_API.Get_Use_Price_Incl_Tax_Db(parent_rec_.customer_no, Site_API.Get_Company(parent_rec_.contract));
+   
+   IF (parent_rec_.template_order_no IS NOT NULL) THEN
+      order_no_ := parent_rec_.template_order_no;
+      FOR co_line_rec_ IN get_order_lines LOOP
+         OPEN get_total_qty_returned(co_line_rec_.line_no, co_line_rec_.rel_no, co_line_rec_.line_item_no);
+         FETCH get_total_qty_returned INTO total_qty_returned_;
+         CLOSE get_total_qty_returned;
+         possible_qty_return_ := (co_line_rec_.qty_shipped / co_line_rec_.conv_factor * co_line_rec_.inverted_conv_factor) - NVL(total_qty_returned_, 0);
+         IF (possible_qty_return_ > 0) THEN
+            lines_rec_.objkey        := sys_guid();
+            lines_rec_.parent_objkey := parent_rec_.objkey;
+            lines_rec_.rma_no := parent_rec_.rma_no;
+            lines_rec_.contract := parent_rec_.contract;
+            lines_rec_.return_qty := possible_qty_return_;
+            lines_rec_.order_no := order_no_;
+            lines_rec_.line_no := co_line_rec_.line_no;
+            lines_rec_.rel_no := co_line_rec_.rel_no;
+            lines_rec_.line_item_no := co_line_rec_.line_item_no;
+            lines_rec_.sales_part_no := co_line_rec_.catalog_no;
+            lines_rec_.configuration_id := co_line_rec_.configuration_id;
+            lines_rec_.qty_to_be_return := possible_qty_return_;
+            lines_rec_.return_reason := parent_rec_.return_reason;
+            CRUD_Create___(lines_rec_);
+         END IF;   
+      END LOOP;     
+   ELSIF (parent_rec_.template_shipment_id IS NOT NULL) THEN
+      FOR ord_line_rec_ IN ship_conn_order_lines(parent_rec_.contract, parent_rec_.customer_no, parent_rec_.currency_code, parent_rec_.template_shipment_id) LOOP
+         order_no_ := ord_line_rec_.order_no;
+         OPEN get_total_qty_returned(ord_line_rec_.line_no, ord_line_rec_.rel_no, ord_line_rec_.line_item_no);
+         FETCH get_total_qty_returned INTO total_qty_returned_;
+         CLOSE get_total_qty_returned;
+         possible_qty_return_ := (ord_line_rec_.qty_shipped / ord_line_rec_.conv_factor * ord_line_rec_.inverted_conv_factor) - NVL(total_qty_returned_, 0);
+         IF (possible_qty_return_ > 0) THEN
+            lines_rec_.objkey        := sys_guid();
+            lines_rec_.parent_objkey := parent_rec_.objkey;
+            lines_rec_.rma_no := parent_rec_.rma_no;
+            lines_rec_.contract := parent_rec_.contract;
+            lines_rec_.return_qty := possible_qty_return_;
+            lines_rec_.order_no := order_no_;
+            lines_rec_.line_no := ord_line_rec_.line_no;
+            lines_rec_.rel_no := ord_line_rec_.rel_no;
+            lines_rec_.line_item_no := ord_line_rec_.line_item_no;
+            lines_rec_.sales_part_no := ord_line_rec_.catalog_no;
+            lines_rec_.configuration_id := ord_line_rec_.configuration_id;
+            lines_rec_.qty_to_be_return := possible_qty_return_;
+            lines_rec_.return_reason := parent_rec_.return_reason;
+            CRUD_Create___(lines_rec_);
+         END IF;
+      END LOOP;   
+   END IF;  
+END Create_Rma_Lines___;
+
+
+PROCEDURE Connect_Lines_To_Rma___ (
+   parent_objkey_ IN VARCHAR2, 
+   rma_no_        IN NUMBER) 
+IS
+   parent_key_       Create_Rma_Virtual_Key;
+   parent_rec_       Create_Rma_Virtual_Rec;
+   child_key_        Order_Lines_To_Return_Virtual_Key;
+   child_rec_        Order_Lines_To_Return_Virtual_Rec;
+   attr_             VARCHAR2(2000);
+   info_             VARCHAR2(2000);
+BEGIN
+   parent_key_.objkey   := parent_objkey_;
+   parent_rec_          := Get_Record___(parent_key_);
+   parent_rec_.rma_no   := rma_no_;
+   IF (parent_rec_.rma_no IS NOT NULL) THEN
+      FOR line_rec_ IN Get_Order_Lines_Array___(parent_key_) LOOP
+         child_key_.objkey := line_rec_.objkey;
+         child_rec_ := Get_Record___(child_key_);
+         IF (child_rec_.return_qty IS NOT NULL AND child_rec_.return_qty != 0 ) THEN
+            Client_SYS.Clear_Attr(attr_);
+            Client_SYS.Add_To_Attr('RMA_NO', parent_rec_.rma_no, attr_);
+            Client_SYS.Add_To_Attr('CATALOG_NO', child_rec_.sales_part_no, attr_);
+            Client_SYS.Add_To_Attr('CATALOG_DESC', Customer_Order_Line_API.Get_Catalog_Desc(child_rec_.order_no, child_rec_.line_no, child_rec_.rel_no, child_rec_.line_item_no), attr_);
+            Client_SYS.Add_To_Attr('QTY_TO_RETURN', child_rec_.return_qty, attr_);
+            Client_SYS.Add_To_Attr('QTY_EDITED_FLAG', 'EDITED', attr_);
+            Client_SYS.Add_To_Attr('RETURN_REASON_CODE', child_rec_.return_reason, attr_);
+            Client_SYS.Add_To_Attr('ORDER_NO', child_rec_.order_no, attr_);
+            Client_SYS.Add_To_Attr('LINE_NO', child_rec_.line_no, attr_);
+            Client_SYS.Add_To_Attr('REL_NO', child_rec_.rel_no, attr_);
+            Client_SYS.Add_To_Attr('LINE_ITEM_NO', child_rec_.line_item_no, attr_);            
+            Client_SYS.Add_To_Attr('CONFIGURATION_ID', child_rec_.configuration_id, attr_);
+            Return_Material_Line_API.New(info_, attr_);
+         END IF;   
+      END LOOP;
+   END IF;   
+END Connect_Lines_To_Rma___;
+
+FUNCTION Get_Customer_Info___ (
+   template_order_no_    IN VARCHAR2,
+   template_shipment_id_ IN NUMBER )  RETURN Customer_Info_Structure_Rec
+IS
+   customer_info_   Customer_Info_Structure_Rec;  
+BEGIN
+   IF (template_order_no_ IS NOT NULL) THEN
+      customer_info_.customer_no := Customer_Order_API.Get_Customer_No(template_order_no_);
+   ELSIF (template_shipment_id_ IS NOT NULL) THEN
+      customer_info_.customer_no := Shipment_API.Get_Receiver_Id(template_shipment_id_);
+   END IF;   
+   customer_info_.currency_code := Get_Currency_Code___(customer_info_.customer_no);
+   RETURN customer_info_;
+END Get_Customer_Info___;
+
+
+PROCEDURE Refreshpage___ (
+   key_ IN Return_Material_Key)
+IS
+BEGIN
+	NULL;
+END Refreshpage___;
+
+-- Check whether the order connected RMA lines are exist for a given RMA
+FUNCTION Ord_Connected_Lines_Exist___ (
+   rma_no_ IN NUMBER) RETURN VARCHAR2
+IS   
+   rma_lines_exist_ VARCHAR2(5) DEFAULT 'FALSE';
+BEGIN
+	rma_lines_exist_ := Return_Material_API.Any_Order_Connected_Lines(rma_no_);
+   RETURN rma_lines_exist_;
+   
+END Ord_Connected_Lines_Exist___;
+
+
+FUNCTION Get_Customer_No___(
+   order_no_      IN VARCHAR2,
+   shipment_id_   IN NUMBER,
+   validate_from_ IN VARCHAR2) RETURN VARCHAR2
+IS
+   customer_no_ VARCHAR2(20);
+BEGIN
+   IF validate_from_ = 'OrderNo' THEN
+      customer_no_ := Customer_Order_API.Get_Customer_No(order_no_);
+   ELSIF validate_from_ = 'ShipmentId' THEN
+      customer_no_ := Shipment_API.Get_Receiver_Id(shipment_id_);
+   END IF;
+   RETURN customer_no_;
+END Get_Customer_No___;
+
+-- Check whether the RMA is connected to export control
+FUNCTION Expctr_Connected___ (
+   rma_no_ IN NUMBER) RETURN VARCHAR2
+IS   
+   expctr_connected_ VARCHAR2(5);
+BEGIN
+   expctr_connected_ := Return_Material_API.Is_Expctr_Connected(rma_no_);
+   RETURN expctr_connected_;   
+END Expctr_Connected___;
+
+
+-- Return Single Occurance Return Address information for Return To Address group
+FUNCTION Single_Occ_Return_Address_Info___ (
+   return_to_contract_     IN VARCHAR2,
+   return_addr_no_         IN VARCHAR2,
+   return_to_vendor_no_    IN VARCHAR2,
+   company_                IN VARCHAR2) RETURN Address_Detail_Struc_Rec
+IS
+   rec_                        Address_Detail_Struc_Rec;
+   company_address_rec_        Company_address_API.Public_Rec;
+   return_to_company_          VARCHAR2 (25);
+   $IF Component_Purch_SYS.INSTALLED $THEN
+      supplier_info_address_rec_ Supplier_Info_Address_API.Public_Rec;
+   $END
+   
+BEGIN
+   return_to_company_   := Site_API.Get_Company(return_to_contract_);
+   IF (return_to_contract_ IS NOT NULL) THEN 
+      rec_.address_name := Company_Address_Deliv_Info_API.Get_Address_Name(return_to_company_, return_addr_no_);
+      company_address_rec_ := Company_Address_API.Get(return_to_company_, return_addr_no_);                                                                          
+      rec_.address1     := company_address_rec_.address1;
+      rec_.address2     := company_address_rec_.address2;
+      rec_.address3     := company_address_rec_.address3;
+      rec_.address4     := company_address_rec_.address4;
+      rec_.address5     := company_address_rec_.address5;
+      rec_.address6     := company_address_rec_.address6; 
+      rec_.zip_code     := company_address_rec_.zip_code;                                                            
+      rec_.city         := company_address_rec_.city;
+      rec_.state        := company_address_rec_.state;      
+      rec_.county       := company_address_rec_.county;
+      rec_.country_code := company_address_rec_.country;                                                            
+   ELSIF  (return_to_vendor_no_ IS NOT NULL) THEN
+      $IF Component_Purch_SYS.INSTALLED $THEN
+         supplier_info_address_rec_ := Supplier_Info_Address_API.Get(return_to_vendor_no_,return_addr_no_);
+         rec_.address_name := supplier_info_address_rec_.name;
+         rec_.address1     := supplier_info_address_rec_.address1;
+         rec_.address2     := supplier_info_address_rec_.address2;
+         rec_.address3     := supplier_info_address_rec_.address3;
+         rec_.address4     := supplier_info_address_rec_.address4;
+         rec_.address5     := supplier_info_address_rec_.address5;
+         rec_.address6     := supplier_info_address_rec_.address6; 
+         rec_.zip_code     := supplier_info_address_rec_.zip_code;         
+         rec_.city         := supplier_info_address_rec_.city;
+         rec_.state        := supplier_info_address_rec_.state;         
+         rec_.county       := supplier_info_address_rec_.county;
+         rec_.country_code := supplier_info_address_rec_.country;
+      $ELSE
+         NULL;
+      $END
+   ELSE
+      rec_.address_name := Company_Address_Deliv_Info_API.Get_Address_Name(company_, return_addr_no_);
+      company_address_rec_ := Company_Address_API.Get(company_, return_addr_no_);                                                                          
+      rec_.address1     := company_address_rec_.address1;
+      rec_.address2     := company_address_rec_.address2;
+      rec_.address3     := company_address_rec_.address3;
+      rec_.address4     := company_address_rec_.address4;
+      rec_.address5     := company_address_rec_.address5;
+      rec_.address6     := company_address_rec_.address6; 
+      rec_.zip_code     := company_address_rec_.zip_code;                                                            
+      rec_.city         := company_address_rec_.city;
+      rec_.state        := company_address_rec_.state;      
+      rec_.county       := company_address_rec_.county;
+      rec_.country_code := company_address_rec_.country;                                                                  
+   END IF;
+   RETURN rec_;
+END Single_Occ_Return_Address_Info___;
+
+
+-- Return Single Occurance Delivery Address information for Return From Address group
+FUNCTION Single_Occ_Delivery_Address_Info___ (
+   order_no_                 IN VARCHAR2,
+   shipment_id_              IN NUMBER,
+   return_from_customer_no_  IN VARCHAR2,
+   ship_addr_no_             IN VARCHAR2 ) RETURN Address_Detail_Struc_Rec
+IS
+   rec_                        Address_Detail_Struc_Rec;
+   cust_ord_addr_rec_          Customer_Order_Address_API.Cust_Ord_Addr_Rec;
+   customer_info_address_rec_  Customer_Info_Address_API.Public_Rec;
+   shipment_rec_               Shipment_API.Public_Rec;
+
+BEGIN
+   customer_info_address_rec_ := Customer_Info_Address_API.Get(return_from_customer_no_,ship_addr_no_);
+   rec_.address_name := customer_info_address_rec_.name;
+   IF (rec_.address_name IS NULL) THEN
+      rec_.address_name := Cust_Ord_Customer_API.Get_Name(return_from_customer_no_); 
+   END IF;
+   IF (order_no_ IS NOT NULL) THEN
+      cust_ord_addr_rec_  := Customer_Order_Address_API.Get_Cust_Ord_Addr(order_no_);
+      rec_.address1     := cust_ord_addr_rec_.address1;
+      rec_.address2     := cust_ord_addr_rec_.address2;
+      rec_.address3     := cust_ord_addr_rec_.address3;
+      rec_.address4     := cust_ord_addr_rec_.address4;
+      rec_.address5     := cust_ord_addr_rec_.address5;
+      rec_.address6     := cust_ord_addr_rec_.address6;
+      rec_.zip_code     := cust_ord_addr_rec_.zip_code;  
+      rec_.city         := cust_ord_addr_rec_.city;  
+      rec_.state        := cust_ord_addr_rec_.state;        
+      rec_.county       := cust_ord_addr_rec_.county;  
+      rec_.country_code := cust_ord_addr_rec_.country_code;        
+   ELSIF (shipment_id_ IS NOT NULL) THEN
+      shipment_rec_ := Shipment_API.Get(shipment_id_);
+      rec_.address1     := shipment_rec_.receiver_address1;
+      rec_.address2     := shipment_rec_.receiver_address2;
+      rec_.address3     := shipment_rec_.receiver_address3;
+      rec_.address4     := shipment_rec_.receiver_address4;
+      rec_.address5     := shipment_rec_.receiver_address5;
+      rec_.address6     := shipment_rec_.receiver_address6;
+      rec_.zip_code     := shipment_rec_.receiver_zip_code;  
+      rec_.city         := shipment_rec_.receiver_city;  
+      rec_.state        := shipment_rec_.receiver_state;        
+      rec_.county       := shipment_rec_.receiver_county;  
+      rec_.country_code := shipment_rec_.receiver_country;              
+   ELSE
+      rec_.address1     := customer_info_address_rec_.address1;
+      rec_.address2     := customer_info_address_rec_.address2;
+      rec_.address3     := customer_info_address_rec_.address3;
+      rec_.address4     := customer_info_address_rec_.address4;
+      rec_.address5     := customer_info_address_rec_.address5;
+      rec_.address6     := customer_info_address_rec_.address6;
+      rec_.zip_code     := customer_info_address_rec_.zip_code;  
+      rec_.city         := customer_info_address_rec_.city;  
+      rec_.state        := customer_info_address_rec_.state;        
+      rec_.county       := customer_info_address_rec_.county;  
+      rec_.country_code := customer_info_address_rec_.country;                    
+   END IF;
+   RETURN rec_;
+END Single_Occ_Delivery_Address_Info___;
+
+@Override
+PROCEDURE CRUD_Default_Copy___ (
+ 	rec_  IN OUT Return_Material_Rec )
+IS
+BEGIN
+   super(rec_);
+   rec_.date_requested := Site_API.Get_Site_Date(rec_.contract);
+   rec_.note_id := NULL;
+   rec_.note_text := NULL;
+   rec_.case_id := NULL;
+   rec_.task_id := NULL;
+   rec_.cancel_reason := NULL;
+   rec_.ship_addr_flag := 'N';
+   rec_.return_addr_flag := 'N';
+   rec_.intrastat_exempt := 'EXEMPT';
+   rec_.receipt_rma_no := NULL;
+   rec_.originating_rma_no := NULL;
+   rec_.document_text := FALSE;
+   
+   IF (rec_.return_addr_no IS NULL) THEN
+      rec_.return_address1 := '';
+      rec_.return_address2 := '';
+      rec_.return_address3 := '';
+      rec_.return_address4 := '';
+      rec_.return_address5 := '';
+      rec_.return_address6 := '';
+      rec_.return_addr_zip_code := '';
+      rec_.return_addr_city := '';
+      rec_.return_addr_state := '';
+      rec_.return_addr_county := '';
+      rec_.return_addr_country_code := '';
+      rec_.return_addr_Country_desc := '';
+   END IF;
+END CRUD_Default_Copy___;
+
+
+FUNCTION Create_Rma___ (
+   parent_objkey_ IN VARCHAR2)RETURN NUMBER
+IS
+   parent_key_             Create_Rma_Virtual_Key;
+   parent_rec_             Create_Rma_Virtual_Rec;  
+   attr_                         VARCHAR2(32000);
+   contract_default_structure_   Return_Material_API.Default_Value_Struc_Rec;
+   supply_country_db_            VARCHAR2(2);
+   company_                      VARCHAR2(20);
+   address1_                     VARCHAR2(35);
+   info_                         VARCHAR2(2000);
+   ship_addr_no_                 VARCHAR2(50); 
+   return_info_structure_        Return_Information_Struc_Rec;   
+   cust_default_structure_       Return_Material_API.Default_Value_Struc_Rec;
+   return_to_supplier_           VARCHAR2(20);
+   address_detail_structure_     Address_Detail_Struc_Rec;
+   use_price_incl_tax_           VARCHAR2(5);  
+   is_internal_supplier_         BOOLEAN := FALSE; 
+BEGIN
+	parent_key_.objkey   := parent_objkey_; 
+   parent_rec_          := Get_Record___(parent_key_);
+   Client_SYS.Clear_Attr(attr_);
+   Client_SYS.Add_To_Attr('DATE_REQUESTED',        Site_API.Get_Site_Date(parent_rec_.contract), attr_);   
+   Client_SYS.Add_To_Attr('CONTRACT',              parent_rec_.contract,      attr_);
+   Client_SYS.Add_To_Attr('CURRENCY_CODE',         parent_rec_.currency_code, attr_);
+   Client_SYS.Add_To_Attr('CUSTOMER_NO',           parent_rec_.customer_no,   attr_);
+   Client_SYS.Add_To_Attr('RETURN_APPROVER_ID',    parent_rec_.coordinator,   attr_);
+   Client_SYS.Add_To_Attr('RMA_REPORT_PRINTED_DB', 'NOT PRINTED',             attr_);
+   Client_SYS.Add_To_Attr('RETURN_ADDR_FLAG_DB',   'N',                       attr_);
+   
+   IF (parent_rec_.template_order_no IS NULL OR parent_rec_.template_shipment_id IS NULL) THEN
+      ship_addr_no_ := Cust_Ord_Customer_API.Get_Delivery_Address(parent_rec_.customer_no);
+   ELSIF (parent_rec_.template_order_no IS NOT NULL) THEN
+      ship_addr_no_ := Customer_Order_API.Get_Ship_Addr_No(parent_rec_.template_order_no);
+   ELSIF (parent_rec_.template_shipment_id IS NOT NULL) THEN
+      ship_addr_no_ := Shipment_API.Get_Receiver_Addr_Id(parent_rec_.template_shipment_id);   
+   END IF;
+   cust_default_structure_ := Validate_Customer___(parent_rec_.contract,
+                                                   parent_rec_.customer_no,
+                                                   supply_country_db_,
+                                                   company_,
+                                                   parent_rec_.template_order_no,
+                                                   parent_rec_.template_shipment_id,
+                                                   ship_addr_no_);
+   Client_SYS.Add_To_Attr('RETURN_FROM_CUSTOMER_NO',     cust_default_structure_.return_from_customer_no,      attr_);
+   Client_SYS.Add_To_Attr('LANGUAGE_CODE',               cust_default_structure_.language_code,                attr_);
+   Client_SYS.Add_To_Attr('CUSTOMER_NO_ADDR_NO',         cust_default_structure_.customer_no_addr_no,          attr_);
+   Client_SYS.Add_To_Attr('SHIP_ADDR_NO',                cust_default_structure_.ship_addr_no,                 attr_);
+   Client_SYS.Add_To_Attr('CUSTOMER_NO_CREDIT',          cust_default_structure_.customer_no_credit,           attr_);
+   Client_SYS.Add_To_Attr('CUSTOMER_NO_CREDIT_ADDR_NO',  cust_default_structure_.customer_no_credit_addr_no,   attr_);
+   Client_SYS.Add_To_Attr('CUST_REF',                    cust_default_structure_.cust_ref,                     attr_);
+   Client_SYS.Add_To_Attr('TAX_LIABILITY',               cust_default_structure_.tax_liability,                attr_);
+   Client_SYS.Add_To_Attr('INTRASTAT_EXEMPT_DB',         cust_default_structure_.intrastat_exempt,             attr_);
+   IF (cust_default_structure_.use_price_incl_tax_db) THEN
+      use_price_incl_tax_ := 'TRUE';
+   ELSE
+      use_price_incl_tax_ := 'FALSE';
+   END IF;
+   Client_SYS.Add_To_Attr('USE_PRICE_INCL_TAX_DB', use_price_incl_tax_, attr_);   
+   Client_SYS.Add_To_Attr('CUSTOMER_TAX_USAGE_TYPE', cust_default_structure_.customer_tax_usage_type, attr_);
+    
+   contract_default_structure_ := Validate_Contract___(parent_rec_.contract,
+                                                          parent_rec_.customer_no,
+                                                          parent_rec_.template_order_no,
+                                                          parent_rec_.template_shipment_id,
+                                                          ship_addr_no_);
+   company_ := contract_default_structure_.company;
+   supply_country_db_ := contract_default_structure_.supply_country_db;
+
+   Client_SYS.Add_To_Attr('SUPPLY_COUNTRY_DB', supply_country_db_, attr_);
+   Client_SYS.Add_To_Attr('RETURN_TO_CONTRACT', contract_default_structure_.return_to_contract, attr_);
+   Client_SYS.Add_To_Attr('SHIP_VIA_CODE', contract_default_structure_.ship_via_code, attr_);
+   Client_SYS.Add_To_Attr('DELIVERY_TERMS', contract_default_structure_.delivery_terms, attr_);
+   Client_SYS.Add_To_Attr('RETURN_ADDR_NO', contract_default_structure_.return_addr_no, attr_);
+   Client_SYS.Add_To_Attr('RETURN_ADDR_NAME', contract_default_structure_.return_addr_name, attr_);
+   Client_SYS.Add_To_Attr('RETURN_ADDRESS1', contract_default_structure_.return_address1, attr_);
+   Client_SYS.Add_To_Attr('RETURN_ADDRESS2', contract_default_structure_.return_address2, attr_);
+   Client_SYS.Add_To_Attr('RETURN_ADDRESS3', contract_default_structure_.return_address3, attr_);
+   Client_SYS.Add_To_Attr('RETURN_ADDRESS4', contract_default_structure_.return_address4, attr_);
+   Client_SYS.Add_To_Attr('RETURN_ADDRESS5', contract_default_structure_.return_address5, attr_);
+   Client_SYS.Add_To_Attr('RETURN_ADDRESS6', contract_default_structure_.return_address6, attr_);
+   Client_SYS.Add_To_Attr('RETURN_ADDR_CITY', contract_default_structure_.return_addr_city, attr_);
+   Client_SYS.Add_To_Attr('RETURN_ADDR_STATE', contract_default_structure_.return_addr_state, attr_);
+   Client_SYS.Add_To_Attr('RETURN_ADDR_ZIP_CODE', contract_default_structure_.return_addr_zip_code, attr_);
+   Client_SYS.Add_To_Attr('RETURN_ADDR_COUNTY', contract_default_structure_.return_addr_county, attr_);
+   Client_SYS.Add_To_Attr('RETURN_ADDR_COUNTRY_CODE', contract_default_structure_.return_addr_country_code, attr_);
+   IF (parent_rec_.return_to_contract IS NOT NULL) THEN
+      Client_SYS.Add_To_Attr('RETURN_TO_CONTRACT', parent_rec_.return_to_contract, attr_);
+      parent_rec_.return_to_supplier := Get_Return_To_Vendor_No___(parent_rec_.return_to_contract);
+      return_to_supplier_ := parent_rec_.return_to_supplier;
+      IF (parent_rec_.return_to_supplier IS NOT NULL) THEN
+         Client_SYS.Add_To_Attr('RETURN_TO_VENDOR_NO', parent_rec_.return_to_supplier, attr_);
+         is_internal_supplier_ := TRUE;
+      END IF;
+   END IF;   
+   IF (parent_rec_.return_to_supplier IS NOT NULL AND NOT is_internal_supplier_) THEN
+      return_to_supplier_ := parent_rec_.return_to_supplier;
+      Client_SYS.Add_To_Attr('RETURN_TO_VENDOR_NO', return_to_supplier_, attr_);
+      Client_SYS.Add_To_Attr('RETURN_TO_CONTRACT', '', attr_);
+      return_info_structure_ := Fetch_Return_To_Information___(return_to_supplier_, parent_rec_.return_to_contract, parent_rec_.contract, company_);
+      Client_SYS.Add_To_Attr('RETURN_ADDR_NO', return_info_structure_.return_addr_no, attr_);
+      Client_SYS.Add_To_Attr('RETURN_ADDR_NAME', return_info_structure_.return_addr_name, attr_);
+      Client_SYS.Add_To_Attr('RETURN_ADDRESS1', return_info_structure_.return_address1, attr_);
+      Client_SYS.Add_To_Attr('RETURN_ADDRESS2', return_info_structure_.return_address2, attr_);
+      Client_SYS.Add_To_Attr('RETURN_ADDRESS3', return_info_structure_.return_address3, attr_);
+      Client_SYS.Add_To_Attr('RETURN_ADDRESS4', return_info_structure_.return_address4, attr_);
+      Client_SYS.Add_To_Attr('RETURN_ADDRESS5', return_info_structure_.return_address5, attr_);
+      Client_SYS.Add_To_Attr('RETURN_ADDRESS6', return_info_structure_.return_address6, attr_);
+      Client_SYS.Add_To_Attr('RETURN_ADDR_CITY', return_info_structure_.return_addr_city, attr_);
+      Client_SYS.Add_To_Attr('RETURN_ADDR_STATE', return_info_structure_.return_addr_state, attr_);
+      Client_SYS.Add_To_Attr('RETURN_ADDR_ZIP_CODE', return_info_structure_.return_addr_zip_code, attr_);
+      Client_SYS.Add_To_Attr('RETURN_ADDR_COUNTY', return_info_structure_.return_addr_county, attr_);
+      Client_SYS.Add_To_Attr('RETURN_ADDR_COUNTRY_CODE', return_info_structure_.return_addr_country_code, attr_);
+   END IF;
+   IF (parent_rec_.template_order_no IS NOT NULL OR parent_rec_.template_shipment_id IS NOT NULL) THEN
+      address_detail_structure_ := Fetch_Address_Related_Details___(NULL,
+                                                                    parent_rec_.customer_no,
+                                                                    cust_default_structure_.return_from_customer_no,
+                                                                    parent_rec_.template_order_no,
+                                                                    parent_rec_.template_shipment_id,
+                                                                    ship_addr_no_,
+                                                                    cust_default_structure_.customer_no_addr_no);
+      Client_SYS.Add_To_Attr('SHIP_ADDR_FLAG_DB', address_detail_structure_.ship_addr_flag, attr_);
+      Client_SYS.Add_To_Attr('SHIP_ADDR_NO', address_detail_structure_.ship_addr_no, attr_);
+      Client_SYS.Add_To_Attr('SHIP_ADDR_NAME', address_detail_structure_.ship_addr_name, attr_);
+      Client_SYS.Add_To_Attr('SHIP_ADDRESS1', address_detail_structure_.ship_address1, attr_);
+      Client_SYS.Add_To_Attr('SHIP_ADDRESS2', address_detail_structure_.ship_address2, attr_);
+      Client_SYS.Add_To_Attr('SHIP_ADDRESS3', address_detail_structure_.ship_address3, attr_);
+      Client_SYS.Add_To_Attr('SHIP_ADDRESS4', address_detail_structure_.ship_address4, attr_);
+      Client_SYS.Add_To_Attr('SHIP_ADDRESS5', address_detail_structure_.ship_address5, attr_);
+      Client_SYS.Add_To_Attr('SHIP_ADDRESS6', address_detail_structure_.ship_address6, attr_);
+      Client_SYS.Add_To_Attr('SHIP_ADDR_CITY', address_detail_structure_.ship_addr_city, attr_);
+      Client_SYS.Add_To_Attr('SHIP_ADDR_STATE', address_detail_structure_.ship_addr_state, attr_);
+      Client_SYS.Add_To_Attr('SHIP_ADDR_ZIP_CODE', address_detail_structure_.ship_addr_zip_code, attr_);
+      Client_SYS.Add_To_Attr('SHIP_ADDR_COUNTY', address_detail_structure_.ship_addr_county, attr_);
+      Client_SYS.Add_To_Attr('SHIP_ADDR_COUNTRY_CODE', address_detail_structure_.ship_addr_country_code, attr_);
+   ELSE
+      Client_SYS.Add_To_Attr('SHIP_ADDR_FLAG_DB', 'N', attr_);
+   END IF;   
+   IF (parent_rec_.template_order_no IS NULL OR parent_rec_.template_shipment_id IS NULL) THEN
+      address1_ := Customer_Info_Address_API.Get_Address1(parent_rec_.customer_no, ship_addr_no_);
+   ELSIF (parent_rec_.template_order_no IS NOT NULL) THEN
+      address1_ := Customer_Order_Address_API.Get_Addr_1(parent_rec_.template_order_no);
+   ELSIF (parent_rec_.template_shipment_id IS NOT NULL) THEN
+      address1_ := Shipment_API.Get_Receiver_Address1(parent_rec_.template_shipment_id);   
+   END IF;
+   Client_SYS.Add_To_Attr('ADDRESS1', address1_, attr_);
+   Client_SYS.Add_To_Attr('JINSUI_INVOICE_DB', 'FALSE', attr_);
+   Client_SYS.Add_To_Attr('DOCUMENT_ADDRESS_NAME', Customer_Info_Address_API.Get_Name(parent_rec_.customer_no, cust_default_structure_.customer_no_addr_no), attr_);
+   Client_SYS.Add_To_Attr('DELIVERY_COUNTRY', Cust_Ord_Customer_Address_API.Get_Country_Code(cust_default_structure_.return_from_customer_no, ship_addr_no_), attr_);
+   Client_SYS.Add_To_Attr('ORDER_NO', parent_rec_.template_order_no, attr_);
+   Client_SYS.Add_To_Attr('SHIPMENT_ID', parent_rec_.template_shipment_id, attr_);
+   
+   Return_Material_API.New(info_, attr_);
+   parent_rec_.rma_no := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Item_Value('RMA_NO', attr_));
+
+   IF (parent_rec_.rma_no IS NOT NULL) THEN 
+      Connect_Lines_To_Rma___(parent_objkey_, parent_rec_.rma_no);
+   END IF;
+   
+   RETURN parent_rec_.rma_no;
+END Create_Rma___;

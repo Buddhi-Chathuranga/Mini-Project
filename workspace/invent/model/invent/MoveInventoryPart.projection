@@ -1,0 +1,624 @@
+-------------------------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  --------------------------------------------------------------------------------
+-- 2021-12-22  GrGalk  SC21R2-6884, Added the attribute ObjId to entity InventoryPartPickShipStock
+-- 2021-05-25  JaThlk  Bug 158861(SCZ-14726), Modified InventoryPartInStockDelivery and LocationInfoStructure to remove CheckExist and LineExist.
+-- 2021-01-21  JaThlk  SC2020R1-12213, Modified ExpirationDate to make it editable.
+-- 2020-12-03  WaSalk  SC2020R1-11386, Added insertable 'false' to AvailabilityControlId to avoid de-serialization error.
+-- 2020-10-02  RasDlk  SC2020R1-10286, Changed the label of the attribute AvailabilityControlId.
+-- 2020-06-01  WaSalk  SCXTEND-4280, Added insrtable 'false' to DefaultLocation, UoM, PartOwnership, ConditionCode, PartOwnershipDb, insertable, SystemShortageFlag and Shortage.
+-- 2020-03-30  JaThlk  SC2021R1-19, Added the attributes from input parameters in the structure, ChangePartAvailabilityControlStructure which were not there before.
+-- 2019-08-28  ChFolk  SCUXXW4-23117, Used Enumeration for FreezeFlag instead of Boolean.
+-- 2019-07-29  ChFolk  SCUXXW4-23311, Removed functions GetDefaultAvailabilityControlId and CheckLineExist as they are handled through GetLocationInfo.
+-- 2019-07-29          added some parameters to LocationInfoStructure.
+-- 2019-07-24  ChFolk  SCUXXW4-23311, Changed UoM to avoid prefetch and uncessary method calls.
+-- 2019-04-03  ShKolk  SCUXXW4-17953, Added actions CreateInventoryPartInStockDelivery and UpdateInventoryPartInStockDelivery to avoid overtaking crud methods in plsvc
+-- 2019-03-07  ChFolk  SCUXXW4-16871, Added dynamic dependency where it is missing.
+-- 2018-10-23  ChFolk  SCUXXW4-5231, Added function GetInventoryPartInStockInfo and structures InvPartInStockInfoStructure and ChangePartAvailabilityControlStructure
+-- 2018-10-23          which are used with ChangePartAvailabilityControl assistant. Added references to support concatenation of descriptions.
+-- 2018-09-21  JaThlk  SCUXXW4-6021, Made it possible to add default values in updating records.
+-- 2018-08-28  JaThlk  SCUXXW4-6021, Added new attributes to pass the values in attr_.
+-- 2018-07-03  JaThlk  SCUXXW4-6021, Converted from frmChangePartLoc using MTG Version: 1.23.
+-------------------------------------------------------------------------------------------------------
+
+projection MoveInventoryPart;
+component INVENT;
+layer Core;
+description "Use this API to move parts from one inventory location to another including reserved stock to customer order, project deliverables, material requisition, shop order and DOP order. The reason for such a move could involve alterations in inventory locations, the need to meet demand from a different site, incorrect receipts, etc. Parts can either be moved to a location where there are already parts of this kind or moved to a new location.
+            It is also possible to choose if the parts should be moved directly to an inventory location or if they should be moved to transit. If parts are reserved, it is only possible to move within the site only. While the parts are in transport, they are not available for reservations. When moving consignment stock handled parts to another stock location directly, you must specify whether the parts should be consumed in the displayed dialog box.
+            However, moving consignment parts between locations can only be done if the locations belong to the same site.";
+category Users;
+
+--------------------------------- FRAGMENTS ---------------------------------
+include fragment InventoryPartLovSelector;
+include fragment UserAllowedSiteLovSelector;
+include fragment InventoryLocation5Selector;
+include fragment InventoryLocation20Selector;
+include fragment IdentifySerialsInLocationAssistant;
+
+
+----------------------------- MAIN ENTRY POINTS -----------------------------
+entityset InventoryPartInStockSet for InventoryPartPickShipStock;
+
+------------------------------ ENTITY DETAILS -------------------------------
+@Override
+entity InventoryPartPickShipStock using InventoryPartInStock {
+   crud = Read;
+   from = "inventory_part_pick_ship_stock";
+   exec = "INVENTORY_PART_IN_STOCK_API";
+   where = "FREEZE_FLAG_DB !='Y'";
+   supportwarnings = [true];
+   exclude attributes = RotablePartPoolId, CreateDate;
+   ludependencies = InventoryPartPickShipStock, InventoryPartInStock;
+
+   attribute ObjId Text {
+      fetch = "OBJID";
+      label = "Objid";
+   }
+   attribute PartNo Text {
+      fetch = "PART_NO";
+      label = "Part No";
+      maxlength = 100;
+      editable = [false];
+      format = uppercase;
+   }
+   attribute Contract Text {
+      fetch = "CONTRACT";
+      label = "Site";
+      maxlength = 5;
+      required = [true];
+      editable = [false];
+      format = uppercase;
+   }
+   attribute EngChgLevel Text {
+      label = "Revision No";
+   }
+   attribute DefaultLocation Boolean("TRUE", "FALSE") {
+      fetch = "Inventory_Part_Def_Loc_API.Check_If_Location_Default_Db(CONTRACT,PART_NO,LOCATION_NO)";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute ReceiptDate Timestamp {
+      fetch = "RECEIPT_DATE";
+      editable = [ETag = null];
+   }
+   attribute PartOwnershipDb Text {
+      fetch = "PART_OWNERSHIP_DB";
+      label = "Ownership";
+      maxlength = 80;
+   }
+   attribute Owner Text {
+      fetch = "DECODE(OWNING_CUSTOMER_NO,NULL,OWNING_VENDOR_NO,OWNING_CUSTOMER_NO)";
+   }
+   attribute ReceiptIssueSerialTrackingDb Text {
+      fetch = "Part_Catalog_API.Get_Rcpt_Issue_Serial_Track_Db(PART_NO)";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute ConditionCode Text {
+      editable = [false];
+   }
+   attribute AvailableQtyToMove Number {
+      fetch = "Inv_Part_Stock_Reservation_API.Get_Available_Qty_To_Move(CONTRACT, PART_NO, CONFIGURATION_ID, LOCATION_NO, LOT_BATCH_NO, SERIAL_NO,ENG_CHG_LEVEL, WAIV_DEV_REJ_NO, ACTIVITY_SEQ, HANDLING_UNIT_ID, QTY_ONHAND, QTY_RESERVED )";
+   }
+   attribute QtyOnhand Number;
+   attribute CatchQtyOnhandUoM Text {
+      fetch = "Inventory_Part_API.Get_Enabled_Catch_Unit_Meas(CONTRACT,PART_NO)";
+      editable = [false];
+   }
+   attribute HandlingUnitTypeId Text {
+      fetch = "Handling_Unit_API.Get_Handling_Unit_Type_Id(HANDLING_UNIT_ID)";
+   }
+   attribute PartShortageFlag Text {
+      fetch = "Inventory_Part_API.Get_Shortage_Flag(CONTRACT, PART_NO)";
+   }
+   attribute DefaultLocationNo Text {
+      fetch = "Inventory_Part_Def_Loc_API.Get_Location_No(CONTRACT, PART_NO)";
+   }
+   attribute CatchUnitEnabled Boolean("TRUE", "FALSE") {
+      fetch = "Part_Catalog_API.Get_Catch_Unit_Enabled_Db(PART_NO)";
+   }
+   attribute AvailabilityControlId Text {
+      label = "Availability Control ID";
+   }
+   reference PartNoRef(Contract, PartNo) to InventoryPartLov(Contract, PartNo) {
+      label = "Part No";
+   }
+   reference ContractRef(Contract) to UserAllowedSiteLov(Contract) {
+      label = "Site";
+   }
+   reference LocationNoRef(Contract, LocationNo) to InventoryLocation20(Contract, LocationNo) {
+      label = "Location No";
+   }
+   reference HandlingUnitRef(HandlingUnitId) to HandlingUnit(HandlingUnitId);
+   reference HandlingUnitTypeIdRef(HandlingUnitTypeId) to HandlingUnitType(HandlingUnitTypeId);
+
+   array NewPartLocArray(PartNo, ConfigurationId, SerialNo, WaivDevRejNo, LotBatchNo, EngChgLevel, HandlingUnitId, ActivitySeq) to InventoryPartInStockDelivery(PartNo, ConfigurationId, SerialNo, WaivDevRejNo, LotBatchNo, EngChgLevel, HandlingUnitId, ActivitySeq) {
+      where = "not (:parent.Contract = :child.Contract and :parent.PartNo = :child.PartNo and :parent.ConfigurationId = :child.ConfigurationId and :parent.LocationNo = :child.LocationNo and :parent.LotBatchNo = :child.LotBatchNo and
+                      :parent.SerialNo = :child.SerialNo and :parent.EngChgLevel = :child.EngChgLevel and :parent.HandlingUnitId = :child.HandlingUnitId and :parent.WaivDevRejNo = :child.WaivDevRejNo and :parent.ActivitySeq = :child.ActivitySeq ) and (:parent.HandlingUnitId = :child.HandlingUnitId) ";
+   }
+}
+
+@Override
+entity InventoryPartInStockDelivery using InventoryPartInStock {
+   crud = Create, Read, Update;
+   from = "inventory_part_in_stock_deliv";
+   exec = "INVENTORY_PART_IN_STOCK_API";
+   keys = Contract, PartNo, ConfigurationId, SerialNo, WaivDevRejNo, LotBatchNo, EngChgLevel, ActivitySeq, HandlingUnitId, LocationNo;
+   use attributes = QtyOnhand, CatchQtyOnhand;
+   exclude attributes = RotablePartPoolId, CreateDate;
+   ludependencies = InventoryPartInStockDelivery, InventoryPartInStock;
+
+   attribute Contract Text {
+      fetch = "CONTRACT";
+      label = "Site";
+      maxlength = 5;
+      required = [true];
+      editable = [ETag = null];
+      format = uppercase;
+   }
+   attribute PartNo Text {
+      fetch = "PART_NO";
+      label = "Part No";
+      maxlength = 25;
+      required = [true];
+      editable = [false];
+   }
+   attribute ConfigurationId Text {
+      fetch = "CONFIGURATION_ID";
+      label = "Configuration ID";
+      maxlength = 50;
+      required = [true];
+      editable = [false];
+   }
+   attribute SerialNo Text {
+      fetch = "SERIAL_NO";
+      label = "Serial No";
+      maxlength = 50;
+      required = [true];
+      editable = [false];
+   }
+   attribute EngChgLevel Text {
+      fetch = "ENG_CHG_LEVEL";
+      label = "Revision No";
+      maxlength = 6;
+      required = [true];
+      editable = [false];
+   }
+   attribute WaivDevRejNo Text {
+      fetch = "WAIV_DEV_REJ_NO";
+      label = "W/D/R No";
+      maxlength = 15;
+      required = [true];
+      editable = [false];
+   }
+   attribute LotBatchNo Text {
+      fetch = "LOT_BATCH_NO";
+      label = "Lot/Batch No";
+      maxlength = 20;
+      required = [true];
+      editable = [false];
+   }
+   attribute ActivitySeq Number {
+      fetch = "ACTIVITY_SEQ";
+      label = "(Untitled)";
+      editable = [false];
+   }
+   attribute HandlingUnitId Number {
+      fetch = "HANDLING_UNIT_ID";
+      label = "Handling Unit ID";
+      required = [true];
+      editable = [ETag = null];
+   }
+   attribute LocationNo Text {
+      fetch = "LOCATION_NO";
+      label = "Location No";
+      maxlength = 35;
+      required = [true];
+      editable = [ETag = null];
+      format = uppercase;
+   }
+
+   attribute Destination Enumeration(InventoryPartDestination) {
+      fetch = "INVENTORY_PART_DESTINATION_API.Get_Db_Value(1)";
+      label = "Destination";
+      required = [true];
+      default = "INVENTORY_PART_DESTINATION_API.DB_MOVE_TO_INVENTORY";
+   }
+   attribute ConditionCode Text {
+      fetch = "CONDITION_CODE_MANAGER_API.Get_Condition_Code(PART_NO,SERIAL_NO,LOT_BATCH_NO )";
+      label = "Condition Code";
+      maxlength = 10;
+      editable = [false];
+      insertable = [false];
+      format = uppercase;
+      insertable = [false];
+   }
+   attribute ExpirationDate Date {
+      fetch = "EXPIRATION_DATE";
+      label = "Expiration Date";
+   }
+   attribute Warehouse Text {
+      fetch = "WAREHOUSE";
+      label = "Warehouse";
+      maxlength = 35;
+      editable = [false];
+      insertable = [false];
+   }
+   attribute BayNo Text {
+      fetch = "BAY_NO";
+      label = "Bay";
+      maxlength = 5;
+      editable = [false];
+      insertable = [false];
+   }
+   attribute RowNo Text {
+      fetch = "ROW_NO";
+      label = "Row";
+      maxlength = 5;
+      editable = [false];
+      insertable = [false];
+   }
+   attribute TierNo Text {
+      fetch = "TIER_NO";
+      label = "Tier";
+      maxlength = 5;
+      editable = [false];
+      insertable = [false];
+   }
+   attribute BinNo Text {
+      fetch = "BIN_NO";
+      label = "Bin";
+      maxlength = 5;
+      editable = [false];
+      insertable = [false];
+   }
+   attribute AvailabilityControlId Text {
+      fetch = "AVAILABILITY_CONTROL_ID";
+      label = "Availability Control ID";
+      maxlength = 25;
+      editable = [ETag = null];
+      insertable = [false];
+   }
+   attribute DefaultLocation Text {
+      fetch = "INVENTORY_PART_DEF_LOC_API.Check_If_Location_Default(CONTRACT,PART_NO,LOCATION_NO)";
+      insertable = [false];
+      label = "Default Location";
+      insertable = [false];
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute QtyInTransit Number {
+      fetch = "QTY_IN_TRANSIT";
+      label = "In Transit Qty";
+      editable = [false];
+      insertable = [false];
+   }
+   attribute QtyOnhand Number {
+      fetch = "QTY_ONHAND";
+      label = "On Hand Qty";
+      editable = [false];
+      insertable = [false];
+   }
+   attribute UoM Text {
+      fetch = "Inventory_Part_API.Get_Unit_Meas(CONTRACT, PART_NO)";
+      insertable = [false];
+   }
+   attribute ToCatchUoM Text {
+      fetch = "Inventory_Part_API.Get_Enabled_Catch_Unit_Meas(CONTRACT,PART_NO)";
+      label = "To Catch UoM";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute CatchQtyInTransit Number {
+      fetch = "CATCH_QTY_IN_TRANSIT";
+      label = "Catch Qty in Transit";
+      editable = [ETag = null];
+   }
+   attribute CatchQtyOnhand Number {
+      fetch = "CATCH_QTY_ONHAND";
+      label = "On Hand Catch Qty";
+      editable = [ETag = null];
+      insertable = [false];
+   }
+   attribute FreezeFlag Enumeration(GenYesNo) {
+      fetch = "FREEZE_FLAG_DB";
+      label = "Frozen for Counting";
+      editable = [false];
+      insertable = [false];
+      required = [true];
+      default = "Gen_Yes_No_API.DB_NO";
+   }
+   attribute PartOwnership Enumeration(PartOwnership) {
+      fetch = "PART_OWNERSHIP_DB";
+      insertable = [false];
+      label = "Ownership";
+      editable = [false];
+      insertable = [false];
+   }
+   attribute Owner Text {
+      fetch = "DECODE(OWNING_CUSTOMER_NO,NULL,OWNING_VENDOR_NO,OWNING_CUSTOMER_NO)";
+      label = "Owner";
+      maxlength = 100;
+      editable = [false];
+      format = uppercase;
+   }
+   @DynamicComponentDependency ORDER
+   @DynamicComponentDependency PURCH
+   attribute OwnerName Text {
+      fetch = "DECODE(OWNING_CUSTOMER_NO,NULL,SUPPLIER_API.Get_Vendor_Name(OWNING_VENDOR_NO), Cust_Ord_Customer_API.Get_Name(OWNING_CUSTOMER_NO))";
+      label = "Owner Name";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute Note Text {
+      fetch = "NULL";
+      label = "Note";
+      maxlength = 2000;
+   }
+   attribute ReceiptDate Timestamp {
+      fetch = "RECEIPT_DATE";
+      label = "Receipt Date";
+      insertable = [false];
+      editable = [ETag = null];
+      insertable = [false];
+      required = [false];
+   }
+   attribute ShortageExists Number {
+      fetch = "Shortage_Demand_API.Shortage_Exists(CONTRACT, PART_NO)";
+      insertable = [false];
+      label = "Shortage Exists?";
+      insertable = [false];
+      editable = [false];
+   }
+   attribute PartOwnershipDb Text {
+      fetch = "PART_OWNERSHIP_DB";
+      insertable = [false];
+      label = "Ownership";
+      maxlength = 20;
+      editable = [false];
+   }
+   attribute NewAvailabilityControlId Text {
+      fetch = "NULL";
+   }
+   attribute DefaultAvailabilityControlId Text {
+      fetch = "NULL";
+      insertable = [false];
+   }
+   attribute QuantityMoved Number {
+      fetch = "NULL";
+      required = [true];
+   }
+   attribute CatchQuantityMoved Number {
+      fetch = "NULL";
+   }
+   attribute ParentLocationNo Text {
+      fetch = "NULL";
+   }
+   attribute ParentContract Text {
+      fetch = "NULL";
+   }
+   attribute ParentAvailabilityControlId Text {
+      fetch = "NULL";
+   }
+   attribute ParentWaivDevRejNo Text {
+      fetch = "NULL";
+   }
+   attribute NewWaivDevRejNo Text {
+      fetch = "NULL";
+      insertable = [false];
+   }
+   attribute ConsumeStock Text {
+      fetch = "NULL";
+   }
+   attribute SessionId Number {
+      fetch = "NULL";
+   }
+   attribute QtyReserved Number {
+      required = [false];
+      insertable = [false];
+   }
+   attribute SystemShortageFlag Text {
+      fetch = "Mpccom_System_Parameter_API.Get_Parameter_Value1('SHORTAGE_HANDLING')";
+      insertable = [false];
+   }
+   attribute Shortage Text {
+      fetch = "Inventory_Part_Shortage_API.Get_Client_Value(0)";
+      insertable = [false];
+   }
+   attribute CatchUnitEnabled Boolean("TRUE", "FALSE") {
+      fetch = "Part_Catalog_API.Get_Catch_Unit_Enabled_Db(PART_NO)";
+      insertable = [false];
+   }
+   reference ContractRef(Contract) to UserAllowedSiteLov(Contract) {
+      label = "Site";
+   }
+   reference LocationNoRef(Contract, LocationNo) to InventoryLocation5(Contract, LocationNo) {
+      label = "Location No";
+   }
+   reference AvailabilityControlIdRef(AvailabilityControlId) to PartAvailabilityControl(AvailabilityControlId) {
+      label = "Availability Control";
+   }
+   reference ToUoMRef(UoM) to IsoUnit(UnitCode) {
+      label = "To UoM";
+   }
+   reference ConditionCodeRef(ConditionCode) to ConditionCode(ConditionCode) {
+      label = "Condition Code";
+   }
+
+   action UpdateInventoryPartInStockDelivery {
+      ludependencies = InventoryPartInStockDelivery;
+      parameter ParentLocationNo Text;
+      parameter ParentContract Text;
+      parameter ParentWaivDevRejNo Text;
+      parameter CatchQuantityMoved Number;
+      parameter NewAvailabilityControlId Text;
+      parameter NewWaivDevRejNo Text;
+      parameter ConsumeStock Text;
+      parameter SessionId Number;
+      parameter ExpirationDate Date;
+      parameter Destination Text;
+      parameter QuantityMoved Number;
+      parameter Note Text;
+   }
+}
+
+// Overrided to avoid deployment errors.
+@Override
+entity InventoryLocation {
+   crud = Read;
+}
+
+---------------------------------- ACTIONS ----------------------------------
+action CreateInventoryPartInStockDelivery {
+   initialcheck UserAllowedSite(Contract);
+   initialcheck UserAllowedSite(ParentContract);
+   ludependencies = InventoryPartInStockDelivery;
+   -- keys
+   parameter Contract Text;
+   parameter PartNo Text;
+   parameter ConfigurationId Text;
+   parameter SerialNo Text;
+   parameter WaivDevRejNo Text;
+   parameter LotBatchNo Text;
+   parameter EngChgLevel Text;
+   parameter ActivitySeq Number;
+   parameter HandlingUnitId Number;
+   parameter LocationNo Text;
+   -- attributes
+   parameter ParentLocationNo Text;
+   parameter ParentContract Text;
+   parameter ParentWaivDevRejNo Text;
+   parameter CatchQuantityMoved Number;
+   parameter NewAvailabilityControlId Text;
+   parameter ConsumeStock Text;
+   parameter SessionId Number;
+   parameter ExpirationDate Date;
+   parameter Destination Text;
+   parameter QuantityMoved Number;
+   parameter Note Text;
+}
+
+action ModifyDefaultLocation {
+   initialcheck UserAllowedSite(Contract);
+   parameter Contract Text;
+   parameter PartNo Text;
+   parameter LocationNo Text;
+   ludependencies = InventoryPartPickShipStock;
+
+}
+
+--------------------------------- FUNCTIONS ---------------------------------
+function GetInventoryPartInStockInfo Structure(InvPartInStockInfoStructure) {
+   parameter Contract Text;
+   parameter PartNo Text;
+   parameter ConfigurationId Text;
+   parameter Location Text;
+   parameter LotBatchNo Text;
+   parameter SerialNo Text;
+   parameter EngChgLevel Text;
+   parameter WaivDevRejNo Text;
+   parameter ActivitySeq Number;
+   parameter HandlingUnitId Number;
+}
+
+function AvailableControlIds List<Entity(PartAvailabilityControl)> {
+   where = "OBJSTATE = 'Active'";
+}
+
+function GetLocationInfo Structure(LocationInfoStructure) {
+   parameter Contract Text;
+   parameter LocationNo Text;
+}
+
+function GetDefaultLocation Text {
+   parameter Contract Text;
+   parameter PartNo Text;
+}
+
+function CheckShortageExists Number {
+   parameter ParentContract Text;
+   parameter Contract Text;
+}
+
+-------------------------------- STRUCTURES ---------------------------------
+structure LocationInfoStructure {
+   attribute Warehouse Text;
+   attribute BayNo Text;
+   attribute RowNo Text;
+   attribute TierNo Text;
+   attribute BinNo Text;
+   attribute AvailabilityControlId Text;
+}
+
+structure InvPartInStockInfoStructure {
+   attribute PartExist Boolean;
+   attribute AvailabilityCtrlId Text;
+}
+
+structure ChangePartAvailabilityControlStructure {
+   attribute PartNo Text {
+      maxlength = 25;
+   }
+   attribute Contract Text {
+      maxlength = 5;
+   }
+   attribute FromLocation Text {
+      label = "Location No";
+      maxlength = 100;
+   }
+   attribute FromAvailabilityCtrlId Text {
+      label = "Availability Control ID";
+      maxlength = 100;
+   }
+   attribute ToLocation Text {
+      label = "Location No";
+      maxlength = 100;
+   }
+   attribute ToAvailabilityCtrlId Text {
+      label = "Availability Control ID";
+      maxlength = 100;
+   }
+   attribute NewAvailabilityCtrlId Text {
+      maxlength = 100;
+   }
+   attribute WaivDevRejNo Text {
+      label = "W/D/R No";
+      maxlength = 100;
+      format = uppercase;
+   }
+   attribute NewWaivDevRejNo Text {
+      label = "W/D/R No";
+      maxlength = 100;
+      format = uppercase;
+   }
+   attribute ConfigurationId Text;
+   attribute ActivitySeq Number;
+   attribute LotBatchNo Text;
+   attribute SerialNo Text;
+   attribute EngChgLevel Text;
+   attribute HandlingUnitId Number;
+   attribute QtyOnhand Number;
+   attribute QtyInTransit Number;
+   attribute SetAvailbilityCtrlOption Enumeration(SetAvailabilityControlEnum);
+   reference PartNoRef(Contract, PartNo)  to InventoryPart(Contract, PartNo);
+   reference NewAvailabilityCtrlIdRef(NewAvailabilityCtrlId) to PartAvailabilityControl(AvailabilityControlId) {
+      label = "New Availability Control ID";
+   }
+}
+
+------------------------------- ENUMERATIONS --------------------------------
+enumeration SetAvailabilityControlEnum {
+   value = "SAME_AS_FROM_LOCATION" {
+      identifier = "SameAsFromLocation";
+      label = "Same as From Location";
+   }
+   value = "SAME_AS_TO_LOCATION" {
+      identifier = "SameAsToLocation";
+      label = "Same as To Location";
+   }
+   value = "NEW_AVAILABILITY_CTRL" {
+      identifier = "NewAvailabilityCtrl";
+      label = "New availability Control";
+   }
+}

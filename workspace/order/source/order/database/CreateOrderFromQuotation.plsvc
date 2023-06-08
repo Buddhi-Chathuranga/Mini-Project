@@ -1,0 +1,472 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: WonInformationHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign    History
+--  ------     ------  ---------------------------------------------------------
+-- 2018-07-23  SeJalk  SCUXXW4-8522, created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+@Override
+PROCEDURE CRUD_Create___ (
+   rec_ IN Order_Quotation_Won_Virtual_Rec )
+IS
+   new_rec_                 Order_Quotation_Won_Virtual_Rec;
+   quote_line_rec_          Order_Quotation_Line_API.Public_Rec;
+   line_rec_                Order_Quotation_Line_Virtual_Rec;
+   price_breaks_exist_      Boolean; 
+   selection_line_no_       VARCHAR2(2000);
+   selection_rel_no_        VARCHAR2(2000);
+   selection_line_item_no_  VARCHAR2(2000);
+   line_no_                 Order_Quotation_Line_tab.line_no%TYPE;
+   rel_no_                  Order_Quotation_Line_tab.rel_no%TYPE;
+   line_item_no_            Order_Quotation_Line_tab.line_item_no%TYPE;
+   quote_head_rec_          Order_Quotation_API.Public_Rec;
+   contract_                VARCHAR2(25);
+   customer_no_             VARCHAR2(20);
+   
+ CURSOR Get_Price_Break_Lines IS
+ SELECT rental_db,
+       line_no,
+       rel_no,
+       line_item_no,
+       catalog_no,
+       buy_qty_due,
+       sale_unit_price,
+       unit_price_incl_tax,
+       sales_unit_measure,
+       quotation_no,
+       contract,
+       tax_liability_type_db
+  FROM order_quotation_line
+ WHERE Order_Quotation_Grad_Price_API.Grad_Price_Exist(quotation_no,
+                                                           line_no,
+                                                           rel_no,
+                                                           line_item_no) = 'TRUE'
+   AND objstate IN ('Released', 'Won')
+   AND quotation_no = rec_.quotation_no
+ ORDER BY line_no, rel_no;
+   
+   
+   
+BEGIN
+   new_rec_ := rec_;
+   selection_line_no_      := CONCAT(rec_.line_no_arr, ';');
+   selection_rel_no_       := CONCAT(rec_.rel_no_arr, ';');
+   selection_line_item_no_ := CONCAT(rec_.line_item_no_arr, ';');
+   quote_head_rec_ := Order_Quotation_API.Get(rec_.quotation_no); 
+   new_rec_.wanted_delivery_date     := quote_head_rec_.wanted_delivery_date;
+   new_rec_.wanted_delivery_date_org := new_rec_.wanted_delivery_date;
+   new_rec_.main_representative      := quote_head_rec_.main_representative_id;
+   new_rec_.main_representative_name := Person_Info_API.Get_Name(new_rec_.main_representative);
+   contract_               := quote_head_rec_.contract;
+   customer_no_            := quote_head_rec_.customer_no;
+   new_rec_.valid_quantity := true;           
+   new_rec_.order_id    := Message_Defaults_Per_Cust_API.Get_Order_Id(contract_ , customer_no_);
+   new_rec_.order_id    := NVL(new_rec_.order_id, Site_Discom_Info_API.Get_Order_Id(contract_));
+   new_rec_.order_id    := NVL(new_rec_.order_id, Cust_Ord_Customer_API.Get_Order_Id(customer_no_));
+   new_rec_.customer_no := customer_no_; 
+   IF Site_Discom_Info_API.Get_Create_Ord_In_Rel_State_Db(contract_) = 'TRUE' THEN
+      new_rec_.status := true;
+   ELSE  
+      new_rec_.status := false;
+   END IF;
+   new_rec_.all_rep       := true;
+   new_rec_.copy_contacts := true;
+   IF Customer_Assortment_Struct_API.Check_Limit_Sales_To_Assorts(customer_no_) = 'TRUE' THEN
+      new_rec_.limit_sales_to_assortments := true;
+   ELSE  
+      new_rec_.limit_sales_to_assortments := false;
+   END IF;
+   IF Site_Discom_Info_API.Get_Allow_Overrule_Limit_Sa_Db(contract_) = 'TRUE' THEN
+      new_rec_.overrule_limit_sale_to_assort := true;
+   ELSE  
+      new_rec_.overrule_limit_sale_to_assort := false;
+   END IF; 
+        
+   super(new_rec_);
+
+   IF LENGTH(rec_.line_no_arr) IS NULL THEN    
+      FOR pb_line_rec_ IN Get_Price_Break_Lines LOOP
+         line_rec_.objkey        := sys_guid();
+         line_rec_.parent_objkey := rec_.objkey;  
+         line_rec_.quotation_no  := rec_.quotation_no;
+         line_rec_.line_no       := pb_line_rec_.line_no;
+         line_rec_.rel_no        := pb_line_rec_.rel_no;
+         line_rec_.line_item_no  := pb_line_rec_.line_item_no;
+         IF pb_line_rec_.rental_db = 'TRUE' THEN
+            line_rec_.rental_db := true;
+         ELSE
+            line_rec_.rental_db := false;
+         END IF;
+         line_rec_.catalog_no  := pb_line_rec_.catalog_no;
+         line_rec_.buy_qty_due := pb_line_rec_.buy_qty_due;
+         $IF (Component_Rental_SYS.INSTALLED) $THEN
+            line_rec_.min_duration := Rental_Object_API.Get_Chargeable_Days(Rental_Object_API.Get_Rental_No(rec_.quotation_no, pb_line_rec_.line_no, pb_line_rec_.rel_no, pb_line_rec_.line_item_no,'ORDER QUOTATION'));
+         $END
+         line_rec_.sale_unit_price       := pb_line_rec_.sale_unit_price;
+         line_rec_.unit_price_incl_tax   := pb_line_rec_.unit_price_incl_tax;
+         line_rec_.sales_unit_measure    := pb_line_rec_.sales_unit_measure;
+         line_rec_.contract              := pb_line_rec_.contract;
+         line_rec_.tax_liability_type_db := pb_line_rec_.tax_liability_type_db; 
+
+         IF Order_Quotation_API.Get_Use_Price_Incl_Tax_Db(rec_.quotation_no) = 'TRUE' THEN
+            line_rec_.use_price_incl_tax := TRUE;
+         ELSE
+            line_rec_.use_price_incl_tax := FALSE;
+         END IF;
+         IF new_rec_.valid_quantity THEN
+            IF pb_line_rec_.buy_qty_due <= 0 THEN
+               new_rec_.valid_quantity := false; 
+               Crud_Update___(new_rec_, new_rec_);
+            END IF;
+         END IF;   
+         Crud_Create___(line_rec_);
+      END LOOP;
+   ELSE 
+      WHILE (INSTR(selection_line_no_, ';') > 0) LOOP    
+         line_no_        := substr(selection_line_no_, 0, INSTR(selection_line_no_, ';')-1);
+         rel_no_         := substr(selection_rel_no_, 0, INSTR(selection_rel_no_, ';')-1);
+         line_item_no_   := to_number(trim(substr(selection_line_item_no_, 0, INSTR(selection_line_item_no_, ';')-1)));    
+         quote_line_rec_ := Order_Quotation_Line_API.Get(rec_.quotation_no, line_no_, rel_no_, line_item_no_);
+
+         IF (line_no_ IS NOT NULL) THEN           
+            price_breaks_exist_ := Order_Quotation_Grad_Price_API.Grad_Price_Exist(rec_.quotation_no, line_no_, rel_no_, line_item_no_) = 'TRUE' 
+                                      AND Order_Quotation_Line_API.Get_Objstate(rec_.quotation_no, line_no_, rel_no_, line_item_no_) IN ('Released', 'Won');
+         END IF;
+
+         IF (new_rec_.wanted_delivery_date IS NULL AND quote_line_rec_.promised_delivery_date IS NOT NULL) OR (new_rec_.wanted_delivery_date > quote_line_rec_.promised_delivery_date) THEN
+            new_rec_.wanted_delivery_date     := quote_line_rec_.promised_delivery_date;
+            new_rec_.wanted_delivery_date_org := quote_line_rec_.promised_delivery_date;
+         END IF;
+         
+         IF price_breaks_exist_ AND new_rec_.valid_quantity THEN
+            IF quote_line_rec_.buy_qty_due <= 0 THEN
+               new_rec_.valid_quantity := false; 
+            END IF;
+         END IF;
+         IF INSTR(rec_.line_no_arr, ';') > 0 THEN
+            new_rec_.lose_win_note := '';
+            new_rec_.reason_id     := '';
+         END IF;
+         Crud_Update___(new_rec_, new_rec_);
+
+         IF price_breaks_exist_ THEN
+            line_rec_.objkey        := sys_guid();
+            line_rec_.parent_objkey := rec_.objkey;  
+            line_rec_.quotation_no  := rec_.quotation_no;
+            line_rec_.line_no       := line_no_;
+            line_rec_.rel_no        := rel_no_;
+            line_rec_.line_item_no  := line_item_no_;
+            IF quote_line_rec_.rental = 'TRUE' THEN
+               line_rec_.rental_db := true;
+            ELSE
+               line_rec_.rental_db := false;
+            END IF;
+            line_rec_.catalog_no  := quote_line_rec_.catalog_no;
+            line_rec_.buy_qty_due := quote_line_rec_.buy_qty_due;
+            $IF (Component_Rental_SYS.INSTALLED) $THEN
+               line_rec_.min_duration := Rental_Object_API.Get_Chargeable_Days(Rental_Object_API.Get_Rental_No(rec_.quotation_no, line_no_, rel_no_, line_item_no_,'ORDER QUOTATION'));
+            $END
+            line_rec_.sale_unit_price       := quote_line_rec_.sale_unit_price;
+            line_rec_.unit_price_incl_tax   := quote_line_rec_.unit_price_incl_tax;
+            line_rec_.sales_unit_measure    := quote_line_rec_.sales_unit_measure;
+            line_rec_.contract              := quote_line_rec_.contract;
+            line_rec_.tax_liability_type_db := quote_line_rec_.tax_liability_type; 
+
+            IF Order_Quotation_API.Get_Use_Price_Incl_Tax_Db(rec_.quotation_no) = 'TRUE' THEN
+               line_rec_.use_price_incl_tax := TRUE;
+            ELSE
+               line_rec_.use_price_incl_tax := FALSE;
+            END IF;
+            Crud_Create___(line_rec_);
+         END IF;  
+         selection_line_no_      := substr(selection_line_no_, INSTR(selection_line_no_, ';')+1);
+         selection_rel_no_       := substr(selection_rel_no_, INSTR(selection_rel_no_, ';')+1);
+         selection_line_item_no_ := substr(selection_line_item_no_, INSTR(selection_line_item_no_, ';')+1);       
+      END LOOP;  
+   END IF;  
+END CRUD_Create___;
+
+@Override
+PROCEDURE CRUD_Update___ (
+   old_ IN Order_Quotation_Line_Virtual_Rec,
+   new_ IN Order_Quotation_Line_Virtual_Rec )
+IS
+   key_        Order_Quotation_Won_Virtual_Key;
+   parent_rec_ Order_Quotation_Won_Virtual_Rec;
+BEGIN
+   key_.objkey := new_.parent_objkey;
+   parent_rec_ := Get_Record___(key_);  
+   parent_rec_.valid_quantity := true;
+   FOR detail_rec_ IN Get_Price_Breaked_Lines_Array___(key_) LOOP
+      IF detail_rec_.objkey != new_.objkey THEN        
+         IF detail_rec_.buy_qty_due <= 0 THEN
+            parent_rec_.valid_quantity := false;  
+         END IF;
+      END IF;
+   END LOOP;
+
+   IF old_.buy_qty_due != new_.buy_qty_due THEN
+      IF new_.buy_qty_due <= 0 THEN
+         parent_rec_.valid_quantity := false; 
+      END IF;      
+      CRUD_Update___(parent_rec_,parent_rec_);
+   END IF;
+   super(old_,new_);
+END CRUD_Update___;
+
+
+FUNCTION Calculate_Price___ (
+	quotation_no_ IN VARCHAR2,
+	line_no_      IN VARCHAR2,
+	rel_no_       IN VARCHAR2,
+	line_item_no_ IN NUMBER,
+	buy_qty_due_  IN NUMBER,
+	min_duration_ IN NUMBER ) RETURN Calc_Price_Struct_Rec
+IS
+   rec_              Calc_Price_Struct_Rec;
+   price_qty_exist_  VARCHAR2(5);
+BEGIN
+	Order_Quotation_Grad_Price_API.Calculate_Price(rec_.sales_price,
+                                                  rec_.sales_price_incl_tax,
+                                                  quotation_no_, 
+                                                  line_no_, 
+                                                  rel_no_, 
+                                                  line_item_no_, 
+                                                  buy_qty_due_,
+                                                  min_duration_);
+   
+   price_qty_exist_ := Order_Quotation_Grad_Price_API.Price_Qty_Exist(quotation_no_, 
+                                                                      line_no_, 
+                                                                      rel_no_, 
+                                                                      line_item_no_, 
+                                                                      buy_qty_due_);
+   IF price_qty_exist_ = 'TRUE' THEN
+      rec_.price_found_flag := TRUE;
+   ELSE
+      rec_.price_found_flag := FALSE;
+   END IF;   
+   RETURN rec_;
+END Calculate_Price___;
+
+FUNCTION Get_Sales_Prices___ (
+	sales_price_          IN NUMBER,
+	sales_price_incl_tax_ IN NUMBER,
+	quotation_no_         IN VARCHAR2,
+	line_no_              IN VARCHAR2,
+	rel_no_               IN VARCHAR2,
+	line_item_no_         IN NUMBER,
+    contract_             IN VARCHAR2 ) RETURN Sales_Price_Struct_Rec
+IS
+   rec_              Sales_Price_Struct_Rec;
+   net_price_base_   NUMBER;
+   gross_price_base_ NUMBER;
+BEGIN
+   rec_.sales_price          := sales_price_;
+   rec_.sales_price_incl_tax := sales_price_incl_tax_;
+	Tax_Handling_Order_Util_API.Get_Prices(net_price_base_, 
+                                          gross_price_base_,
+                                          rec_.sales_price,
+                                          rec_.sales_price_incl_tax,
+                                          Site_API.Get_Company(contract_), 
+                                          'ORDER_QUOTATION_LINE',
+                                          quotation_no_,                                         
+                                          line_no_,
+                                          rel_no_,
+                                          line_item_no_,
+                                          '*',
+                                          ifs_curr_rounding_ => 16); 
+   RETURN rec_;                                       
+END Get_Sales_Prices___;
+
+FUNCTION Validate_Fields___ (
+   customer_no_         IN VARCHAR2,
+   customer_po_no_      IN VARCHAR2,
+   main_representative_ IN VARCHAR2 ) RETURN Validate_Struct_Rec
+IS
+   po_exist_ NUMBER;
+   rec_      Validate_Struct_Rec;
+BEGIN  
+   $IF Component_Crm_SYS.INSTALLED $THEN
+   IF main_representative_ IS NOT NULL THEN
+      Business_Representative_API.Exist(main_representative_, TRUE);
+   ELSE
+       rec_.eligible_rep := Rm_Acc_Representative_API.Get_Eligible_Representative(customer_no_);
+   END IF;
+   $END
+   po_exist_ := Customer_Order_API.Get_Customer_Po_No(customer_po_no_, customer_no_);
+   IF po_exist_ = 0 THEN
+     rec_.po_exist := false;
+   ELSE
+     rec_.po_exist := true;
+   END IF;  
+   RETURN rec_;
+END Validate_Fields___;
+
+FUNCTION Create_Order___ (
+   key_ IN Order_Quotation_Won_Virtual_Key,
+   info$_ OUT VARCHAR2) RETURN Created_Order_Info_Struct_Rec
+IS
+   rec_                    Order_Quotation_Won_Virtual_Rec;
+   msg_                    VARCHAR2(32000);
+   info_                   VARCHAR2(2000);
+   order_no_               customer_order_tab.order_no%TYPE;
+   pre_accounting_id_      NUMBER;
+   status_                 VARCHAR2(5);
+   pre_postings_           VARCHAR2(5);
+   update_won_             VARCHAR2(5);
+   order_info_             Created_Order_Info_Struct_Rec;
+   selection_line_no_      VARCHAR2(2000);
+   selection_rel_no_       VARCHAR2(2000);
+   selection_line_item_no_ VARCHAR2(2000);
+   line_no_                Order_Quotation_Line_tab.line_no%TYPE;
+   rel_no_                 Order_Quotation_Line_tab.rel_no%TYPE;
+   line_item_no_           Order_Quotation_Line_tab.line_item_no%TYPE;
+   attr_                   VARCHAR2(32000);
+BEGIN
+   rec_ := Get_Record___(key_);
+   IF (rec_.line_no_arr IS NOT NULL) THEN
+      -- When the method is called from Sales Quotation Lines
+      msg_ := Message_SYS.Construct('');
+      Message_SYS.Add_Attribute(msg_, 'REASON_ID', rec_.reason_id);
+      Message_SYS.Add_Attribute(msg_, 'ORDER_ID', rec_.order_id);
+      Message_SYS.Add_Attribute(msg_, 'WON_NOTE', rec_.lose_win_note);
+      Message_SYS.Add_Attribute(msg_, 'CHANGE_LINE_DELIVERY_DATE', rec_.change_line_delivery_date);
+      Message_SYS.Add_Attribute(msg_, 'CUSTOMER_PO_NO', rec_.customer_po_no);
+      IF rec_.all_rep THEN
+         Message_SYS.Add_Attribute(msg_, 'COPY_ALL_REPRESENTATIVES', 'TRUE');
+      ELSE
+         Message_SYS.Add_Attribute(msg_, 'COPY_ALL_REPRESENTATIVES', 'FALSE');
+      END IF;    
+      Message_SYS.Add_Attribute(msg_, 'MAIN_REPRESENTATIVE',rec_.main_representative);
+       IF rec_.copy_contacts THEN
+         Message_SYS.Add_Attribute(msg_, 'COPY_CONTACTS', 'TRUE');
+      ELSE
+         Message_SYS.Add_Attribute(msg_, 'COPY_CONTACTS', 'FALSE');
+      END IF;  
+
+      selection_line_no_      := CONCAT(rec_.line_no_arr, ';');
+      selection_rel_no_       := CONCAT(rec_.rel_no_arr, ';');
+      selection_line_item_no_ := CONCAT(rec_.line_item_no_arr, ';');
+      WHILE (INSTR(selection_line_no_, ';') > 0) LOOP
+         line_no_                := substr(selection_line_no_, 0, INSTR(selection_line_no_, ';')-1);
+         rel_no_                 := substr(selection_rel_no_, 0, INSTR(selection_rel_no_, ';')-1);
+         line_item_no_           := to_number(substr(selection_line_item_no_, 0, INSTR(selection_line_item_no_, ';')-1));   
+         Message_SYS.Add_Attribute(msg_, 'LINE_NO', line_no_);
+         Message_SYS.Add_Attribute(msg_, 'REL_NO', rel_no_);
+         Message_SYS.Add_Attribute(msg_, 'WANTED_DELIVERY_DATE', rec_.wanted_delivery_date);
+         Message_SYS.Add_Attribute(msg_, 'LINE_ITEM_NO', line_item_no_);  
+         selection_line_no_      := substr(selection_line_no_, INSTR(selection_line_no_, ';')+1);
+         selection_rel_no_       := substr(selection_rel_no_, INSTR(selection_rel_no_, ';')+1);
+         selection_line_item_no_ := substr(selection_line_item_no_, INSTR(selection_line_item_no_, ';')+1);      
+      END LOOP;  
+   ELSE
+      -- When the method is called from Sales Quotations
+      Client_SYS.Add_To_Attr('REASON_ID', rec_.reason_id, attr_);
+      Client_SYS.Add_To_Attr('ORDER_ID', rec_.order_id, attr_);
+      Client_SYS.Add_To_Attr('LOSE_WIN_REJECT_NOTE', rec_.lose_win_note, attr_);
+      Client_SYS.Add_To_Attr('CHANGE_LINE_DELIVERY_DATE', rec_.change_line_delivery_date, attr_);
+      Client_SYS.Add_To_Attr('CUSTOMER_PO_NO', rec_.customer_po_no, attr_);
+      IF rec_.all_rep THEN
+         Client_SYS.Add_To_Attr('COPY_ALL_REPRESENTATIVES', 'TRUE', attr_);
+      ELSE
+         Client_SYS.Add_To_Attr('COPY_ALL_REPRESENTATIVES', 'FALSE', attr_);
+      END IF;    
+      Client_SYS.Add_To_Attr('MAIN_REPRESENTATIVE', rec_.main_representative, attr_);
+      IF rec_.copy_contacts THEN
+         Client_SYS.Add_To_Attr('COPY_CONTACTS', 'TRUE', attr_);
+      ELSE
+         Client_SYS.Add_To_Attr('COPY_CONTACTS', 'FALSE', attr_);
+      END IF;  
+      Client_SYS.Add_To_Attr('WANTED_DELIVERY_DATE', rec_.wanted_delivery_date, attr_);
+   END IF;
+
+   IF rec_.status THEN
+      status_ := 'TRUE';
+   ELSE
+      status_ := 'FALSE';
+   END IF;  
+   
+   IF rec_.pre_postings THEN
+      pre_postings_ := 'TRUE';
+   ELSE
+      pre_postings_ := 'FALSE';
+   END IF; 
+   
+   IF rec_.update_won THEN
+      update_won_ := 'TRUE';
+   ELSE
+      update_won_ := 'FALSE';
+   END IF; 
+
+   IF (rec_.line_no_arr IS NOT NULL) THEN
+      Order_Quotation_Line_API.Create_Order(info_, order_no_, pre_accounting_id_, rec_.quotation_no, msg_, status_, pre_postings_, update_won_);
+   ELSE
+      Order_Quotation_API.Create_Order(rec_.quotation_no, info_, attr_, status_, pre_postings_, update_won_);
+      order_no_ := Client_SYS.Get_Item_Value('CREATED_ORDER_NO', attr_);
+      pre_accounting_id_ := Client_SYS.Get_Item_Value('PRE_ACCOUNTING_ID', attr_);
+   END IF;
+   
+   order_info_.info              := info_;
+   info$_  := info_;
+   order_info_.order_no          := order_no_;
+   order_info_.pre_accounting_id := pre_accounting_id_;
+   RETURN order_info_;
+END Create_Order___;
+
+
+PROCEDURE Create_Pre_Posting___ (
+   key_      IN Order_Quotation_Won_Virtual_Key,
+   order_no_ IN VARCHAR2 ) 
+IS
+   rec_                     Order_Quotation_Won_Virtual_Rec;
+   selection_line_no_       VARCHAR2(2000);
+   selection_rel_no_        VARCHAR2(2000);
+   selection_line_item_no_  VARCHAR2(2000);
+   line_no_                 Order_Quotation_Line_tab.line_no%TYPE;
+   rel_no_                  Order_Quotation_Line_tab.rel_no%TYPE;
+   line_item_no_            Order_Quotation_Line_tab.line_item_no%TYPE;
+BEGIN
+   rec_ := Get_Record___(key_);
+   selection_line_no_      := CONCAT(rec_.line_no_arr, ';');
+   selection_rel_no_       := CONCAT(rec_.rel_no_arr, ';');
+   selection_line_item_no_ := CONCAT(rec_.line_item_no_arr, ';');
+   IF rec_.line_no_arr IS NULL THEN
+      Customer_Order_API.Copy_Prepostings_To_Lines(order_no_);
+   ELSE
+      WHILE (INSTR(selection_line_no_, ';') > 0) LOOP
+         line_no_                := substr(selection_line_no_, 0, INSTR(selection_line_no_, ';')-1);
+         rel_no_                 := substr(selection_rel_no_, 0, INSTR(selection_rel_no_, ';')-1);
+         line_item_no_           := to_number(substr(selection_line_item_no_, 0, INSTR(selection_line_item_no_, ';')-1));
+         Customer_Order_Line_API.Copy_Prepostings_To_Line(order_no_, line_no_, rel_no_, line_item_no_);
+         selection_line_no_      := substr(selection_line_no_, INSTR(selection_line_no_, ';')+1);
+         selection_rel_no_       := substr(selection_rel_no_, INSTR(selection_rel_no_, ';')+1);
+         selection_line_item_no_ := substr(selection_line_item_no_, INSTR(selection_line_item_no_, ';')+1);
+      END LOOP;
+   END IF;
+   IF rec_.status THEN
+      Order_Quotation_API.Release_Customer_Order__(order_no_);
+   END IF;
+END Create_Pre_Posting___;
+
+PROCEDURE Update_Grad_Price_Line___ (
+   key_ IN Order_Quotation_Won_Virtual_Key ) 
+IS
+BEGIN
+   FOR detail_rec_ IN  Get_Price_Breaked_Lines_Array___(key_) LOOP
+      Order_Quotation_Line_API.Update_Grad_Price_Line(detail_rec_.quotation_no,
+                                                      detail_rec_.line_no,
+                                                      detail_rec_.rel_no,
+                                                      detail_rec_.line_item_no,
+                                                      detail_rec_.buy_qty_due,
+                                                      detail_rec_.sale_unit_price,
+                                                      detail_rec_.unit_price_incl_tax);
+   END LOOP;
+END Update_Grad_Price_Line___;
+

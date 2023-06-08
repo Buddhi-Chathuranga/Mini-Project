@@ -1,0 +1,284 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     IdentifySerialsInLocationAssistant
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  190410  JaThlk  SCUXXW4-18432, Moved the where clause for SerialNo to projection file from plsvc file.
+--  181122  ChFolk  SCUXXW4-5511, Renamed Get_Catch_Uom as Get_Catch_Uom_For_In_Loc_Serials___, Create_Lines___ as Create_Lines_For_In_Loc_Serials___, Catch_Unit_Info_Structure_Rec as Catch_Unit_Info_For_In_Loc_Serials_Structure_Rec
+--  181122          to distinguish methods names in IdentifySerialsInLocationAssistant and IdentifySerialsInMultipleLocationsAssistant.
+--  181107  JaThlk  SCUXXW4-5511, Implemented SequenceGeneratorAssistant.
+--  180913  JaThlk  SCUXXW4-5511, Created.
+--  200311  Asiglk  MFXTEND-304, We can't issue more than one serial part which is not tracked in inventory.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Identify_Serials_In_Location_Virtual_Rec )
+IS
+   line_rec_   Temp_Part_Tracking_For_In_Loc_Serials_Virtual_Rec; 
+   CURSOR get_serials_line_in_location IS
+      SELECT serial_no, catch_qty
+      FROM temporary_part_tracking
+      WHERE session_id = rec_.session_id;
+BEGIN   
+   super(rec_);
+   OPEN get_serials_line_in_location;
+      LOOP
+         FETCH get_serials_line_in_location INTO line_rec_.serial_no, line_rec_.catch_qty;
+         EXIT WHEN get_serials_line_in_location%NOTFOUND;
+         line_rec_.objkey              := sys_guid();
+         line_rec_.parent_objkey       := rec_.objkey; 
+         line_rec_.contract            := rec_.contract;
+         line_rec_.part_no             := rec_.part_no;
+         line_rec_.lot_batch_no        := rec_.lot_batch_no;
+         line_rec_.configuration_id    := rec_.configuration_id;
+         line_rec_.eng_chg_level       := rec_.eng_chg_level;
+         line_rec_.waiv_dev_rej_no     := rec_.waiv_dev_rej_no;
+         line_rec_.activity_seq        := rec_.activity_seq;
+         line_rec_.handling_unit_id    := rec_.handling_unit_id;
+         line_rec_.assistant_context   := rec_.assistant_context;
+         line_rec_.part_ownership_db   := rec_.part_ownership_db;
+         line_rec_.session_id          := rec_.session_id;
+         line_rec_.generated           := TRUE;
+         CRUD_Create___(line_rec_);
+      END LOOP;
+   CLOSE get_serials_line_in_location;
+   END CRUD_Create___;
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Temp_Part_Tracking_For_In_Loc_Serials_Virtual_Rec )
+IS
+   identification_context_  VARCHAR2(25) := '';
+
+BEGIN   
+   super(rec_);
+   IF rec_.assistant_context = 'POSITIVE_COUNTING_DIFF' THEN
+      identification_context_ := 'POSITIVE_COUNTING_DIFF';
+   END IF;
+   IF (NOT (rec_.generated)) OR (rec_.generated IS NULL) THEN
+   Temporary_Part_Tracking_API.New(rec_.session_id, rec_.serial_no, rec_.catch_qty, rec_.contract, rec_.part_no, identification_context_);
+   END IF;
+END CRUD_Create___;  
+
+
+@Override
+PROCEDURE CRUD_Update___(
+   old_ IN Temp_Part_Tracking_For_In_Loc_Serials_Virtual_Rec,
+   new_ IN Temp_Part_Tracking_For_In_Loc_Serials_Virtual_Rec )
+IS
+   
+BEGIN
+   Temporary_Part_Tracking_API.Modify_Catch_Qty(new_.session_id, new_.serial_no, new_.catch_qty);
+   super(old_, new_);
+
+END CRUD_Update___;
+
+
+@Override
+PROCEDURE CRUD_Delete___(   
+   rec_ IN Temp_Part_Tracking_For_In_Loc_Serials_Virtual_Rec )
+IS
+
+BEGIN
+    Temporary_Part_Tracking_API.Remove(rec_.session_id, rec_.serial_no);  
+    super(rec_);
+       
+END CRUD_Delete___;
+
+
+FUNCTION Get_Initial_Info_For_In_Loc_Serials___ (
+   contract_   IN VARCHAR2,
+   part_no_    IN VARCHAR2,
+   session_id_ IN NUMBER ) RETURN Initial_Info_For_In_Loc_Serials_Structure_Rec
+IS
+   rec_ Initial_Info_For_In_Loc_Serials_Structure_Rec;
+   catch_uom_ VARCHAR2(32);
+   catch_unit_enabled_  VARCHAR2(5);
+BEGIN
+   IF (Part_Catalog_API.Get_Catch_Unit_Enabled_Db(part_no_) = 'TRUE') THEN
+      catch_unit_enabled_ := 'TRUE';
+      catch_uom_ := Inventory_Part_API.Get_Catch_Unit_Meas(contract_, part_no_);
+   ELSE
+      catch_unit_enabled_ := 'FALSE';
+      catch_uom_ := NULL;
+   END IF;
+   IF session_id_ IS NULL THEN
+      rec_.session_id := Temporary_Part_Tracking_API.Get_Next_Session_Id;
+   ELSE
+      rec_.session_id := session_id_;
+   END IF;
+   rec_.catch_uom := catch_uom_;
+   rec_.catch_unit_enabled := catch_unit_enabled_;
+   RETURN rec_;
+END Get_Initial_Info_For_In_Loc_Serials___;
+
+
+PROCEDURE Create_Lines_For_In_Loc_Serials___ (
+   parent_objkey_   IN  VARCHAR2,
+   serial_list_     IN  CLOB,
+   session_id_      IN  NUMBER,
+   contract_        IN  VARCHAR2,
+   part_no_         IN  VARCHAR2,
+   info$_           OUT VARCHAR2 ) 
+IS
+   serial_no_list_   CLOB := CONCAT(serial_list_, Client_SYS.record_separator_);
+   line_rec_         Temp_Part_Tracking_For_In_Loc_Serials_Virtual_Rec;
+   serial_no_        VARCHAR2(50);
+   serial_no_attr_   VARCHAR2(32000);
+   catch_qty_        NUMBER;   
+BEGIN  
+   WHILE (INSTR(serial_no_list_, Client_SYS.record_separator_) > 0) LOOP
+      serial_no_ := substr(serial_no_list_, 0, INSTR(serial_no_list_, Client_SYS.record_separator_) - 1);
+      line_rec_.objkey                    := sys_guid();
+      line_rec_.parent_objkey             := parent_objkey_;
+      line_rec_.serial_no                 := serial_no_;
+      line_rec_.session_id                := session_id_;
+      line_rec_.contract                  := contract_;
+      line_rec_.part_no                   := part_no_;
+      line_rec_.generated                 := true;
+      IF serial_no_attr_ IS NULL THEN
+         serial_no_attr_ := serial_no_;
+      ELSE
+         serial_no_attr_ := serial_no_attr_ || Client_SYS.record_separator_ || serial_no_;
+      END IF;
+      CRUD_Create___(line_rec_);
+      serial_no_list_ := SUBSTR(serial_no_list_, (INSTR(serial_no_list_, Client_SYS.record_separator_) + 1)); 
+   END LOOP;
+   info$_ := Temporary_Part_Tracking_API.New_Clob(serial_no_attr_, session_id_, catch_qty_, contract_, part_no_);
+END Create_Lines_For_In_Loc_Serials___;
+
+
+PROCEDURE Insert_Lines_For_In_Loc_Serials___ (
+   parent_objkey_      IN VARCHAR2,
+   session_id_var_     IN NUMBER,
+   session_id_         IN NUMBER,
+   contract_           IN VARCHAR2,
+   part_no_            IN VARCHAR2 ) 
+IS
+  rec_  Temp_Part_Tracking_For_In_Loc_Serials_Virtual_Rec;
+  CURSOR Get_Serial_Numbers IS
+  SELECT *
+  FROM temporary_part_tracking_tab
+  WHERE session_id = session_id_var_;
+BEGIN
+   FOR linerec_ IN Get_Serial_Numbers LOOP
+      rec_.objkey                    := sys_guid();
+      rec_.parent_objkey             := parent_objkey_;
+      rec_.serial_no                 := linerec_.serial_no;
+      rec_.session_id                := session_id_;
+      rec_.contract                  := contract_;
+      rec_.part_no                   := part_no_;
+      rec_.generated                 := true;
+      CRUD_Create___(rec_);
+   END LOOP;
+END Insert_Lines_For_In_Loc_Serials___;
+
+
+FUNCTION Get_Barcode_Info_In_Loc___ (
+   parent_session_id_  IN NUMBER,
+   activity_seq_       IN NUMBER) RETURN Barcode_Info_In_Loc_Structure_Rec
+IS
+   rec_               Barcode_Info_In_Loc_Structure_Rec;
+   session_id_temp_   NUMBER;
+BEGIN
+   session_id_temp_           := Get_Session_Id_For_In_Loc___;
+   rec_.session_id            := session_id_temp_;
+   rec_.session_id_str        := TO_CHAR(session_id_temp_);
+   rec_.parent_session_id_str := TO_CHAR(parent_session_id_);
+   rec_.activity_seq_str      := TO_CHAR(activity_seq_);
+   RETURN rec_;
+END Get_Barcode_Info_In_Loc___;
+
+
+FUNCTION Get_Session_Id_For_In_Loc___ RETURN NUMBER
+IS
+   session_id_ NUMBER;
+BEGIN
+   session_id_ := Temporary_Part_Tracking_API.Get_Next_Session_Id;
+   RETURN session_id_;
+END Get_Session_Id_For_In_Loc___;
+
+PROCEDURE Populate_Header_From_Selection___ (
+   rec_ IN OUT Serial_Record_Pick_List_Structure_Rec)
+IS
+   selection_table_              Utility_SYS.STRING_TABLE;
+   delimiter_                    VARCHAR2(1) := ';';
+   token_count_                  NUMBER;
+
+BEGIN
+   Utility_SYS.Tokenize(rec_.remaining_selection, delimiter_, selection_table_, token_count_);     
+   FOR i_ IN 1..selection_table_.COUNT  LOOP
+      IF i_ = 1 THEN         
+         rec_.contract := Client_SYS.Get_Key_Reference_Value(selection_table_(i_), 'CONTRACT');  
+         rec_.part_no := Client_SYS.Get_Key_Reference_Value(selection_table_(i_), 'PART_NO');  
+         rec_.configuration_id := Client_SYS.Get_Key_Reference_Value(selection_table_(i_), 'CONFIGURATION_ID');  
+         rec_.location_no := Client_SYS.Get_Key_Reference_Value(selection_table_(i_), 'LOCATION_NO');  
+         rec_.lot_batch_no := Client_SYS.Get_Key_Reference_Value(selection_table_(i_), 'LOT_BATCH_NO');  
+         rec_.eng_chg_level := Client_SYS.Get_Key_Reference_Value(selection_table_(i_), 'ENG_CHG_LEVEL');  
+         rec_.waiv_dev_rej_no := Client_SYS.Get_Key_Reference_Value(selection_table_(i_), 'WAIV_DEV_REJ_NO');  
+         rec_.activity_seq := Client_SYS.Get_Key_Reference_Value(selection_table_(i_), 'ACTIVITY_SEQ');  
+         rec_.handling_unit_id := Client_SYS.Get_Key_Reference_Value(selection_table_(i_), 'HANDLING_UNIT_ID');  
+         rec_.qty_issue := Client_SYS.Get_Key_Reference_Value(selection_table_(i_), 'QTY_TO_PICK');   
+         rec_.catch_qty_issue:= Client_SYS.Get_Key_Reference_Value(selection_table_(i_), 'CATCH_QTY_ISSUE');  
+         rec_.assistant_title := Client_SYS.Get_Key_Reference_Value(selection_table_(i_), 'ASSISTANT_TITLE');  
+         rec_.assistant_context := Client_SYS.Get_Key_Reference_Value(selection_table_(i_), 'ASSISTANT_CONTEXT');  
+         rec_.session_id := Client_SYS.Get_Key_Reference_Value(selection_table_(i_), 'SESSION_ID');  
+         rec_.selection_rec := selection_table_(i_);  
+      END IF;      
+   END LOOP;
+END Populate_Header_From_Selection___;
+
+PROCEDURE Update_Remaining_Selection___ (
+   rec_ IN OUT Serial_Record_Pick_List_Structure_Rec)
+IS
+   selection_table_              Utility_SYS.STRING_TABLE;
+   delimiter_                    VARCHAR2(1) := ';';
+   token_count_                  NUMBER;   
+   remaining_selection_          VARCHAR2(32000);
+BEGIN
+   Utility_SYS.Tokenize(rec_.remaining_selection, delimiter_, selection_table_, token_count_);
+   FOR i_ IN 1..selection_table_.COUNT  LOOP
+      IF i_ != 1 THEN
+         IF remaining_selection_ IS NOT NULL THEN
+            remaining_selection_ := remaining_selection_ || delimiter_;
+         END IF;
+         remaining_selection_ := remaining_selection_ || selection_table_(i_);
+      END IF;      
+   END LOOP;
+   rec_.remaining_selection := trim(remaining_selection_);
+END Update_Remaining_Selection___;
+
+FUNCTION Check_Serial_Records___ (
+   remaining_selection_ IN VARCHAR2
+   ) RETURN Serial_Record_Pick_List_Structure_Rec
+IS
+   struct_           Serial_Record_Pick_List_Structure_Rec;
+
+BEGIN
+   struct_.remaining_selection := trim(remaining_selection_);
+   Populate_Header_From_Selection___(struct_);
+   Update_Remaining_Selection___(struct_);   
+   RETURN struct_;
+END Check_Serial_Records___;
+
+FUNCTION Create_Session_Id___ (
+   old_selection_       IN VARCHAR2,
+   execute_selection_   IN VARCHAR2,
+   session_id_          IN NUMBER
+   ) RETURN VARCHAR2
+IS
+   delimiter_           VARCHAR2(1) := ';';
+   selection_           VARCHAR2(32000) := NULL;
+BEGIN
+   selection_:= old_selection_||execute_selection_;
+   Client_SYS.Add_To_Key_Reference(selection_,'SESSION_ID',TO_CHAR(session_id_));
+   selection_ := selection_ || delimiter_;
+   RETURN selection_;
+END Create_Session_Id___;

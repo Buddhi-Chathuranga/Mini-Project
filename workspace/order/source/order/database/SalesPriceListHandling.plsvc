@@ -1,0 +1,224 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: SalesPriceListHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign    History
+--  ------     ------  ---------------------------------------------------------
+-- 2020-03-16  RaVdlk  SCXTEND-2248, Modified the CRUD_Default_Copy for Unit Based and Assortment Node Based tabs
+-- 2020-03-03  RaVdlk  SCXTEND-2248, Overidden the CRUD_Default_Copy for Unit Based and Assortment Node Based tabs
+-- 2019-04-25  MaEelk  SCUXXW4-18527, Moved the logic of Fetch_Unit_Based_Price_List_Lines___ to the projection
+-- 2019-04-25  MaEelk  SCUXXW4-18526, Moved the logic of  Fetch_Assortment_Node_Based_Price_List_Lines___ to the projection 
+-- 2018-10-18  MaEelk  SCUXXW4-1481, Added Search Context functionality to Assortment Tab.
+-- 2018-10-17  MaEelk  SCUXXW4-9452, Converted from frmSalesPriceList using MTG Version: 1.30
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Fetch_Use_Price_Incl_Tax___(
+   company_ IN VARCHAR2 )  RETURN BOOLEAN
+IS
+   use_price_incl_tax_ BOOLEAN := FALSE; 
+BEGIN
+   use_price_incl_tax_ := (Company_Tax_Discom_Info_API.Get_Use_Price_Incl_Tax_Ord_Db(company_) = 'TRUE');
+   RETURN use_price_incl_tax_;
+END Fetch_Use_Price_Incl_Tax___;
+
+FUNCTION Planned_Part_Lines_Exist___(
+   price_list_no_ IN VARCHAR2 )  RETURN BOOLEAN
+IS  
+BEGIN
+   RETURN (Sales_Price_List_Part_API.Planned_Part_Lines_Exist__(price_list_no_) = 'TRUE');
+END Planned_Part_Lines_Exist___;
+
+PROCEDURE Add_Sites_From_Site_Cluster___ (
+   price_list_no_        IN VARCHAR2,
+   site_cluster_id_      IN VARCHAR2,
+   site_cluster_node_id_ IN VARCHAR2,
+   info$_                OUT VARCHAR2) 
+IS
+   data_found_ BOOLEAN := FALSE;
+   info_       VARCHAR2(32000); 
+   
+   CURSOR get_cluster_connected_site IS
+      SELECT contract
+      FROM SITE_CLUSTER_NODE_JOIN
+      WHERE contract NOT IN (SELECT contract 
+                             FROM SALES_PRICE_LIST_SITE  
+                             WHERE PRICE_LIST_NO = price_list_no_) 
+      AND   site_cluster_id = site_cluster_id_
+      AND   contract IN (SELECT site 
+                         FROM USER_ALLOWED_SITE_PUB)
+     AND   contract IN (SELECT  contract
+                        FROM    SITE_CLUSTER_NODE
+                        START WITH site_cluster_id = site_cluster_id_
+                        AND  site_cluster_node_id = site_cluster_node_id_
+                        CONNECT BY PRIOR site_cluster_id = site_cluster_id
+                        AND PRIOR site_cluster_node_id =  parent_node);    
+                        
+BEGIN
+   FOR rec_ IN get_cluster_connected_site LOOP 
+      Sales_Price_List_Site_API.New(info_, rec_.contract, price_list_no_);
+      info$_ := info_;
+      data_found_ := TRUE;
+   END LOOP;
+   IF NOT(data_found_) THEN
+      Client_SYS.Add_Info(lu_name_, 'NODATA: No Data found');
+      info$_ := Client_SYS.Get_All_Info;
+   END IF;
+END Add_Sites_From_Site_Cluster___;
+
+
+@Override
+PROCEDURE CRUD_Default___ (
+   key_  IN  Sales_Price_List_Rental_Part_Key,
+   attr_ IN OUT VARCHAR2,
+   info_ OUT VARCHAR2 )
+IS
+BEGIN
+   super(key_, attr_, info_);
+   Client_SYS.Set_Item_Value('MIN_DURATION', 0, attr_);   
+   Client_SYS.Set_Item_Value('SALES_PRICE_TYPE', Sales_Price_Type_API.Decode('RENTAL PRICES'), attr_);
+   Client_SYS.Set_Item_Value('SALES_PRICE_TYPE_DB', 'RENTAL PRICES', attr_);   
+   Client_SYS.Set_Item_Value('VALID_FROM_DATE', Site_API.Get_Site_Date(User_Default_API.Get_Contract), attr_);   
+   Client_SYS.Set_Item_Value('MIN_QUANTITY', 0, attr_);
+END CRUD_Default___;
+
+@Override
+PROCEDURE CRUD_Default___ (
+   key_  IN  Sales_Price_List_Parts_Key,
+   attr_ IN OUT VARCHAR2,
+   info_ OUT VARCHAR2 )
+IS
+BEGIN   
+   super(key_, attr_, info_);   
+   Client_SYS.Set_Item_Value('MIN_DURATION', -1, attr_);   
+   Client_SYS.Set_Item_Value('SALES_PRICE_TYPE', Sales_Price_Type_API.Decode('SALES PRICES'), attr_);
+   Client_SYS.Set_Item_Value('SALES_PRICE_TYPE_DB', 'SALES PRICES', attr_);   
+   Client_SYS.Set_Item_Value('VALID_FROM_DATE', Site_API.Get_Site_Date(User_Default_API.Get_Contract), attr_);   
+   Client_SYS.Set_Item_Value('MIN_QUANTITY', 0, attr_);
+END CRUD_Default___;
+
+
+FUNCTION Round_Sales_Price___(
+   sales_price_     IN NUMBER,
+   rounding_        IN NUMBER) RETURN NUMBER
+IS
+BEGIN  
+   RETURN ROUND(sales_price_, NVL(rounding_, 20));	
+END Round_Sales_Price___;
+
+FUNCTION Sales_Price_List_Lines_Search_Context_Defaults___ RETURN Sales_Price_List_Lines_Search_Context_Structure_Rec
+IS
+   sales_price_list_lines_search_context_structure_    Sales_Price_List_Lines_Search_Context_Structure_Rec;
+BEGIN 
+   sales_price_list_lines_search_context_structure_.Show_Details := 'ViewAll';
+   sales_price_list_lines_search_context_structure_.Valid_Date := NULL;
+   RETURN sales_price_list_lines_search_context_structure_;   
+END Sales_Price_List_Lines_Search_Context_Defaults___;
+
+
+FUNCTION Fetch_Valid_Date___(
+   show_details_ IN VARCHAR2 ) RETURN DATE
+IS
+   valid_date_ DATE;   
+BEGIN
+   IF show_details_ = 'ViewAll' THEN
+      valid_date_ := NULL;
+   ELSE
+      valid_date_ := SYSDATE;
+   END IF;
+   RETURN valid_date_;
+END Fetch_Valid_Date___;
+
+PROCEDURE Activate_All_Planned_Lines___ (
+	key_ IN Sales_Price_List_Key)
+IS
+BEGIN
+	Sales_Price_List_Part_API.Activate_All_Planned_Lines__(key_.price_list_no);
+END Activate_All_Planned_Lines___;
+
+PROCEDURE Add_Sites_From_Site_Cluster___ (
+	key_ IN Sales_Price_List_Key,
+	site_cluster_id_ IN VARCHAR2,
+	site_cluster_node_id_ IN VARCHAR2,
+	info$_ OUT VARCHAR2)
+IS
+BEGIN
+	Add_Sites_From_Site_Cluster___(key_.price_list_no, site_cluster_id_, site_cluster_node_id_, info$_);
+END Add_Sites_From_Site_Cluster___;
+
+@Override
+PROCEDURE CRUD_Default_Copy___ (
+   objid_  IN     VARCHAR2,
+   key_    IN     Sales_Price_List_Unit_Key,
+   values_ IN     Copy_Values_Rec,
+   attr_      OUT VARCHAR2,
+   info_      OUT VARCHAR2 )
+IS
+   valid_from_date_   DATE;
+BEGIN
+   IF objid_ IS NOT NULL  THEN
+      valid_from_date_ := key_.valid_from_date;
+   ELSE
+      valid_from_date_ := Client_SYS.Get_Item_Value_To_Date('VALID_FROM_DATE',values_.modified_source, lu_name_, NULL);
+   END IF;
+   super(objid_, key_,values_,attr_, info_ );
+   Client_SYS.Set_Item_Value('VALID_FROM_DATE', valid_from_date_, attr_);
+END CRUD_Default_Copy___;
+
+@Override
+PROCEDURE CRUD_Default_Copy___ (
+   objid_  IN     VARCHAR2,
+   key_    IN     Sales_Price_List_Assort_Key,
+   values_ IN     Copy_Values_Rec,
+   attr_      OUT VARCHAR2,
+   info_      OUT VARCHAR2 )
+IS
+   valid_from_date_   DATE;
+BEGIN
+   IF objid_ IS NOT NULL  THEN
+      valid_from_date_ := key_.valid_from_date;
+   ELSE
+      valid_from_date_ := Client_SYS.Get_Item_Value_To_Date('VALID_FROM_DATE',values_.modified_source, lu_name_, NULL);
+   END IF;   
+   super(objid_, key_,values_,attr_, info_ );
+   Client_SYS.Set_Item_Value('VALID_FROM_DATE', valid_from_date_, attr_);
+END CRUD_Default_Copy___;
+
+
+@Override
+@DynamicComponentDependency CFGCHR
+PROCEDURE CRUD_Default___ (
+   key_  IN  Char_Based_Price_List_Key,
+   attr_ IN OUT VARCHAR2,
+   info_ OUT VARCHAR2 )
+IS
+BEGIN   
+   super(key_, attr_, info_);
+   Client_SYS.Add_To_Attr('VALID_FROM_DATE', TRUNC(SYSDATE), attr_ );
+   Client_SYS.Add_To_Attr('OFFSET_VALUE', '0', attr_ );
+   Client_SYS.Add_To_Attr('FIXED_AMOUNT', '0', attr_ );
+   Client_SYS.Add_To_Attr('FIXED_AMOUNT_INCL_TAX', '0', attr_ );
+   Client_SYS.Add_To_Attr('QUANTITY_BREAK', '0', attr_ );
+   Client_SYS.Add_To_Attr('PRICE_SEARCH_DB', 'CONTINUE', attr_ );
+   Client_SYS.Add_To_Attr('CHAR_QTY_PRICE_METHOD_DB', 'NO', attr_);
+END CRUD_Default___;
+
+@Override
+@DynamicComponentDependency CFGCHR
+PROCEDURE CRUD_Default___ (
+   key_  IN  Char_Based_Opt_Price_List_Key,
+   attr_ IN OUT VARCHAR2,
+   info_ OUT VARCHAR2 )
+IS
+BEGIN     
+   super(key_, attr_, info_);
+   Client_SYS.Add_To_Attr('OFFSET_VALUE', '0', attr_ );
+   Client_SYS.Add_To_Attr('FIXED_AMOUNT', '0', attr_ );
+   Client_SYS.Add_To_Attr('FIXED_AMOUNT_INCL_TAX', '0', attr_ );
+   Client_SYS.Add_To_Attr('VALID_FROM_DATE', TRUNC(SYSDATE), attr_ );
+   Client_SYS.Add_To_Attr('CHAR_QTY_PRICE_METHOD_DB', 'NO', attr_);
+END CRUD_Default___;

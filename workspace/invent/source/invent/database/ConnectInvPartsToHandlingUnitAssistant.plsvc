@@ -1,0 +1,222 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     ConnectInvPartsToHandlingUnitAssistant
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date         Sign    History
+--  ----------  ------  ---------------------------------------------------------
+--  2020-12-16  LEPESE  SC2020R1-11803, Modified cursor get_receipt_inv_loc_info in CRUD_Create___ to use Receive_Order_API.Get_Inv_Trans_Src_Ref_Type_Db.
+--  2019-05-31  ChFolk  SCUXXW4-21984, Modified CRUD_Create___ to to avoid concatenated values in the dynamic cursor.
+--  2018-12-24  ChFolk  SCUXXW4-5341, Created. 
+-----------------------------------------------------------------------------
+
+layer Core;
+
+@Override
+PROCEDURE CRUD_Create___(   
+   rec_ IN Connect_Inv_Parts_To_Handling_Unit_Virtual_Rec )
+IS
+   parts_to_attach_rec_         Part_In_Stocks_To_Attach_To_Hu_Virtual_Rec;
+   attached_parts_rec_          Previously_Attached_Parts_In_Stock_To_Hu_Virtual_Rec;       
+    
+   CURSOR get_part_stock_info IS
+      SELECT contract, part_no, configuration_id, location_no, handling_unit_id, lot_batch_no, serial_no, eng_chg_level, waiv_dev_rej_no, 
+             activity_seq, qty_onhand, qty_reserved, (qty_onhand - qty_reserved) available_qty, catch_qty_onhand, source_ref1, source_ref2,
+             source_ref3, receipt_no, DECODE(SOURCE_REF_TYPE_DB, 'PURCHASE_ORDER', 'PUR ORDER', NULL) inv_trans_source_ref_type_db, source_ref_type_db, source_ref_type
+      FROM   INVENTORY_PART_IN_STOCK_UIV
+      WHERE  objid IN (SELECT REGEXP_SUBSTR(rec_.objid_list_arr,'[^,]+', 1, LEVEL) 
+                       FROM dual
+                       CONNECT BY REGEXP_SUBSTR(rec_.objid_list_arr, '[^,]+', 1, LEVEL) IS NOT NULL);
+                                 
+   $IF Component_Rceipt_SYS.INSTALLED $THEN
+   CURSOR get_receipt_inv_loc_info IS
+      SELECT contract, part_no, configuration_id, location_no, handling_unit_id, lot_batch_no, serial_no, eng_chg_level, waiv_dev_rej_no, 
+             activity_seq, qty_onhand, qty_reserved, (qty_onhand - qty_reserved) available_qty, catch_qty_onhand, source_ref1, source_ref2,
+             source_ref3, receipt_no, Receive_Order_API.Get_Inv_Trans_Src_Ref_Type_Db(source_ref_type_db) inv_trans_source_ref_type_db, source_ref_type_db, source_ref_type
+      FROM   RECEIPT_INV_LOCATION_HU
+      WHERE  objid IN ( SELECT REGEXP_SUBSTR(rec_.objid_list_arr,'[^,]+', 1, LEVEL) 
+                        FROM dual
+                        CONNECT BY REGEXP_SUBSTR(rec_.objid_list_arr, '[^,]+', 1, LEVEL) IS NOT NULL);
+   $END
+   
+   CURSOR get_attached_hu IS
+      SELECT contract, part_no, configuration_id, location_no, handling_unit_id, lot_batch_no, serial_no, eng_chg_level, waiv_dev_rej_no, 
+             activity_seq, qty_onhand, qty_reserved, source_ref1, source_ref2, source_ref3, receipt_no, source_ref_type
+      FROM   INVENTORY_PART_IN_STOCK_UIV
+      WHERE  handling_unit_id = rec_.handling_unit_id
+      AND    qty_onhand > 0;
+BEGIN
+   super(rec_);   
+   IF (rec_.connected_source = 'INVENT') THEN
+      FOR part_stock_rec_ IN get_part_stock_info LOOP
+         parts_to_attach_rec_.objkey        := sys_guid();
+         parts_to_attach_rec_.parent_objkey := rec_.objkey;
+         parts_to_attach_rec_.contract := part_stock_rec_.contract;
+         parts_to_attach_rec_.part_no := part_stock_rec_.part_no;
+         parts_to_attach_rec_.configuration_id := part_stock_rec_.configuration_id;
+         parts_to_attach_rec_.location_no := part_stock_rec_.location_no;
+         parts_to_attach_rec_.handling_unit_id := part_stock_rec_.handling_unit_id;
+         parts_to_attach_rec_.lot_batch_no := part_stock_rec_.lot_batch_no;
+         parts_to_attach_rec_.serial_no := part_stock_rec_.serial_no;
+         parts_to_attach_rec_.eng_chg_level := part_stock_rec_.eng_chg_level;
+         parts_to_attach_rec_.waiv_dev_rej_no := part_stock_rec_.waiv_dev_rej_no;
+         parts_to_attach_rec_.activity_seq := part_stock_rec_.activity_seq;
+         parts_to_attach_rec_.qty_onhand := part_stock_rec_.qty_onhand;
+         parts_to_attach_rec_.qty_reserved := part_stock_rec_.qty_reserved;
+         parts_to_attach_rec_.available_qty := part_stock_rec_.available_qty;
+         parts_to_attach_rec_.catch_qty_onhand := part_stock_rec_.catch_qty_onhand;
+         parts_to_attach_rec_.source_ref1 := part_stock_rec_.source_ref1;
+         parts_to_attach_rec_.source_ref2 := part_stock_rec_.source_ref2;
+         parts_to_attach_rec_.source_ref3 := part_stock_rec_.source_ref3;
+         parts_to_attach_rec_.receipt_no := part_stock_rec_.receipt_no;
+         parts_to_attach_rec_.inv_trans_source_ref_type_db := part_stock_rec_.inv_trans_source_ref_type_db;
+         parts_to_attach_rec_.source_ref_type_db := part_stock_rec_.source_ref_type_db;
+         parts_to_attach_rec_.source_ref_type := part_stock_rec_.source_ref_type;
+         IF (part_stock_rec_.serial_no != '*') THEN
+            parts_to_attach_rec_.qty_to_attach := part_stock_rec_.available_qty;               
+         END IF;
+         parts_to_attach_rec_.catch_uom := Inventory_Part_API.Get_Enabled_Catch_Unit_Meas(part_stock_rec_.contract, part_stock_rec_.part_no);
+         parts_to_attach_rec_.receipt_issue_serial_track_db := Part_Catalog_API.Get_Rcpt_Issue_Serial_Track_Db(part_stock_rec_.part_no);
+         CRUD_Create___(parts_to_attach_rec_);
+      END LOOP;
+   ELSIF (rec_.connected_source = 'RECEIPT') THEN
+      $IF Component_Rceipt_SYS.INSTALLED $THEN
+      FOR receipt_loc_rec_ IN get_receipt_inv_loc_info LOOP
+         parts_to_attach_rec_.objkey        := sys_guid();
+         parts_to_attach_rec_.parent_objkey := rec_.objkey;
+         parts_to_attach_rec_.contract := receipt_loc_rec_.contract;
+         parts_to_attach_rec_.part_no := receipt_loc_rec_.part_no;
+         parts_to_attach_rec_.configuration_id := receipt_loc_rec_.configuration_id;
+         parts_to_attach_rec_.location_no := receipt_loc_rec_.location_no;
+         parts_to_attach_rec_.handling_unit_id := receipt_loc_rec_.handling_unit_id;
+         parts_to_attach_rec_.lot_batch_no := receipt_loc_rec_.lot_batch_no;
+         parts_to_attach_rec_.serial_no := receipt_loc_rec_.serial_no;
+         parts_to_attach_rec_.eng_chg_level := receipt_loc_rec_.eng_chg_level;
+         parts_to_attach_rec_.waiv_dev_rej_no := receipt_loc_rec_.waiv_dev_rej_no;
+         parts_to_attach_rec_.activity_seq := receipt_loc_rec_.activity_seq;
+         parts_to_attach_rec_.qty_onhand := receipt_loc_rec_.qty_onhand;
+         parts_to_attach_rec_.qty_reserved := receipt_loc_rec_.qty_reserved;
+         parts_to_attach_rec_.available_qty := receipt_loc_rec_.available_qty;
+         parts_to_attach_rec_.catch_qty_onhand := receipt_loc_rec_.catch_qty_onhand;
+         parts_to_attach_rec_.source_ref1 := receipt_loc_rec_.source_ref1;
+         parts_to_attach_rec_.source_ref2 := receipt_loc_rec_.source_ref2;
+         parts_to_attach_rec_.source_ref3 := receipt_loc_rec_.source_ref3;
+         parts_to_attach_rec_.receipt_no := receipt_loc_rec_.receipt_no;
+         parts_to_attach_rec_.inv_trans_source_ref_type_db := receipt_loc_rec_.inv_trans_source_ref_type_db;
+         parts_to_attach_rec_.source_ref_type_db := receipt_loc_rec_.source_ref_type_db;
+         parts_to_attach_rec_.source_ref_type := receipt_loc_rec_.source_ref_type;
+         IF (receipt_loc_rec_.serial_no != '*') THEN
+            parts_to_attach_rec_.qty_to_attach := receipt_loc_rec_.available_qty;               
+         END IF;
+         parts_to_attach_rec_.catch_uom := Inventory_Part_API.Get_Enabled_Catch_Unit_Meas(receipt_loc_rec_.contract, receipt_loc_rec_.part_no);
+         parts_to_attach_rec_.receipt_issue_serial_track_db := Part_Catalog_API.Get_Rcpt_Issue_Serial_Track_Db(receipt_loc_rec_.part_no);
+         CRUD_Create___(parts_to_attach_rec_);
+      END LOOP;
+      $ELSE
+         NULL;
+      $END
+   END IF;
+   FOR line_rec_ IN get_attached_hu LOOP
+      attached_parts_rec_.objkey        := sys_guid();
+      attached_parts_rec_.parent_objkey := rec_.objkey;
+      attached_parts_rec_.contract := line_rec_.contract;
+      attached_parts_rec_.part_no := line_rec_.part_no;
+      attached_parts_rec_.configuration_id := line_rec_.configuration_id;
+      attached_parts_rec_.location_no := line_rec_.location_no;
+      attached_parts_rec_.handling_unit_id := line_rec_.handling_unit_id;
+      attached_parts_rec_.lot_batch_no := line_rec_.lot_batch_no;
+      attached_parts_rec_.serial_no := line_rec_.serial_no;
+      attached_parts_rec_.eng_chg_level := line_rec_.eng_chg_level;
+      attached_parts_rec_.waiv_dev_rej_no := line_rec_.waiv_dev_rej_no;
+      attached_parts_rec_.activity_seq := line_rec_.activity_seq;
+      attached_parts_rec_.qty_onhand := line_rec_.qty_onhand;
+      attached_parts_rec_.qty_reserved := line_rec_.qty_reserved;
+      attached_parts_rec_.source_ref1 := line_rec_.source_ref1;
+      attached_parts_rec_.source_ref2 := line_rec_.source_ref2;
+      attached_parts_rec_.source_ref3 := line_rec_.source_ref3;
+      attached_parts_rec_.receipt_no := line_rec_.receipt_no;     
+      attached_parts_rec_.source_ref_type := line_rec_.source_ref_type;      
+      CRUD_Create___(attached_parts_rec_);
+   END LOOP;
+END CRUD_Create___;
+
+PROCEDURE Connect_To_Handling_Unit___ (
+   parent_objkey_ IN  VARCHAR2,
+   info$_         OUT VARCHAR2 ) 
+IS  
+   parent_key_             Connect_Inv_Parts_To_Handling_Unit_Virtual_Key;
+   parent_rec_             Connect_Inv_Parts_To_Handling_Unit_Virtual_Rec;
+   child_key_              Part_In_Stocks_To_Attach_To_Hu_Virtual_Key;
+   child_rec_              Part_In_Stocks_To_Attach_To_Hu_Virtual_Rec;
+   total_qty_to_attach_    NUMBER := 0;
+   new_child_rec_          Part_In_Stocks_To_Attach_To_Hu_Virtual_Rec;
+   catch_qty_defined_      BOOLEAN := FALSE;
+   msg_                    CLOB; 
+  
+BEGIN
+   parent_key_.objkey := parent_objkey_;
+   parent_rec_ := Get_Record___(parent_key_);
+   FOR line_rec_ IN Get_Add_Parts_To_Handling_Unit_Array___(parent_key_) LOOP
+      child_key_.objkey := line_rec_.objkey;
+      child_rec_ := Get_Record___(child_key_);
+      total_qty_to_attach_ := total_qty_to_attach_ + NVL(child_rec_.qty_to_attach, 0);
+      new_child_rec_ := child_rec_;
+      IF (child_rec_.catch_uom IS NOT NULL AND child_rec_.qty_to_attach > 0) THEN
+         IF (child_rec_.qty_to_attach = child_rec_.available_qty) THEN           
+            new_child_rec_.catch_qty_to_attach := child_rec_.catch_qty_onhand;
+            CRUD_Update___(child_rec_, new_child_rec_);
+         ELSIF (child_rec_.catch_qty_to_attach IS NULL) THEN
+            Error_SYS.Record_General(lu_name_, 'CATCH_QTY_MISSING: One or more records needs a value in Catch Qty To Attach.');
+         ELSE
+            catch_qty_defined_ := TRUE;          
+         END IF;   
+      END IF;
+      IF (child_rec_.qty_to_attach > 0 OR new_child_rec_.catch_qty_to_attach > 0) THEN
+         msg_ := Pack_Connect_To_Hu_Rec___(msg_, new_child_rec_);
+      END IF;   
+   END LOOP;
+   IF (total_qty_to_attach_ = 0 AND NOT catch_qty_defined_) THEN
+      Error_SYS.Record_General(lu_name_, 'QTY_TO_ATTACH_MISSING: At least one record must have a value in Qty To Attach.');
+   END IF;   
+   IF total_qty_to_attach_ > 0 THEN
+      Inventory_Part_In_Stock_API.Change_Handling_Unit_Id(msg_, parent_rec_.handling_unit_id);
+      info$_ := Handling_Unit_API.Get_Max_Capacity_Exceeded_Info(parent_rec_.handling_unit_id);
+   END IF;   
+END Connect_To_Handling_Unit___;
+
+FUNCTION Pack_Connect_To_Hu_Rec___ (
+   msg_        IN CLOB,
+   child_rec_  IN Part_In_Stocks_To_Attach_To_Hu_Virtual_Rec ) RETURN CLOB
+IS
+   new_msg_   CLOB;
+BEGIN
+   -- Security
+   IF (child_rec_.contract IS NOT NULL) THEN
+      User_Allowed_Site_API.Is_Authorized(child_rec_.contract);    
+   END IF;
+   new_msg_ := msg_;   
+   Message_SYS.Add_Attribute(new_msg_, 'CONTRACT', child_rec_.contract);
+   Message_SYS.Add_Attribute(new_msg_, 'PART_NO', child_rec_.part_no);
+   Message_SYS.Add_Attribute(new_msg_, 'CONFIGURATION_ID', child_rec_.configuration_id);
+   Message_SYS.Add_Attribute(new_msg_, 'LOCATION_NO', child_rec_.location_no);
+   Message_SYS.Add_Attribute(new_msg_, 'LOT_BATCH_NO', child_rec_.lot_batch_no);
+   Message_SYS.Add_Attribute(new_msg_, 'SERIAL_NO', child_rec_.serial_no);
+   Message_SYS.Add_Attribute(new_msg_, 'ENG_CHG_LEVEL', child_rec_.eng_chg_level);
+   Message_SYS.Add_Attribute(new_msg_, 'WAIV_DEV_REJ_NO', child_rec_.waiv_dev_rej_no);
+   Message_SYS.Add_Attribute(new_msg_, 'ACTIVITY_SEQ', child_rec_.activity_seq);
+   Message_SYS.Add_Attribute(new_msg_, 'HANDLING_UNIT_ID', 0);
+   Message_SYS.Add_Attribute(new_msg_, 'QUANTITY', child_rec_.qty_to_attach);
+   Message_SYS.Add_Attribute(new_msg_, 'CATCH_QUANTITY', child_rec_.catch_qty_to_attach);
+   Message_SYS.Add_Attribute(new_msg_, 'SOURCE_REF1', child_rec_.source_ref1);
+   Message_SYS.Add_Attribute(new_msg_, 'SOURCE_REF2', child_rec_.source_ref2);
+   Message_SYS.Add_Attribute(new_msg_, 'SOURCE_REF3', child_rec_.source_ref3);
+   Message_SYS.Add_Attribute(new_msg_, 'SOURCE_REF4', child_rec_.receipt_no);
+   Message_SYS.Add_Attribute(new_msg_, 'INV_TRANS_SOURCE_REF_TYPE_DB', child_rec_.inv_trans_source_ref_type_db);
+   IF (child_rec_.part_tracking_session_id IS NOT NULL) THEN
+      Message_SYS.Add_Attribute(new_msg_, 'PART_TRACKING_SESSION_ID', child_rec_.part_tracking_session_id);
+   END IF;
+   RETURN new_msg_;
+END Pack_Connect_To_Hu_Rec___;
+

@@ -1,0 +1,145 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: ExternalForecastUtil
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  200616  RaMolk   SCZ-10253, Rename country and customer_Category to country_db and customer_category_db in view External_Invent_Part_Issue_Pub
+--  200327  JiThlk   SCXTEND-4081,Changed logic to fetch market_code and salesman_code from cust_ord_customer_tab.
+--  200319  JiThlk   152945(SCZ-9547), Changed logic to fetch region,district and country from cust_ord_customer_address_tab.
+--  150616  AwWelk   Merged Bug 122959, Changed the join view EXTERNAL_INVENT_PART_ISSUE_PUB to include customer order line objects with status  
+--  150526  IsSalk   KES-510, Modified view Co_Line_Deliveries to filter out cancelled CO deliver lines.
+--  150616           'Released', 'Reserved', 'PartiallyDelivered','Delivered', 'Picked', 'Invoiced'.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+-------------------- COMMON COLUMN DEFINITIONS ------------------------------
+
+-------------------- PUBLIC VIEW DEFINITIONS --------------------------------
+
+VIEW Co_Line_Deliveries IS
+   Prompt = 'View to help get the correct info in EXTERNAL_INVENT_PART_ISSUE_PUB'
+SELECT order_no                order_no,
+       line_no                 line_no,
+       rel_no                  rel_no,
+       line_item_no            line_item_no, 
+       desired_qty             desired_qty,
+       revised_qty_due         revised_qty_due,
+       0                       qty_shipped,
+       to_date(NULL)           date_delivered
+FROM customer_order_line_tab
+UNION ALL 
+SELECT order_no                order_no,
+       line_no                 line_no,
+       rel_no                  rel_no,
+       line_item_no            line_item_no, 
+       0                       desired_qty,
+       0                       revised_qty_due,
+       qty_shipped             qty_shipped,
+       date_delivered          date_delivered
+FROM   customer_order_delivery_tab
+WHERE  cancelled_delivery = 'FALSE';
+
+VIEW External_Invent_Part_Issue_Pub IS
+   Prompt = 'External Inventory Part Issue'
+SELECT line.part_no                               part_no,
+       head.contract                              contract,
+       sale.catalog_group                         sales_part_group,
+       sale.sales_price_group_id                  sales_price_group,
+       line.cost                                  standard_cost,
+       (sale.list_price*sale.price_conv_factor/sale.conv_factor * sale.inverted_conv_factor) base_price,
+       sale.expected_average_price                expected_average_price,
+       Customer_Order_Line_API.Get_Base_Sale_Price_Total(line.order_no, line.line_no, line.rel_no, line.line_item_no)/line.revised_qty_due net_price,
+       (Sales_Part_API.Get_Gross_Weight(sale.contract, sale.catalog_no)/sale.conv_factor * sale.inverted_conv_factor) weight,
+       (Part_Weight_Volume_Util_API.Get_Partca_Net_Volume(sale.contract, sale.catalog_no, sale.part_no, sale.sales_unit_meas, sale.conv_factor, sale.inverted_conv_factor, Company_Invent_Info_API.Get_Uom_For_Volume(Site_API.Get_Company(sale.contract)) )/sale.conv_factor * sale.inverted_conv_factor)       volume,
+       head.customer_no                           customer_no,
+       cust.cust_grp                              customer_group,
+       cust.category                              customer_category_db,
+       cust.market_code                           market,
+       addr.region_code                           region,
+       addr.district_code                         district,
+       Cust_Ord_Customer_Address_API.Get_Country_Code(head.customer_no, addr.addr_no) country_db,
+       cust.salesman_code                         salesman,
+       del.desired_qty                            desired_qty,
+       line.wanted_delivery_date                  desired_date,
+       line.promised_delivery_date                promised_date,
+       del.revised_qty_due                        planned_qty,
+       line.planned_delivery_date                 planned_date,
+       del.qty_shipped                            issue_qty,
+       del.date_delivered                         issue_date
+FROM   cust_ord_customer_address_tab  addr,
+       cust_ord_customer_tab          cust,
+       sales_part_tab                 sale,
+       customer_order_tab             head,
+       customer_order_line_tab        line,
+       CO_LINE_DELIVERIES                    del
+WHERE  addr.addr_no      = head.ship_addr_no
+AND    addr.customer_no  = head.customer_no
+AND    head.customer_no  = cust.customer_no
+AND    line.catalog_no   = sale.catalog_no
+AND    head.contract     = sale.contract
+AND    line.order_no     = head.order_no
+AND    head.order_no     = del.order_no
+AND    line.line_no      = del.line_no
+AND    line.rel_no       = del.rel_no
+AND    line.line_item_no = del.line_item_no
+AND    line.rowstate IN ('Released', 'Reserved', 'PartiallyDelivered','Delivered', 'Picked', 'Invoiced')
+AND    line.part_no IS NOT NULL
+AND    line.abnormal_demand != 'TRUE'
+UNION ALL
+SELECT sale.part_no                               part_no,
+       sale.contract                               contract,
+       sale.catalog_group                         sales_part_group,
+       sale.sales_price_group_id                  sales_price_group,
+       Inventory_Part_API.Get_Inventory_Value_By_Method(sale.contract, sale.part_no) standard_cost,
+       (sale.list_price*sale.price_conv_factor/sale.conv_factor * sale.inverted_conv_factor) base_price,
+       sale.expected_average_price                expected_average_price,
+       Return_Material_Line_API.Get_Returned_Total_Base_Price(line.rma_no, line.rma_line_no)/
+                                (Decode(nvl(line.qty_returned_inv,0)+nvl(line.qty_scrapped,0),
+                                 0,NULL,nvl(line.qty_returned_inv,0)+nvl(line.qty_scrapped,0))) net_price,
+       (Sales_Part_API.Get_Gross_Weight(sale.contract, sale.catalog_no)/sale.conv_factor * sale.inverted_conv_factor) weight,
+       (Part_Weight_Volume_Util_API.Get_Partca_Net_Volume(sale.contract, sale.catalog_no, sale.part_no, sale.sales_unit_meas, sale.conv_factor, sale.inverted_conv_factor, Company_Invent_Info_API.Get_Uom_For_Volume(Site_API.Get_Company(sale.contract)))/sale.conv_factor * sale.inverted_conv_factor)       volume,
+       head.customer_no                           customer_no,
+       cust.cust_grp                              customer_group,
+       cust.category                              customer_category_db,
+       cust.market_code                           market,
+       addr.region_code                           region,
+       addr.district_code                         district,
+       Cust_Ord_Customer_Address_API.Get_Country_Code(head.customer_no, addr.addr_no) country_db,
+       cust.salesman_code                         salesman,
+       -(nvl(line.qty_returned_inv,0)+nvl(line.qty_scrapped,0)) desired_qty,
+       line.date_returned                         desired_date,
+       line.date_returned                         promised_date,
+       -(nvl(line.qty_returned_inv,0)+nvl(line.qty_scrapped,0)) planned_qty,
+       line.date_returned                         planned_date,
+       -(nvl(line.qty_returned_inv,0)+nvl(line.qty_scrapped,0)) issue_qty,
+       line.date_returned                         issue_date
+FROM   cust_ord_customer_address_tab  addr,
+       cust_ord_customer_tab          cust,
+       sales_part_tab                 sale,
+       return_material_tab            head,
+       return_material_line_tab       line
+WHERE  addr.addr_no     = head.ship_addr_no
+AND    addr.customer_no = head.customer_no
+AND    cust.customer_no = head.customer_no
+AND    line.catalog_no  = sale.catalog_no
+AND    line.contract    = sale.contract
+AND    sale.part_no IS NOT NULL
+AND    line.rma_no      = head.rma_no
+AND    line.rowstate IN ('PartiallyReceived','Received', 'ReturnCompleted')
+AND    (line.rma_no, line.rma_line_no) NOT IN (SELECT rma_no, rma_line_no
+                                               FROM return_material_line_tab rml,
+                                                    customer_order_line_tab col
+                                               WHERE col.order_no = rml.order_no
+                                               AND   col.line_no = rml.line_no
+                                               AND   col.rel_no = rml.rel_no
+                                               AND   col.line_item_no = rml.line_item_no
+                                               AND   col.abnormal_demand = 'TRUE');
+
+
+-------------------- PRIVATE VIEW DEFINITIONS -------------------------------
+

@@ -1,0 +1,230 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: InventoryPartAvailabilityGraphAnalysis
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date        Sign    History
+--  ----------  ------  ---------------------------------------------------------
+--  2019-04-29  ChFolk  SCUXXW4-5986, Modified Create_Graph_Data___ to correct some data.
+--  2019-04-18  ChFolk  SCUXXW4-5986, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+PROCEDURE Create_Graph_Data___ (
+   parent_objkey_     IN VARCHAR2,
+   part_no_           IN VARCHAR2,
+   contract_          IN VARCHAR2,
+   configuration_id_  IN VARCHAR2,
+   order_qty_         IN NUMBER,
+   order_point_qty_   IN NUMBER,
+   safety_stock_      IN NUMBER )
+IS
+   new_day_rec_                   Order_Supply_Demand_Day_Virtual_Rec;
+   new_week_rec_                  Order_Supply_Demand_Week_Virtual_Rec;
+   new_month_rec_                 Order_Supply_Demand_Month_Virtual_Rec;
+   prev_day_available_qty_        NUMBER;
+   prev_week_available_qty_       NUMBER;
+   prev_month_available_qty_      NUMBER;
+   current_date_                  DATE := sysdate;
+   start_date_for_day_graph_      DATE;
+   start_date_for_week_graph_     DATE;
+   start_date_for_month_graph_    DATE;
+   exp_next_date_for_day_graph_   DATE;
+   exp_next_date_for_week_graph_  DATE;
+   exp_next_date_for_month_graph_ DATE;
+   end_date_for_day_graph_        DATE;
+   end_date_for_week_graph_       DATE;
+   end_date_for_month_graph_      DATE;
+   current_day_usable_qty_        NUMBER;
+   current_week_usable_qty_       NUMBER;
+   current_month_usable_qty_      NUMBER;  
+    
+   CURSOR get_lines_for_day IS
+      SELECT part_no, TO_CHAR(date_required, 'YYYYMMDD') date_with_year, SUM(qty_supply - qty_demand) available_qty, contract, TRUNC(date_required, 'DD') trans_date_for_day_graph
+      FROM ORDER_SUPPLY_DEMAND_UIV
+      WHERE part_no = part_no_
+      AND   contract = contract_
+      AND   configuration_id = configuration_id_
+      GROUP BY part_no, contract, TO_CHAR(date_required, 'YYYYMMDD'), TRUNC(date_required, 'DD')
+      ORDER BY TO_CHAR(date_required, 'YYYYMMDD');
+
+   CURSOR get_lines_for_week IS
+      SELECT part_no, TO_CHAR(date_required, 'YYYYWW') date_with_year_week, SUM(qty_supply - qty_demand) available_qty, contract, TRUNC(date_required, 'WW') trans_date_for_week_graph
+      FROM ORDER_SUPPLY_DEMAND_UIV
+      WHERE part_no = part_no_
+      AND   contract = contract_
+      AND   configuration_id = configuration_id_
+      GROUP BY part_no, contract, TO_CHAR(date_required, 'YYYYWW'), TRUNC(date_required, 'WW')
+      ORDER BY TO_CHAR(date_required, 'YYYYWW');
+      
+   CURSOR get_lines_for_month IS
+      SELECT part_no, TO_CHAR(date_required, 'YYYYMM') date_with_year_month, SUM(qty_supply - qty_demand) available_qty, contract, TRUNC(date_required, 'MM') trans_date_for_month_graph
+      FROM ORDER_SUPPLY_DEMAND_UIV
+      WHERE part_no = part_no_
+      AND   contract = contract_
+      AND   configuration_id = configuration_id_
+      GROUP BY part_no, contract, TO_CHAR(date_required, 'YYYYMM'), TRUNC(date_required, 'MM')
+      ORDER BY TO_CHAR(date_required, 'YYYYMM');    
+
+BEGIN
+	-- Clear existing data
+   DELETE FROM ${PROJECTION}_ORDER_SUPPLY_DEMAND_DAY_VIRTUAL_VRT WHERE parent_objkey = parent_objkey_;
+   DELETE FROM ${PROJECTION}_ORDER_SUPPLY_DEMAND_WEEK_VIRTUAL_VRT WHERE parent_objkey = parent_objkey_;
+   DELETE FROM ${PROJECTION}_ORDER_SUPPLY_DEMAND_MONTH_VIRTUAL_VRT WHERE parent_objkey = parent_objkey_;
+ 
+   start_date_for_day_graph_ := current_date_ - 32;
+   end_date_for_day_graph_ := start_date_for_day_graph_ + 50;
+   exp_next_date_for_day_graph_ := start_date_for_day_graph_;
+   FOR days_rec_ IN get_lines_for_day LOOP
+      IF (prev_day_available_qty_ IS NULL) THEN
+         current_day_usable_qty_ := order_qty_ + days_rec_.available_qty;
+      ELSE
+         current_day_usable_qty_ := prev_day_available_qty_ + days_rec_.available_qty;
+      END IF;
+            
+      IF (days_rec_.trans_date_for_day_graph >= TRUNC(start_date_for_day_graph_, 'DD')) THEN
+         WHILE TO_CHAR(days_rec_.trans_date_for_day_graph, 'YYYYMMDD') != TO_CHAR(exp_next_date_for_day_graph_, 'YYYYMMDD') LOOP
+            new_day_rec_.objkey := Sys_Guid();
+            new_day_rec_.parent_objkey := parent_objkey_;
+            new_day_rec_.sort_date := TO_CHAR(exp_next_date_for_day_graph_, 'YY/MM/DD');
+            new_day_rec_.usable_qty := prev_day_available_qty_;
+            new_day_rec_.order_point_qty := order_point_qty_;
+            new_day_rec_.safety_stock := safety_stock_;
+            CRUD_Create___(new_day_rec_);
+            exp_next_date_for_day_graph_ := exp_next_date_for_day_graph_ + 1;
+         END LOOP;
+         new_day_rec_.objkey := Sys_Guid();
+         new_day_rec_.parent_objkey := parent_objkey_;
+         new_day_rec_.sort_date := TO_CHAR(days_rec_.trans_date_for_day_graph, 'YY/MM/DD');
+         new_day_rec_.usable_qty := current_day_usable_qty_;
+         new_day_rec_.order_point_qty := order_point_qty_;
+         new_day_rec_.safety_stock := safety_stock_;
+         CRUD_Create___(new_day_rec_);
+      END IF;
+      prev_day_available_qty_ := current_day_usable_qty_;
+      
+   END LOOP;
+   -- create records for future dates
+   WHILE (TRUNC(end_date_for_day_graph_, 'DD') >= TRUNC(exp_next_date_for_day_graph_, 'DD')) LOOP
+      new_day_rec_.objkey := Sys_Guid();
+      new_day_rec_.parent_objkey := parent_objkey_;
+      new_day_rec_.sort_date := TO_CHAR(exp_next_date_for_day_graph_, 'YY/MM/DD');
+      new_day_rec_.usable_qty := prev_day_available_qty_;
+      new_day_rec_.order_point_qty := order_point_qty_;
+      new_week_rec_.safety_stock := safety_stock_;
+      CRUD_Create___(new_day_rec_);
+      exp_next_date_for_day_graph_ := exp_next_date_for_day_graph_ + 1;
+   END LOOP;
+   start_date_for_week_graph_ := current_date_ - 125;
+   end_date_for_week_graph_ := start_date_for_week_graph_ + 365;
+   exp_next_date_for_week_graph_ := start_date_for_week_graph_;
+  
+   FOR weeks_rec_ IN get_lines_for_week LOOP
+      IF (prev_week_available_qty_ IS NULL) THEN
+         current_week_usable_qty_ := order_qty_ + weeks_rec_.available_qty;
+      ELSE
+         current_week_usable_qty_ := prev_week_available_qty_ + weeks_rec_.available_qty;
+      END IF;
+           
+      IF (weeks_rec_.trans_date_for_week_graph >= TRUNC(start_date_for_week_graph_, 'WW')) THEN
+         WHILE TO_CHAR(weeks_rec_.trans_date_for_week_graph, 'YYYYWW') != TO_CHAR(exp_next_date_for_week_graph_, 'YYYYWW') LOOP
+            new_week_rec_.objkey := Sys_Guid();
+            new_week_rec_.parent_objkey := parent_objkey_;
+            new_week_rec_.sort_date := TO_CHAR(exp_next_date_for_week_graph_, 'YY/WW');
+            new_week_rec_.usable_qty := prev_week_available_qty_;
+            new_week_rec_.order_point_qty := order_point_qty_;
+            new_week_rec_.safety_stock := safety_stock_;
+            CRUD_Create___(new_week_rec_);
+            exp_next_date_for_week_graph_ := exp_next_date_for_week_graph_ + 7;
+         END LOOP;
+         new_week_rec_.objkey := Sys_Guid();
+         new_week_rec_.parent_objkey := parent_objkey_;
+         new_week_rec_.sort_date := TO_CHAR(weeks_rec_.trans_date_for_week_graph, 'YY/WW');
+         new_week_rec_.usable_qty := current_week_usable_qty_;
+         new_week_rec_.order_point_qty := order_point_qty_;
+         new_week_rec_.safety_stock := safety_stock_;
+         CRUD_Create___(new_week_rec_);
+      END IF;
+      prev_week_available_qty_ := current_week_usable_qty_;
+   END LOOP;
+   -- create records for future dates
+   WHILE (TRUNC(end_date_for_week_graph_, 'WW') >= TRUNC(exp_next_date_for_week_graph_, 'WW')) LOOP
+      new_week_rec_.objkey := Sys_Guid();
+      new_week_rec_.parent_objkey := parent_objkey_;
+      new_week_rec_.sort_date := TO_CHAR(exp_next_date_for_week_graph_, 'YY/WW');
+      new_week_rec_.usable_qty := prev_week_available_qty_;
+      new_week_rec_.order_point_qty := order_point_qty_;
+      new_week_rec_.safety_stock := safety_stock_;
+      CRUD_Create___(new_week_rec_);
+      exp_next_date_for_week_graph_ := exp_next_date_for_week_graph_ + 7;
+   END LOOP;
+  
+   start_date_for_month_graph_ := current_date_ - 125;
+   end_date_for_month_graph_ := start_date_for_month_graph_ + 365;
+   exp_next_date_for_month_graph_ := start_date_for_month_graph_;
+   FOR months_rec_ IN get_lines_for_month LOOP
+      IF (prev_month_available_qty_ IS NULL) THEN
+         current_month_usable_qty_ := order_qty_ + months_rec_.available_qty;
+      ELSE
+         current_month_usable_qty_ := prev_month_available_qty_ + months_rec_.available_qty;
+      END IF;
+           
+      IF (months_rec_.trans_date_for_month_graph >= TRUNC(start_date_for_month_graph_, 'MM')) THEN
+         WHILE TO_CHAR(months_rec_.trans_date_for_month_graph, 'YYYYMM') != TO_CHAR(exp_next_date_for_month_graph_, 'YYYYMM') LOOP
+            new_month_rec_.objkey := Sys_Guid();
+            new_month_rec_.parent_objkey := parent_objkey_;
+            new_month_rec_.sort_date := TO_CHAR(exp_next_date_for_month_graph_, 'YYYY/MM');
+            new_month_rec_.usable_qty := prev_month_available_qty_;
+            new_month_rec_.order_point_qty := order_point_qty_;
+            new_month_rec_.safety_stock := safety_stock_;
+            CRUD_Create___(new_month_rec_);
+            exp_next_date_for_month_graph_ := Get_Next_Expected_Date___(exp_next_date_for_month_graph_, TO_CHAR(exp_next_date_for_month_graph_, 'MM'));
+         END LOOP;
+         new_month_rec_.objkey := Sys_Guid();
+         new_month_rec_.parent_objkey := parent_objkey_;
+         new_month_rec_.sort_date := TO_CHAR(months_rec_.trans_date_for_month_graph, 'YYYY/MM');
+         new_month_rec_.usable_qty := current_month_usable_qty_;
+         new_month_rec_.order_point_qty := order_point_qty_;
+         new_month_rec_.safety_stock := safety_stock_;
+         CRUD_Create___(new_month_rec_);
+      END IF;
+      prev_month_available_qty_ := current_month_usable_qty_;
+   END LOOP;
+
+   -- create records for future dates
+   WHILE (TRUNC(end_date_for_month_graph_, 'MM') >= TRUNC(exp_next_date_for_month_graph_, 'MM')) LOOP
+      new_month_rec_.objkey := Sys_Guid();
+      new_month_rec_.parent_objkey := parent_objkey_;
+      new_month_rec_.sort_date := TO_CHAR(exp_next_date_for_month_graph_, 'YYYY/MM');
+      new_month_rec_.usable_qty := prev_month_available_qty_;
+      new_month_rec_.order_point_qty := order_point_qty_;
+      new_month_rec_.safety_stock := safety_stock_;
+      CRUD_Create___(new_month_rec_);
+      exp_next_date_for_month_graph_ := Get_Next_Expected_Date___(exp_next_date_for_month_graph_, TO_CHAR(exp_next_date_for_month_graph_, 'MM'));
+   END LOOP;   
+END Create_Graph_Data___;
+
+FUNCTION Get_Next_Expected_Date___ (
+   date_      IN DATE,
+   month_     IN VARCHAR2 ) RETURN DATE
+IS
+   next_date_  DATE;
+   year_       NUMBER;
+BEGIN
+   IF (month_ IN ('1', '3', '5', '7', '8', '10', '12')) THEN
+      next_date_ := date_ + 31;
+   ELSIF (month_ IN ('4', '6', '9', '11')) THEN
+      next_date_ := date_ + 30;
+   ELSE
+      year_ := TO_NUMBER(TO_CHAR(date_, 'YYYY'));
+      IF ((MOD(year_, 4) = 0) AND ((MOD(year_, 100) != 0) OR (MOD(year_, 400) = 0))) THEN
+         next_date_ := date_ + 29;
+      ELSE
+         next_date_ := date_ + 28;
+      END IF;     
+   END IF;
+   RETURN next_date_;
+END Get_Next_Expected_Date___;   

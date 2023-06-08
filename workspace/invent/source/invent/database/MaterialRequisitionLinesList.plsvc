@@ -1,0 +1,537 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     MaterialRequisitionLinesList
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  200921  JaThlk  SC2020R1-9886, Moved the function Get_Site_Date___ to MaterialRequisitionHandling.plsvc.
+--  200721  JaThlk  Bug 154532 (SCZ-10444), Added the functions, Is_Reserve_Quantity_Expired___ and Is_Issue_Quantity_Expired___ to check
+--  200721          whether it is reserving or issuing from expired quantity.  
+--  190329  fandse  SCUXXW4-6850, Fixed CRUD_Create for manual reservation, order class didn't handle language correctly.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+PROCEDURE Make_Line_Reservations___ (
+   order_class_db_     IN     VARCHAR2,
+   order_no_           IN     VARCHAR2,
+   line_no_            IN     VARCHAR2,
+   release_no_         IN     VARCHAR2,
+   line_item_no_       IN     NUMBER,
+   qty_to_reserve_     IN     NUMBER,
+   part_no_            IN     VARCHAR2,
+   info$_              OUT    VARCHAR2)
+IS
+   qty_left_            NUMBER := 0;
+BEGIN
+   Material_Requis_Line_Initial_Check___ (Material_Requis_Type_API.Decode(order_class_db_), order_no_, line_no_, release_no_, line_item_no_);
+   Material_Requis_Line_API.Make_Line_Reservations(qty_left_ => qty_left_,
+                                                   order_class_ => Material_Requis_Type_API.Decode(order_class_db_),
+                                                   order_no_ => order_no_,
+                                                   line_no_ => line_no_,
+                                                   release_no_ => release_no_,
+                                                   line_item_no_ => line_item_no_,
+                                                   qty_to_reserve_ => NULL,
+                                                   availability_check_ => 'Y');
+   IF (qty_left_ = qty_to_reserve_) THEN
+      Client_SYS.Add_Info(lu_name_, 'NOMATISAVAIL: No material is available to reserve for part :P1, qty_left_ :P2', part_no_, qty_left_);
+   ELSIF (qty_left_ > 0) THEN
+      Client_SYS.Add_Info(lu_name_, 'LEFTTOALLOC: All material could not be allocated for part :P1. Remaining quantity: :P2.', part_no_, qty_left_);
+   END IF;
+   info$_ := Client_SYS.Get_All_Info;
+END Make_Line_Reservations___;
+
+PROCEDURE Make_Line_Delivery___ (
+   order_class_db_            IN     VARCHAR2,
+   order_no_                  IN     VARCHAR2,
+   line_no_                   IN     VARCHAR2,
+   release_no_                IN     VARCHAR2,
+   line_item_no_              IN     NUMBER,
+   part_tracking_session_id_  IN     NUMBER,
+   info$_                     OUT    VARCHAR2)
+IS
+   info_                      VARCHAR2(2000);
+   next_inventory_event_id_   NUMBER;
+BEGIN
+   next_inventory_event_id_ := Inventory_Event_Manager_API.Get_Next_Inventory_Event_Id;  
+   Inventory_Event_Manager_API.Set_Session_Id(next_inventory_event_id_);
+   Material_Requis_Line_Initial_Check___ (Material_Requis_Type_API.Decode(order_class_db_), order_no_, line_no_, release_no_, line_item_no_);
+   Material_Requis_Reservat_API.Make_Line_Delivery(order_class_ => Material_Requis_Type_API.Decode(order_class_db_),
+                                                   order_no_ => order_no_,
+                                                   line_no_ => line_no_,
+                                                   release_no_ => release_no_,
+                                                   line_item_no_ => line_item_no_,
+                                                   part_tracking_session_id_ => part_tracking_session_id_,
+                                                   info_ => info_);
+   Inventory_Event_Manager_API.Finish(next_inventory_event_id_);
+   info$_ := info_;
+END Make_Line_Delivery___;
+
+FUNCTION Convert_To_String___ (
+   number_to_convert_ IN NUMBER ) RETURN VARCHAR2
+IS
+   
+BEGIN
+   RETURN TO_CHAR(number_to_convert_);
+END Convert_To_String___;
+
+PROCEDURE Close_Line___ (
+   order_class_db_            IN     VARCHAR2,
+   order_no_                  IN     VARCHAR2,
+   line_no_                   IN     VARCHAR2,
+   release_no_                IN     VARCHAR2,
+   line_item_no_              IN     NUMBER)
+IS
+BEGIN
+   Material_Requis_Line_Initial_Check___ (Material_Requis_Type_API.Decode(order_class_db_), order_no_, line_no_, release_no_, line_item_no_);
+   Material_Requis_Line_API.Close__(order_class_ => Material_Requis_Type_API.Decode(order_class_db_),
+                                       order_no_ => order_no_,
+                                       line_no_ => line_no_,
+                                       release_no_ => release_no_,
+                                       line_item_no_ => line_item_no_);
+END Close_Line___;
+
+PROCEDURE Modify_Activity_Sequence___ (
+   order_class_db_  IN  VARCHAR2,
+   order_no_        IN  VARCHAR2,
+   line_no_         IN  VARCHAR2,
+   release_no_      IN  VARCHAR2,
+   line_item_no_    IN  NUMBER,
+   activity_seq_    IN  NUMBER,
+   info$_           OUT VARCHAR2)
+IS
+BEGIN
+   Material_Requis_Line_Initial_Check___ (Material_Requis_Type_API.Decode(order_class_db_), order_no_, line_no_, release_no_, line_item_no_);
+   Material_Requis_Line_API.Modify_Activity_Seq(order_class_db_ => order_class_db_,
+                                                order_no_ => order_no_,
+                                                line_no_ => line_no_,
+                                                release_no_ => release_no_,
+                                                line_item_no_ => line_item_no_,
+                                                activity_seq_ => activity_seq_);
+   info$_ := Client_SYS.Get_All_Info;
+END Modify_Activity_Sequence___;
+
+FUNCTION Create_Purchase_Information_Navigation___ (
+   order_class_db_            IN     VARCHAR2,
+   order_no_                  IN     VARCHAR2,
+   line_no_                   IN     VARCHAR2,
+   release_no_                IN     VARCHAR2,
+   line_item_no_              IN     NUMBER) RETURN VARCHAR2
+IS
+   po_order_no_   VARCHAR2(12);
+   po_line_no_    VARCHAR2(4);
+   po_rel_no_     VARCHAR2(4);
+   purchase_type_ VARCHAR2(1);
+   navigation_    VARCHAR2(2000) := NULL;
+BEGIN
+   Material_Requis_Pur_Order_API.Get_Purchase_Link(po_order_no_ => po_order_no_,
+                                                   po_line_no_ => po_line_no_,
+                                                   po_rel_no_ => po_rel_no_,
+                                                   purchase_type_ => purchase_type_,
+                                                   order_no_ => order_no_,
+                                                   line_no_ => line_no_,
+                                                   release_no_ => release_no_,
+                                                   line_item_no_ => line_item_no_,
+                                                   order_class_ => Material_Requis_Type_API.Decode(order_class_db_));
+   IF (purchase_type_ = 'O') THEN
+      navigation_ := 'page/PurchaseOrder/Form?$filter=OrderNo eq '''||po_order_no_||'''';
+   ELSIF (purchase_type_ = 'R') THEN
+      navigation_ := 'page/PurchaseRequisition/Form?$filter=RequisitionNo eq '''||po_order_no_||'''';
+   ELSE
+      Error_SYS.Record_General(lu_name_, 'NOVALIDPURCHASETYPE: Not possible to navigate as no valid purchase type was found.');
+   END IF;
+   RETURN navigation_;
+END Create_Purchase_Information_Navigation___;
+
+
+FUNCTION Get_Part_Information___ (
+   part_no_     IN     VARCHAR2,
+   contract_    IN     VARCHAR2) RETURN Part_Information_Structure_Rec
+IS
+   rec_              Part_Information_Structure_Rec;
+   part_description_ VARCHAR2(200);
+   supply_code_      VARCHAR2(30);
+   unit_meas_        VARCHAR2(10);
+BEGIN
+   Material_Requis_Line_API.Check_Part_No__( description_ => part_description_,
+                                             supply_code_ => supply_code_,
+                                             unit_meas_ => unit_meas_,
+                                             part_no_ => part_no_,
+                                             contract_ => contract_);
+   rec_.part_description := part_description_;
+   rec_.supply_code := Material_Requis_Supply_API.Encode(supply_code_);
+   rec_.unit_meas := unit_meas_;
+   RETURN rec_;
+END Get_Part_Information___;
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Manual_Reservation_Virtual_Rec )
+IS
+   line_rec_    Inv_Part_In_Stock_To_Reserve_Virtual_Rec;
+   newrec_      Manual_Reservation_Virtual_Rec;
+   
+   CURSOR get_locations IS
+     SELECT (qty_onhand - qty_reserved) available_qty, location_no, handling_unit_id, warehouse,
+            bay_no, row_no, tier_no, bin_no, part_no, contract, lot_batch_no, serial_no, eng_chg_level, waiv_dev_rej_no,
+            project_id, activity_seq, availability_control_id, expiration_date            
+         FROM  INVENTORY_PART_PICK_SHIP_STOCK
+         WHERE part_no = rec_.part_no
+         AND   contract = rec_.contract   
+         AND   ((qty_onhand - qty_reserved) > 0 OR 
+                (Material_Requis_Reservat_API.Get_Qty_Assigned(Material_Requis_Type_API.Decode(rec_.order_class), rec_.order_no, rec_.line_no, rec_.release_no, rec_.line_item_no, rec_.part_no, rec_.contract, '*', location_no, lot_batch_no, serial_no, waiv_dev_rej_no, eng_chg_level, activity_seq, handling_unit_id) > 0))
+         AND   location_type_db = 'PICKING'
+         AND   part_ownership_db IN ('COMPANY OWNED','CONSIGNMENT')
+         AND   NVL(project_id, ' ') = NVL(rec_.project_id, ' ')
+         AND   NVL(condition_code, ' ') = NVL(rec_.condition_code, ' ');
+         
+BEGIN
+   newrec_ := rec_;  
+   newrec_.lines_ready_to_reserve := Fnd_Boolean_API.DB_FALSE;
+   super(newrec_); 
+ 
+   FOR location_rec_ IN get_locations LOOP
+      line_rec_.objkey        := sys_guid();     
+      line_rec_.parent_objkey := rec_.objkey;
+      line_rec_.available_qty := location_rec_.available_qty;
+      line_rec_.qty_reserved := Material_Requis_Reservat_API.Get_Qty_Assigned(Material_Requis_Type_API.Decode(rec_.order_class),
+                                                                              rec_.order_no,
+                                                                              rec_.line_no,
+                                                                              rec_.release_no,
+                                                                              rec_.line_item_no,
+                                                                              rec_.part_no,
+                                                                              rec_.contract,
+                                                                              '*',
+                                                                              location_rec_.location_no,
+                                                                              location_rec_.lot_batch_no,
+                                                                              location_rec_.serial_no,
+                                                                              location_rec_.waiv_dev_rej_no, 
+                                                                              location_rec_.eng_chg_level,
+                                                                              location_rec_.activity_seq,
+                                                                              location_rec_.handling_unit_id);
+      line_rec_.location_no := location_rec_.location_no;
+      line_rec_.handling_unit_id := location_rec_.handling_unit_id;
+      line_rec_.warehouse := location_rec_.warehouse;
+      line_rec_.bay_no := location_rec_.bay_no;
+      line_rec_.row_no := location_rec_.row_no;
+      line_rec_.tier_no := location_rec_.tier_no;
+      line_rec_.bin_no := location_rec_.bin_no;
+      line_rec_.part_no := location_rec_.part_no;
+      line_rec_.contract := location_rec_.contract;
+      line_rec_.lot_batch_no := location_rec_.lot_batch_no;
+      line_rec_.serial_no := location_rec_.serial_no;
+      line_rec_.eng_chg_level := location_rec_.eng_chg_level;
+      line_rec_.waiv_dev_rej_no := location_rec_.waiv_dev_rej_no;
+      line_rec_.project_id := location_rec_.project_id;
+      line_rec_.activity_seq := location_rec_.activity_seq;
+      line_rec_.availability_control_id := location_rec_.availability_control_id;
+      line_rec_.expiration_date := location_rec_.expiration_date;     
+      CRUD_Create___(line_rec_);
+   END LOOP;
+ 
+END CRUD_Create___;
+
+PROCEDURE Reserve_Materials___ (
+   order_class_db_   IN VARCHAR2,
+   order_no_         IN VARCHAR2,
+   line_no_          IN VARCHAR2,
+   release_no_       IN VARCHAR2,
+   line_item_no_     IN NUMBER,
+   contract_         IN VARCHAR2,
+   part_no_          IN VARCHAR2,
+   parent_objkey_    IN VARCHAR2 ) 
+IS
+   parent_key_           Manual_Reservation_Virtual_Key; 
+   child_key_            Inv_Part_In_Stock_To_Reserve_Virtual_Key;
+   current_child_rec_    Inv_Part_In_Stock_To_Reserve_Virtual_Rec; 
+  
+BEGIN
+   parent_key_.objkey := parent_objkey_;
+   FOR child_rec_ IN Get_Part_In_Stock_To_Reserve_Array___(parent_key_) LOOP
+      child_key_.objkey := child_rec_.objkey;
+      current_child_rec_ := Get_Record___(child_key_);
+      IF (current_child_rec_.qty_to_reserve IS NOT NULL AND current_child_rec_.qty_to_reserve != 0) THEN
+         Material_Requis_Line_Initial_Check___ (Material_Requis_Type_API.Decode(order_class_db_), order_no_, line_no_, release_no_, line_item_no_);
+         Material_Requis_Reservat_API.Make_Part_Reservations(Material_Requis_Type_API.Decode(order_class_db_),
+                                                             order_no_,
+                                                             line_no_,
+                                                             release_no_,
+                                                             line_item_no_,
+                                                             part_no_,
+                                                             contract_,
+                                                             current_child_rec_.location_no,
+                                                             current_child_rec_.lot_batch_no,
+                                                             current_child_rec_.serial_no,
+                                                             current_child_rec_.waiv_dev_rej_no,
+                                                             current_child_rec_.eng_chg_level,
+                                                             current_child_rec_.activity_seq,
+                                                             current_child_rec_.handling_unit_id,
+                                                             current_child_rec_.qty_to_reserve);
+      END IF;
+   END LOOP;
+END Reserve_Materials___;
+
+
+@Override
+PROCEDURE CRUD_Update___(
+   old_ IN Inv_Part_In_Stock_To_Reserve_Virtual_Rec,
+   new_ IN Inv_Part_In_Stock_To_Reserve_Virtual_Rec )
+IS
+   parent_key_              Manual_Reservation_Virtual_Key; 
+   old_parent_rec_          Manual_Reservation_Virtual_Rec;
+   new_parent_rec_          Manual_Reservation_Virtual_Rec;
+   lines_ready_to_reserve_  BOOLEAN := FALSE;
+   child_key_               Inv_Part_In_Stock_To_Reserve_Virtual_Key;
+   old_child_rec_           Inv_Part_In_Stock_To_Reserve_Virtual_Rec;
+BEGIN   
+   super(old_, new_);
+   parent_key_.objkey := new_.parent_objkey;
+   old_parent_rec_ := Get_Record___(parent_key_);
+   new_parent_rec_ := old_parent_rec_;
+   IF (old_parent_rec_.lines_ready_to_reserve = Fnd_Boolean_API.DB_FALSE AND new_.qty_to_reserve IS NOT NULL) THEN
+      new_parent_rec_.lines_ready_to_reserve := Fnd_Boolean_API.DB_TRUE;
+      lines_ready_to_reserve_ := TRUE;      
+      CRUD_Update___(old_parent_rec_, new_parent_rec_);
+   ELSE
+      FOR line_rec_ IN Get_Part_In_Stock_To_Reserve_Array___(parent_key_) LOOP
+         child_key_.objkey := line_rec_.objkey;
+         old_child_rec_ := Get_Record___(child_key_);
+         IF (old_child_rec_.qty_to_reserve IS NOT NULL) THEN
+            IF (old_parent_rec_.lines_ready_to_reserve = Fnd_Boolean_API.DB_FALSE) THEN            
+               new_parent_rec_.lines_ready_to_reserve := Fnd_Boolean_API.DB_TRUE;     
+               CRUD_Update___(old_parent_rec_, new_parent_rec_);
+            END IF;   
+            lines_ready_to_reserve_ := TRUE;
+            EXIT;
+         END IF;   
+      END LOOP;
+      IF (NOT lines_ready_to_reserve_ AND old_parent_rec_.lines_ready_to_reserve = Fnd_Boolean_API.DB_TRUE) THEN
+         new_parent_rec_.lines_ready_to_reserve := Fnd_Boolean_API.DB_FALSE;
+         CRUD_Update___(old_parent_rec_, new_parent_rec_);
+      END IF;   
+   END IF;   
+END CRUD_Update___ ;
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Manual_Issue_Virtual_Rec )
+IS
+   line_rec_               Inv_Part_In_Stock_To_Issue_Virtual_Rec;
+   newrec_                 Manual_Issue_Virtual_Rec;
+   inv_location_rec_       Inventory_Location_API.Public_Rec;
+   receipt_issue_track_db_ VARCHAR2(5);
+   
+   CURSOR get_locations IS
+     SELECT qty_assigned, location_no, handling_unit_id, part_no, contract, lot_batch_no, serial_no, eng_chg_level, waiv_dev_rej_no,
+            activity_seq, configuration_id            
+         FROM  MATERIAL_REQUIS_RESERVAT
+         WHERE contract = rec_.contract   
+         AND   order_no = rec_.order_no
+         AND   order_class_db = rec_.order_class
+         AND   line_no = rec_.line_no
+         AND   release_no = rec_.release_no
+         AND   line_item_no = rec_.line_item_no
+         AND   Part_Availability_Control_API.Check_Order_Issue_Control(Inventory_Part_In_Stock_API.Get_Availability_Control_Id(contract,part_no,'*',location_no,lot_batch_no,serial_no,eng_chg_level,waiv_dev_rej_no,activity_seq,handling_unit_id)) = 'ORDER ISSUE';
+         
+BEGIN
+   newrec_ := rec_;
+   newrec_.lines_ready_to_issue := Fnd_Boolean_API.DB_FALSE;
+   super(newrec_); 
+   receipt_issue_track_db_ := Part_Catalog_API.Serial_Trak_Only_Rece_Issue_Db(rec_.part_no);
+   FOR location_rec_ IN get_locations LOOP
+      line_rec_.objkey        := sys_guid();     
+      line_rec_.parent_objkey := rec_.objkey;    
+      line_rec_.qty_assigned := location_rec_.qty_assigned;
+      line_rec_.location_no := location_rec_.location_no;
+      line_rec_.handling_unit_id := location_rec_.handling_unit_id;
+      inv_location_rec_ := Inventory_Location_API.Get(location_rec_.contract, location_rec_.location_no);
+      line_rec_.warehouse := inv_location_rec_.warehouse;
+      line_rec_.bay_no := inv_location_rec_.bay_no;
+      line_rec_.row_no := inv_location_rec_.row_no;
+      line_rec_.tier_no := inv_location_rec_.tier_no;
+      line_rec_.bin_no := inv_location_rec_.bin_no;
+      line_rec_.part_no := location_rec_.part_no;
+      line_rec_.contract := location_rec_.contract;
+      line_rec_.lot_batch_no := location_rec_.lot_batch_no;
+      line_rec_.serial_no := location_rec_.serial_no;
+      line_rec_.condition_code := Condition_Code_Manager_API.Get_Condition_Code(location_rec_.part_no, location_rec_.serial_no, location_rec_.lot_batch_no);
+      line_rec_.eng_chg_level := location_rec_.eng_chg_level;
+      line_rec_.waiv_dev_rej_no := location_rec_.waiv_dev_rej_no;
+      line_rec_.project_id := rec_.project_id;
+      line_rec_.activity_seq := location_rec_.activity_seq;
+      line_rec_.top_parent_handling_unit_id := Handling_Unit_API.Get_Top_Parent_Handl_Unit_Id(line_rec_.handling_unit_id);
+      line_rec_.top_parent_hu_type_id := Handling_Unit_API.Get_Top_Parent_Hu_Type_Id(line_rec_.handling_unit_id);
+      line_rec_.top_parent_sscc := Handling_Unit_API.Get_Top_Parent_Sscc(line_rec_.handling_unit_id);
+      line_rec_.top_parent_alt_hu_label_id := Handling_Unit_API.Get_Top_Parent_Alt_Hu_Label_Id(line_rec_.handling_unit_id);
+      line_rec_.availability_control_id := Inventory_Part_In_Stock_API.Get_Availability_Control_Id(location_rec_.contract,
+                                                                                                   location_rec_.part_no,
+                                                                                                   '*',
+                                                                                                   location_rec_.location_no,
+                                                                                                   location_rec_.lot_batch_no,
+                                                                                                   location_rec_.serial_no,
+                                                                                                   location_rec_.eng_chg_level,
+                                                                                                   location_rec_.waiv_dev_rej_no,
+                                                                                                   location_rec_.activity_seq,
+                                                                                                   location_rec_.handling_unit_id);
+      line_rec_.configuration_Id := location_rec_.configuration_Id;
+      line_rec_.receipt_issue_serial_track := receipt_issue_track_db_;
+      CRUD_Create___(line_rec_);
+   END LOOP;
+ 
+END CRUD_Create___;
+
+PROCEDURE Issue_Material___ (
+   order_class_db_ IN  VARCHAR2,
+   order_no_       IN  VARCHAR2,
+   line_no_        IN  VARCHAR2,
+   release_no_     IN  VARCHAR2,
+   line_item_no_   IN  NUMBER,
+   part_no_        IN  VARCHAR2,
+   contract_       IN  VARCHAR2,
+   parent_objkey_  IN  VARCHAR2,
+   info$_          OUT VARCHAR2 ) 
+IS
+   order_class_          VARCHAR2(3);
+   parent_key_           Manual_Issue_Virtual_Key; 
+   child_key_            Inv_Part_In_Stock_To_Issue_Virtual_Key;
+   current_child_rec_    Inv_Part_In_Stock_To_Issue_Virtual_Rec;
+   item_info_            VARCHAR2(4000);
+   total_info_           VARCHAR2(32000);
+BEGIN
+   order_class_ := Material_Requis_Type_API.Decode(order_class_db_);
+   Material_Requis_Reservat_API.Check_Issue(order_class_, order_no_, line_no_, release_no_, line_item_no_);
+   parent_key_.objkey := parent_objkey_;
+   FOR child_rec_ IN Get_Part_In_Stock_To_Issue_Array___(parent_key_) LOOP
+      child_key_.objkey := child_rec_.objkey;
+      current_child_rec_ := Get_Record___(child_key_);
+      IF (current_child_rec_.qty_to_issue IS NOT NULL AND current_child_rec_.qty_to_issue > 0) THEN
+         Material_Requis_Line_Initial_Check___ (order_class_, order_no_, line_no_, release_no_, line_item_no_);
+         Material_Requis_Reservat_API.Make_Item_Delivery(order_class_,
+                                                         order_no_,
+                                                         line_no_,
+                                                         release_no_,
+                                                         line_item_no_,
+                                                         part_no_,
+                                                         contract_,
+                                                         current_child_rec_.location_no,
+                                                         current_child_rec_.lot_batch_no,
+                                                         current_child_rec_.serial_no,
+                                                         current_child_rec_.waiv_dev_rej_no,
+                                                         current_child_rec_.eng_chg_level,
+                                                         current_child_rec_.activity_seq,
+                                                         current_child_rec_.handling_unit_id,
+                                                         current_child_rec_.qty_to_issue,
+                                                         current_child_rec_.catch_qty_to_issue,
+                                                         item_info_,
+                                                         current_child_rec_.part_tracking_session_id);
+      END IF;
+      total_info_ := total_info_ || item_info_;
+   END LOOP;
+   info$_ := total_info_;
+END Issue_Material___;
+
+@Override
+PROCEDURE CRUD_Update___(
+   old_ IN Inv_Part_In_Stock_To_Issue_Virtual_Rec,
+   new_ IN Inv_Part_In_Stock_To_Issue_Virtual_Rec )
+IS
+   parent_key_              Manual_Issue_Virtual_Key; 
+   old_parent_rec_          Manual_Issue_Virtual_Rec;
+   new_parent_rec_          Manual_Issue_Virtual_Rec;
+   lines_ready_to_issue_    BOOLEAN := FALSE;
+   child_key_               Inv_Part_In_Stock_To_Issue_Virtual_Key;
+   old_child_rec_           Inv_Part_In_Stock_To_Issue_Virtual_Rec;
+BEGIN   
+   super(old_, new_);
+   parent_key_.objkey := new_.parent_objkey;
+   old_parent_rec_ := Get_Record___(parent_key_);
+   new_parent_rec_ := old_parent_rec_;
+   IF (old_parent_rec_.lines_ready_to_issue = Fnd_Boolean_API.DB_FALSE AND new_.qty_to_issue > 0) THEN
+      new_parent_rec_.lines_ready_to_issue := Fnd_Boolean_API.DB_TRUE;
+      lines_ready_to_issue_ := TRUE;      
+      CRUD_Update___(old_parent_rec_, new_parent_rec_);
+   ELSE
+      FOR line_rec_ IN Get_Part_In_Stock_To_Issue_Array___(parent_key_) LOOP
+         child_key_.objkey := line_rec_.objkey;
+         old_child_rec_ := Get_Record___(child_key_);
+         IF (old_child_rec_.qty_to_issue IS NOT NULL) THEN
+            IF (old_parent_rec_.lines_ready_to_issue = Fnd_Boolean_API.DB_FALSE) THEN            
+               new_parent_rec_.lines_ready_to_issue := Fnd_Boolean_API.DB_TRUE;     
+               CRUD_Update___(old_parent_rec_, new_parent_rec_);
+            END IF;   
+            lines_ready_to_issue_ := TRUE;
+            EXIT;
+         END IF;   
+      END LOOP;
+      IF (NOT lines_ready_to_issue_ AND old_parent_rec_.lines_ready_to_issue = Fnd_Boolean_API.DB_TRUE) THEN
+         new_parent_rec_.lines_ready_to_issue := Fnd_Boolean_API.DB_FALSE;
+         CRUD_Update___(old_parent_rec_, new_parent_rec_);
+      END IF;   
+   END IF;   
+END CRUD_Update___ ;
+
+FUNCTION Is_Reserve_Quantity_Expired___ (
+   contract_         IN VARCHAR2,
+   parent_objkey_    IN VARCHAR2 ) RETURN BOOLEAN
+IS
+   parent_key_           Manual_Reservation_Virtual_Key; 
+   child_key_            Inv_Part_In_Stock_To_Reserve_Virtual_Key;
+   current_child_rec_    Inv_Part_In_Stock_To_Reserve_Virtual_Rec; 
+   site_date_            DATE;
+   is_expired_           BOOLEAN := FALSE;
+BEGIN
+   parent_key_.objkey := parent_objkey_;
+   site_date_ := Site_API.Get_Site_Date(contract_);
+   FOR child_rec_ IN Get_Part_In_Stock_To_Reserve_Array___(parent_key_) LOOP
+      child_key_.objkey := child_rec_.objkey;
+      current_child_rec_ := Get_Record___(child_key_);
+      IF (current_child_rec_.qty_to_reserve IS NOT NULL AND current_child_rec_.qty_to_reserve > 0 AND current_child_rec_.expiration_date < site_date_) THEN
+         is_expired_ := TRUE; 
+         EXIT;
+      END IF;
+   END LOOP;
+   RETURN is_expired_;
+END Is_Reserve_Quantity_Expired___;
+
+
+FUNCTION Is_Issue_Quantity_Expired___ (
+   contract_       IN  VARCHAR2,
+   part_no_        IN  VARCHAR2,
+   parent_objkey_  IN  VARCHAR2 ) RETURN BOOLEAN
+IS
+   parent_key_           Manual_Issue_Virtual_Key; 
+   child_key_            Inv_Part_In_Stock_To_Issue_Virtual_Key;
+   current_child_rec_    Inv_Part_In_Stock_To_Issue_Virtual_Rec;
+   site_date_            DATE;
+   expiration_date_      DATE;
+   is_expired_           BOOLEAN := FALSE;
+BEGIN
+   
+   parent_key_.objkey := parent_objkey_;
+   site_date_ := Site_API.Get_Site_Date(contract_);
+   FOR child_rec_ IN Get_Part_In_Stock_To_Issue_Array___(parent_key_) LOOP
+      child_key_.objkey := child_rec_.objkey;
+      current_child_rec_ := Get_Record___(child_key_);
+      expiration_date_ := Inventory_Part_In_Stock_API.Get_Expiration_Date(contract_, 
+                                                                          part_no_, 
+                                                                          current_child_rec_.configuration_id, 
+                                                                          current_child_rec_.location_no, 
+                                                                          current_child_rec_.lot_batch_no,
+                                                                          current_child_rec_.serial_no,
+                                                                          current_child_rec_.eng_chg_level,
+                                                                          current_child_rec_.waiv_dev_rej_no,
+                                                                          current_child_rec_.activity_seq,
+                                                                          current_child_rec_.handling_unit_id);
+      IF (current_child_rec_.qty_to_issue IS NOT NULL AND current_child_rec_.qty_to_issue > 0 AND expiration_date_ < site_date_) THEN
+         is_expired_ := TRUE; 
+         EXIT;
+      END IF;
+   END LOOP;
+   RETURN is_expired_;
+END Is_Issue_Quantity_Expired___;
+
+
+

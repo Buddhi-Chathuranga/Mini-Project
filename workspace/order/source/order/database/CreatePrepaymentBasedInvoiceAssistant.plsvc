@@ -1,0 +1,328 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     CreatePrepaymentBasedInvoiceAssistant
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+-- 20210629 MaEelk  SC21R2-1075, Added Get_Delivery_Type_Description___ to fetch the Description of a Delivery Type
+-- 20210618 MaEelk  SC21R2-1075, Modified CRUD_Create___. Modified the cursor to fetch Delivery Type. Replaced the calls to  
+-- 20210618         Customer_Order_Line_API.Get_Gross_Amnt_Ratio_Per_Tax__, Customer_Order_API.Get_Tax_Amount_Per_Tax_Code and 
+-- 20210618         Customer_Order_API.Get_Gross_Amount_Per_Tax_Code with  Customer_Order_Line_API.Get_Amt_Ratio_Per_Tax_Deliv__, 
+-- 20210618         Customer_Order_API.Get_Tax_Per_Tax_Code_Deliv  and Customer_Order_API.Get_Gross_Per_Tax_Code_Deliv respectively.
+-- 20190314 IzShlk  SCUXXW4-8317, Created
+-----------------------------------------------------------------------------
+
+layer Core;
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Customer_Order_Virtual_Rec )
+IS
+   rec_dup_          Customer_Order_Virtual_Rec;
+   parent_key_       Customer_Order_Virtual_Key;
+   line_             Tax_Distribution_Virtual_Rec;
+   pos_count_        NUMBER := 0;
+   line_total_gross_ NUMBER := 0;
+   gross_amnt_ratio_ NUMBER;
+   old_child_rec_    Tax_Distribution_Virtual_Rec;
+   new_child_rec_    Tax_Distribution_Virtual_Rec;
+   old_parent_rec_   Customer_Order_Virtual_Rec;
+   new_parent_rec_   Customer_Order_Virtual_Rec; 
+   child_key_        Tax_Distribution_Virtual_Key;
+   line_amounts_structure_rec_ Line_Amounts_Structure_Rec;
+   
+   -- gelr:delivery_types_in_pbi, Added delivery_type to the SELCET, GROUP BY and ORDER BY statements
+   CURSOR get_tax_info IS
+      SELECT  company, tax_code, delivery_type 
+      FROM PREPAY_TAX_INFO
+      WHERE ORDER_NO = rec_.order_no
+      GROUP BY company, tax_code, order_no, delivery_type
+      ORDER BY tax_code, delivery_type;
+      
+BEGIN
+   rec_dup_ := rec_;
+   parent_key_.objkey := rec_.objkey;
+   
+   rec_dup_.use_price_incl_tax_db := Customer_Order_API.Get_Use_Price_Incl_Tax_Db(rec_dup_.order_no);
+   rec_dup_.currency_rounding     := Customer_Order_API.Get_Order_Currency_Rounding(rec_dup_.order_no);
+   rec_dup_.prepay_tobe_invoiced  := ROUND(rec_.prepay_tobe_invoiced, rec_dup_.currency_rounding);
+   super(rec_dup_);
+   
+   -- Populate Tax Distribution list
+   FOR tax_info_rec_ IN get_tax_info LOOP
+      line_.objkey             := sys_guid();
+      line_.parent_objkey      := rec_.objkey;
+      line_.company            := tax_info_rec_.company;
+      line_.tax_code           := tax_info_rec_.tax_code;
+      line_.tax_percentage     := Statutory_Fee_API.Get_Fee_Rate(tax_info_rec_.company, tax_info_rec_.tax_code);
+      -- gelr:delivery_types_in_pbi, Replaced the call to Customer_Order_Line_API.Get_Gross_Amnt_Ratio_Per_Tax__ with Customer_Order_Line_API.Get_Amt_Ratio_Per_Tax_Deliv__.
+      gross_amnt_ratio_        := Customer_Order_Line_API.Get_Amt_Ratio_Per_Tax_Deliv__(rec_.order_no, tax_info_rec_.tax_code, tax_info_rec_.delivery_type);
+      line_.gross_amount       := ROUND((rec_.prepay_tobe_invoiced * gross_amnt_ratio_), rec_dup_.currency_rounding);
+      line_.net_amount         := ROUND((rec_.prepay_tobe_invoiced * gross_amnt_ratio_ * 100 / NVL((100 + Statutory_Fee_API.Get_Fee_Rate(tax_info_rec_.company, tax_info_rec_.tax_code)), 1)), rec_dup_.currency_rounding) ;
+      line_.tax_amount         := ROUND((rec_.prepay_tobe_invoiced * gross_amnt_ratio_ - rec_.prepay_tobe_invoiced * gross_amnt_ratio_ * 100 / NVL((100 + Statutory_Fee_API.Get_Fee_Rate(tax_info_rec_.company, tax_info_rec_.tax_code)), 1)), rec_dup_.currency_rounding);
+      line_.invoice_text       := Invoice_Customer_Order_API.Get_Prepayment_Text__(rec_.order_no);
+      -- gelr:delivery_types_in_pbi, Replaced Customer_Order_API.Get_Tax_Amount_Per_Tax_Code with Customer_Order_API.Get_Tax_Per_Tax_Code_Deliv.
+      line_.order_tax_amount   := Customer_Order_API.Get_Tax_Per_Tax_Code_Deliv(rec_.order_no, tax_info_rec_.tax_code,tax_info_rec_.delivery_type);
+      -- gelr:delivery_types_in_pbi, Replaced Customer_Order_API.Get_Gross_Amount_Per_Tax_Code with Customer_Order_API.Get_Gross_Per_Tax_Code_Deliv 
+      line_.order_gross_amount := Customer_Order_API.Get_Gross_Per_Tax_Code_Deliv(rec_.order_no, tax_info_rec_.tax_code, tax_info_rec_.delivery_type);
+      line_.order_tax_code     := line_.tax_code;
+      -- gelr:delivery_types_in_pbi, begin
+      line_.delivery_type      := tax_info_rec_.delivery_type;
+      line_.delivery_type_description := Delivery_Type_API.Get_Description(tax_info_rec_.company, tax_info_rec_.delivery_type);
+      -- gelr:delivery_types_in_pbi, end
+      pos_count_ := pos_count_ + 1;
+      line_.pos  := pos_count_;
+      
+      -- Calculate Line total Gross amount for all rec
+      IF line_.gross_amount IS NOT NULL THEN
+         line_total_gross_ := line_total_gross_ + line_.gross_amount;
+      END IF;
+      
+      CRUD_Create___(line_);
+   END LOOP;
+   
+   IF line_total_gross_ = 0 THEN
+      line_total_gross_ := rec_dup_.prepay_tobe_invoiced;
+   END IF;
+   
+   FOR tax_distribution_info IN Get_Tax_Distribution_Virtual_Array___(parent_key_) LOOP
+      child_key_.objkey := tax_distribution_info.objkey;
+      old_child_rec_    := Get_Record___(child_key_);
+      new_child_rec_    := old_child_rec_;
+
+      IF line_total_gross_ != rec_dup_.prepay_tobe_invoiced THEN
+         new_child_rec_.gross_amount := old_child_rec_.gross_amount - (line_total_gross_ - rec_dup_.prepay_tobe_invoiced);
+         line_total_gross_  := rec_dup_.prepay_tobe_invoiced;
+      END IF;
+
+      -- Calculate_Line_Amounts
+      line_amounts_structure_rec_ := Calculate_Line_Amounts___( rec_dup_.prepayment_percentage, 
+                                                                rec_dup_.use_price_incl_tax_db,
+                                                                new_child_rec_.tax_code,
+                                                                new_child_rec_.order_tax_code,
+                                                                new_child_rec_.gross_amount,
+                                                                new_child_rec_.order_gross_amount,
+                                                                new_child_rec_.order_tax_amount,
+                                                                new_child_rec_.tax_percentage,
+                                                                rec_dup_.currency_rounding);
+      new_child_rec_.net_amount  := line_amounts_structure_rec_.net_amount;
+      new_child_rec_.tax_amount  := line_amounts_structure_rec_.tax_amount;
+      
+      -- Calculate Tax Amount
+      IF ((new_child_rec_.net_amount + new_child_rec_.tax_amount) != new_child_rec_.gross_amount) THEN
+         new_child_rec_.tax_amount := new_child_rec_.gross_amount - new_child_rec_.net_amount;
+      END IF;
+      
+      CRUD_Update___(old_child_rec_, new_child_rec_);
+   END LOOP;
+
+   -- While populate, the total line gross amount has been hold in the header level (line_total_gross_amount) to enable/disable Create, Create, prind and offset commands
+   old_parent_rec_ := rec_dup_;
+   new_parent_rec_ := old_parent_rec_;
+   new_parent_rec_.line_total_gross_amount := line_total_gross_;
+   CRUD_Update___(old_parent_rec_, new_parent_rec_);
+END CRUD_Create___;
+
+FUNCTION Calculate_Line_Amounts___(
+   percentage_            IN NUMBER,
+   use_price_incl_tax_db_ IN VARCHAR2,
+   tax_code_              IN VARCHAR2,
+   order_tax_code_        IN VARCHAR2,
+   gross_amount_          IN NUMBER,
+   order_gross_amount_    IN NUMBER,
+   order_tax_amount_      IN NUMBER,
+   tax_percentage_        IN NUMBER,
+   curr_rounding_         IN NUMBER )  RETURN Line_Amounts_Structure_Rec
+IS
+   line_amounts_structure_rec_ Line_Amounts_Structure_Rec;
+BEGIN
+   IF ((percentage_ * 100) = 100 AND use_price_incl_tax_db_ = 'TRUE' AND tax_code_ = order_tax_code_ AND order_gross_amount_ = gross_amount_ ) THEN
+      -- When UsePriceInclTaxDb is true, Correct tax and net amounts should be fetched from CO as there can be differences if discounts are applied to CO
+      line_amounts_structure_rec_.tax_amount := order_tax_amount_;
+      line_amounts_structure_rec_.net_amount := gross_amount_ - order_tax_amount_;
+
+   ELSE
+      line_amounts_structure_rec_.net_amount := ROUND( (gross_amount_ * 100 / (100 + tax_percentage_)) , curr_rounding_);
+      line_amounts_structure_rec_.tax_amount := gross_amount_ - line_amounts_structure_rec_.net_amount;
+   END IF;
+   
+   RETURN line_amounts_structure_rec_;
+END Calculate_Line_Amounts___;
+
+FUNCTION Validate_Tax_Code___(
+   company_               IN VARCHAR2,
+   order_no_              IN VARCHAR2,
+   tax_code_              IN VARCHAR2,
+   prepayment_percentage_ IN NUMBER,
+   use_price_incl_tax_db_ IN VARCHAR2,
+   order_tax_code_        IN VARCHAR2,
+   gross_amount_          IN NUMBER,
+   order_gross_amount_    IN NUMBER,
+   order_tax_amount_      IN NUMBER,
+   curr_rounding_         IN NUMBER )  RETURN Tax_Info_Structure_Rec
+IS
+   tax_info_structure_rec_     Tax_Info_Structure_Rec;
+   line_amounts_structure_rec_ Line_Amounts_Structure_Rec;
+BEGIN
+   tax_info_structure_rec_.tax_code_exist_flag := Source_Tax_Item_Order_API.Is_Tax_Code_Exist__(company_, order_no_, tax_code_);
+   IF tax_info_structure_rec_.tax_code_exist_flag = 'FALSE' THEN
+      RETURN tax_info_structure_rec_;
+   END IF;
+   
+   -- Get Tax Percentage
+   tax_info_structure_rec_.tax_percentage := Statutory_Fee_API.Get_Percentage(company_, tax_code_);
+   
+   -- Calculate_Line_Amounts
+   line_amounts_structure_rec_ := Calculate_Line_Amounts___( prepayment_percentage_, 
+                                                             use_price_incl_tax_db_,
+                                                             tax_code_,
+                                                             order_tax_code_,
+                                                             gross_amount_,
+                                                             order_gross_amount_,
+                                                             order_tax_amount_,
+                                                             tax_info_structure_rec_.tax_percentage,
+                                                             curr_rounding_);
+   tax_info_structure_rec_.net_amount  := line_amounts_structure_rec_.net_amount;
+   tax_info_structure_rec_.tax_amount  := line_amounts_structure_rec_.tax_amount;
+
+   RETURN tax_info_structure_rec_;
+END Validate_Tax_Code___;
+
+FUNCTION Build_Line_Attr___(
+   parent_key_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   attr_ VARCHAR2(32000);
+   key_  Customer_Order_Virtual_Key;
+BEGIN
+   key_.Objkey := parent_key_;
+   Client_SYS.Clear_Attr(attr_);
+   
+   FOR tax_distribution_info IN Get_Tax_Distribution_Virtual_Array___(key_) LOOP
+      Client_SYS.Add_To_Attr('FEE_CODE', tax_distribution_info.tax_code, attr_);
+      Client_SYS.Add_To_Attr('FEE_PERCENTAGE', tax_distribution_info.tax_percentage, attr_);
+      -- gelr:delivery_types_in_pbi, begin
+      Client_SYS.Add_To_Attr('DELIVERY_TYPE', tax_distribution_info.delivery_type, attr_);
+      -- gelr:delivery_types_in_pbi, end      
+      Client_SYS.Add_To_Attr('NET_CURR_AMOUNT', tax_distribution_info.net_amount, attr_);
+      Client_SYS.Add_To_Attr('TAX_CURR_AMOUNT', tax_distribution_info.tax_amount, attr_);
+      Client_SYS.Add_To_Attr('GROSS_CURR_AMOUNT', tax_distribution_info.gross_amount, attr_);
+      Client_SYS.Add_To_Attr('DESCRIPTION', tax_distribution_info.invoice_text, attr_);
+      Client_SYS.Add_To_Attr('END_OF_LINE', 'END', attr_);
+   END LOOP;   
+
+   RETURN attr_;
+END Build_Line_Attr___;
+
+PROCEDURE Create_Prepayment_Invoice___ (
+   print_option_        IN VARCHAR2,
+   obj_key_             IN VARCHAR2,
+   order_no_            IN VARCHAR2,
+   ledger_item_id_      IN VARCHAR2,
+   prepayment_          IN VARCHAR2,
+   ledger_item_version_ IN NUMBER ) 
+IS
+   attr_          VARCHAR2(32000);
+   invoice_id_    VARCHAR2(100);
+BEGIN
+   attr_ := Build_Line_Attr___(obj_key_);
+   
+   IF print_option_ = 'CREATE' THEN
+      Invoice_Customer_Order_API.Create_Prepayment_Invoice__(  invoice_id_,
+                                                               order_no_,
+                                                               ledger_item_id_,
+                                                               prepayment_,
+                                                               ledger_item_version_,
+                                                               attr_ );
+   ELSIF print_option_ = 'OFFSET' THEN
+      Invoice_Customer_Order_API.Create_Print_Prepay_Invoice__( invoice_id_,
+                                                                order_no_,
+                                                                ledger_item_id_,
+                                                                prepayment_,
+                                                                ledger_item_version_,
+                                                                attr_,
+                                                                print_option_ );
+   END IF;
+END Create_Prepayment_Invoice___;
+
+-- This is used to update line_total_gross_amount in the header level to enable/disable Create, Create, prind and offset commands
+PROCEDURE Update_Line_Total_Gross_Amount___ (
+   obj_key_              IN VARCHAR2,
+   prepay_tobe_invoiced_ IN NUMBER ) 
+IS
+   line_total_gross_  NUMBER := 0;
+   key_               Customer_Order_Virtual_Key;
+   old_parent_rec_    Customer_Order_Virtual_Rec;
+   new_parent_rec_    Customer_Order_Virtual_Rec; 
+BEGIN
+   key_.Objkey       := obj_key_;
+   old_parent_rec_   := Get_Record___(key_);
+   new_parent_rec_   := old_parent_rec_;
+   
+   FOR tax_distribution_info IN Get_Tax_Distribution_Virtual_Array___(key_) LOOP
+       line_total_gross_ := line_total_gross_ + tax_distribution_info.gross_amount;
+   END LOOP; 
+   
+   IF line_total_gross_ = 0 THEN
+      line_total_gross_ := prepay_tobe_invoiced_;
+   END IF;
+
+   new_parent_rec_.line_total_gross_amount := line_total_gross_;
+   CRUD_Update___(old_parent_rec_, new_parent_rec_);
+END Update_Line_Total_Gross_Amount___;
+
+@Override
+PROCEDURE CRUD_Delete___(
+   rec_ IN Tax_Distribution_Virtual_Rec )
+IS   
+   key_   Customer_Order_Virtual_Key;
+   child_key_        Tax_Distribution_Virtual_Key;
+   old_child_rec_    Tax_Distribution_Virtual_Rec;
+   new_child_rec_    Tax_Distribution_Virtual_Rec;
+   count_            NUMBER := 0;
+   pos_count_        NUMBER := 0;
+BEGIN
+   key_.Objkey       := rec_.parent_objkey;
+   
+   FOR tax_distribution_info IN Get_Tax_Distribution_Virtual_Array___(key_) LOOP
+      count_ := count_ + 1;
+   END LOOP; 
+   
+   IF count_ = 1 THEN
+      Error_SYS.Record_General(lu_name_, 'LASTROWDELETE: You cannot remove last proposed prepayment invoice line, at least one line should exist.');      
+   END IF;
+   super(rec_);
+   
+   IF count_ > 1 THEN
+      FOR tax_distribution_info IN Get_Tax_Distribution_Virtual_Array___(key_) LOOP
+         child_key_.objkey := tax_distribution_info.objkey;
+         old_child_rec_    := Get_Record___(child_key_);
+         new_child_rec_    := old_child_rec_;
+    
+         pos_count_ := pos_count_ + 1;
+         new_child_rec_.pos  := pos_count_;
+      END LOOP; 
+      CRUD_Update___(old_child_rec_, new_child_rec_);
+   END IF;   
+END CRUD_Delete___;
+
+FUNCTION Create_Prepayment_Invoice_Initial_Check___ (
+	order_no_ IN VARCHAR2) RETURN BOOLEAN
+IS
+BEGIN
+   RETURN User_Finance_API.Is_User_Authorized(Site_API.Get_Company(Customer_Order_API.Get_Contract(order_no_)));
+END Create_Prepayment_Invoice_Initial_Check___;
+
+-- gelr:delivery_types_in_pbi, begin
+FUNCTION Get_Delivery_Type_Description___ (
+   company_       IN VARCHAR2,
+   delivery_type_ IN VARCHAR2 )  RETURN VARCHAR2
+IS
+   description_ VARCHAR2(200);   
+BEGIN
+   description_ := Delivery_Type_API.Get_Description(company_, delivery_type_);
+   RETURN description_;
+END Get_Delivery_Type_Description___;
+-- gelr:delivery_types_in_pbi, end

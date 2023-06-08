@@ -1,0 +1,3137 @@
+-------------------------------------------------------------------------------------------------------------------------------
+-- Date        Sign       History
+-- ----------  ------   -------------------------------------------------------------------------------------------------------
+-- 2021-01-28  KaPblk   SCZ-17464, Removed "exit when fail" written after ValidateCatalogNo() because it prevent displaying error messages.
+-- 2022-01-26  NiDalk   SCZ-17458, Modified CustomerPartNoRef to fetch default for selfbilling.
+-- 2022-01-10  KiSalk   Bug 161945(SC21R2-6793), Modified ValidatePriceAndTotalCommand not to make discount null for new rental lines.
+-- 2021-10-12  Skanlk   Bug 161110(SC21R2-3223), Modified OrderQuotationLineBaseList by making CatalogDesc field as multiline field.
+-- 2021-07-01  Skanlk   SC21R2-1411, Modified command QuotationLineHistoryCommand to show the history details for multiple quotation lines.
+-- 2021-04-08  Skanlk   SCZ-14204, Modified the functions CalculateLineTotal and ValidateBuyQtyDueCalculateLineTotal by adding Discount as a parameter.
+-- 2021-04-01  ApWilk   Bug 158539(SCZ-14282), Added the function FetchPeriodRounding() to fetch the correct periodic rounding from the site level.
+-- 2021-02-19  NiDalk   SC2020R1-12603, Modified ValidateBuyQtyDueBaseCommand to pass DemandCodeDb to ValidateBuyQtyDue.
+-- 2021-02-17  RaNhlk   MF2020R1-8692, Modified commands New EstimateCommand and EstimateCommand.
+-- 2021-02-05  DhAplk   SC2020R1-12435, Changed EffectivityDate data type to Date in ValidateBuyQtyDue, SetQuotePriceAndTotals, GetQuotePrice, GetValidPriceList functions.
+-- 2021-01-29  Skanlk   SCZ-13274, Modified ValidateCatalogNoCommand by setting the TaxCodeFlagVar as false when creating a new order line.
+-- 2021-01-25  MalLlk   SC2020R1-12288, Modified RecalculatePriceCurrencyCommand to set the enabled condition correctly using PriceFreeze value.
+-- 2020-12-08  Erlise   Bug 156667(SCZ-12957), Modified filters ClassificationPartFilter and GtinNoFilter. Wrong parameter type used in the decode statement causing a run time error.
+-- 2020-10-13  ChBnlk   SCZ-11880, Modified CalculatePricesCommand to fetch TaxLiabilityType correctly. Renamed GetTaxLiabilityType to GetCusTaxLiabilityTypeDb to fetch db value.
+-- 2020-09-17  MaEelk   GESPRING20-5399, Added OriginalDiscount, OriginalAddDiscount and OriginalQuotationDiscount to OrderQuotationLineBaseList and displayed them when Discounted Price Rounded Enabled.
+-- 2020-09-17           Discount was assigned to OriginalDiacount when fetching Price and Discounts.
+-- 2020-07-16  PamPlk   Bug 152585(SCZ-9275), Modified the function FetchPriceListNo by removing the CurrencyCode filteration and modified BeforeLineSaveCommand
+-- 2020-07-16           to properly validate the priceListNo and give an error message for failed validations.
+-- 2020-01-14  UtSwlk   Bug 151751(MFZ-3252), Enable RMB IsReplaceWithStandardSalesPartAvailable when the status is Planned or Released.
+-- 2020-01-07  AyAmlk   SCXTEND-1922, Disabled the QuotationLineDiscountsCommand for BuyQtyDue 0 lines so
+-- 2020-01-07           that adding a discount will not give an error due to line delete.
+-- 2019-11-13  ChJalk   SCXTEND-518, Modified GetAvailableQuantity to add parameter RentalDb.
+-- 2019-10-29  MaEelk   SCXTEND-1167, Restructured the function ValidateSaleUnitPrice and modified its calling places
+-- 2019-10-21  MaEelk   SCXTEND-1118, Removed the structure PriceStructure since its contents already exist in to QuoteLineStruct
+-- 2019-10-21  RaVdlk   SCXTEND-1074   Removed the structure LineTotalsStruct and replaced using Price
+-- 2019-08-13  MaAtlk   MFUXXW4-29339, Pass the wanted delivery date to new estimate in the command NewEstimateCommand.
+-- 2019-08-08  MaAtlk   MFUXXW4-29337, JSON option is removed in stringify in the command NewEstimateCommand as that format is not support in new estimate assistant and
+-- 2019-08-08           key list won't exceed the characteristic limit as few records will be selected.
+-- 2019-07-20  TiRalk   SCUXXW4-23303, Added GetAvailableQuantity to ConditionCode validation.
+-- 2019-07-18  TiRalk   SCUXXW4-23277, Removed field BuyQtyDue from client section.
+-- 2019-07-05  RasDlk   SCUXXW4-15881, Corrected few issues related to InputUoM.
+-- 2019-05-05  RasDlk   SCUXXW4-20371, Implemented the InputUoMParametersCommand command.
+-- 2019-04-02  MaEelk   SCUXXW4-18093, Added Dynamic Component Dependency to SupplierRef.AcquisitionSite.
+-- 2019-03-12  PIPELK   SCUXXW4-17251,Added Customer Warranty functionality.
+-- 2019-02-11  CHINLK   MFUXXW4-15663,Added EstimateDeliverableCommand.
+-- 2018-12-14  DiNglk   SCUXXW4-14921, Add the command groups
+-- 2018-12-12  SeJalk   SCUXXW4-986, Converted from tbwOrderQuotationLine using MTG Version: 1.34
+---------------------------------------------------------------------------------------------------------------------------------
+fragment SalesQuotationLineBaseList;
+component ORDER;
+layer Core;
+description "This is the base fragment for quotation lines and quotation rental lines";
+
+include fragment SalesInterimOrderCommands;
+include fragment CancelSalesQuotationLineDialog;
+include fragment LostWonQuotationDialog;
+@DynamicComponentDependency CFGCHR
+include fragment ReplaceCharacteristicValueDialog;
+include fragment RunCapabilityCheck;
+// Address Dialog
+include fragment QuotationLineAddressDialog;
+include fragment TaxLinesCommonAssistant;
+include fragment OrderQuotationLineInitialCheck;
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+
+--------------------------------- COMMANDS ----------------------------------
+
+command CreateOrderfromQuotationCommand {
+   label = "Create Order";
+   enabled = [substring(Condition, 3, 1) != "*"];
+   mode = SelectedRecords;
+   variable LineDetailvar {
+      type = LineDetailStructure;
+   }
+   variable ContractVar Text;
+
+   bulkexecute {
+      if [parent.CustomerInfoRef.CustomerCategory != "Customer"] {
+         error("You are not allowed to create a customer order. Convert prospect ${parent.CustomerNo} to a customer.");
+         exit;
+      }
+
+      call PackLineKeys(Selection) into LineDetailvar;
+      if [not LineDetailvar.SameOrder] {
+         error("You have selected more than one Sales Quotations. Operation denied.");
+      }
+      set ContractVar = parent.Contract;
+      navigate "assistant/CreateOrderFromQuotation/Assistant?$action=SetupSourceInfo{QuotationNoStr:$[LineDetailvar.QuotationNo], LineNoStr:$[LineDetailvar.LineNoArr], RelNoStr:$[LineDetailvar.RelNoArr], LineItemNoStr:$[LineDetailvar.LineItemNoArr] , ReasonIdStr:$[LineDetailvar.ReasonId], LoseWinNoteStr:$[LineDetailvar.LoseWinNote], ContractStr:$[ContractVar]}";
+   }
+}
+command CustomerOrderCommand {
+   label = "Customer Order";
+   mode = SingleRecord;
+   enabled = [ConOrderNo != null];
+   execute {
+      navigate "page/CustomerOrder/Form?$filter=OrderNo eq $[ConOrderNo]";
+   }
+}
+command CompetitorsCommand {
+   label = "Competitors";
+   enabled = [true];
+   variable InsUpdAllowedBool Boolean;
+   variable LineNoVar Text;
+   execute {
+      if [Objstate != "Won" and Objstate != "Lost" and Objstate != "Cancelled"] {
+         set InsUpdAllowedBool = true;
+      }
+      else
+         {
+         set InsUpdAllowedBool = false;
+      }
+      set LineNoVar = LineNo;
+      assistant SalesQuotationLineCompetitor.Assistant(QuotationNo, LineNo, RelNo, LineItemNo, InsUpdAllowedBool) {
+         when OK {
+            exit;
+         }
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+
+
+command PriceBreaksCommand {
+   label = "Price Breaks";
+   enabled = [DiscountAmountCurr = null or DiscountAmountCurr = 0];
+   variable InsUpdAllowedBool Boolean;
+   variable UsePriceInclTaxBool Boolean;
+   variable RentalVar Boolean;
+   execute {
+      if [Objstate != "Won" and Objstate != "Lost" and Objstate != "Cancelled"] {
+         set InsUpdAllowedBool = true;
+      }
+      else
+         {
+         set InsUpdAllowedBool = false;
+      }
+      if [parent.UsePriceInclTax] {
+         set UsePriceInclTaxBool = true;
+      }
+      else
+         {
+         set UsePriceInclTaxBool = false;
+      }
+      if [not Rental] {
+         set RentalVar = false;
+      }
+      else {
+         set RentalVar = true;
+      }
+      navigate "assistant/PriceBreaks/OrderQuotationGradPriceAssistant?$action=SetupSourceInfo{QuotationNoStr:$[QuotationNo], LineNoStr:$[LineNo], RelNoStr:$[RelNo], LineItemNoNum:$[LineItemNo], CompanyStr:$[Company], ContractStr : $[Contract], CatalogNoStr : $[CatalogNo], TaxCodeStr:$[TaxCode], InsUpdAllowedBool:$[InsUpdAllowedBool], PriceListNoStr:$[PriceListNo], ConditionCodeStr:$[ConditionCode], UsePriceInclTaxBool:$[UsePriceInclTaxBool], RentalDbBool:$[RentalVar]}";
+   }
+}
+
+command QuotationLineDiscountCommand {
+   label = "Quotation Line Discount";
+   enabled = [not PriceBreaks and BuyQtyDue > 0];
+   variable InsUpdAllowedBool Boolean;
+   variable UsePriceInclTaxBool Boolean;
+
+   execute {
+      if [Objstate != "Won" and Objstate != "Lost" and Objstate != "Cancelled" and Objstate != "COCreated"] {
+         set InsUpdAllowedBool = true;
+      }
+      else
+         {
+         set InsUpdAllowedBool = false;
+      }
+      if [parent.UsePriceInclTax] {
+         set UsePriceInclTaxBool = true;
+      }
+      else
+         {
+         set UsePriceInclTaxBool = false;
+      }
+
+      assistant SalesQuotationLineDiscount.OrderQuoteLineDiscountAssistant(QuotationNo, LineNo, RelNo, LineItemNo, Company, Contract, CatalogNo, InsUpdAllowedBool, UsePriceInclTaxBool) {
+         when OK {
+            call RefreshQuotationLines();
+            exit;
+         }
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+
+command RecalculatePriceCurrencyCommand {
+   label = "Recalculate Price/Currency";
+   mode = SelectedRecords;
+   autosave = false;
+   enabled = [CatalogNo != null and PriceFreeze = "Free" and Objstate in("Released", "Planned", "Revised", "Rejected")];
+   variable SalesPriceTypeVar Text;
+   variable PriceListVar Structure(PriceListStructure);
+   variable QuotePriceVar Structure(QuoteLineStruct);
+   variable IsNew Boolean;
+   variable RentalChargableDaysVar Number;
+   variable TaxFromDefVar Text;
+
+   execute {
+      if [isNew] {
+         set IsNew = true;
+      }
+      else {
+         set IsNew = false;
+      }
+
+      if [parent.TaxCalcMethod != "NOT_USED"]
+         {
+         set TaxFromDefVar = "TRUE";
+      }
+      else {
+         set TaxFromDefVar = "FALSE";
+      }
+      if [not Rental] {
+         set SalesPriceTypeVar = "SALES PRICES";
+         set RentalChargableDaysVar = 1;
+      }
+      else {
+         set SalesPriceTypeVar = "RENTAL PRICES";
+      }
+
+      call GetValidPriceList(PriceListNo, Contract, CatalogNo, CustomerNo, parent.CurrencyCode, parent.PriceEffectivityDate, SalesPriceTypeVar) into PriceListVar;
+      set CustomerLevel = PriceListVar.CustomerLevelDb;
+      set CustomerLevelId = PriceListVar.CustomerLevelId;
+      set PriceListNo = PriceListVar.PriceListNo;
+
+      call SetQuotePriceAndTotals(QuotationNo,
+      LineNo,
+      RelNo,
+      LineItemNo,
+      CatalogNo,
+      BuyQtyDue,
+      PriceListNo,
+      parent.PriceEffectivityDate,
+      ConditionCode,
+      CustomerLevel,
+      CustomerLevelId,
+      UnformattedDiscount,
+      CharPrice,
+      ConfiguredLinePriceId,
+      PartNo,
+      ConfigurationId,
+      PriceFreeze,
+      SaleUnitPrice,
+      BaseSaleUnitPrice,
+      BaseUnitPriceInclTax,
+      IsNew,
+      true,
+      DemandCode,
+      DemandOrderRef1,
+      DemandOrderRef2,
+      MultipleTaxLines,
+      TaxCode,
+      TaxCalcStructureId,
+      TaxClassId,
+      Contract,
+      CustomerNo,
+      ShipAddrNo,
+      PlannedDueDate,
+      parent.SupplyCountry,
+      DeliveryType,
+      TaxLiability,
+      TaxLiabilityType,
+      parent.CurrencyCode,
+      CurrencyRate,
+      TaxFromDefVar,
+//      ChargedItem,
+//      ConvFactor,
+//      InvertedConvFactor,
+//      OrderSupplyType,
+//      Catalogtype,
+      Rental,
+      RevisedQtyDue,
+      DesiredQty,
+      PriceConvFactor,
+      AdditionalDiscount,
+      QuoteDiscount,
+      RentalChargableDaysVar,
+      DuplicatedLine
+      )  into QuotePriceVar {
+         when FAIL {
+            exit;
+         }
+      }
+      if [not QuotePriceVar.Success] {
+         exit;
+      }
+
+      set PriceSource = QuotePriceVar.PriceSource;
+      set SetPriceSource = QuotePriceVar.SetPriceSource;
+      set PriceSourceId = QuotePriceVar.PriceSourceId;
+      set PriceFreeze = QuotePriceVar.PriceFreeze;
+      set PartPrice = QuotePriceVar.PartPrice;
+      set CurrencyRate = QuotePriceVar.CurrencyRate;
+      set Discount = QuotePriceVar.Discount;
+      -- gelr:disc_price_rounded, begin
+      if [parent.DiscPriceRound and not(parent.UsePriceInclTax)] {
+         set OriginalDiscount = QuotePriceVar.Discount;
+      }
+      -- gelr:disc_price_rounded, end
+      set PartLevel = QuotePriceVar.PartLevelDb;
+      set PartLevelId = QuotePriceVar.PartLevelId;
+      set CustomerLevel = QuotePriceVar.CustomerLevelDb;
+      set CustomerLevelId = QuotePriceVar.CustomerLevelId;
+      set PriceSourceNetPrice = QuotePriceVar.PriceSourceNetPrice;
+      set SaleUnitPrice = QuotePriceVar.SaleUnitPrice;
+      set UnitPriceInclTax = QuotePriceVar.UnitPriceInclTax;
+      set BaseSaleUnitPrice = QuotePriceVar.BaseSaleUnitPrice;
+      set BaseUnitPriceInclTax = QuotePriceVar.BaseUnitPriceInclTax;
+      set CalcPriceCurr = QuotePriceVar.CalcPriceCurr;
+      set CharPrice = QuotePriceVar.CharPrice;
+      set CalcCharPrice = QuotePriceVar.CalcCharPrice;
+
+      set MultipleTaxLines = QuotePriceVar.MultipleTaxLines;
+      set TaxCode = QuotePriceVar.TaxCode;
+      set TaxCalcStructureId = QuotePriceVar.TaxCalcStructureId;
+      set TaxClassId = QuotePriceVar.TaxClassId;
+
+      set RevisedQtyDue = QuotePriceVar.RevisedQtyDue;
+      set DesiredQty = QuotePriceVar.DesiredQty;
+
+      set  TaxAmountBase = QuotePriceVar.TaxAmountBase;
+      set NetAmountBase = QuotePriceVar.NetAmountBase;
+      set  GrossAmtBase = QuotePriceVar.GrossAmtBase;
+      set TaxAmountCurrency = QuotePriceVar.TaxAmountCurrency;
+      set NetAmountCurr = QuotePriceVar.NetAmountCurr;
+      set  GrossAmtCurr = QuotePriceVar.GrossAmtCurr;
+      set TaxCalcStructureId = QuotePriceVar.TaxCalcStructureId;
+      set DiscountAmountCurr = QuotePriceVar.DiscountAmountCurr;
+      set FetchTaxFromDefaults = QuotePriceVar.FetchTaxFromDefaults;
+      call CalculateDiscountAmount(QuotationNo, LineNo, RelNo, LineItemNo, BuyQtyDue, PriceConvFactor) into DiscountAmountCurr;
+   }
+}
+
+command QuotationLineAddressCommand {
+   label = "Address";
+   enabled = [true];
+   variable AddressVar Structure(QuotationLineAddresStructure);
+   variable ShipAddrInCityVar Boolean;
+   execute {
+      -- copy this into AddressVar;
+      if [ShipAddrInCity = "TRUE"] {
+         set ShipAddrInCityVar = true;
+      }
+      else {
+         set ShipAddrInCityVar = false;
+      }
+
+      dialog QuotationLineAddressDialog(Company, QuotationNo, LineNo, RelNo, LineItemNo, CatalogNo, ShipAddrNo, DefaultAddrFlag, ShipViaCode, ExtTransportCalendarId, FreightMapId, ZoneId, FreightPriceListNo, ShipAddrInCityVar, SingleOccAddrFlag, ShipAddrName, ShipAddress1, ShipAddress2, ShipAddress3, ShipAddress4, ShipAddress5, ShipAddress6, ShipAddrZipCode, ShipAddrCity, ShipAddrState, ShipAddrCounty, ShipAddrCountryCode, CustomerNo, DelTermsLocation, DeliveryLeadtime, PickingLeadtime, ForwardAgentId, FreightPriceListNo, ShipViaCode, DeliveryTerms, Contract, PartNo, OrderSupplyType, VendorNo, TaxLiability, TaxLiabilityType)
+      into(ShipAddrNo, DefaultAddrFlag, ShipViaCode, ExtTransportCalendarId, FreightMapId, ZoneId, FreightPriceListNo, ShipAddrInCityVar, SingleOccAddrFlag, ShipAddrName, ShipAddress1, ShipAddress2, ShipAddress3, ShipAddress4, ShipAddress5, ShipAddress6, ShipAddrZipCode, ShipAddrCity, ShipAddrState, ShipAddrCounty, ShipAddrCountryCode, DelTermsLocation, DeliveryLeadtime, PickingLeadtime, ForwardAgentId, FreightPriceListNo, ShipViaCode, DeliveryTerms, TaxLiability, TaxLiabilityType)
+         {
+         when OK {
+            --copy AddressVar into this;
+            if [ShipAddrInCityVar] {
+               set ShipAddrInCity = "TRUE";
+            }
+            else {
+               set ShipAddrInCity = "FALSE";
+            }
+            save();
+            exit;
+         }
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+
+command QuotationLineHistoryCommand {
+   label = "Line History";
+   enabled = [true];
+   mode = SelectedRecords;
+
+   bulkexecute {
+      bulknavigate "page/SalesQuotationLineHistory/Form?$filter=QuotationNo eq $[QuotationNo] and  LineNo eq $[LineNo] and  RelNo eq $[RelNo] and  LineItemNo eq $[LineItemNo]";
+   }
+}
+
+command QuotationLineTaxesCommand {
+   label = "Quotation Line Taxes";
+   mode = SingleRecord;
+   enabled = [true];
+   variable PackageNameVar Text;
+   variable ReadOnlyVar Boolean;
+   variable CalcBaseVar Text;
+   variable TitleVar Text;
+   variable SetDefaultCmdVisibleVar Boolean;
+
+   execute {
+      set PackageNameVar = "ORDER_QUOTATION_LINE_API";
+      if [parent.UsePriceInclTax] {
+         set CalcBaseVar = "GROSS_BASE";
+      }
+      else {
+         set CalcBaseVar = "NET_BASE";
+      }
+
+      if [Objstate = "Invoiced" or Objstate = "Cancelled" or parent.TaxCalcMethod != "NOT_USED"] {
+         set ReadOnlyVar = true;
+      }
+      else {
+         set ReadOnlyVar = false;
+      }
+
+      set TitleVar = "Quotation Line Tax Lines" {
+         translatable = true;
+      }
+
+      set SetDefaultCmdVisibleVar = true;
+      assistant TaxLinesCommonAssistant(keyref, PackageNameVar, ReadOnlyVar, CalcBaseVar, TitleVar, null, SetDefaultCmdVisibleVar) {
+         when OK {
+            call RefreshQuotationLines();
+            exit OK;
+         }
+         when CANCEL {
+            exit CANCEL;
+         }
+      }
+   }
+}
+
+command DocumentTextCommand {
+   label = "Document Text";
+   mode = SingleRecord;
+   enabled = [NoteId != null];
+
+   variable LabelTextVar Text;
+   execute {
+      set LabelTextVar = " Sales Quotation - ${QuotationNo} ${LineNo} ${RelNo} ${LineItemNo}" {
+         translatable = true;
+      }
+      assistant DocumentText.DocumentText(NoteId, LabelTextVar) {
+         when NO {
+            exit CANCEL;
+         }
+      }
+   }
+}
+
+command SetDefaultInfoCommand {
+   label = "Set to Default Info";
+   mode = SelectedRecords;
+   enabled = [DefaultAddrFlag = "No"];
+   bulkexecute {
+      bulkset DefaultAddrFlag = "Yes";
+   }
+}
+
+
+command StatusCancelQuotationLineCommand {
+   label = "Cancel Quotation Line";
+   mode = SelectedRecords;
+   enabled = [substring(Condition, 0, 1) != "*"];
+   variable ReasonIdVar {
+      type = Text;
+   }
+   variable ConnectedPromoExistVar {
+      type = Number;
+   }
+
+   bulkexecute {
+      dialog CancelSalesQuotationLineDialog into(ReasonIdVar) {
+         when OK {
+            call CheckPromoExistQuoLineNum(Selection) into ConnectedPromoExistVar;
+            if [ConnectedPromoExistVar = 1]
+               {
+               confirm("There exists one or more sales promotion charge lines that are associated to the sales quotation order line(s) that is cancelled. You may need to calculate the sales promotion again.")
+                  {
+                  when CANCEL {
+                     exit;
+                  }
+               }
+            }
+            call CancelQuotationLines(Selection, ReasonIdVar);
+         }
+         when CANCEL {
+            exit;
+         }
+      }
+
+   }
+}
+
+command QuotationwonCommand {
+   label = "Won Quotation Line";
+   mode = SelectedRecords;
+   enabled = [substring(Condition, 4, 1) != "*"];
+   variable ReasonIdStr {
+      type = Text;
+   }
+   variable WonNoteStr {
+      type = Text;
+   }
+   variable LineVar {
+      type = Structure(QutationLineStructure);
+   }
+   bulkexecute {
+      call ValidateSelectedLines(Selection) into LineVar;
+      dialog OrderQuotationWonDialog(LineVar.QuotationNo, LineVar.LineNo, LineVar.RelNo, LineVar.LineItemNo) into(ReasonIdStr, WonNoteStr) {
+         when OK {
+            call SetBulkQuotationWon(Selection, ReasonIdStr, WonNoteStr);
+         }
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+
+
+
+command QuotationlostCommand {
+   label = "Lost Quotation Line";
+   enabled = [substring(Condition, 2, 1) != "*"];
+   mode = SelectedRecords;
+
+   variable ReasonIdStr Text;
+   variable LostToStr Text;
+   variable LostNoteStr Text;
+   variable ConnectedPromoExistVar Number;
+   variable LineVar Structure(QutationLineStructure);
+   bulkexecute {
+      call ValidateSelectedLines(Selection) into LineVar;
+      dialog OrderQuotationLostDialog(LineVar.QuotationNo, LineVar.LineNo, LineVar.RelNo, LineVar.LineItemNo) into(ReasonIdStr, LostToStr, LostNoteStr) {
+         when OK {
+            call CheckPromoExistQuoLineNum(Selection) into ConnectedPromoExistVar;
+            if [ConnectedPromoExistVar = 1]
+               {
+               confirm("There exists one or more sales promotion charge lines that are associated to the sales quotation order line(s) that is lost. You may need to calculate the sales promotion again.")
+                  {
+                  when CANCEL {
+                     exit;
+                  }
+               }
+            }
+            call SetBulkQuotationLost(Selection, ReasonIdStr, LostToStr, LostNoteStr);
+         }
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+
+command NewEstimateCommand {
+   label = "New Estimate";
+   enabled = [(Objstate = "Released" or Objstate = "Planned") and BuyQtyDue > 0 and CatalogType != "PackagePart" and(EstimateId = null)];
+   mode = SelectedRecords;
+   variable VarKeyrefs Text;
+   variable VarSource Text;
+   variable VarCount Number;
+   variable VarRemCount;
+   bulkexecute {
+      set VarSource = "SQ";
+      set VarCount = 0;
+      // No need to have JSON formatting as NewEstimateAssistant doesn't support it and the vaulue doesn't exceed the limit as few records will be selected
+      stringify(records, keyref) into VarKeyrefs;
+      call GetSelectedRecordCount(VarKeyrefs) into VarRemCount;
+      navigate "assistant/NewEstimate/NewEstimateAssistant?$action=InitAssistantForNewItem{VarSource:$[VarSource],VarCompany:$[parent.Company],VarEstimateId:$[EstimateId],VarEstimateRevNo:$[EstimateRevisionNo],VarParentNodeId:$[ParentNodeId],VarProdDisplayDesc:$[parent.QuotationNo],VarGenDisplayDesc:$[VarGenDisplayDesc], VarRequiredDate:$[RequiredDate], VarEstimateRequiredDate:$[parent.WantedDeliveryDate], VarCountNo:$[VarCount],VarRemCount:$[VarRemCount], VarDistrictCode:$[parent.DistrictCode], VarMarketCode:$[parent.MarketCode], VarRegionCode:$[parent.RegionCode],VarRecSelection:$[VarKeyrefs]}";
+   }
+}
+
+command EstimateCommand {
+   label = "Estimate";
+   enabled = [(EstimateId != null)];
+   mode = SelectedRecords;
+   bulkexecute {
+      bulknavigate "page/Estimate/Form?$filter=EstimateId eq ${EstimateId} and EstimateRevisionNo eq ${EstimateRevision}";
+   }
+}
+
+command EstimateDeliverableCommand {
+   label = "Estimate Deliverable";
+   mode = SelectedRecords;
+   enabled = [(DemandCode = "CostEstimation" and DemandOrderRef1 != null and DemandOrderRef2 != null)];
+   bulkexecute {
+      bulknavigate "page/EstimateDeliverables/Form?$filter=EstimateId eq ${DemandOrderRef1} and EstimateRevisionNo eq ${DemandOrderRef2} and CustomerId eq $[CustomerNo]";
+   }
+}
+
+command PriceQueryCommand {
+   label = "Price Query";
+   mode = SelectedRecords;
+   enabled = [parent.CustomerInfoRef.CustomerCategory != "Prospect"];
+   variable OrderLineSelectionVar Text;
+   variable PriceQueryVar Text;
+   bulkexecute {
+      stringify(records, keyref, JSON) into OrderLineSelectionVar;
+      call CreatePqForSource(OrderLineSelectionVar) into PriceQueryVar;
+      navigate "page/PriceQuery/Form?$filter=(${PriceQueryVar})";
+   }
+}
+
+command SubstituteSalesPartCommand {
+   label = "Substitute Sales Part";
+   enabled = [true];
+   variable SourceVar Text;
+   execute {
+      set SourceVar = "QUOTATION";
+      navigate "assistant/SubstituteSalesPart/SubstituteSalesPartAssistant?$action=SetupSourceInfo{OrderNoVar:$[QuotationNo], LineNoVar:$[LineNo], RelNoVar:$[RelNo], LineItemNoVar:$[LineItemNo], SourceVar:$[SourceVar], PromisedDeliveryDateVar:$[PromisedDeliveryDate]}";
+   }
+}
+
+// enable logic is in enablefunction in command definition
+command InventoryPartAvailabilityPlanCommand {
+   label = "Inventory Part Availability Planning";
+   variable ParamVar Structure(InventoryPlanningParamStructure);
+   execute {
+      call GerParamForInventoryPlanning(Contract, CatalogNo, VendorNo, PartNo, OrderSupplyType) into ParamVar;
+      navigate "page/InventoryPartAvailabilityPlanning/Form?$filter=PartNo eq $[ParamVar.PartNo] and Contract eq $[ParamVar.Contract] and ConfigurationId eq $[ConfigurationId] and ProjectId eq $[ParamVar.ProjectId]";
+   }
+}
+
+command PartsbyAssortmentandSiteClCommand {
+   label = "Parts by Assortment and Site Cluster";
+   enabled = [true];
+   mode = SelectedRecords;
+
+   bulkexecute {
+      bulknavigate "tree/PartsByAssortmentAndSiteCluster/Tree?$filter=ClassificationStandard eq $[ClassificationStandard]";
+   }
+}
+
+command InputUoMParametersCommand {
+   label = "Input UoM Parameters";
+   mode = SingleRecord;
+   enabled = [InputUomGroup];
+   execute {
+      assistant EnterInputUomParameters.EnterInputUnitParamAssistant(InputUnitMeasGroupId, InputVariableValues, null, null, InputUnitMeas, InputConvFactor, "ORDER") into(InputVariableValues, BuyQtyDue, InputQty, InputUnitMeas, InputConvFactor) {
+         when CANCEL {
+            exit CANCEL;
+         }
+      }
+   }
+}
+
+command CustomerWarrantyCommand {
+   label = "Customer Warranty";
+   variable SelectMethodVar Boolean;
+   enabled = [not((Objstate != "Released" and Objstate != "Planned" and Objstate != "Revised") and not CustomerWarranty) and LineItemNo !=-1];
+   execute {
+      set SelectMethodVar = false;
+      if [Objstate = "Released" or Objstate = "Planned" or Objstate = "Revised"] {
+         set SelectMethodVar = true;
+      }
+      assistant CustomerWarranty.CustomerWarrantyAssistant(CatalogNo, null, CustWarrantyId, SelectMethodVar) into(CustWarrantyId) {
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+
+
+@DynamicComponentDependency CFGCHR
+command CreateConfigurationCommand {
+   label = "Create";
+   variable UsageVar Text;
+   enabled = [QuotationNo != null and CatalogNo != null and Configurable and Objstate in("Planned", "Released", "Revised") and ConfigurationId = "*"];
+
+   execute {
+      set UsageVar = "SalesQuotation";
+      if [PlannedDeliveryDate = null] {
+         confirm("The system date will be used to determine the part configuration revision. Do you want to create the configuration without a wanted delivery date/time?") {
+            when CANCEL {
+               exit CANCEL;
+            }
+         }
+      }
+
+      navigate "assistant/PartConfigurationAssistant/EditConfiguration?$action=InitConfiguration{  VarUsage:$[UsageVar],
+                                                                                                   VarMode:'Create',
+                                                                                                   VarIdentity1:$[QuotationNo],
+                                                                                                   VarIdentity2:$[LineNo],
+                                                                                                   VarIdentity3:$[RelNo],
+                                                                                                   VarIdentity4:$[LineItemNo]}";
+   }
+}
+
+@DynamicComponentDependency CFGCHR
+command EditConfigurationCommand {
+   label = "Edit";
+   variable UsageVar Text;
+   enabled = [Objstate in("Planned", "Released", "Revised") and ConfigurationId != "*"];
+   execute {
+      set UsageVar = "SalesQuotation";
+      if [InterimOrder != null] {
+         confirm("Editing the configuration will make it no longer match your Interim Order. You will need to re-evaluate the Interim Order from the Interim Demand Head form.") {
+            when CANCEL {
+               exit;
+            }
+         }
+      }
+      navigate "assistant/PartConfigurationAssistant/EditConfiguration?$action=InitConfiguration{  VarUsage:$[UsageVar],
+                                                                                                   VarMode:'Edit',
+                                                                                                   VarIdentity1:$[QuotationNo],
+                                                                                                   VarIdentity2:$[LineNo],
+                                                                                                   VarIdentity3:$[RelNo],
+                                                                                                   VarIdentity4:$[LineItemNo]}";
+   }
+
+}
+
+@DynamicComponentDependency CFGCHR
+command ViewConfigurationCommand {
+   label = "View";
+   variable UsageVar Text;
+   enabled = [ConfigurationId != "*"];
+   execute {
+      set UsageVar = "SalesQuotation";
+
+      navigate "assistant/PartConfigurationAssistant/EditConfiguration?$action=InitConfiguration{  VarUsage:$[UsageVar],
+                                                                                                   VarMode:'View',
+                                                                                                   VarIdentity1:$[QuotationNo],
+                                                                                                   VarIdentity2:$[LineNo],
+                                                                                                   VarIdentity3:$[RelNo],
+                                                                                                   VarIdentity4:$[LineItemNo]}";
+   }
+
+}
+
+command CopyConfigurationCommand {
+   label = "Copy From";
+   variable SourceVar Text;
+
+   mode = SingleRecord;
+   enabled = [QuotationNo != null and CatalogNo != null and Configurable and ConfigurationId = "*" and Objstate in("Planned", "Released", "Revised")];
+   execute {
+      set SourceVar = "OrderQuotationLine";
+      assistant CopyConfigurationForSales.CopyConfigurationForSalesAssistant(SourceVar, QuotationNo, LineNo, RelNo, LineItemNo, ConfiguredLinePriceId, PartNo, CatalogNo, CatalogDesc, Contract, CustomerNo, PlannedDeliveryDate) {
+         when CANCEL {
+            exit;
+         }
+         when OK {
+            call RefreshAfterCrud();
+            exit;
+         }
+      }
+
+   }
+}
+
+command PackageStructureCommand {
+   label = "Package Structure";
+   mode = SingleRecord;
+
+   enabled = [(QuotationNo != null) and(LineItemNo =-1)];
+   execute {
+      navigate "page/QuotePackageStructure/Form?$filter=QuotationNo eq $[QuotationNo] and LineNo eq $[LineNo] and RelNo eq $[RelNo]";
+   }
+}
+
+command ContributionMarginCommand {
+   label = "Manage Contribution Margin";
+   mode = SelectedRecords;
+   enabled = [count(*, Objstate = "Won") = 0 and count(*, Objstate = "Cancelled") = 0 and count(*, Objstate = "Lost") = 0 and  count(*, Objstate = "CO Created") = 0];
+   bulkexecute {
+      assistant ManageContributionMargins.Assistant("Price", Selection, "CUSTOMERQUOTE")
+         {
+         when OK {
+            exit;
+         }
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+
+@DynamicComponentDependency CFGCHR
+command ConfigurationReplaceCharacteristicValueCommand {
+   label = "Replace Characteristic Value";
+   label = "Replace Characteristic Value";
+   mode = SelectedRecords;
+   enabled = [ConfigurationId != "*"];
+   variable KeyrefVar Text;
+   variable CharacteristicVar Structure(CharacteristicStructure);
+   variable CharacteristicIdVar Text;
+   variable CharacteristicValueVar Text;
+
+   bulkexecute {
+      stringify(records, "${keyref}PART_NO=${PartNo}^CONFIGURATION_ID=${ConfigurationId}^", JSON) into KeyrefVar;
+
+      call GetCharacteristics(KeyrefVar) into CharacteristicVar;
+      dialog ReplaceCharacteristicValueDialog(CharacteristicVar.CharacteristicIds, CharacteristicVar.PartNos, CharacteristicVar.WantedDeliveryDate) into(CharacteristicIdVar, CharacteristicValueVar) {
+         when OK {
+            call ReplaceCharValueForConfigs(CharacteristicVar.ConnectedIdAttr, CharacteristicIdVar, CharacteristicValueVar);
+         }
+      }
+   }
+}
+
+@DynamicComponentDependency CFGCHR
+command ConfigurationReplacewithStdSalesPartCommand {
+   label = "Replace with Standard Sales Part";
+   enabled = [CatalogNo != null and Configurable and Objstate in("Planned", "Released") and parent.Objstate in("Planned", "Released")];
+   variable PartNoVar Text;
+   variable NewContractVar Text;
+   variable NewCatalogNoVar Text;
+   execute {
+      call GetPartNo(Contract, CatalogNo) into PartNoVar;
+      assistant ReplaceWithStandardSalesPartAssistant.Assistant(PartNoVar, Contract, ConfigurationId, false, "") into(NewContractVar, NewCatalogNoVar) {
+         when OK {
+            call ReplaceQuotationLine(QuotationNo, LineNo, RelNo, LineItemNo, NewContractVar, NewCatalogNoVar, BuyQtyDue, DesiredQty);
+         }
+      }
+   }
+}
+
+---- Commands for functions
+command ValidateBuyQtyDueBaseCommand {
+   variable QuotePriceVar Structure(QuoteLineStruct);
+   variable IsNew Boolean;
+   variable RentalChargableDaysVar Number;
+
+   execute {
+      if [isNew] {
+         set IsNew = true;
+      }
+      else {
+         set IsNew = false;
+      }
+
+      call ValidateBuyQtyDue(QuotationNo,
+      LineNo,
+      RelNo,
+      LineItemNo,
+      CatalogNo,
+      BuyQtyDue,
+      PriceListNo,
+      parent.PriceEffectivityDate,
+      ConditionCode,
+      CustomerLevel,
+      CustomerLevelId,
+      UnformattedDiscount,
+      CharPrice,
+      ConfiguredLinePriceId,
+      PartNo,
+      ConfigurationId,
+      PriceFreeze,
+      SaleUnitPrice,
+      BaseSaleUnitPrice,
+      BaseUnitPriceInclTax,
+      IsNew,
+      true,
+      DemandCodeDb,
+      DemandOrderRef1,
+      DemandOrderRef2,
+      MultipleTaxLines,
+      TaxCode,
+      TaxCalcStructureId,
+      TaxClassId,
+      Contract,
+      CustomerNo,
+      ShipAddrNo,
+      PlannedDueDate,
+      parent.SupplyCountry,
+      DeliveryType,
+      TaxLiability,
+      TaxLiabilityType,
+      parent.CurrencyCode,
+      CurrencyRate,
+      "FALSE",
+      ChargedItem,
+      ConvFactor,
+      InvertedConvFactor,
+      OrderSupplyType,
+      Catalogtype,
+      Rental,
+      RevisedQtyDue,
+      DesiredQty,
+      PriceUnitMeas,
+      SalesUnitMeasure,
+      PriceConvFactor,
+      CustomerPartConvFactor,
+      CustPartInvertConvFact,
+      AdditionalDiscount,
+      QuoteDiscount,
+      RentalChargableDaysVar,
+      DuplicatedLine,
+      Discount
+      )  into QuotePriceVar;
+      if [not QuotePriceVar.Success] {
+         exit;
+      }
+
+      set PriceSource = QuotePriceVar.PriceSource;
+      set SetPriceSource = QuotePriceVar.SetPriceSource;
+      set PriceSourceId = QuotePriceVar.PriceSourceId;
+      set PriceFreeze = QuotePriceVar.PriceFreeze;
+
+      set CurrencyRate = QuotePriceVar.CurrencyRate;
+      set Discount = QuotePriceVar.Discount;
+      -- gelr:disc_price_rounded, begin
+      if [parent.DiscPriceRound and not(parent.UsePriceInclTax)] {
+         set OriginalDiscount = QuotePriceVar.Discount;
+      }
+      -- gelr:disc_price_rounded, end
+      set PartLevel = QuotePriceVar.PartLevelDb;
+      set PartLevelId = QuotePriceVar.PartLevelId;
+      set CustomerLevel = QuotePriceVar.CustomerLevelDb;
+      set CustomerLevelId = QuotePriceVar.CustomerLevelId;
+      set PriceSourceNetPrice = QuotePriceVar.PriceSourceNetPrice;
+
+      set BaseSaleUnitPrice = QuotePriceVar.BaseSaleUnitPrice;
+
+      set CalcPriceCurr = QuotePriceVar.CalcPriceCurr;
+      set CharPrice = QuotePriceVar.CharPrice;
+      set CalcCharPrice = QuotePriceVar.CalcCharPrice;
+
+      set MultipleTaxLines = QuotePriceVar.MultipleTaxLines;
+      set TaxCode = QuotePriceVar.TaxCode;
+      set TaxCalcStructureId = QuotePriceVar.TaxCalcStructureId;
+      set TaxClassId = QuotePriceVar.TaxClassId;
+
+      if [QuotePriceVar.PriceFreeze = "Free"] {
+         set PriceUnitMeas = QuotePriceVar.PriceUnitMeas;
+         set SalesUnitMeasure = QuotePriceVar.SalesUnitMeasure;
+         set PriceConvFactor = QuotePriceVar.PriceConvFactor;
+
+         set SaleUnitPrice = QuotePriceVar.SaleUnitPrice;
+         set PartPrice = QuotePriceVar.PartPrice;
+         set UnitPriceInclTax = QuotePriceVar.UnitPriceInclTax;
+         set BaseUnitPriceInclTax = QuotePriceVar.BaseUnitPriceInclTax;
+
+      }
+
+      // UPDATE COST FUNCTION
+      if [QuotePriceVar.Cost != null] {
+         set Cost = QuotePriceVar.Cost;
+      }
+
+      set RevisedQtyDue = QuotePriceVar.RevisedQtyDue;
+      set DesiredQty = QuotePriceVar.DesiredQty;
+      set PriceUnitMeas = QuotePriceVar.PriceUnitMeas;
+      set SalesUnitMeasure = QuotePriceVar.SalesUnitMeasure;
+      set PriceConvFactor = QuotePriceVar.PriceConvFactor;
+
+      set PriceQtyDue = QuotePriceVar.PriceQtyDue;
+      set TaxAmountBase = QuotePriceVar.TaxAmountBase;
+      set NetAmountBase = QuotePriceVar.NetAmountBase;
+      set GrossAmtBase = QuotePriceVar.GrossAmtBase;
+      set TaxAmountCurrency = QuotePriceVar.TaxAmountCurrency;
+      set NetAmountCurr = QuotePriceVar.NetAmountCurr;
+      set GrossAmtCurr = QuotePriceVar.GrossAmtCurr;
+      set TaxCalcStructureId = QuotePriceVar.TaxCalcStructureId;
+      set DiscountAmountCurr = QuotePriceVar.DiscountAmountCurr;
+      set CustomerPartBuyQty = QuotePriceVar.CustomerPartBuyQty;
+      set CustomerPartBuyQty = QuotePriceVar.CustomerPartBuyQty;
+      set CustomerPartConvFactor = QuotePriceVar.CustomerPartConvFactor;
+      set CustomerPartConvFactor = QuotePriceVar.CustomerPartConvFactor;
+      set CustomerPartBuyQty = QuotePriceVar.CustomerPartBuyQty;
+      set FetchTaxFromDefaults = QuotePriceVar.FetchTaxFromDefaults;
+   }
+}
+
+command ValidatePriceAndTotalCommand {
+   variable QuotePriceVar Structure(QuoteLineStruct);
+   variable IsNew Boolean;
+   variable RentalChargableDaysVar Number;
+   variable TaxFromDefVar Text;
+
+   execute {
+      if [isNew] {
+         set IsNew = true;
+      }
+      else {
+         set IsNew = false;
+      }
+
+      if [parent.TaxCalcMethod != "NOT_USED"]
+         {
+         set TaxFromDefVar = "TRUE";
+      }
+      else {
+         set TaxFromDefVar = "FALSE";
+      }
+      if [not Rental] {
+         set RentalChargableDaysVar = 1;
+      }
+      call SetQuotePriceAndTotals(QuotationNo,
+      LineNo,
+      RelNo,
+      LineItemNo,
+      CatalogNo,
+      BuyQtyDue,
+      PriceListNo,
+      parent.PriceEffectivityDate,
+      ConditionCode,
+      CustomerLevel,
+      CustomerLevelId,
+      UnformattedDiscount,
+      CharPrice,
+      ConfiguredLinePriceId,
+      PartNo,
+      ConfigurationId,
+      PriceFreeze,
+      SaleUnitPrice,
+      BaseSaleUnitPrice,
+      BaseUnitPriceInclTax,
+      IsNew,
+      true,
+      DemandCodeDb,
+      DemandOrderRef1,
+      DemandOrderRef2,
+      MultipleTaxLines,
+      TaxCode,
+      TaxCalcStructureId,
+      TaxClassId,
+      Contract,
+      CustomerNo,
+      ShipAddrNo,
+      PlannedDueDate,
+      parent.SupplyCountry,
+      DeliveryType,
+      TaxLiability,
+      TaxLiabilityType,
+      parent.CurrencyCode,
+      CurrencyRate,
+      TaxFromDefVar,
+//      ChargedItem,
+//      ConvFactor,
+//      InvertedConvFactor,
+//      OrderSupplyType,
+//      Catalogtype,
+      Rental,
+      RevisedQtyDue,
+      DesiredQty,
+      PriceConvFactor,
+      AdditionalDiscount,
+      QuoteDiscount,
+      RentalChargableDaysVar,
+      DuplicatedLine
+      )  into QuotePriceVar {
+         when FAIL {
+            exit;
+         }
+      }
+      if [not QuotePriceVar.Success] {
+         exit;
+      }
+
+      set PriceSource = QuotePriceVar.PriceSource;
+      set SetPriceSource = QuotePriceVar.SetPriceSource;
+      set PriceSourceId = QuotePriceVar.PriceSourceId;
+      set PriceFreeze = QuotePriceVar.PriceFreeze;
+      set PartPrice = QuotePriceVar.PartPrice;
+      set CurrencyRate = QuotePriceVar.CurrencyRate;
+      if [not(isNew and Rental and QuotePriceVar.Discount = null)] {
+         set Discount = QuotePriceVar.Discount;
+      }
+      -- gelr:disc_price_rounded, begin
+      if [parent.DiscPriceRound and not(parent.UsePriceInclTax)] {
+         set OriginalDiscount = QuotePriceVar.Discount;
+      }
+      -- gelr:disc_price_rounded, end
+      set PartLevel = QuotePriceVar.PartLevelDb;
+      set PartLevelId = QuotePriceVar.PartLevelId;
+      set CustomerLevel = QuotePriceVar.CustomerLevelDb;
+      set CustomerLevelId = QuotePriceVar.CustomerLevelId;
+      set PriceSourceNetPrice = QuotePriceVar.PriceSourceNetPrice;
+      set SaleUnitPrice = QuotePriceVar.SaleUnitPrice;
+      set UnitPriceInclTax = QuotePriceVar.UnitPriceInclTax;
+      set BaseSaleUnitPrice = QuotePriceVar.BaseSaleUnitPrice;
+      set BaseUnitPriceInclTax = QuotePriceVar.BaseUnitPriceInclTax;
+      set CalcPriceCurr = QuotePriceVar.CalcPriceCurr;
+      set CharPrice = QuotePriceVar.CharPrice;
+      set CalcCharPrice = QuotePriceVar.CalcCharPrice;
+
+      set MultipleTaxLines = QuotePriceVar.MultipleTaxLines;
+      set TaxCode = QuotePriceVar.TaxCode;
+      set TaxCalcStructureId = QuotePriceVar.TaxCalcStructureId;
+      set TaxClassId = QuotePriceVar.TaxClassId;
+
+      set RevisedQtyDue = QuotePriceVar.RevisedQtyDue;
+      set DesiredQty = QuotePriceVar.DesiredQty;
+      set  TaxAmountBase = QuotePriceVar.TaxAmountBase;
+      set NetAmountBase = QuotePriceVar.NetAmountBase;
+      set  GrossAmtBase = QuotePriceVar.GrossAmtBase;
+      set TaxAmountCurrency = QuotePriceVar.TaxAmountCurrency;
+      set NetAmountCurr = QuotePriceVar.NetAmountCurr;
+      set  GrossAmtCurr = QuotePriceVar.GrossAmtCurr;
+      set TaxCalcStructureId = QuotePriceVar.TaxCalcStructureId;
+      set DiscountAmountCurr = QuotePriceVar.DiscountAmountCurr;
+      set FetchTaxFromDefaults = QuotePriceVar.FetchTaxFromDefaults;
+   }
+}
+
+command ValidateBuyQtyDueCommand for OrderQuotationLine clone ValidateBuyQtyDueBaseCommand {
+   execute {
+      super;
+      -- Moved the Input UoM code to SalesQuotationLineTab fragment. Kept this command in case you need to add additional validations.
+   }
+}
+
+
+command ValidateCustomerPartBuyQtyCommand for OrderQuotationLine clone ValidateBuyQtyDueBaseCommand {
+   execute {
+      if [CustomerPartBuyQty = null] {
+         exit;
+      }
+      if [CustomerPartConvFactor = null] {
+         set BuyQtyDue = null;
+         exit;
+      }
+      else {
+         if [CustPartInvertConvFact = null] {
+            set CustPartInvertConvFact = 1;
+         }
+         set BuyQtyDue = "#{CustomerPartBuyQty * CustomerPartConvFactor / CustPartInvertConvFact}";
+      }
+      super;
+   }
+}
+
+command ValidatePriceCommand for OrderQuotationLine {
+   variable IsNew Boolean;
+   variable ValidationRec Structure(QuoteLineStruct);
+   variable PriceVar Structure(QuoteLineStruct);
+   variable ValidateBasePriceVar Boolean;
+   execute {
+
+
+      if [isNew] {
+         set IsNew = true;
+      }
+      else {
+         set IsNew = false;
+      }
+      copy this into ValidationRec;
+      call ValidateSaleUnitPrice(
+      ValidationRec,
+      parent.SupplyCountry,
+      parent.CurrencyCode,
+      "FALSE",
+      IsNew, -- TaxCodeFlag if new it shoud be true
+      IsNew,
+      false,
+      QuoteDiscount,
+      CustomerNoPay,
+      ValidateBasePriceVar,
+      1) into PriceVar;
+      copy PriceVar into this skip nulls;
+
+   }
+}
+
+command ValidateSalesPriceCommand clone ValidatePriceCommand {
+   execute {
+      set ValidateBasePriceVar = false;
+      super;
+   }
+}
+
+command ValidateBaseSalesPriceCommand clone ValidatePriceCommand {
+   execute {
+      set ValidateBasePriceVar = true;
+      super;
+   }
+}
+
+command CalculateLineTotalCommand for OrderQuotationLine {
+   variable IsNew Boolean;
+   variable DiscontVar Boolean;
+   variable FreeOfChargeTaxBasisVar Number;
+   execute {
+      call CalculateLineTotal(
+      QuotationNo,
+      LineNo,
+      RelNo,
+      LineItemNo,
+      "FALSE",
+      true,
+      IsNew,
+      false,
+      false,
+      TaxCalcStructureId,
+      TaxCode,
+      Contract,
+      CustomerNo,
+      ShipAddrNo,
+      PlannedDueDate,
+      parent.SupplyCountry,
+      DeliveryType,
+      CatalogNo,
+      TaxLiability,
+      TaxLiabilityType,
+      parent.CurrencyCode,
+      CurrencyRate,
+      BuyQtyDue,
+      PriceConvFactor,
+      SaleUnitPrice,
+      UnitPriceInclTax,
+      AdditionalDiscount,
+      QuoteDiscount,
+      1,
+      FreeOfChargeTaxBasisVar,
+      Discount) into DiscontVar;
+      copy DiscontVar into this skip nulls;
+   }
+}
+
+-- gelr:disc_price_rounded, begin
+command CalculateOriginalLineTotalCommand clone CalculateLineTotalCommand {
+   execute {
+      set Discount = OriginalDiscount;
+      super;
+   }
+}
+-- gelr:disc_price_rounded, end
+
+command CalculatePricesCommand for OrderQuotationLine {
+   variable TaxLiabilityTypeVar Enumeration(TaxLiabilityType);
+   variable TaxLiabilityTypeDb Text;
+   variable PriiceVar Structure(QuoteLineStruct);
+   variable IsNew Boolean;
+   variable TaxFromDefVar Text;
+   variable ValidateTypeVar Text;
+   execute {
+      if [isNew] {
+         set IsNew = true;
+      }
+      else {
+         set IsNew = false;
+      }
+
+      call GetCusTaxLiabilityTypeDb(TaxLiability, CustomerNo, ShipAddrNo) into TaxLiabilityTypeDb;
+
+      if [TaxLiabilityTypeDb = "EXM"] {
+         set TaxLiabilityTypeVar = "Exempt";
+      }
+      if [TaxLiabilityTypeDb = "TAX"] {
+         set TaxLiabilityTypeVar = "Taxable";
+      }
+
+      if [(TaxLiabilityTypeVar = "Exempt" and ValidateTypeVar = "DeliveryType")] {
+         set TaxFromDefVar = "TRUE";
+      }
+
+      if [ValidateTypeVar = "TaxLiability"] {
+         if [not isNew and TaxLiabilityType != TaxLiabilityTypeVar] {
+            set TaxFromDefVar = "TRUE";
+         }
+         if [isNew] {
+            set TaxFromDefVar = "TRUE";
+         }
+         set TaxLiabilityType = TaxLiabilityTypeVar;
+      }
+
+      if [(TaxLiabilityTypeVar = "Exempt" and ValidateTypeVar = "DeliveryType") or(ValidateTypeVar = "TaxLiability") or(ValidateTypeVar = "TaxCode")] {
+         call CalculatePrices(QuotationNo,
+         LineNo,
+         RelNo,
+         LineItemNo,
+         SaleUnitPrice,
+         UnitPriceInclTax,
+         MultipleTaxLines,
+         TaxCode,
+         TaxCalcStructureId,
+         TaxClassId,
+         Contract,
+         CustomerNo,
+         ShipAddrNo,
+         PlannedDueDate,
+         parent.SupplyCountry,
+         DeliveryType,
+         CatalogNo,
+         TaxLiability,
+         TaxLiabilityType,
+         parent.CurrencyCode,
+         CurrencyRate,
+         TaxFromDefVar, --TaxFromDef
+         true, --TaxCodeFlag,
+         IsNew,
+         false, --TaxEdited,
+         BuyQtyDue,
+         PriceConvFactor,
+         AdditionalDiscount,
+         QuoteDiscount,
+         1) into PriiceVar;
+         copy PriiceVar into this skip nulls;
+      }
+   }
+}
+
+
+command ValidateDeliveryTypeCommand clone CalculatePricesCommand {
+   execute {
+      set ValidateTypeVar = "DeliveryType";
+      set TaxFromDefVar = "FALSE";
+      super;
+   }
+}
+
+command ValidateTaxLiabilityCommand clone CalculatePricesCommand {
+   execute {
+      set ValidateTypeVar = "TaxLiability";
+      set TaxFromDefVar = "FALSE";
+      if [parent.CustomerInfoRef.CustomerCategory = "Customer"] {
+         set DefaultAddrFlag = "No";
+      }
+      if [TaxCode != null] {
+         set TaxCode = null;
+      }
+      super;
+   }
+}
+
+command ValidateTaxCodeCommand clone CalculatePricesCommand {
+   execute {
+      set ValidateTypeVar = "TaxCode";
+      set TaxFromDefVar = "FALSE";
+      if [TaxCode != null] {
+         if [TaxCalcStructureId != null] {
+            messagebox("", question, "This will overwrite the existing tax calculation structure.
+            Do you want to continue?") {
+               when "Yes" {
+                  set MultipleTaxLines = false;
+               }
+               when "No" {
+                  set TaxCode = original.TaxCode;
+                  exit;
+               }
+            }
+         }
+         if [MultipleTaxLines and TaxCalcStructureId = null] {
+            messagebox("", question, "This will overwrite the existing multiple tax lines.
+            Do you want to continue?") {
+               when "Yes" {
+                  set MultipleTaxLines = false;
+               }
+               when "No" {
+                  set TaxCode = original.TaxCode;
+                  exit;
+               }
+
+            }
+         }
+         set MultipleTaxLines = false;
+      }
+      if [TaxCode = null and MultipleTaxLines] {
+         set MultipleTaxLines = false;
+      }
+      if [TaxCode = null and not MultipleTaxLines] {
+         set TaxFromDefVar = "DO_NOT_FETCH";
+         set FetchTaxCodes = "FALSE";
+      }
+      if [TaxClassId != null] {
+         set TaxClassId = null;
+         set TaxClassDescription = null;
+      }
+      if [TaxCalcStructureId != null] {
+         set TaxCalcStructureId = null;
+      }
+      super;
+   }
+}
+
+
+command ValidateShipAddrNoCommand clone CalculatePricesCommand {
+   variable AddressDetailVar Structure(AddressDetailStructure);
+
+   execute {
+      set DefaultAddrFlag = "No";
+      call ValidateAddressNo(
+      CustomerNo,
+      ShipAddrNo,
+      Contract,
+      CatalogNo,
+      DeliveryLeadtime,
+      PickingLeadtime,
+      PartNo,
+      OrderSupplyType,
+      VendorNo,
+      QuotationNo) into AddressDetailVar;
+      copy AddressDetailVar into this skip nulls;
+      super;
+   }
+}
+
+command ValidateTaxCalcStructureIdCommand clone CalculatePricesCommand {
+   execute {
+      if [TaxCalcStructureId != null] {
+         if [TaxCode != null] {
+            messagebox("", question, "This will overwrite the existing tax code.
+               Do you want to continue?") {
+               when "Yes" {
+                  set TaxCode = null;
+               }
+               when "No" {
+                  set TaxCalcStructureId = original.TaxCalcStructureId;
+                  exit;
+               }
+            }
+         }
+         else {
+            if [MultipleTaxLines and original.TaxCalcStructureId = null] {
+               messagebox("", question, " This will overwrite the existing multiple tax lines.
+                  Do you want to continue?") {
+                  when "Yes" {
+                     if [TaxClassId != null] {
+                        set TaxClassId = null;
+                        set TaxClassDescription = null;
+                     }
+                  }
+                  when "No" {
+                     set TaxCalcStructureId = original.TaxCalcStructureId;
+                     exit;
+                  }
+               }
+            }
+         }
+         if [TaxClassId != null] {
+            set TaxClassId = null;
+            set TaxClassDescription = null;
+         }
+      }
+      if [TaxCalcStructureId = null and original.TaxCalcStructureId != null] {
+         set TaxFromDefVar = "DO_NOT_FETCH";
+         set FetchTaxCodes = "FALSE";
+      }
+      super;
+   }
+}
+
+command FetchDeliveryAttributeCommand {
+   variable DeliveryAttrVar Structure(AddressDetailStructure);
+   variable SingleOccurVar Text;
+   execute {
+      set SingleOccurVar = null;
+      if [parent.CustomerInfoRef.CustomerCategory = "Customer"] {
+         set DefaultAddrFlag = "No";
+      }
+      call FetchDeliveryAttributes(QuotationNo,
+      LineNo,
+      RelNo,
+      Contract,
+      CustomerNo,
+      ShipAddrNo,
+      ShipViaCode,
+      PartNo,
+      OrderSupplyType,
+      VendorNo,
+      SingleOccAddrFlag,
+      DeliveryTerms,
+      DelTermsLocation,
+      ForwardAgentId,
+      DeliveryLeadtime,
+      PickingLeadtime,
+      SingleOccurVar,
+      SingleOccurVar,
+      SingleOccurVar,
+      SingleOccurVar,
+      SingleOccurVar,
+      "FALSE") into DeliveryAttrVar;
+      set FreightMapId = DeliveryAttrVar.FreightMapId;
+      set ZoneId = DeliveryAttrVar.ZoneId;
+      set FreightPriceListNo = DeliveryAttrVar.FreightPriceListNo;
+
+   }
+}
+
+command ValidateLineShipViaCodeCommand clone FetchDeliveryAttributeCommand {
+   execute {
+      super;
+      set  ExtTransportCalendarId = DeliveryAttrVar.ExtTransportCalendarId;
+      set  DeliveryLeadtime = DeliveryAttrVar.DeliveryLeadtime;
+      set  PickingLeadtime = DeliveryAttrVar.PickingLeadtime;
+      set  ForwardAgentId = DeliveryAttrVar.ForwardAgentId;
+      set  DeliveryTerms = DeliveryAttrVar.DeliveryTerms;
+      set  DelTermsLocation = DeliveryAttrVar.DelTermsLocation;
+      call GetShipViaDesc(ShipViaCode) into ShipViaDesc;
+   }
+}
+
+command ValidateCatalogNoCommand for OrderQuotationLine {
+   variable QuoatLineVar Structure(QuoteLineStruct);
+   variable ValidationRec Structure(QuoteLineStruct);
+   variable IsNew Boolean;
+   variable ClassificationDefaultsVar Structure(ClassificationDefaultsStructure);
+   variable ClassifcationPartEditedVar Boolean;
+   variable TaxCodeFlagVar Boolean;
+
+   execute {
+      if [isNew] {
+         set IsNew = true;
+         set TaxCodeFlagVar = false;
+      }
+      else {
+         set IsNew = false;
+      }
+      copy this into ValidationRec;
+      call ValidateCatalogNo(ValidationRec, IsNew, parent.SupplyCountry, parent.CurrencyCode, "TRUE", TaxCodeFlagVar, false, 1) into QuoatLineVar;
+
+      if [not QuoatLineVar.Success] {
+         exit;
+      }
+      if [QuoatLineVar.InactiveCompExist = 1] {
+         alert("The specified component part is not active for sale.");
+      }
+      copy QuoatLineVar into this;
+      set ClassificationPartNo = null;
+      call ValidateClassificationDefaults(ClassificationUnitMeas, CatalogNo, ClassificationPartNo, ClassificationStandard, Contract, ClassifcationPartEditedVar) into ClassificationDefaultsVar {
+         when SUCCESS {
+            set ClassificationUnitMeas = ClassificationDefaultsVar.ClassificationUnitMeas;
+            set ClassificationPartNo = ClassificationDefaultsVar.ClassificationPartNo;
+            set ClassificationStandard = ClassificationDefaultsVar.ClassificationStandard;
+         }
+      }
+   }
+}
+
+command ClassificationPartNoCommand clone ValidateCatalogNoCommand {
+   execute {
+      set CatalogNo = null;
+      call ValidateClassificationDefaults(ClassificationUnitMeas, CatalogNo, ClassificationPartNo, ClassificationStandard, Contract, true) into ClassificationDefaultsVar {
+         when SUCCESS {
+            set ClassificationUnitMeas = ClassificationDefaultsVar.ClassificationUnitMeas;
+            set ClassificationPartNo = ClassificationDefaultsVar.ClassificationPartNo;
+            set CatalogNo = ClassificationDefaultsVar.CatalogNo;
+            set ClassifcationPartEditedVar = true;
+            super;
+         }
+      }
+   }
+}
+
+command ValidateGtinNoCommand clone ValidateCatalogNoCommand {
+   variable GtinVar Structure(GtinStructure);
+   execute {
+      if [GtinNo = null] {
+         exit;
+      }
+
+      call ValidateGtinNo(GtinNo, Contract, InputUnitMeasGroupId, true) into GtinVar;
+      set CatalogNo = GtinVar.CatalogNo;
+      if [GtinVar.InputUnitMeas != null] {
+         set InputUnitMeas = GtinVar.InputUnitMeas;
+         set InputConvFactor = GtinVar.InputConvFactor;
+      }
+      set ClassificationPartNo = null;
+
+      call ValidateClassificationDefaults(ClassificationUnitMeas, CatalogNo, ClassificationPartNo, ClassificationStandard, Contract, true) into ClassificationDefaultsVar {
+         when SUCCESS {
+            set ClassificationUnitMeas = ClassificationDefaultsVar.ClassificationUnitMeas;
+            set ClassificationPartNo = ClassificationDefaultsVar.ClassificationPartNo;
+            set CatalogNo = ClassificationDefaultsVar.CatalogNo;
+            set ClassifcationPartEditedVar = false;
+         }
+         when FAIL {
+            exit;
+         }
+      }
+      super;
+      if [GtinNo != null] {
+         call ValidateGtinNo(GtinNo, Contract, InputUnitMeasGroupId, false) into GtinVar;
+         set CatalogNo = GtinVar.CatalogNo;
+         if [GtinVar.InputUnitMeas != null] {
+            set InputUnitMeas = GtinVar.InputUnitMeas;
+            set InputConvFactor = GtinVar.InputConvFactor;
+         }
+      }
+   }
+}
+
+command BeforeLineSaveCommand for OrderQuotationLine {
+   variable ConfigurationInfoVar Structure(ConfigurationInfoStructure);
+   variable SuccessVar Boolean;
+   variable ValidPriceListVar Text;
+   variable SalesPriceTypeVar Text;
+   variable MinDurationVar Number;
+
+   bulkexecute {
+      if [Record.ConfigurationId != "*" and Record.ConfigurationId != null] {
+         call GetConfigurationInfo(Record.PartNo, Record.PlannedDeliveryDate, Record.ConfigurationId) into ConfigurationInfoVar;
+         if [ConfigurationInfoVar.CfgChrInstalled and ConfigurationInfoVar.RevForDate = null] {
+            alert("No valid part configuration revision exists for this date. Current revision will be used.");
+         }
+         else {
+            if [ConfigurationInfoVar.RevForDate != ConfigurationInfoVar.RevisionNo] {
+               messagebox("", question, "A new part configuration revision is effective for this date. Do you want to update the configuration to this revision?") {
+                  when "Yes" {
+                     bulkset UpdateConfigRev = "Y";
+                  }
+                  when "No" {
+                     bulkset UpdateConfigRev = "N";
+                  }
+               }
+            }
+         }
+      }
+      if [UpdateCount > 0] {
+         if [Record.PriceListNo != null] {
+            if [not Record.Rental] {
+               set SalesPriceTypeVar = "SALES PRICES";
+               set MinDurationVar = -1;
+            }
+            else {
+               set SalesPriceTypeVar = "RENTAL PRICES";
+               set MinDurationVar = Record.PlannedRentalDuration;
+            }
+            call IsValidPriceList(Record.PriceListNo, Record.Contract, Record.CatalogNo, Record.CustomerNo, parent.CurrencyCode, parent.PriceEffectivityDate, SalesPriceTypeVar, Record.BuyQtyDue, MinDurationVar) into ValidPriceListVar;
+            if [ValidPriceListVar = "FALSE" and SalesPriceTypeVar = "SALES PRICES"] {
+               error("This price list cannot be selected as the minimum quantity requirement has not been fulfilled, the valid to date is in the past or is not a preferred price list.");
+               exit CANCEL;
+            }
+            if [ValidPriceListVar = "FALSE" and SalesPriceTypeVar = "RENTAL PRICES"] {
+               error("This price list cannot be selected as the minimum quantity, minimum duration requirement has not been fulfilled, the valid to date is in the past or is not a preferred price list.");
+               exit CANCEL;
+            }
+         }
+      }
+      call GetCurrencyRateDefaults(parent.Contract, parent.CustomerNo, parent.CurrencyCode) into SuccessVar;
+      if [not SuccessVar] {
+         exit;
+      }
+   }
+}
+
+
+--------------------------------- SELECTORS ---------------------------------
+
+---------------------------------- GROUPS -----------------------------------
+
+----------------------------------- LISTS -----------------------------------
+
+list OrderQuotationLineBaseList for OrderQuotationLine {
+   -- Can change if SCUXXW4-16405 fixed
+   orderby = LineNumber, RelNumber;
+
+   crudactions {
+      before command BeforeLineSaveCommand;
+      new {
+         enabled = [not parent.Objstate in("Closed", "Cancelled")];
+      }
+      delete {
+         enabled = [not parent.Objstate in("Closed", "Cancelled")];
+      }
+   }
+   field LineNo {
+      size = Small;
+      validate command {
+         execute {
+            call GetNextRelNo(QuotationNo, LineNo, LineItemNo, Contract) into RelNo;
+            if [LineNo != null and RelNo != null] {
+               if [LineItemNo > 0] {
+                  call ExistLineNo(QuotationNo, LineNo, RelNo, LineItemNo);
+               }
+               else
+                  {
+                  call ExistLineNo(QuotationNo, LineNo, RelNo, NULL);
+               }
+            }
+         }
+      }
+   }
+   field RelNo {
+      size = Small;
+      validate command {
+         execute {
+            if [LineNo != null and RelNo != null] {
+               if [LineItemNo > 0] {
+                  call ExistLineNo(QuotationNo, LineNo, RelNo, LineItemNo);
+               }
+               else
+                  {
+                  call ExistLineNo(QuotationNo, LineNo, RelNo, NULL);
+               }
+            }
+         }
+      }
+   }
+   field CatalogDesc {
+      multiline = true;
+      size = Medium;
+   }
+   field SalesUnitMeasureRef {
+      size = Small;
+   }
+   badge Objstate {
+      label = "Status";
+      emphasis Progress1 = [Objstate = "Planned"];
+      emphasis Progress3 = [Objstate = "Released"];
+      emphasis Progress5 = [Objstate = "Revised"];
+      emphasis Progress9 = [Objstate = "Won"];
+      emphasis Progress12 = [Objstate = "COCreated"];
+      emphasis Progress12 = [Objstate = "Lost"];
+      emphasis StateBlocked = [Objstate = "Rejected"];
+      emphasis StateCancelled = [Objstate = "Cancelled"];
+      style = TextOnly;
+   }
+   field SaleUnitPrice {
+      editable = [not parent.UsePriceInclTax];
+      preserveprecision = [true];
+      validate command ValidateSalesPriceCommand;
+   }
+   field UnitPriceInclTax {
+      editable = [parent.UsePriceInclTax];
+      preserveprecision = [true];
+      validate command ValidateSalesPriceCommand;
+   }
+   field PriceUnitMeas {
+      size = Small;
+   }
+   field PriceSource {
+      size = Small;
+      editable = [false];
+   }
+   field PriceSourceId {
+      size = Small;
+   }
+   field PriceFreeze {
+      size = Small;
+      enumerationtrue = "Frozen";
+      enumerationfalse = "Free";
+      truelabel = "Yes";
+      falselabel = "No";
+   }
+   field DiscountAmountCurr {
+      editable = [false];
+   }
+   field Discount {
+      -- gelr:disc_price_rounded, begin
+      columnexclude = [parent.DiscPriceRound and not(parent.UsePriceInclTax)];
+      -- gelr:disc_price_rounded, end
+      validate command CalculateLineTotalCommand;
+   }
+   -- gelr:disc_price_rounded, begin
+   field OriginalDiscount {
+      columnexclude = [not(parent.DiscPriceRound) or parent.UsePriceInclTax];
+      validate command CalculateOriginalLineTotalCommand;
+   }
+   -- gelr:disc_price_rounded, end
+   field AdditionalDiscount {
+      -- gelr:disc_price_rounded, begin
+      columnexclude = [parent.DiscPriceRound and not(parent.UsePriceInclTax)];
+      -- gelr:disc_price_rounded, end
+   }
+   -- gelr:disc_price_rounded, begin
+   field OriginalAddDiscount {
+      columnexclude = [not(parent.DiscPriceRound) or parent.UsePriceInclTax];
+   }
+   -- gelr:disc_price_rounded, end
+   field TotalOrderLineDiscount;
+   field NetAmountCurr {
+      editable = [false];
+   }
+   field GrossAmtCurr {
+      editable = [false];
+   }
+   field PlannedDeliveryDate;
+   field PromisedDeliveryDate;
+   field PlannedDueDate {
+      editable = [false];
+   }
+   field OrderSupplyType {
+      when [not Rental] use subset Subset11;
+      when [Rental] use subset Subset12;
+   }
+   field DefaultAddrFlag {
+      size = Small;
+      editable = [false];
+      enumerationtrue = "Yes";
+      enumerationfalse = "No";
+      truelabel = "Yes";
+      falselabel = "No";
+
+      validate command {
+         execute {
+            if [(DefaultAddrFlag = "No") and parent.CustomerInfoRef.CustomerCategory = "Prospect"] {
+               set DefaultAddrFlag = "Yes";
+            }
+            if [(DefaultAddrFlag = "No") and original.DefaultAddrFlagDb or isNew] {
+               set DefaultAddrFlagDb = "Yes";
+            }
+         }
+      }
+   }
+   field SingleOccAddrFlag {
+      size = Small;
+      editable = [false];
+      validate command FetchDeliveryAttributeCommand;
+   }
+   field ShipAddrNo {
+      editable = [not SingleOccAddrFlag and(parent.CustomerInfoRef.CustomerCategory in("Customer", "Prospect") and TaxLiabilityType = "Taxable")];
+      validate command ValidateShipAddrNoCommand;
+      lovswitch {
+         when [parent.CustomerInfoRef.CustomerCategory = "Customer"] {
+            lov ShipAddrNoRef with ReferenceCustAddressShipLovSelector;
+         }
+         when [true] {
+            lov ShipAddrNoforPospectRef with ReferenceCustomerInfoAddrDelPubLovSelector;
+         }
+      }
+   }
+   lov ShipViaCodeRef with ReferenceMpccomShipViaSelector {
+      editable = [parent.CustomerInfoRef.CustomerCategory in("Prospect", "Customer")];
+      validate command ValidateLineShipViaCodeCommand;
+      description = ShipViaDesc;
+   }
+   field CustomerPartNoRef {
+      validate command {
+         variable QuoatLineVar Structure(QuoteLineStruct);
+         variable TaxFromDefaultsVar Text;
+         execute {
+            if [DuplicatedLine = "TRUE"] {
+               set TaxFromDefaultsVar = "FALSE";
+            }
+            else {
+               set TaxFromDefaultsVar = "FALSE";
+            }
+            call ValidateCustomerPartNo(
+            QuotationNo,
+            CustomerPartNo,
+            CustomerNo,
+            Contract,
+            BuyQtyDue,
+            PriceConvFactor,
+            ConfigurationId,
+            -- line prices
+            LineNo,
+            RelNo,
+            LineItemNo,
+            SaleUnitPrice,
+            UnitPriceInclTax,
+            MultipleTaxLines,
+            TaxCode,
+            TaxCalcStructureId,
+            TaxClassId,
+            ShipAddrNo,
+            PlannedDueDate,
+            parent.SupplyCountry,
+            DeliveryType,
+            CatalogNo,
+            TaxLiability,
+            TaxLiabilityType,
+            parent.CurrencyCode,
+            CurrencyRate,
+            TaxFromDefaultsVar,
+            --line totals
+            true,
+            true,
+            false,
+            AdditionalDiscount,
+            QuotationDiscount,
+            1,
+            DuplicatedLine) into QuoatLineVar {
+               when FAIL {
+                  exit;
+               }
+            }
+            --copy QuoatLineVar into this skip nulls;
+            set Configurable = QuoatLineVar.Configurable;
+            set PriceUnitMeas = QuoatLineVar.PriceUnitMeas;
+            set SalesPriceGroupId = QuoatLineVar.SalesPriceGroupId;
+            set CostLevelDb = QuoatLineVar.CostLevelDb;
+            set InputUnitMeasGroupId = QuoatLineVar.InputUnitMeasGroupId;
+            set BuyQtyDue = QuoatLineVar.BuyQtyDue;
+            set CurrencyRate = QuoatLineVar.CurrencyRate;
+            set ConvFactor = QuoatLineVar.ConvFactor;
+            set InvertedConvFactor = QuoatLineVar.InvertedConvFactor;
+            set PriceConvFactor = QuoatLineVar.PriceConvFactor;
+            set PartPrice = QuoatLineVar.PartPrice;
+            set PriceSource = QuoatLineVar.PriceSource;
+            set SetPriceSource = QuoatLineVar.SetPriceSource;
+            set PriceSourceId = QuoatLineVar.PriceSourceId;
+            set SalesUnitMeasure = QuoatLineVar.SalesUnitMeasure;
+            set Discount = QuoatLineVar.Discount;
+            -- gelr:disc_price_rounded, begin
+            if [parent.DiscPriceRound and not(parent.UsePriceInclTax)] {
+               set OriginalDiscount = QuoatLineVar.Discount;
+            }
+            -- gelr:disc_price_rounded, end
+            set Cost = QuoatLineVar.Cost;
+            set PartNo = QuoatLineVar.PartNo;
+            set TaxCode = QuoatLineVar.TaxCode;
+            set OrderSupplyType = QuoatLineVar.OrderSupplyType;
+
+            set CatalogType = QuoatLineVar.CatalogType;
+            set CatalogNo = QuoatLineVar.CatalogNo;
+            set CustomerPartConvFactor = QuoatLineVar.CustomerPartConvFactor;
+            set CustomerPartUnitMeas = QuoatLineVar.CustomerPartUnitMeas;
+            set CustPartInvertConvFact = QuoatLineVar.CustPartInvertConvFact;
+
+            -- Line prices
+            if [BuyQtyDue != null] {
+               set SaleUnitPrice = QuoatLineVar.SaleUnitPrice;
+               set UnitPriceInclTax = QuoatLineVar.UnitPriceInclTax;
+               set BaseSaleUnitPrice = QuoatLineBaseSaleUnitPriceVar.BaseSaleUnitPrice;
+               set BaseUnitPriceInclTax = QuoatLineVar.BaseUnitPriceInclTax;
+               set MultipleTaxLines = QuoatLineVar.MultipleTaxLines;
+               set TaxCode = QuoatLineVar.TaxCode;
+               set TaxCalcStructureId = QuoatLineVar.TaxCalcStructureId;
+               set TaxClassId = QuoatLineVar.TaxClassId;
+               --set TaxFromDefaults = QuoatLineVar.TaxFromDefaults;
+            }
+            set TaxAmountBase = QuoatLineVar.TaxAmountBase;
+            set NetAmountBase = QuoatLineVar.NetAmountBase;
+            set GrossAmtBase = QuoatLineVar.GrossAmtBase;
+            set TaxAmountCurrency = QuoatLineVar.TaxAmountCurrency;
+            set NetAmountCurr = QuoatLineVar.NetAmountCurr;
+            set GrossAmtCurr = QuoatLineVar.GrossAmtCurr;
+            set TaxCalcStructureId = QuoatLineVar.TaxCalcStructureId;
+            set DiscountAmountCurr = QuoatLineVar.DiscountAmountCurr;
+            if [BuyQtyDue != null and InvertedConvFactor != 0] {
+               set RevisedQtyDue = "#{BuyQtyDue * ConvFactor / InvertedConvFactor}";
+            }
+            set AvailableQty = QuoatLineVar.AvailableQty;
+            set FetchTaxFromDefaults = QuoatLineVar.FetchTaxFromDefaults;
+            set SelfBilling = QuoatLineVar.SelfBilling;
+         }
+      }
+   }
+   field CustomerPartBuyQty {
+      validate command ValidateCustomerPartBuyQtyCommand;
+   }
+   field CustomerPartUnitMeas {
+      size = Small;
+   }
+   lov ConditionCodeRef with ReferenceConditionCodeSelector {
+      description = ConditionCodeRef.Description;
+      validate command {
+         execute {
+            if [BuyQtyDue != null and(not Rental)] {
+               if [BuyQtyDue > 0] {
+                  call GetQuotePrice(QuotationNo,
+                  LineNo,
+                  RelNo,
+                  LineItemNo,
+                  CatalogNo,
+                  BuyQtyDue,
+                  PriceListNo,
+                  parent.PriceEffectivityDate,
+                  ConditionCode,
+                  CustomerLevel,
+                  CustomerLevelId,
+                  UnformattedDiscount,
+                  CharPrice,
+                  ConfiguredLinePriceId,
+                  PartNo,
+                  ConfigurationId,
+                  PriceFreeze,
+                  SaleUnitPrice,
+                  BaseSaleUnitPrice,
+                  BaseUnitPriceInclTax,
+                  IsNew,
+                  true,
+                  DemandCodeDb,
+                  DemandOrderRef1,
+                  DemandOrderRef2,
+                  --calc line param
+                  MultipleTaxLines,
+                  TaxCode,
+                  TaxCalcStructureId,
+                  TaxClassId,
+                  Contract,
+                  CustomerNo,
+                  ShipAddrNo,
+                  PlannedDueDate,
+                  parent.SupplyCountry,
+                  DeliveryType,
+                  TaxLiability,
+                  TaxLiabilityType,
+                  parent.CurrencyCode,
+                  CurrencyRate,
+                  "FALSE",
+                  Rental,
+                  1,
+                  DuplicatedLine)  into QuotePriceVar {
+                     when FAIL {
+                        exit;
+                     }
+                  }
+
+                  set PriceSource = QuotePriceVar.PriceSource;
+                  set SetPriceSource = QuotePriceVar.SetPriceSource;
+                  set PriceSourceId = QuotePriceVar.PriceSourceId;
+                  set PriceFreeze = QuotePriceVar.PriceFreeze;
+                  set PartPrice = QuotePriceVar.PartPrice;
+                  set CurrencyRate = QuotePriceVar.CurrencyRate;
+                  set Discount = QuotePriceVar.Discount;
+                  -- gelr:disc_price_rounded, begin
+                  if [parent.DiscPriceRound and not(parent.UsePriceInclTax)] {
+                     set OriginalDiscount = QuotePriceVar.Discount;
+                  }
+                  -- gelr:disc_price_rounded, end
+                  set PartLevel = QuotePriceVar.PartLevelDb;
+                  set PartLevelId = QuotePriceVar.PartLevelId;
+                  set CustomerLevel = QuotePriceVar.CustomerLevelDb;
+                  set CustomerLevelId = QuotePriceVar.CustomerLevelId;
+                  set PriceSourceNetPrice = QuotePriceVar.PriceSourceNetPrice;
+                  set SaleUnitPrice = QuotePriceVar.SaleUnitPrice;
+                  set UnitPriceInclTax = QuotePriceVar.UnitPriceInclTax;
+                  set BaseSaleUnitPrice = QuotePriceVar.BaseSaleUnitPrice;
+                  set BaseUnitPriceInclTax = QuotePriceVar.BaseUnitPriceInclTax;
+                  set CalcPriceCurr = QuotePriceVar.CalcPriceCurr;
+                  set CharPrice = QuotePriceVar.CharPrice;
+                  set CalcCharPrice = QuotePriceVar.CalcCharPrice;
+
+                  set MultipleTaxLines = QuotePriceVar.MultipleTaxLines;
+                  set TaxCode = QuotePriceVar.TaxCode;
+                  set TaxCalcStructureId = QuotePriceVar.TaxCalcStructureId;
+                  set TaxClassId = QuotePriceVar.TaxClassId;
+                  set FetchTaxFromDefaults = QuotePriceVar.FetchTaxFromDefaults;
+
+                  if[CostLevelDb = "COST PER CONDITION" and QuotePriceVar.Cost != null] {
+                     call UpdateCost(Contract,
+                     PartNo,
+                     ConfigurationId,
+                     ConditionCode,
+                     BuyQtyDue,
+                     ConvFactor,
+                     InvertedConvFactor,
+                     ChargedItem,
+                     OrderSupplyType,
+                     CustomerNo,
+                     CatalogType,
+                     QuotationNo,
+                     LineNo,
+                     RelNo,
+                     CatalogNo,
+                     Rental) into Cost;
+                  }
+               }
+               else {
+                  if [CostLevelDb = "COST PER CONDITION"] {
+                     call UpdateCost(Contract,
+                     PartNo,
+                     ConfigurationId,
+                     ConditionCode,
+                     BuyQtyDue,
+                     ConvFactor,
+                     InvertedConvFactor,
+                     ChargedItem,
+                     OrderSupplyType,
+                     CustomerNo,
+                     CatalogType,
+                     QuotationNo,
+                     LineNo,
+                     RelNo,
+                     CatalogNo,
+                     Rental) into Cost;
+                  }
+               }
+            }
+            call GetAvailableQuantity(CatalogNo, PartNo, Contract, VendorNo, ConfigurationId, OrderSupplyType, ConditionCode, Rental) into AvailableQty;
+         }
+      }
+   }
+   field DesiredQty;
+   field AvailableQty {
+      editable = [false];
+   }
+   field PriceBreaks {
+      size = Small;
+   }
+   lov PriceListNoRef with ReferenceSalesPriceListJoinLovSelector using FetchPriceListNo(Contract, CatalogNo) {
+      size = Small;
+      validate command ValidateBuyQtyDueBaseCommand;
+   }
+   field PartPrice {
+      editable = [false];
+      preserveprecision = [true];
+   }
+   field CalcPriceCurr {
+      size = Small;
+      editable = [false];
+      preserveprecision = [true];
+   }
+   computedfield PriceQtyDue {
+      label = "Price Qty";
+      value = "#{BuyQtyDue * PriceConvFactor}";
+      type = Number;
+   }
+   field BaseSaleUnitPrice {
+      editable = [not parent.UsePriceInclTax];
+      preserveprecision = [true];
+      validate command ValidateBaseSalesPriceCommand;
+   }
+   field BaseUnitPriceInclTax {
+      editable = [parent.UsePriceInclTax];
+      preserveprecision = [true];
+      validate command ValidateBaseSalesPriceCommand;
+   }
+   field InventoryUom {
+      size = Small;
+      editable = [false];
+   }
+   @DynamicComponentDependency PURCH
+   field SupplySite {
+      size = Small;
+      editable = [false];
+   }
+   @DynamicComponentDependency PURCH
+   field SupplySiteInventoryUom {
+      size = Small;
+   }
+   lov DeliveryTypeRef with ReferenceDeliveryTypeSelector {
+      description = DeliveryTypeRef.Description;
+      validate command ValidateDeliveryTypeCommand;
+   }
+   field NetAmountBase {
+      editable = [false];
+   }
+   field TaxAmountBase {
+      editable = [false];
+   }
+   field GrossAmtBase {
+      editable = [false];
+   }
+   lov TaxLiabilityRef with ReferenceTaxLiabilityLovSelector using FetchTaxLiability(QuotationNo, LineNo, RelNo, LineItemNo, Company, CustomerNo, ShipAddrNo) {
+      size = Small;
+      editable = [parent.CustomerInfoRef.CustomerCategory = "Customer" or parent.CustomerInfoRef.CustomerCategory = "Prospect"];
+
+      validate command ValidateTaxLiabilityCommand;
+   }
+   field SalesPartRef.Taxable {
+      size = Small;
+      label = "Taxable";
+   }
+   lov TaxCodeRef with ReferenceStatutoryFeeSelector using TaxCodeFilter(TaxLiability, CustomerNo, ShipAddrNo, Contract, PlannedDueDate, Company, CatalogNo) {
+      editable = [parent.TaxCalcMethod = "NOT_USED"];
+      validate command ValidateTaxCodeCommand;
+      description = TaxCodeRef.Description;
+   }
+   field TaxClassId {
+      size = Small;
+   }
+   field TaxClassDescription;
+   lov TaxCalcStructureIdRef with ReferenceTaxCalcStructureActiveSelector {
+      editable = [parent.TaxCalcMethod = "NOT_USED"];
+      description = TaxCalcStructureIdRef.Description;
+      validate command  ValidateTaxCalcStructureIdCommand;
+   }
+   field MultipleTaxLines {
+      size = Small;
+      editable = [false];
+   }
+   field NoteText {
+      multiline = true;
+   }
+   field DocumentText {
+      size = Small;
+   }
+   field OriginalPartNo {
+      size = Small;
+   }
+   field ConOrderNo {
+      size = Small;
+   }
+   field ConLineNo {
+      size = Small;
+   }
+   field ConRelNo {
+      size = Small;
+   }
+   field DateEntered;
+   lov EndCustomerIdRef with ReferenceCustomerInfoSelector {
+      description = EndCustomerIdRef.Name;
+      editable = [false];
+      contactwidget {
+         enabled = [EndCustomerId != null];
+         source = Customer;
+      }
+   }
+   lov DeliveryTermsRef with ReferenceOrderDeliveryTermLovSelector {
+      editable = [parent.CustomerInfoRef.CustomerCategory in("Prospect", "Customer")];
+      validate command {
+         execute {
+            call GetDeliveryTermsDesc(DeliveryTerms) into DeliveryTermsDesc;
+            if [parent.CustomerInfoRef.CustomerCategory = "Customer"] {
+               set DefaultAddrFlag = "No";
+            }
+            set DelTermsLocation = null;
+         }
+      }
+      description = DeliveryTermsDesc;
+   }
+   field DelTermsLocation {
+      editable = [parent.CustomerInfoRef.CustomerCategory in("Prospect", "Customer")];
+      validate command {
+         execute {
+            if [parent.CustomerInfoRef.CustomerCategory = "Customer"] {
+               set DefaultAddrFlag = "No";
+            }
+         }
+      }
+   }
+   lov ForwardAgentIdRef with ReferenceForwarderInfoSelector {
+      validate command {
+         execute {
+            if [parent.CustomerInfoRef.CustomerCategory = "Customer"] {
+               set DefaultAddrFlag = "No";
+            }
+            call GetFreightPriceListNo(Contract, ShipViaCode, FreightMapId, ForwardAgentId, parent.UsePriceInclTax, VendorNo, OrderSupplyType) into FreightPriceListNo;
+         }
+      }
+      description = ForwardAgentIdRef.Name;
+   }
+   field PickingLeadtime {
+      validate command {
+         execute {
+            if [parent.CustomerInfoRef.CustomerCategory = "Customer"] {
+               set DefaultAddrFlag = "No";
+            }
+         }
+      }
+   }
+   field DeliveryLeadtime {
+      editable = [parent.CustomerInfoRef.CustomerCategory in("Prospect", "Customer")];
+      validate command {
+         execute {
+            if [parent.CustomerInfoRef.CustomerCategory = "Customer"] {
+               set DefaultAddrFlag = "No";
+            }
+         }
+      }
+   }
+   lov ExtTransportCalendarIdRef with ReferenceWorkTimeCalendarSelector {
+      validate command {
+         execute {
+            if [parent.CustomerInfoRef.CustomerCategory = "Customer"] {
+               set DefaultAddrFlag = "No";
+            }
+         }
+      }
+      description = ExtTransportCalendarIdRef.Description;
+   }
+   field ProbabilityToWin;
+   field LostToRef {
+      size = Small;
+      editable = [Objstate in("Won", "Lost")];
+   }
+   field CompetitorRef.CompetitorName {
+      size = Small;
+      label = "Competitor Name";
+   }
+   lov ReasonIdRef with ReferenceLoseWinReasonSelector {
+      size = Small;
+      editable = [Objstate in("Won", "Lost")];
+      validate command {
+         execute {
+            call GetReasonDescription(ReasonId) into ReasonDescription;
+         }
+      }
+      description = ReasonDescription;
+   }
+   field LoseWinNote {
+      size = Small;
+      editable = [ReasonId != null];
+   }
+   field LatestReleaseDate;
+   lov CancelReasonRef with ReferenceOrderCancelReasonSelector {
+      editable = [Objstate = "Cancelled"];
+      validate command {
+         execute {
+            call GetCancelReasonDescription(CancelReason) into CancellationReasonDescription;
+         }
+      }
+      description = CancellationReasonDescription;
+   }
+   lov ClassificationStandardRef with ReferenceCustomerAssortmentStructLovSelector {
+      validate command {
+         execute {
+            if [CatalogNo != null] {
+               set ClassificationPartNo = null;
+            }
+            call ValidateClassificationDefaults(ClassificationUnitMeas, CatalogNo, ClassificationPartNo, ClassificationStandard, Contract, false) into ClassificationDefaultsVar {
+               when SUCCESS {
+                  set ClassificationUnitMeas = ClassificationDefaultsVar.ClassificationUnitMeas;
+                  set ClassificationPartNo = ClassificationDefaultsVar.ClassificationPartNo;
+                  set CatalogNo = ClassificationDefaultsVar.CatalogNo;
+               }
+            }
+         }
+      }
+   }
+   lov ClassificationPartNoRef with ReferenceSalesPartClassificationLovSelector using ClassificationPartFilter(Rental) {
+      validate command ClassificationPartNoCommand;
+   }
+   lov ClassificationUnitMeasRef with ReferenceIsoUnitSelector using ClassificationUoMFilter(Contract, ClassificationStandard, ClassificationPartNo);
+   lov GtinNoRef with ReferenceSalesPartGtinNoLovSelector using GtinNoFilter(Rental) {
+      validate command ValidateGtinNoCommand;
+   }
+   field AdjustedWeightNet;
+   field AdjustedWeightGross;
+   field AdjustedVolume;
+   field PriceSourceNetPrice {
+      size = Small;
+      editable = [false];
+   }
+   field QuotationDiscount {
+      -- gelr:disc_price_rounded, begin
+      columnexclude = [parent.DiscPriceRound and not(parent.UsePriceInclTax)];
+      -- gelr:disc_price_rounded, end
+   }
+
+   -- gelr:disc_price_rounded, begin
+   field OriginalQuotationDiscount {
+      columnexclude = [not(parent.DiscPriceRound) or parent.UsePriceInclTax];
+   }
+   -- gelr:disc_price_rounded, end
+   field DemandCode {
+      size = Small;
+   }
+   field DemandOrderRef1 {
+      size = Small;
+   }
+   field DemandOrderRef2 {
+      size = Small;
+   }
+   fieldranking LineNo, RelNo, CatalogNo, CatalogDesc, BuyQtyDue, Objstate, SaleUnitPrice, NetAmountCurr, WantedDeliveryDate;
+
+   commandgroup StatusL1CmdGroup {
+      commandgroup StatusCmdGroup {
+         label = "Status";
+         command StatusReleaseQuotationLineCommand;
+         command QuotationwonCommand;
+         command QuotationlostCommand;
+         command StatusCancelQuotationLineCommand;
+      }
+   }
+   command CreateOrderfromQuotationCommand;
+   command CustomerOrderCommand;
+   commandgroup LineDetailsL1CmdGroup {
+      commandgroup LineDetailsCmdGroup {
+         label = "Line Details";
+         command CompetitorsCommand;
+         command QuotationLineAddressCommand;
+         command SetDefaultInfoCommand;
+         command PackageStructureCommand;
+         command SubstituteSalesPartCommand;
+         command InputUoMParametersCommand;
+         command InventoryPartAvailabilityPlanCommand {
+            enablefunction CheckPartAvailability(Contract, CatalogNo, VendorNo, PartNo, SalesPartRef.PurchasePartNo);
+         }
+         command QuotationLineHistoryCommand;
+      }
+   }
+   commandgroup PricingL1CmdGroup {
+      commandgroup PricingCmdGroup {
+         label = "Pricing";
+         command PriceQueryCommand;
+         command QuotationLineDiscountCommand;
+         command PriceBreaksCommand;
+         command QuotationLineTaxesCommand;
+         command RecalculatePriceCurrencyCommand;
+         command ContributionMarginCommand;
+      }
+   }
+   commandgroup ConfigurationL1CmdGroup {
+      commandgroup ConfigurationCmdGroup {
+         label = "Configuration";
+         @DynamicComponentDependency CFGCHR
+         command CreateConfigurationCommand;
+         @DynamicComponentDependency CFGCHR
+         command ViewConfigurationCommand;
+         @DynamicComponentDependency CFGCHR
+         command EditConfigurationCommand;
+         @DynamicComponentDependency CFGCHR
+         command ConfigurationReplaceCharacteristicValueCommand;
+         @DynamicComponentDependency CFGCHR
+         command CopyConfigurationCommand;
+         @DynamicComponentDependency CFGCHR
+         command ConfigurationReplacewithStdSalesPartCommand;
+         @DynamicComponentDependency ORDSTR
+         commandgroup InterimOrderL2CmdGroup {
+            label = "Interim Order";
+            command ConfigurationInterimOrderCreateCommand;
+            command ConfigurationInterimOrderViewEditCommand;
+            command ConfigurationInterimOrderRecalculateCostCommand;
+            command ConfigurationInterimOrderDeleteCommand;
+         }
+      }
+   }
+   commandgroup CapabilityCheckL1CmdGroup {
+      commandgroup CapabilityCheckCmdGroup {
+         label = "Capability Check";
+         commandgroup CapabilityCheckNavCmdGroup {
+            @DynamicComponentDependency ORDSTR
+            command AnalyzeCapabilityCheckResultCommand;
+            command CapabilityCheckViewInterimOrderCommand;
+         }
+         commandgroup CapabilityCheckExecCmdGroup {
+            command CapabilityCheckRunCapabilityCheckCommand {
+               enablefunction IsRunCapabilityCheckEnabled(SupplySite, PartNo, CatalogNo, Objstate, Configurable, ConfigurationId, QuotationNo, PlannedDueDate, SupplyCode, BuyQtyDue);
+            }
+            command CapabilityCheckCancelInterimOrderCommand;
+         }
+      }
+   }
+   command CustomerWarrantyCommand;
+   command PartsbyAssortmentandSiteClCommand;
+   commandgroup EstimateL1CmdGroup {
+      commandgroup EstimateCmdGroup {
+         label = "Estimate";
+         command NewEstimateCommand;
+         command EstimateCommand;
+         command EstimateDeliverableCommand;
+      }
+   }
+   command DocumentTextCommand;
+}
+
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+---------------------------------- ACTION -----------------------------------
+
+action CreatePqForSource Text {
+   initialcheck implementation;
+   parameter Selection Text;
+}
+
+action RefreshQuotationLines {
+   initialcheck none;
+   ludependencies = OrderQuotationLine;
+}
+--------------------------------- FUNCTIONS ---------------------------------
+
+function GetShipViaDesc Text {
+   parameter ShipViaCode Text;
+}
+function GetDeliveryTermsDesc Text {
+   parameter DeliveryTerms Text;
+}
+function GetReasonDescription Text {
+   parameter ReasonId Text;
+}
+function GetCancelReasonDescription Text {
+   parameter CancelReason Text;
+}
+function ValidateSaleUnitPrice Structure(QuoteLineStruct) {
+   parameter ValidationRec        Structure(QuoteLineStruct);
+   parameter SupplyCountryDb      Lookup(IsoCountry);
+   parameter CurrencyCode         Text;
+   parameter TaxFromDef           Text;
+   parameter TaxCodeFlag          Boolean;
+   parameter NewLine              Boolean;
+   parameter TaxEdited            Boolean;
+   parameter QuoteDiscount        Number;
+   parameter CustomerNoPay        Text;
+   parameter ValidateBasePrice    Boolean;
+   parameter RentalChargableDays  Number;
+}
+
+function CalculateLineTotal Structure(QuoteLineStruct) {
+   parameter QuotationNo          Text;
+   parameter LineNo               Text;
+   parameter RelNo                Text;
+   parameter LineItemNo           Number;
+   parameter TaxFromDefaults      Text;
+   parameter TaxCodeFlag          Boolean;
+   parameter NewLine              Boolean;
+   parameter TaxEdited            Boolean;
+   parameter RecalcLineDisc       Boolean;
+   parameter TaxCalcStructureId   Text;
+   parameter TaxCode              Text;
+   parameter Contract             Text;
+   parameter CustomerNo           Text;
+   parameter ShipAddrNo           Text;
+   parameter PlannedDueDate       Date;
+   parameter SupplyCountryDb      Lookup(IsoCountry);
+   parameter DeliveryType         Text;
+   parameter CatalogNo            Text;
+   parameter TaxLiability         Text;
+   parameter TaxLiabilityTypeDb   Enumeration(TaxLiabilityType);
+   parameter CurrencyCode         Text;
+   parameter CurrencyRate         Number;
+   parameter BuyQtyDue            Number;
+   parameter PriceConvFactor      Number;
+   parameter SaleUnitPrice        Number;
+   parameter UnitPriceInclTax     Number;
+   parameter AdditionalDiscount   Number;
+   parameter QuoteDiscount        Number;
+   parameter RentalChargableDays  Number;
+   parameter FreeOfChargeTaxBasis Number;
+   parameter Discount             Number;
+}
+
+-- This function is combination of CalculateQuoteLinePrices and CalculateLineTotal
+function CalculatePrices Structure(QuoteLineStruct) {
+   parameter QuotationNo          Text;
+   parameter LineNo               Text;
+   parameter RelNo                Text;
+   parameter LineItemNo           Number;
+   parameter SaleUnitPrice        Number;
+   parameter UnitPriceInclTax     Number;
+   parameter MultipleTaxLines     Boolean;
+   parameter TaxCode              Text;
+   parameter TaxCalcStructureId   Text;
+   parameter TaxClassId           Text;
+   parameter Contract             Text;
+   parameter CustomerNo           Text;
+   parameter ShipAddrNo           Text;
+   parameter PlannedDueDate       Date;
+   parameter SupplyCountryDb      Lookup(IsoCountry);
+   parameter DeliveryType         Text;
+   parameter CatalogNo            Text;
+   parameter TaxLiability         Text;
+   parameter TaxLiabilityTypeDb   Enumeration(TaxLiabilityType);
+   parameter CurrencyCode         Text;
+   parameter CurrencyRate         Number;
+   parameter TaxFromDef           Text;
+   parameter TaxCodeFlag          Boolean;
+   parameter NewLine              Boolean;
+   parameter TaxEdited            Boolean;
+   parameter BuyQtyDue            Number;
+   parameter PriceConvFactor      Number;
+   parameter AdditionalDiscount   Number;
+   parameter QuoteDiscount        Number;
+   parameter RentalChargableDays  Number;
+}
+
+function ValidateBuyQtyDue Structure(QuoteLineStruct) {
+   parameter QuotationNo            Text;
+   parameter LineNo                 Text;
+   parameter RelNo                  Text;
+   parameter LineItemNo             Number;
+   parameter CatalogNo              Text;
+   parameter BuyQtyDue              Number;
+   parameter PriceListNo            Text;
+   parameter EffectivityDate        Date;
+   parameter ConditionCode          Text;
+   parameter CustomerLevelDb        Enumeration(PriceDiscountCustLevel);
+   parameter CustomerLevelId        Text;
+   parameter UnformattedDiscount    Number;
+   parameter CharPrice              Number;
+   parameter ConfiguredLinePriceId  Number;
+   parameter PartNo                 Text;
+   parameter ConfigurationId        Text;
+   parameter PriceFreezeDb          Enumeration(FreezeFlag);
+   parameter SaleUnitPrice          Number;
+   parameter BaseSaleUnitPrice      Number;
+   parameter BaseUnitPriceInclTax   Number;
+   parameter IsNew                  Boolean;
+   parameter AssignDiscount         Boolean;
+   parameter DemandCodeDb           Text;
+   parameter DemandOrderRef1        Text;
+   parameter DemandOrderRef2        Text;
+
+  --calc line param
+   parameter MultipleTaxLines       Boolean;
+   parameter TaxCode                Text;
+   parameter TaxCalcStructureId     Text;
+   parameter TaxClassId             Text;
+   parameter Contract               Text;
+   parameter CustomerNo             Text;
+   parameter ShipAddrNo             Text;
+   parameter PlannedDueDate         Date;
+   parameter SupplyCountryDb        Lookup(IsoCountry);
+   parameter DeliveryType           Text;
+   parameter TaxLiability           Text;
+   parameter TaxLiabilityTypeDb     Enumeration(TaxLiabilityType);
+   parameter CurrencyCode           Text;
+   parameter CurrencyRate           Number;
+   parameter TaxFromDef             Text;
+   -- cost
+   parameter ChargedItem            Enumeration(ChargedItem);
+   parameter ConvFactor             Number;
+   parameter InvertedConvFactor     Number;
+   parameter OrderSupplyType        Enumeration(OrderSupplyType);
+   parameter CatalogType            Text;
+   parameter Rental                 Boolean;
+
+   parameter RevisedQtyDue          Number;
+   parameter DesiredQty             Number;
+   parameter PriceUnitMeas          Text;
+   parameter SalesUnitMeasure       Text;
+   parameter PriceConvFactor        Number;
+   parameter CustomerPartConvFactor Number;
+   parameter CustPartInvertConvFact Number;
+   parameter AdditionalDiscount     Number;
+   parameter QuoteDiscount          Number;
+   parameter RentalChargableDays    Number;
+   parameter DuplicatedLine         Text;
+   parameter Discount               Number;
+  -- supportwarnings = [true];
+}
+
+function SetQuotePriceAndTotals Structure(QuoteLineStruct) {
+   parameter QuotationNo            Text;
+   parameter LineNo                 Text;
+   parameter RelNo                  Text;
+   parameter LineItemNo             Number;
+   parameter CatalogNo              Text;
+   parameter BuyQtyDue              Number;
+   parameter PriceListNo            Text;
+   parameter EffectivityDate        Date;
+   parameter ConditionCode          Text;
+   parameter CustomerLevelDb        Enumeration(PriceDiscountCustLevel);
+   parameter CustomerLevelId        Text;
+   parameter UnformattedDiscount    Number;
+   parameter CharPrice              Number;
+   parameter ConfiguredLinePriceId  Number;
+   parameter PartNo                 Text;
+   parameter ConfigurationId        Text;
+   parameter PriceFreezeDb          Enumeration(FreezeFlag);
+   parameter SaleUnitPrice          Number;
+   parameter BaseSaleUnitPrice      Number;
+   parameter BaseUnitPriceInclTax   Number;
+   parameter IsNew                  Boolean;
+   parameter AssignDiscount         Boolean;
+   parameter DemandCodeDb           Text;
+   parameter DemandOrderRef1        Text;
+   parameter DemandOrderRef2        Text;
+
+  --calc line param
+   parameter MultipleTaxLines     Boolean;
+   parameter TaxCode              Text;
+   parameter TaxCalcStructureId   Text;
+   parameter TaxClassId           Text;
+   parameter Contract             Text;
+   parameter CustomerNo           Text;
+   parameter ShipAddrNo           Text;
+   parameter PlannedDueDate       Date;
+   parameter SupplyCountryDb      Lookup(IsoCountry);
+   parameter DeliveryType         Text;
+   parameter TaxLiability         Text;
+   parameter TaxLiabilityTypeDb   Enumeration(TaxLiabilityType);
+   parameter CurrencyCode         Text;
+   parameter CurrencyRate         Number;
+   parameter TaxFromDef           Text;
+   -- cost
+   parameter Rental               Boolean;
+
+   parameter RevisedQtyDue        Number;
+   parameter DesiredQty           Number;
+   parameter PriceConvFactor      Number;
+   parameter AdditionalDiscount   Number;
+   parameter QuoteDiscount        Number;
+   parameter RentalChargableDays  Number;
+   parameter DuplicatedLine       Text;
+  -- supportwarnings = [true];
+}
+
+function GetQuotePrice Structure(QuoteLineStruct) {
+   parameter QuotationNo            Text;
+   parameter LineNo                 Text;
+   parameter RelNo                  Text;
+   parameter LineItemNo             Number;
+   parameter CatalogNo              Text;
+   parameter BuyQtyDue              Number;
+   parameter PriceListNo            Text;
+   parameter EffectivityDate        Date;
+   parameter ConditionCode          Text;
+   parameter CustomerLevelDb        Enumeration(PriceDiscountCustLevel);
+   parameter CustomerLevelId        Text;
+   parameter UnformattedDiscount    Number;
+   parameter CharPrice              Number;
+   parameter ConfiguredLinePriceId  Number;
+   parameter PartNo                 Text;
+   parameter ConfigurationId        Text;
+   parameter PriceFreezeDb          Enumeration(FreezeFlag);
+   parameter SaleUnitPrice          Number;
+   parameter BaseSaleUnitPrice      Number;
+   parameter BaseUnitPriceInclTax   Number;
+   parameter IsNew                  Boolean;
+   parameter AssignDiscount         Boolean;
+   parameter DemandCodeDb           Text;
+   parameter DemandOrderRef1        Text;
+   parameter DemandOrderRef2        Text;
+
+  --calc line param
+   parameter MultipleTaxLines     Boolean;
+   parameter TaxCode              Text;
+   parameter TaxCalcStructureId   Text;
+   parameter TaxClassId           Text;
+   parameter Contract             Text;
+   parameter CustomerNo           Text;
+   parameter ShipAddrNo           Text;
+   parameter PlannedDueDate       Date;
+   parameter SupplyCountryDb      Lookup(IsoCountry);
+   parameter DeliveryType         Text;
+   parameter TaxLiability         Text;
+   parameter TaxLiabilityTypeDb   Enumeration(TaxLiabilityType);
+   parameter CurrencyCode         Text;
+   parameter CurrencyRate         Number;
+   parameter TaxFromDef           Text;
+   parameter Rental               Boolean;
+   parameter RentalChargableDays  Number;
+   parameter DuplicatedLine         Text;
+}
+
+function GetAvailableQuantity Number {
+   parameter CatalogNo        Text;
+   parameter PartNo           Text;
+   parameter Contract         Text;
+   parameter VendorNo         Text;
+   parameter ConfigurationId  Text;
+   parameter OrderSupplyType  Enumeration(OrderSupplyType);
+   parameter ConditionCode    Text;
+   parameter Rental           Boolean;
+}
+
+function FetchPeriodRounding Text {
+   parameter Contract       Text;
+}
+
+//! TODO: Should be refactored as a function! But this has been added as a action because functions doesnt support supportwarnings
+action ValidateCustomerPartNo Structure(QuoteLineStruct) {
+   initialcheck none;
+   parameter QuotationNo      Text;
+   parameter CustomerPartNo   Text;
+   parameter CustomerNo       Text;
+   parameter Contract         Text;
+   parameter BuyQtyDue        Number;
+   parameter PriceConvFactor  Number;
+   parameter ConfigurationId  Text;
+   -- line prices
+   parameter LineNo               Text;
+   parameter RelNo                Text;
+   parameter LineItemNo           Number;
+   parameter SaleUnitPrice        Number;
+   parameter UnitPriceInclTax     Number;
+   parameter MultipleTaxLines     Boolean;
+   parameter TaxCode              Text;
+   parameter TaxCalcStructureId   Text;
+   parameter TaxClassId           Text;
+   parameter ShipAddrNo           Text;
+   parameter PlannedDueDate       Date;
+   parameter SupplyCountryDb      Lookup(IsoCountry);
+   parameter DeliveryType         Text;
+   parameter CatalogNo            Text;
+   parameter TaxLiability         Text;
+   parameter TaxLiabilityTypeDb   Enumeration(TaxLiabilityType);
+   parameter CurrencyCode         Text;
+   parameter CurrencyRate         Number;
+   parameter TaxFromDef           Text;
+
+   --line totals
+   parameter TaxCodeFlag          Boolean;
+   parameter NewLine              Boolean;
+   parameter TaxEdited            Boolean;
+
+   parameter AdditionalDiscount   Number;
+   parameter QuoteDiscount        Number;
+   parameter RentalChargableDays  Number;
+   parameter DuplicatedLine       Text;
+   supportwarnings = [true];
+}
+
+function GetNextRelNo Text {
+   parameter QuotationNo   Text;
+   parameter LineNo        Text;
+   parameter LineItemNo    Number;
+   parameter Contract      Text;
+}
+
+function ExistLineNo Text {
+   parameter QuotationNo   Text;
+   parameter LineNo        Text;
+   parameter RelNo         Text;
+   parameter LineItemNo    Number;
+}
+
+-- These functions common to lines overview as well
+function PackLineKeys  Structure(LineDetailStructure) {
+   parameter Selection Text;
+}
+
+function GetCharacteristics Structure(CharacteristicStructure) {
+   parameter Selection Text;
+}
+
+function ValidateClassificationDefaults Structure(ClassificationDefaultsStructure) {
+   parameter ClassificationUnitMeas    Text;
+   parameter CatalogNo                 Text;
+   parameter ClassificationPartNo      Text;
+   parameter ClassificationStandard    Text;
+   parameter Contract                  Text;
+   parameter ClassifcationPartEdited   Boolean;
+}
+
+function UpdateCost Number {
+   parameter Contract            Text;
+   parameter PartNo              Text;
+   parameter ConfigurationId     Text;
+   parameter ConditionCode       Text;
+   parameter BuyQtyDue           Number;
+   parameter ConvFactor          Number;
+   parameter InvertedConvFactor  Number;
+   parameter ChargedItem         Enumeration(ChargedItem);
+   parameter OrderSupplyType     Enumeration(OrderSupplyType);
+   parameter CustomerNo          Text;
+   parameter CatalogType         Enumeration(SalesPartType);
+   parameter QuotationNo         Text;
+   parameter LineNo              Text;
+   parameter RelNo               Text;
+   parameter CatalogNo           Text;
+   parameter Rental              Boolean;
+}
+
+function FetchPriceListNo  List < Entity(SalesPriceListJoinLov) > {
+   parameter Contract      Text;
+   parameter CatalogNo     Text;
+   basedon Reference_SalesPriceListJoinLov;
+
+   where = " SALES_PRICE_GROUP_ID = Sales_Part_API.Get_Sales_Price_Group_Id(:Contract, :CatalogNo)
+      AND CONTRACT = :Contract
+      AND ( (Sales_Price_Group_API.Get_Sales_Price_Group_Type_Db(Sales_Part_API.Get_Sales_Price_Group_Id(:Contract, :CatalogNo)) = 'PART BASED' AND  CATALOG_NO = :CatalogNo) OR CATALOG_NO IS NULL)";
+}
+
+function FetchTaxLiability  List < Entity(TaxLiabilityLov) > {
+   parameter QuotationNo   Text;
+   parameter LineNo        Text;
+   parameter RelNo         Text;
+   parameter LineItemNo    Number;
+   parameter Company       Text;
+   parameter CustomerNo    Text;
+   parameter ShipAddrNo    Text;
+}
+
+function TaxCodeFilter List < Entity(StatutoryFee) > {
+   parameter TaxLiability     Text;
+   parameter CustomerNo       Text;
+   parameter ShipAddrNo       Text;
+   parameter Contract         Text;
+   parameter PlannedDueDate   Date;
+   parameter Company          Text;
+   parameter CatalogNo        Text;
+}
+
+function GetCusTaxLiabilityTypeDb Text {
+   parameter TaxLiability  Text;
+   parameter CustomerNo    Text;
+   parameter ShipAddrNo    Text;
+}
+
+function GetPartNo Text {
+   parameter Contract   Text;
+   parameter CatalogNo  Text;
+}
+
+function GetFreightPriceListNo Text {
+   parameter Contract         Text;
+   parameter ShipViaCode      Text;
+   parameter FreightMapId     Text;
+   parameter ForwardAgentId   Text;
+   parameter UsePriceInclTax  Boolean;
+   parameter VendorNo         Text;
+   parameter OrderSupplyType  Enumeration(OrderSupplyType);
+}
+
+function ValidateGtinNo Structure(GtinStructure) {
+   parameter GtinNo                 Text;
+   parameter Contract               Text;
+   parameter InputUnitMeasGroupId   Text;
+   parameter SetCatalogNo           Boolean;
+}
+
+function ClassificationUoMFilter List < Entity(IsoUnit) > {
+   parameter Contract               Text;
+   parameter ClassificationStandard Text;
+   parameter ClassificationPartNo   Text;
+   where = "(:ClassificationStandard IS NULL OR :ClassificationPartNo IS NULL) OR (UNIT_CODE in (SELECT CLASSIFICATION_UNIT_MEAS FROM SALES_PART_CLASSIFICATION_LOV WHERE CONTRACT = :Contract
+                                                                                                                      AND CLASSIFICATION_STANDARD = :ClassificationStandard
+                                                                                                                      AND CLASSIFICATION_PART_NO = :ClassificationPartNo))";
+
+}
+
+function GtinNoFilter List < Entity(SalesPartGtinNoLov) > {
+   parameter Rental Boolean;
+   where = "SALES_TYPE_DB IN (DECODE(:Rental,'TRUE','RENTAL','SALES'), 'SALES RENTAL')";
+}
+
+function GetConfigurationInfo Structure(ConfigurationInfoStructure) {
+   parameter PartNo              Text;
+   parameter PlannedDeliveryDate Timestamp;
+   parameter ConfigurationId     Text;
+}
+
+function ClassificationPartFilter List < Entity(SalesPartClassificationLov) >  {
+   parameter Rental Boolean;
+   where = " CLASSIFICATION_STANDARD IS NOT NULL AND SALES_TYPE_DB IN (DECODE(:Rental,'TRUE','RENTAL','SALES'), 'SALES RENTAL')";
+}
+
+function CheckPartAvailability Boolean {
+   parameter Contract         Text;
+   parameter CatalogNo        Text;
+   parameter VendorNo         Text;
+   parameter PartNo           Text;
+   parameter PurchasePartNo   Text;
+}
+
+function GerParamForInventoryPlanning Structure(InventoryPlanningParamStructure) {
+   parameter Contract         Text;
+   parameter CatalogNo        Text;
+   parameter VendorNo         Text;
+   parameter PartNo           Text;
+   parameter OrderSupplyType  Enumeration(OrderSupplyType);
+}
+
+function IsRunCapabilityCheckEnabled Boolean {
+   parameter SupplySite      Text;
+   parameter PartNo          Text;
+   parameter CatalogNo       Text;
+   parameter Objstate        Enumeration(OrderQuotationLineState);
+   parameter Configurable    Boolean;
+   parameter ConfigurationId Text;
+   parameter QuotationNo     Text;
+   parameter PlannedDueDate  Date;
+   parameter SupplyCodeDb    Enumeration(OrderSupplyType);
+   parameter BuyQtyDue       Number;
+}
+
+function IsValidPriceList Text {
+   parameter PriceListNo      Text;
+   parameter Contract        Text;
+   parameter CatalogNo       Text;
+   parameter CustomerNo      Text;
+   parameter CurrencyCode    Text;
+   parameter EffectivityDate Date;
+   parameter SalesPriceType  Text;
+   parameter BuyQtyDue       Number;
+   parameter MinDuration     Number;
+}
+-------------------------------------
+
+---------------------------------- ACTIONS ----------------------------------
+-- This action common to lines overview as well
+action ReplaceCharValueForConfigs {
+   initialcheck none;
+   parameter ConnectedIdAttr     Text;
+   parameter CharacteristicId    Text;
+   parameter CharacteristicValue Text;
+   supportwarnings = [true];
+   ludependencies = OrderQuotationLine;
+}
+
+action ReplaceQuotationLine {
+   initialcheck OrderQuotationLineInitialCheck(Identity1, Identity2, Identity3, Identity4);
+   initialcheck UserAllowedSite(Contract);
+   parameter Identity1     Text;
+   parameter Identity2     Text;
+   parameter Identity3     Text;
+   parameter Identity4     Number;
+   parameter Contract      Text;
+   parameter CatalogNo     Text;
+   parameter BuyQuantity   Number;
+   parameter DesiredQty    Number;
+
+   supportwarnings = [true];
+   ludependencies = OrderQuotationLine;
+}
+--------------------------------------
+//! TODO: Should be refactored as a function! But this has been added as a action because functions doesnt support supportwarnings
+action ValidateCatalogNo Structure(QuoteLineStruct) {
+   initialcheck none;
+   parameter ValidationRec       Structure(QuoteLineStruct);
+   parameter IsNew               Boolean;
+   parameter SupplyCountryDb     Lookup(IsoCountry);
+   parameter CurrencyCode        Text;
+   parameter TaxFromDef          Text;
+   parameter TaxCodeFlag         Boolean;
+   parameter TaxEdited           Boolean;
+   parameter RentalChargableDays Number;
+   supportwarnings = [true];
+}
+
+function GetValidPriceList Structure(PriceListStructure) {
+   parameter PriceListNo      Text;
+   parameter Contract         Text;
+   parameter CatalogNo        Text;
+   parameter CustomerNo       Text;
+   parameter CurrencyCode     Text;
+   parameter EffectivityDate  Date;
+   parameter SalesPriceType   Text;
+}
+
+function CalculateDiscountAmount Number {
+   parameter QuotationNo      Text;
+   parameter LineNo           Text;
+   parameter RelNo            Text;
+   parameter LineItemNo       Number;
+   parameter BuyQtyDue        Number;
+   parameter PriceConvFactor  Number;
+}
+
+function GetCurrencyRateDefaults Boolean {
+   parameter Contract      Text;
+   parameter CustomerNo    Text;
+   parameter CurrencyCode  Text;
+}
+
+-------------------------------- STRUCTURES ---------------------------------
+structure ClassificationDefaultsStructure {
+   attribute ClassificationUnitMeas Text;
+   attribute ClassificationPartNo   Text;
+   attribute ClassificationStandard Text;
+   attribute CatalogNo              Text;
+}
+
+structure  LineDetailStructure {
+   attribute SameOrder     Boolean;
+   attribute QuotationNo   Text;
+   attribute LineNoArr     Text;
+   attribute RelNoArr      Text;
+   attribute LineItemNoArr Text;
+   attribute ReasonId      Text;
+   attribute LoseWinNote   Text;
+}
+
+structure QuoteLineStruct {
+   attribute Contract               Text;
+   attribute QuotationNo            Text;
+   attribute Rental                 Boolean;
+   attribute ConfigurationId        Text;
+   attribute LineNo                 Text;
+   attribute RelNo                  Text;
+   attribute LineItemNo             Number;
+   attribute CustomerNo             Text;
+   attribute ShipAddrNo             Text;
+   attribute PlannedDueDate         Date;
+   attribute TaxLiability           Text;
+   attribute TaxLiabilityType       Enumeration(TaxLiabilityType);
+   attribute AdditionalDiscount     Number;
+   attribute QuotationDiscount      Number;
+
+   attribute CatalogNo              Text;
+   attribute CatalogDesc            Text;
+   attribute Configurable           Boolean;
+   attribute PriceUnitMeas          Text;
+   attribute DeliveryType           Text;
+   attribute SalesPriceGroupId      Text;
+   attribute CostLevelDb            Text;
+   attribute InputUnitMeasGroupId   Text;
+   attribute InputUomGroup          Boolean;
+   attribute GtinNo                 Text;
+   attribute InactiveCompExist      Number;
+   attribute CatalogType            Enumeration(SalesPartType);
+   attribute OriginalPartNo         Text;
+   attribute BuyQtyDue              Number;
+   attribute CurrencyRate           Number;
+   attribute ConvFactor             Number;
+   attribute InvertedConvFactor     Number;
+   attribute PriceConvFactor        Number;
+   attribute PartPrice              Number;
+   attribute PriceSource            Enumeration(PricingSource);
+   attribute SetPriceSource         Text;
+   attribute PriceSourceId          Text;
+   attribute InputUnitMeas          Text;
+   attribute InputConvFactor        Number;
+   attribute PartLevel              Enumeration(PriceDiscountPartLevel);
+   attribute PartLevelId            Text;
+   attribute CustomerLevel          Enumeration(PriceDiscountCustLevel);
+   attribute CustomerLevelId        Text;
+   attribute SaleUnitPrice          Number;
+   attribute UnitPriceInclTax       Number;
+   attribute BaseSaleUnitPrice      Number;
+   attribute BaseUnitPriceInclTax   Number;
+   attribute SalesUnitMeasure       Text;
+   attribute Discount               Number;
+   attribute Cost                   Number;
+   attribute PartNo                 Text;
+   attribute OrderSupplyType        Enumeration(OrderSupplyType);
+   attribute VendorNo               Text;
+   attribute PriceListNo            Text;
+   attribute ConditionCode          Text;
+   attribute CustomerPartNo         Text;
+   attribute CustomerPartConvFactor Number;
+   attribute CustomerPartUnitMeas   Text;
+   attribute SelfBilling            Enumeration(SelfBillingType);
+   attribute CustPartInvertConvFact Number;
+   attribute PriceQtyDue            Number;
+   attribute AvailableQty           Number;
+
+   -- Calc line prices
+   attribute MultipleTaxLines       Boolean;
+   attribute TaxCode                Text;
+   attribute TaxCalcStructureId     Text;
+   attribute TaxClassId             Text;
+   attribute TaxFromDefaults        Text;
+
+   -- Line Totals
+   attribute TaxAmountBase          Number;
+   attribute NetAmountBase          Number;
+   attribute GrossAmtBase           Number;
+   attribute TaxAmountCurrency      Number;
+   attribute NetAmountCurr          Number;
+   attribute GrossAmtCurr           Number;
+   attribute DiscountAmountCurr     Number;
+
+   -- Buy Quantity due Changes
+   attribute PriceFreeze            Enumeration(FreezeFlag);
+   attribute PriceSourceNetPrice    Boolean;
+   attribute CalcPriceCurr          Number;
+   attribute CharPrice              Number;
+   attribute CalcCharPrice          Number;
+   attribute Success                Boolean;
+
+   -- buyQty
+   attribute RevisedQtyDue          Number;
+   attribute DesiredQty             Number;
+   attribute CustomerPartBuyQty     Number;
+   attribute FetchTaxFromDefaults   Text;
+
+   attribute DuplicatedLine         Text;
+   attribute ChargedItem            Enumeration(ChargedItem);
+   attribute QuoteDiscount          Number;
+   attribute RentalChargableDays    Number;
+
+}
+
+structure CharacteristicStructure {
+   attribute PartNos             Text;
+   attribute CharacteristicIds   Text;
+   attribute WantedDeliveryDate  Timestamp;
+   attribute ConnectedIdAttr     Text;
+}
+
+structure SaleUnitPriceStructure {
+   attribute BaseUnitPrice          Number;
+   attribute BaseUnitPriceInclTax   Number;
+   attribute CurrencyRate           Number;
+}
+
+structure GtinStructure {
+   attribute CatalogNo        Text;
+   attribute InputUnitMeas    Text;
+   attribute InputConvFactor  Number;
+}
+
+structure ConfigurationInfoStructure {
+   attribute RevForDate       Number;
+   attribute RevisionNo       Number;
+   attribute CfgChrInstalled  Boolean;
+}
+
+structure PriceListStructure {
+   attribute CustomerLevelDb  Enumeration(PriceDiscountCustLevel);
+   attribute CustomerLevelId  Text;
+   attribute PriceListNo      Text;
+}
+
+structure InventoryPlanningParamStructure {
+   attribute PartNo     Text;
+   attribute Contract   Text;
+   attribute ProjectId  Text;
+}

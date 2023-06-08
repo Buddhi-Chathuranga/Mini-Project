@@ -1,0 +1,277 @@
+-----------------------------------------------------------------------------
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  200810  MAABSE  TEAURENAFW-3248, Copied and modified content from MediaPanel.client,
+--  200305  MDAHSE  SAXTEND-2504, removed KeyRef from the navigation link to the MediaLibraryManager page.
+--  190606  SSILLK  SAZMWO-2482, added pre-validation to ManageMediaCommand before GetLibarayID
+-----------------------------------------------------------------------------
+
+client MediaLibraryB2bAttachment;
+component APPSRV;
+layer Core;
+projection MediaLibraryAttachmentHandling;
+description "Manage Media in B2b Attachment Panel (stixy keyword to enable new functionality)";
+
+include fragment MediaLibraryAttachment;
+
+-------------------------------- MAIN PAGES ---------------------------------
+
+objectconnection MediaLibrary {
+   label = "Media";
+
+   list MediaLibraryList using MediaLibraryResultSet(luname, keyref);
+   imageviewer MediaLibraryImageViewer using MediaLibraryResultSet(luname, keyref);
+
+   command CreateNewMediaCommand;
+//   command ManageMediaCommand;
+}
+
+--------------------------------- COMMANDS ----------------------------------
+
+command CreateNewMediaCommand {
+
+   label = "Upload Media Item";
+
+   variable EditableLogicalUnit;
+   variable LuNameMediaAware;
+
+   execute {
+
+      // Handle Object Connection Transformation
+
+      call GetEditableLuName(luname, "MediaLibrary") into EditableLogicalUnit;
+      call GetLuNameMediaAware(EditableLogicalUnit) into LuNameMediaAware;
+
+      if [EditableLogicalUnit = null] {
+         alert("Editable flag of Object Connection Transformation is None. New connections are not allowed.");
+      }
+      else {
+         if [LuNameMediaAware = "FALSE"] {
+            alert("LU ${EditableLogicalUnit} is not media aware.");
+         }
+         else {
+            dialog CreateNewMediaDlg(luname, keyref) {
+               when OK {
+                  refresh;
+                  exit;
+               }
+            }
+         }
+      }
+   }
+}
+
+command ManageMediaCommand {
+   label = "Manage Media";
+   variable VarLibraryId Text;
+   variable LuNameMediaAware;
+   variable EditableLogicalUnit;
+   execute {
+      call GetEditableLuName(luname, "MediaLibrary") into EditableLogicalUnit;
+      call GetLuNameMediaAware(EditableLogicalUnit) into LuNameMediaAware;
+      if [LuNameMediaAware = "FALSE"] {
+         alert("LU ${EditableLogicalUnit} is not media aware.");
+      }
+      else {
+         call GetLibraryId(luname, keyref) into VarLibraryId;
+
+         // Below, KeyRef left out of the navigation URL on purpose,
+         // to handle better scenarios where we use OCT rules. In some
+         // cases, the KeyRef and LU on the page the user comes from
+         // are not the same as where the attachment is really
+         // saved. This happens for OCT rules where Editable = Source.
+
+         navigate "page/MediaLibraryManager/Form?$filter=LibraryId eq $[VarLibraryId]";
+      }
+   }
+}
+command CreateAndConnectMediaCommand for CreateNewMediaStruct {
+
+   label = "Upload";
+   icon = "upload";
+
+   variable SourceLuName;
+   variable SourceLuNameToUse;
+   variable SourceKeyRef;
+   variable SourceKeyRefToUse;
+   variable MediaKeys {
+      type = Structure(MediaKeysStruct);
+   }
+
+   variable SucessMessage;
+
+   enabled = [(not component.UploadQueue.IsEmpty) and(component.UploadQueue.InvalidFileList = "")];
+
+   execute {
+
+      if [component.UploadQueue.Count > 1] {
+         set SucessMessage = "New files have been created and attached.";
+      }
+      else {
+         set SucessMessage = "New file has been created and attached.";
+      }
+
+      call GetEditableLuName(LuName, "MediaLibrary") into SourceLuName;
+
+      if [SourceLuName != LuName] {
+         call GetTransformedKeyRef(LuName, SourceLuName, "MediaLibrary", KeyRef) into SourceKeyRef;
+         set SourceKeyRefToUse = SourceKeyRef;
+         set SourceLuNameToUse = SourceLuName;
+      }
+      else {
+         set SourceLuNameToUse = LuName;
+         set SourceKeyRefToUse = KeyRef;
+      }
+
+      if [SourceKeyRefToUse = null] {
+         alert("Cannot connect media. An Object Connection Transformation rule might be invalid. Original LU = ${LuName}, Source LU to use = ${SourceLuNameToUse}");
+      }
+      else {
+         upload "MediaItemSet(ItemId=$[MediaKeys.ItemId])/MediaObject" {
+            call CreateAndConnectMedia(SourceLuNameToUse, SourceKeyRefToUse, Name, Description) into MediaKeys;
+         }
+         info("${SucessMessage}");
+      }
+
+      exit OK;
+
+   }
+}
+
+command View {
+   label = "View";
+   icon = "view";
+   style = IconOnly;
+
+   execute {
+      set component.MediaLibraryImageViewer.SelectImageId = ItemId;
+      set component.MediaLibraryImageViewer.FullScreenMode = true;
+   }
+}
+
+command DetachMediaCommand {
+   label = "Detach media item";
+   icon = "detach";
+   style = IconOnly;
+   execute {
+      confirm("Do you want to detach this media item?") {
+         when OK {
+            alert("Delete media logic comes here");
+         }
+      }
+   }
+}
+
+----------------------------- VISUAL COMPONENTS -----------------------------
+
+list MediaLibraryList for MlibResultStruct {
+
+   card MediaLibraryCard;
+
+   command View;
+//   command DetachMediaCommand;
+}
+
+imageviewer MediaLibraryImageViewer for MlibResultStruct {
+   label = "Image";
+   imageid = ItemId;
+   fullscreenonly = true;
+}
+
+card MediaLibraryCard for MlibResultStruct {
+   label = "${Description}";
+
+   // IMAGE
+   imagefield {
+      imagedata MediaThumb;
+      size = Small;
+      visible = [MediaItemType = "IMAGE" and MediaThumb != null];
+   }
+   // TEXT, VIDEO, AUDIO
+   badge MediaItemType {
+      label = "";
+      showlabel = false;
+      style = TextOnly;
+      emphasis Complementary5 = [MediaItemType != "IMAGE" or MediaThumb = null];
+      visible = [MediaItemType != "IMAGE" or MediaThumb = null];
+   }
+
+}
+
+dialog CreateNewMediaDlg for CreateNewMediaStruct {
+
+   label = "Upload Media Item to Media Library";
+
+   input(LuName, KeyRef);
+
+   fileselector {
+      multifile = [true];
+
+      init command {
+         execute {
+            call GetMediaFileExtList() into component.UploadQueue.AcceptedExtensions;
+         }
+      }
+
+      onfileselect {
+
+         execute {
+
+            if[component.UploadQueue.Count = 1] {
+               // Let's try to get a good value for Name, based on the file name.
+               // Let Description be empty. It will default to the full file name later
+               // on. It would look strange to prefill both with the same value...
+               call ExtractTitleFromFileName(component.UploadQueue.FileList) into Name;
+            }
+
+            // Clear the name since the user will probably not use the name
+            // that came from the first selected file. Keep the Description though
+            // since that might be useful to have the same for all.
+            if[component.UploadQueue.Count > 1] {
+               set Name = "";
+            }
+         }
+      }
+
+      onfiledelete {
+         execute {
+            // If the user first selected multiple files and if he removes all
+            // but one, try to be nice and suggest a new name if it is empty.
+            if[(component.UploadQueue.Count = 1) and(Name = null)] {
+               call ExtractTitleFromFileName(component.UploadQueue.FileList) into Name;
+            }
+         }
+
+      }
+
+
+      label = "Browse";
+
+   }
+
+   group {
+
+      label = "Enter Media Item Information";
+
+      field LuName {
+         visible = [false];
+      }
+      field KeyRef {
+         visible = [false];
+      }
+
+      field Name {
+         label = "Name (Blank = use filename. Not blank = use for all files)";
+         size = FullWidth;
+      }
+      field Description {
+         label = "Description (Blank = use filename. Not blank = use for all files)";
+         size = FullWidth;
+         multiline = true;
+      }
+
+   }
+
+   command CreateAndConnectMediaCommand;
+   command Cancel;
+}

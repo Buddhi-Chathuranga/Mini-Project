@@ -1,0 +1,284 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     UnattachPartsFromHandlingUnitAssistant
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  2020-04-15  ErRalk  SCSPRING20-2112, Modified get_part_stock_info cursor in CRUD_Create___ for shipment order.
+--  2019-09-12  JaThlk  Bug 149820(SCZ-6741), Modified CRUD_Create___ to replace objkey with objid. 
+--  2019-05-27  ChFolk  SCUXXW4-21153, Modified CRUD_Create___ to avoid where clause as parameter in the dynamic cursors. Introduced new
+--  2019-05-27          new cursors get_part_stock_info, get_part_stock_info_from_hu and get_receipt_inv_loc_info instead of dynamic cursors.
+--  2018-12-08  ChFolk  SCUXXW4-6101, Modified Pack_Child_Rec___ to set the correct source ref type for source purchase order.
+--  2018-10-15  ChFolk  SCUXXW4-5896, CRUD_Create___ to use where_clause instead of ObjidList.
+--  2018-09-21  ChFolk  SCUXXW4-5896, Removed method Set_Un_Attach_Qty___ as the two command buttons were removed.
+--  2018-09-17  ChFolk  SCUXXW4-5896, Override method CRUD_Create___ and added methods Execute_Un_Attach_From_Handling_Unit___,
+--  2018-09-17          Pack_Child_Rec___ and Set_Un_Attach_Qty___.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+--@Override
+PROCEDURE CRUD_Create___(   
+   rec_ IN Unattach_Parts_From_Handling_Unit_Virtual_Rec )
+IS
+   line_rec_                    Inventory_Part_In_Stock_To_Unattach_Virtual_Rec;
+   newrec_                      Unattach_Parts_From_Handling_Unit_Virtual_Rec;
+   
+   CURSOR get_part_stock_info IS
+      SELECT contract, part_no, configuration_id, location_no, handling_unit_id, lot_batch_no, serial_no, eng_chg_level, waiv_dev_rej_no, 
+             activity_seq, qty_onhand, qty_reserved, catch_qty_onhand, source_ref1, source_ref2, source_ref3, receipt_no, source_ref_type,
+             source_ref_type_db
+      FROM   INVENTORY_PART_IN_STOCK_UIV
+      WHERE  objid IN (SELECT REGEXP_SUBSTR(rec_.obj_list_arr,'[^,]+', 1, LEVEL) 
+                       FROM dual
+                       CONNECT BY REGEXP_SUBSTR(rec_.obj_list_arr, '[^,]+', 1, LEVEL) IS NOT NULL)
+      AND   qty_onhand > 0;
+   
+   CURSOR get_part_stock_info_from_hu IS
+      SELECT contract, part_no, configuration_id, location_no, handling_unit_id, lot_batch_no, serial_no, eng_chg_level, waiv_dev_rej_no, 
+             activity_seq, qty_onhand, qty_reserved, catch_qty_onhand, source_ref1, source_ref2, source_ref3, receipt_no, source_ref_type,
+             source_ref_type_db
+      FROM   INVENTORY_PART_IN_STOCK_UIV
+      WHERE  ((QTY_ONHAND > 0 OR QTY_IN_TRANSIT > 0)
+      AND (HANDLING_UNIT_ID IN (SELECT HANDLING_UNIT_ID 
+                                FROM HANDLING_UNIT
+                                CONNECT BY PRIOR HANDLING_UNIT_ID = PARENT_HANDLING_UNIT_ID 
+                                START WITH HANDLING_UNIT_ID IN (SELECT REGEXP_SUBSTR(rec_.handling_unit_id_list_arr,'[^,]+', 1, LEVEL) 
+                                                                FROM dual
+                                                                CONNECT BY REGEXP_SUBSTR(rec_.handling_unit_id_list_arr, '[^,]+', 1, LEVEL) IS NOT NULL))));
+      
+   $IF Component_Rceipt_SYS.INSTALLED $THEN
+   CURSOR get_receipt_inv_loc_info IS
+      SELECT contract, part_no, configuration_id, location_no, handling_unit_id, lot_batch_no, serial_no, eng_chg_level, waiv_dev_rej_no, 
+             activity_seq, qty_onhand, qty_reserved, catch_qty_onhand, source_ref1, source_ref2, source_ref3, receipt_no, source_ref_type,
+             DECODE(source_ref_type_db, 'PURCHASE_ORDER', 'PUR ORDER','SHIPMENT_ORDER', 'SHIPMENT_ORDER', NULL) inv_trans_source_ref_type_db
+      FROM   RECEIPT_INV_LOCATION_HU
+      WHERE  objid IN ( SELECT REGEXP_SUBSTR(rec_.obj_list_arr,'[^,]+', 1, LEVEL) 
+                        FROM dual
+                        CONNECT BY REGEXP_SUBSTR(rec_.obj_list_arr, '[^,]+', 1, LEVEL) IS NOT NULL);
+                        
+   CURSOR get_receipt_inv_loc_from_hu IS
+      SELECT contract, part_no, configuration_id, location_no, handling_unit_id, lot_batch_no, serial_no, eng_chg_level, waiv_dev_rej_no, 
+             activity_seq, qty_onhand, qty_reserved, catch_qty_onhand, source_ref1, source_ref2, source_ref3, receipt_no, source_ref_type,
+             DECODE(source_ref_type_db, 'PURCHASE_ORDER', 'PUR ORDER','SHIPMENT_ORDER', 'SHIPMENT_ORDER', NULL) source_ref_type_db
+      FROM   RECEIPT_INV_LOCATION_HU
+      WHERE  ((QTY_ONHAND > 0 OR QTY_IN_TRANSIT > 0)
+      AND (HANDLING_UNIT_ID IN (SELECT HANDLING_UNIT_ID 
+                                FROM HANDLING_UNIT
+                                CONNECT BY PRIOR HANDLING_UNIT_ID = PARENT_HANDLING_UNIT_ID 
+                                START WITH HANDLING_UNIT_ID IN (SELECT REGEXP_SUBSTR(rec_.handling_unit_id_list_arr,'[^,]+', 1, LEVEL) 
+                                                                FROM dual
+                                                                CONNECT BY REGEXP_SUBSTR(rec_.handling_unit_id_list_arr, '[^,]+', 1, LEVEL) IS NOT NULL))));
+   
+   $END
+BEGIN
+   newrec_ := rec_;  
+   super(newrec_);
+   IF (rec_.connected_source = 'INVENT') THEN
+      IF (rec_.obj_list_arr IS NOT NULL) THEN
+         FOR part_stock_rec_ IN get_part_stock_info LOOP
+            line_rec_.objkey        := sys_guid();
+            line_rec_.parent_objkey := rec_.objkey;
+            line_rec_.contract := part_stock_rec_.contract;
+            line_rec_.part_no := part_stock_rec_.part_no;
+            line_rec_.configuration_id := part_stock_rec_.configuration_id;
+            line_rec_.location_no := part_stock_rec_.location_no;
+            line_rec_.handling_unit_id := part_stock_rec_.handling_unit_id;
+            line_rec_.lot_batch_no := part_stock_rec_.lot_batch_no;
+            line_rec_.serial_no := part_stock_rec_.serial_no;
+            line_rec_.eng_chg_level := part_stock_rec_.eng_chg_level;
+            line_rec_.waiv_dev_rej_no := part_stock_rec_.waiv_dev_rej_no;
+            line_rec_.activity_seq := part_stock_rec_.activity_seq;
+            line_rec_.qty_onhand := part_stock_rec_.qty_onhand;
+            line_rec_.qty_reserved := part_stock_rec_.qty_reserved;
+            line_rec_.catch_qty_onhand := part_stock_rec_.catch_qty_onhand;
+            line_rec_.source_ref1 := part_stock_rec_.source_ref1;
+            line_rec_.source_ref2 := part_stock_rec_.source_ref2;
+            line_rec_.source_ref3 := part_stock_rec_.source_ref3;
+            line_rec_.receipt_no := part_stock_rec_.receipt_no;
+            line_rec_.source_ref_type := part_stock_rec_.source_ref_type;
+            line_rec_.inv_trans_source_ref_type_db := part_stock_rec_.source_ref_type_db;
+            line_rec_.qty_to_unattach := part_stock_rec_.qty_onhand - part_stock_rec_.qty_reserved;
+            line_rec_.catch_uom := Inventory_Part_API.Get_Enabled_Catch_Unit_Meas(part_stock_rec_.contract, part_stock_rec_.part_no);
+            IF (line_rec_.catch_uom IS NOT NULL) THEN
+                line_rec_.catch_qty_to_unattach := part_stock_rec_.catch_qty_onhand;
+            END IF;
+            CRUD_Create___(line_rec_);
+         END LOOP;
+      ELSIF (rec_.handling_unit_id_list_arr IS NOT NULL) THEN
+         FOR part_stock_rec_ IN get_part_stock_info_from_hu LOOP
+            line_rec_.objkey        := sys_guid();
+            line_rec_.parent_objkey := rec_.objkey;
+            line_rec_.contract := part_stock_rec_.contract;
+            line_rec_.part_no := part_stock_rec_.part_no;
+            line_rec_.configuration_id := part_stock_rec_.configuration_id;
+            line_rec_.location_no := part_stock_rec_.location_no;
+            line_rec_.handling_unit_id := part_stock_rec_.handling_unit_id;
+            line_rec_.lot_batch_no := part_stock_rec_.lot_batch_no;
+            line_rec_.serial_no := part_stock_rec_.serial_no;
+            line_rec_.eng_chg_level := part_stock_rec_.eng_chg_level;
+            line_rec_.waiv_dev_rej_no := part_stock_rec_.waiv_dev_rej_no;
+            line_rec_.activity_seq := part_stock_rec_.activity_seq;
+            line_rec_.qty_onhand := part_stock_rec_.qty_onhand;
+            line_rec_.qty_reserved := part_stock_rec_.qty_reserved;
+            line_rec_.catch_qty_onhand := part_stock_rec_.catch_qty_onhand;
+            line_rec_.source_ref1 := part_stock_rec_.source_ref1;
+            line_rec_.source_ref2 := part_stock_rec_.source_ref2;
+            line_rec_.source_ref3 := part_stock_rec_.source_ref3;
+            line_rec_.receipt_no := part_stock_rec_.receipt_no;
+            line_rec_.source_ref_type := part_stock_rec_.source_ref_type;
+            line_rec_.inv_trans_source_ref_type_db := part_stock_rec_.source_ref_type_db;
+            line_rec_.qty_to_unattach := part_stock_rec_.qty_onhand - part_stock_rec_.qty_reserved;
+            line_rec_.catch_uom := Inventory_Part_API.Get_Enabled_Catch_Unit_Meas(part_stock_rec_.contract, part_stock_rec_.part_no);
+            IF (line_rec_.catch_uom IS NOT NULL) THEN
+                line_rec_.catch_qty_to_unattach := part_stock_rec_.catch_qty_onhand;
+            END IF;
+            CRUD_Create___(line_rec_);
+         END LOOP;
+      END IF;
+   ELSIF (rec_.connected_source = 'RECEIPT') THEN
+      $IF Component_Rceipt_SYS.INSTALLED $THEN
+      IF (rec_.obj_list_arr IS NOT NULL) THEN
+         FOR receipt_loc_rec_ IN get_receipt_inv_loc_info LOOP
+            line_rec_.objkey        := sys_guid();
+            line_rec_.parent_objkey := rec_.objkey;
+            line_rec_.contract := receipt_loc_rec_.contract;
+            line_rec_.part_no := receipt_loc_rec_.part_no;
+            line_rec_.configuration_id := receipt_loc_rec_.configuration_id;
+            line_rec_.location_no := receipt_loc_rec_.location_no;
+            line_rec_.handling_unit_id := receipt_loc_rec_.handling_unit_id;
+            line_rec_.lot_batch_no := receipt_loc_rec_.lot_batch_no;
+            line_rec_.serial_no := receipt_loc_rec_.serial_no;
+            line_rec_.eng_chg_level := receipt_loc_rec_.eng_chg_level;
+            line_rec_.waiv_dev_rej_no := receipt_loc_rec_.waiv_dev_rej_no;
+            line_rec_.activity_seq := receipt_loc_rec_.activity_seq;
+            line_rec_.qty_onhand := receipt_loc_rec_.qty_onhand;
+            line_rec_.qty_reserved := receipt_loc_rec_.qty_reserved;
+            line_rec_.catch_qty_onhand := receipt_loc_rec_.catch_qty_onhand;
+            line_rec_.source_ref1 := receipt_loc_rec_.source_ref1;
+            line_rec_.source_ref2 := receipt_loc_rec_.source_ref2;
+            line_rec_.source_ref3 := receipt_loc_rec_.source_ref3;
+            line_rec_.receipt_no := receipt_loc_rec_.receipt_no;
+            line_rec_.source_ref_type := receipt_loc_rec_.source_ref_type;
+            line_rec_.inv_trans_source_ref_type_db := receipt_loc_rec_.inv_trans_source_ref_type_db;
+            line_rec_.qty_to_unattach := receipt_loc_rec_.qty_onhand - receipt_loc_rec_.qty_reserved;
+            line_rec_.catch_uom := Inventory_Part_API.Get_Enabled_Catch_Unit_Meas(receipt_loc_rec_.contract, receipt_loc_rec_.part_no);
+            IF (line_rec_.catch_uom IS NOT NULL) THEN
+                line_rec_.catch_qty_to_unattach := receipt_loc_rec_.catch_qty_onhand;
+            END IF;
+            CRUD_Create___(line_rec_);
+         END LOOP;
+      ELSIF (rec_.handling_unit_id_list_arr IS NOT NULL) THEN
+         FOR receipt_loc_rec_ IN get_receipt_inv_loc_from_hu LOOP
+            line_rec_.objkey        := sys_guid();
+            line_rec_.parent_objkey := rec_.objkey;
+            line_rec_.contract := receipt_loc_rec_.contract;
+            line_rec_.part_no := receipt_loc_rec_.part_no;
+            line_rec_.configuration_id := receipt_loc_rec_.configuration_id;
+            line_rec_.location_no := receipt_loc_rec_.location_no;
+            line_rec_.handling_unit_id := receipt_loc_rec_.handling_unit_id;
+            line_rec_.lot_batch_no := receipt_loc_rec_.lot_batch_no;
+            line_rec_.serial_no := receipt_loc_rec_.serial_no;
+            line_rec_.eng_chg_level := receipt_loc_rec_.eng_chg_level;
+            line_rec_.waiv_dev_rej_no := receipt_loc_rec_.waiv_dev_rej_no;
+            line_rec_.activity_seq := receipt_loc_rec_.activity_seq;
+            line_rec_.qty_onhand := receipt_loc_rec_.qty_onhand;
+            line_rec_.qty_reserved := receipt_loc_rec_.qty_reserved;
+            line_rec_.catch_qty_onhand := receipt_loc_rec_.catch_qty_onhand;
+            line_rec_.source_ref1 := receipt_loc_rec_.source_ref1;
+            line_rec_.source_ref2 := receipt_loc_rec_.source_ref2;
+            line_rec_.source_ref3 := receipt_loc_rec_.source_ref3;
+            line_rec_.receipt_no := receipt_loc_rec_.receipt_no;
+            line_rec_.source_ref_type := receipt_loc_rec_.source_ref_type;
+            line_rec_.inv_trans_source_ref_type_db := receipt_loc_rec_.source_ref_type_db;
+            line_rec_.qty_to_unattach := receipt_loc_rec_.qty_onhand - receipt_loc_rec_.qty_reserved;
+            line_rec_.catch_uom := Inventory_Part_API.Get_Enabled_Catch_Unit_Meas(receipt_loc_rec_.contract, receipt_loc_rec_.part_no);
+            IF (line_rec_.catch_uom IS NOT NULL) THEN
+                line_rec_.catch_qty_to_unattach := receipt_loc_rec_.catch_qty_onhand;
+            END IF;
+            CRUD_Create___(line_rec_);
+         END LOOP;
+      END IF;
+      $ELSE
+         NULL;
+      $END
+   END IF;
+
+END CRUD_Create___;
+
+
+PROCEDURE Execute_Un_Attach_From_Handling_Unit___ (
+   parent_objkey_ IN VARCHAR2 )   
+IS
+   parent_key_                  Unattach_Parts_From_Handling_Unit_Virtual_Key;
+   child_key_                   Inventory_Part_In_Stock_To_Unattach_Virtual_Key;
+   child_rec_                   Inventory_Part_In_Stock_To_Unattach_Virtual_Rec;
+   total_qty_to_unattach_       NUMBER := 0;
+   new_child_rec_               Inventory_Part_In_Stock_To_Unattach_Virtual_Rec;
+   catch_qty_defined_           BOOLEAN := FALSE;
+   msg_                         CLOB;
+
+BEGIN
+   parent_key_.objkey := parent_objkey_; 
+   FOR line_rec_ IN Get_Inventory_Part_In_Stock_To_Unattach_Array___(parent_key_) LOOP
+      child_key_.objkey := line_rec_.objkey;
+      child_rec_ := Get_Record___(child_key_);
+      total_qty_to_unattach_ := total_qty_to_unattach_ + NVL(child_rec_.qty_to_unattach, 0);
+      new_child_rec_ := child_rec_;
+      IF (child_rec_.catch_uom IS NOT NULL) THEN
+         IF (child_rec_.qty_to_Unattach = child_rec_.qty_onhand) THEN           
+            new_child_rec_.catch_qty_to_unattach := child_rec_.catch_qty_onhand;
+            CRUD_Update___(child_rec_, new_child_rec_);
+         ELSIF (child_rec_.catch_qty_to_Unattach IS NULL) THEN
+            Error_SYS.Record_General(lu_name_, 'UNATTACH_CATCH_QTY_MISSING: One or more records needs a value in Catch Qty To Unattach.');
+         ELSE
+            catch_qty_defined_ := TRUE;          
+         END IF;   
+      END IF;
+      IF (child_rec_.qty_to_unattach > 0 OR new_child_rec_.catch_qty_to_unattach > 0) THEN
+         msg_ := Pack_Child_Rec___(msg_, new_child_rec_);
+      END IF;   
+   END LOOP;
+   
+   IF (total_qty_to_unattach_ = 0 AND NOT catch_qty_defined_) THEN
+      Error_SYS.Record_General(lu_name_, 'QTY_TO_UNATTACH_MISSING: At least one record must have a value in Qty To Unattach.');
+   END IF;
+   
+   Inventory_Part_In_Stock_API.Change_Handling_Unit_Id(msg_, 0);
+
+END Execute_Un_Attach_From_Handling_Unit___;
+
+
+FUNCTION Pack_Child_Rec___ (
+   msg_        IN CLOB,
+   child_rec_  IN Inventory_Part_In_Stock_To_Unattach_Virtual_Rec ) RETURN CLOB
+IS
+   new_msg_             CLOB;
+BEGIN
+   IF (child_rec_.contract IS NOT NULL) THEN
+      User_Allowed_Site_API.Is_Authorized(child_rec_.contract); 
+   END IF;   
+   new_msg_ := msg_;   
+   Message_SYS.Add_Attribute(new_msg_, 'CONTRACT', child_rec_.contract);
+   Message_SYS.Add_Attribute(new_msg_, 'PART_NO', child_rec_.part_no);
+   Message_SYS.Add_Attribute(new_msg_, 'CONFIGURATION_ID', child_rec_.configuration_id);
+   Message_SYS.Add_Attribute(new_msg_, 'LOCATION_NO', child_rec_.location_no);
+   Message_SYS.Add_Attribute(new_msg_, 'LOT_BATCH_NO', child_rec_.lot_batch_no);
+   Message_SYS.Add_Attribute(new_msg_, 'SERIAL_NO', child_rec_.serial_no);
+   Message_SYS.Add_Attribute(new_msg_, 'ENG_CHG_LEVEL', child_rec_.eng_chg_level);
+   Message_SYS.Add_Attribute(new_msg_, 'WAIV_DEV_REJ_NO', child_rec_.waiv_dev_rej_no);
+   Message_SYS.Add_Attribute(new_msg_, 'ACTIVITY_SEQ', child_rec_.activity_seq);
+   Message_SYS.Add_Attribute(new_msg_, 'HANDLING_UNIT_ID', child_rec_.handling_unit_id);
+   Message_SYS.Add_Attribute(new_msg_, 'QUANTITY', child_rec_.qty_to_unattach);
+   Message_SYS.Add_Attribute(new_msg_, 'CATCH_QUANTITY', child_rec_.catch_qty_to_unattach);
+   Message_SYS.Add_Attribute(new_msg_, 'SOURCE_REF1', child_rec_.source_ref1);
+   Message_SYS.Add_Attribute(new_msg_, 'SOURCE_REF2', child_rec_.source_ref2);
+   Message_SYS.Add_Attribute(new_msg_, 'SOURCE_REF3', child_rec_.source_ref3);
+   Message_SYS.Add_Attribute(new_msg_, 'SOURCE_REF4', child_rec_.receipt_no);
+   Message_SYS.Add_Attribute(new_msg_, 'INV_TRANS_SOURCE_REF_TYPE_DB', child_rec_.inv_trans_source_ref_type_db);
+   RETURN new_msg_;
+END Pack_Child_Rec___;
+

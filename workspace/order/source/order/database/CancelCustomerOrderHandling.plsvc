@@ -1,0 +1,466 @@
+-----------------------------------------------------------------------------------------
+--
+--  Logical unit: CancelCustomerOrderHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date        Sign    History
+--  ----------  ------  ----------------------------------------------------------------
+--  2021-10-12  KiSalk  Bug 161220(SC21R2-5190), Modified Process_Cancel_Order___ to work for multiple answers yes/no
+--  2019-08-21  JeLise  SCUXXW4-8717, Added function Get_Cancel_Replication_Info___ and moved replication code from Process_Cancel_Order___.
+--  2019-08-17  MalLlk  SCUXXW4-22978, Rename the projection HandleCancelCustomerOrderAssistant to CancelCustomerOrderHandling.
+--  2019-08-16  MalLlk  SCUXXW4-22978, Supporting to move fragment CancelCustomerOrderAssistant to a seperate projection.
+--  2019-07-01  MaAuse  SCUXXW4-16888, Modified Add_Message___ to set default answer to yes if the message type is Warning.
+--  2019-03-20  JeLise  SCUXXW4-9072, Added checks in Process_Cancel_Order___ to handle replication.
+--  2018-11-22  MalLlk  SCUXXW4-8177, Handled "Cancel" operation of Customer Order Line.
+--  2018-11-11  HaPulk  SCUXXW4-8170, Use for "Cancel" operation of Customer Order.
+-----------------------------------------------------------------------------------------
+
+layer Core;
+
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Cancel_Order_Virtual_Rec )
+IS
+   key_ Cancel_Order_Virtual_Key;
+BEGIN
+   super(rec_);
+   key_.objkey := rec_.objkey;  
+   Check_Cancel_Order___(key_, rec_.order_selection, NULL, rec_.source);
+END CRUD_Create___;
+
+
+PROCEDURE Check_Cancel_Order___ (
+   parent_key_     IN Cancel_Order_Virtual_Key,
+   full_selection_ IN VARCHAR2,
+   cancel_reason_  IN VARCHAR2,
+   source_         IN VARCHAR2)
+IS         
+   orders_         json_array_t := json_array_t.parse(full_selection_);
+BEGIN
+   IF (source_ = 'CO') THEN
+      Check_Customer_Order___(orders_, parent_key_, cancel_reason_);
+   ELSIF (source_ = 'COL') THEN
+      Check_Customer_Order_Lines___(orders_, parent_key_, cancel_reason_);
+   END IF;   
+END Check_Cancel_Order___;
+
+
+PROCEDURE Check_Customer_Order___ (
+   orders_         IN json_array_t,
+   parent_key_     IN Cancel_Order_Virtual_Key,
+   cancel_reason_  IN VARCHAR2) 
+IS  
+   ord_change_online_db_      site_discom_info_tab.exec_order_change_online%TYPE;
+   customer_no_               customer_order_tab.customer_no%TYPE;
+   order_no_                  customer_order_tab.order_no%TYPE;
+   order_code_                customer_order_tab.order_code%TYPE;
+   int_cust_ord_del_warnings_ VARCHAR2(32000);
+   current_selection_         VARCHAR2(32000);
+   demand_code_db_            VARCHAR2(2000);
+   has_adv_or_prepaym_inv_    VARCHAR2(5);
+   created_int_po_            VARCHAR2(5);
+   exchange_exist_            NUMBER;   
+   old_rec_                   Cancel_Order_Virtual_Rec;
+   new_rec_                   Cancel_Order_Virtual_Rec;
+   key_                       Cancel_Order_Virtual_Key;
+   state_                     VARCHAR2(12) := 'Initial';
+   message_exist_             BOOLEAN := FALSE;
+   info_exist_                BOOLEAN := FALSE;
+   warning_exist_             BOOLEAN := FALSE;      
+   
+   CURSOR get_messages IS
+      SELECT message_type
+        FROM ${PROJECTION}_Cancel_Order_Message_Virtual_VRT
+       WHERE parent_objkey = key_.objkey;
+BEGIN
+   FOR order_ IN 0 .. orders_.get_size - 1 LOOP 
+      current_selection_ := orders_.get_string(order_);
+      order_no_    := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');
+      order_code_  := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_CODE');
+      customer_no_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CUSTOMER_NO');      
+      created_int_po_ := Customer_Order_API.Created_From_Int_Po__ (order_no_);   
+      ord_change_online_db_ := Site_Discom_Info_API.Get_Exec_Ord_Change_Online_Db(Cust_Ord_Customer_API.Get_Acquisition_Site(customer_no_));
+      
+      IF created_int_po_ = 'TRUE'  THEN    
+         IF ord_change_online_db_ = 'TRUE'  THEN  
+            Add_Message___(parent_key_, order_no_, NULL, NULL, NULL, 1, 'This order originates from an Internal Purchase Order and can only be cancelled on the demand site.', 'BEFORE_CANCEL', 'Error');            
+         ELSE
+            Add_Message___(parent_key_, order_no_, NULL, NULL, NULL, 2, 'This order originates from an Internal Purchase Order. Do you still want to cancel the order?', 'BEFORE_CANCEL', 'Warning');            
+         END IF;         
+      END IF;
+      
+      int_cust_ord_del_warnings_ := Cancel_Customer_Order_API.Int_Cust_Ord_Delivered (order_no_);
+      IF int_cust_ord_del_warnings_ IS NOT NULL THEN         
+         Add_Message___(parent_key_, order_no_, NULL, NULL, NULL, 3, int_cust_ord_del_warnings_, 'BEFORE_CANCEL', 'Warning');         
+      END IF;
+
+      has_adv_or_prepaym_inv_ := Customer_Invoice_Pub_Util_API.Has_Adv_Or_Prepaym_Inv (order_no_);
+      IF has_adv_or_prepaym_inv_ = 'TRUE' THEN
+         Add_Message___(parent_key_, order_no_, NULL, NULL, NULL, 4, 'Connected Advance/Prepayment based Invoice(s) exist(s). Manual processing is required.', 'BEFORE_CANCEL', 'Information');
+      END IF;
+     
+      IF ((Customer_Order_API.Exist_Connected_Charges (order_no_) = 1) OR (Customer_Order_API.Uninvoiced_Charges_Exist (order_no_) = 1)) THEN
+         Add_Message___(parent_key_, order_no_, NULL, NULL, NULL, 5, 'Charges that have not been invoiced exist for this order. Any charge line(s) connected to an order line will be removed. Do you still want to cancel the order?', 'BEFORE_CANCEL', 'Warning');         
+      END IF;
+            
+      IF Shipment_Line_API.Shipment_Connected_Lines_Exist(order_no_, 'CUSTOMER_ORDER') = 1 THEN
+         Add_Message___(parent_key_, order_no_, NULL, NULL, NULL, 6, 'Shipments exist for the specified customer order', 'BEFORE_CANCEL', 'Information');         
+      END IF;
+         
+      IF Customer_Order_API.Get_Sm_Connection_Db(order_no_) = 'CONNECTED' THEN
+         Add_Message___(parent_key_, order_no_, NULL, NULL, NULL, 7, 'Do you want to Cancel the connected Service Request too?', 'AFTER_CANCEL', 'Warning');         
+      END IF;
+      
+      demand_code_db_ := Customer_Order_API.Get_Line_Demand_Code_Db(order_no_);
+      exchange_exist_ := Customer_Order_API.Check_Exchange_Part_Exist(order_no_);
+   
+      IF exchange_exist_ = 0 AND demand_code_db_ = 'PO' THEN
+         Add_Message___(parent_key_, order_no_, NULL, NULL, NULL, 8, 'This order is connected to a purchase order which will not be updated automatically.', 'AFTER_CANCEL', 'Information');         
+      END IF;
+      IF demand_code_db_ = 'WO' THEN
+         Add_Message___(parent_key_, order_no_, NULL, NULL, NULL, 9, 'This order is connected to a work order which will not be updated automatically.', 'AFTER_CANCEL', 'Information');         
+      END IF;                     
+   END LOOP;
+   
+   key_.objkey := parent_key_.objkey;   
+   FOR message_ IN get_messages LOOP
+      message_exist_ := TRUE;
+      IF message_.message_type = 'Warning' THEN
+         warning_exist_ := TRUE;
+      END IF;  
+      IF message_.message_type = 'Information' THEN
+         info_exist_ := TRUE;
+      END IF;   
+      IF message_.message_type = 'Error' THEN
+         state_ := 'Error';
+         EXIT;
+      END IF;        
+   END LOOP;
+   
+   IF state_ != 'Error' THEN   
+      IF warning_exist_ AND info_exist_ THEN 
+         state_ := 'Info/Warning';
+      ELSIF warning_exist_ THEN 
+         state_ := 'Warning';
+      ELSIF info_exist_ THEN 
+         state_ := 'Information';
+      END IF;
+   END IF;  
+      
+   old_rec_ := Get_Record___(key_);
+   new_rec_ := old_rec_;
+   new_rec_.exist := message_exist_;
+   new_rec_.cancel_reason := cancel_reason_;
+   new_rec_.state := state_;
+   Crud_Update___(old_rec_, new_rec_);
+END Check_Customer_Order___;
+
+
+PROCEDURE Check_Customer_Order_Lines___ (
+   orders_         IN json_array_t,
+   parent_key_     IN Cancel_Order_Virtual_Key,
+   cancel_reason_  IN VARCHAR2) 
+IS   
+   col_rec_                       Customer_Order_Line_API.public_rec;
+   customer_no_                   customer_order_line_tab.customer_no%TYPE;
+   order_no_                      customer_order_line_tab.order_no%TYPE;
+   line_no_                       customer_order_line_tab.line_no%TYPE;
+   rel_no_                        customer_order_line_tab.rel_no%TYPE;
+   line_item_no_                  customer_order_line_tab.line_item_no%TYPE;
+   ord_change_online_db_          site_discom_info_tab.exec_order_change_online%TYPE;
+   old_rec_                       Cancel_Order_Virtual_Rec;
+   new_rec_                       Cancel_Order_Virtual_Rec;
+   key_                           Cancel_Order_Virtual_Key;
+   state_                         VARCHAR2(12) := 'Initial';
+   current_selection_             VARCHAR2(32000);
+   int_co_line_del_warnings_      VARCHAR2(32000);
+   message_exist_                 BOOLEAN := FALSE;
+   info_exist_                    BOOLEAN := FALSE;
+   warning_exist_                 BOOLEAN := FALSE;   
+   
+   CURSOR get_messages IS
+      SELECT message_type
+        FROM ${PROJECTION}_Cancel_Order_Message_Virtual_VRT
+       WHERE parent_objkey = key_.objkey;
+BEGIN  
+   FOR order_ IN 0 .. orders_.get_size - 1 LOOP     
+      current_selection_ := orders_.get_string(order_);
+      order_no_     := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');
+      customer_no_  := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CUSTOMER_NO');
+      line_no_      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_NO');
+      rel_no_       := Client_SYS.Get_Key_Reference_Value(current_selection_, 'REL_NO');
+      line_item_no_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_ITEM_NO');
+        
+      col_rec_      := Customer_Order_Line_API.Get(order_no_, line_no_, rel_no_, line_item_no_);
+      
+      IF (col_rec_.demand_code IN ('IPD', 'IPT')) THEN
+         ord_change_online_db_ := Site_Discom_Info_API.Get_Exec_Ord_Change_Online_Db(Cust_Ord_Customer_API.Get_Acquisition_Site(customer_no_));
+         IF (ord_change_online_db_ = 'TRUE') THEN  
+            Add_Message___(parent_key_, order_no_, line_no_, rel_no_, line_item_no_, 1, 'This order line originates from an Internal Purchase Order and can only be cancelled on the demand site.', 'BEFORE_CANCEL', 'Error');            
+         ELSE
+            Add_Message___(parent_key_, order_no_, line_no_, rel_no_, line_item_no_, 2, 'This order line originates from an Internal Purchase Order. Do you still want to cancel the line?', 'BEFORE_CANCEL', 'Warning');            
+         END IF;         
+      END IF;
+      
+      IF (col_rec_.supply_code IN ('IPD', 'IPT', 'PKG')) THEN
+          int_co_line_del_warnings_ := Cancel_Customer_Order_API.Int_Cust_Ord_Line_Delivered(order_no_, line_no_, rel_no_, line_item_no_);
+          IF (int_co_line_del_warnings_ IS NOT NULL) THEN
+            Add_Message___(parent_key_, order_no_, line_no_, rel_no_, line_item_no_, 3, int_co_line_del_warnings_, 'BEFORE_CANCEL', 'Warning');
+         END IF;
+      END IF;
+      
+      IF (Customer_Invoice_Pub_Util_API.Has_Adv_Or_Prepaym_Inv(order_no_) = 'TRUE') THEN
+         Add_Message___(parent_key_, order_no_, line_no_, rel_no_, line_item_no_, 4, 'Connected Advance/Prepayment based Invoice(s) exist(s). Manual processing is required.', 'BEFORE_CANCEL', 'Information');
+      END IF;                
+
+      IF ((Customer_Order_Charge_API.Exist_Charge_On_Order_Line(order_no_, line_no_, rel_no_, line_item_no_) = 1) OR 
+       ((Customer_Order_Charge_API.Exist_Charge_On_Order_Line (order_no_, line_no_, rel_no_, -1) = 1) AND 
+       (Customer_Order_Line_API.Get_Uncancelled_Pkg_Line_Count(order_no_, line_no_, rel_no_) = 1)))
+      THEN
+         Add_Message___(parent_key_, order_no_, line_no_, rel_no_, line_item_no_, 5, 'There is a charge line(s) connected to the order line, which will be removed. Do you still want to cancel the line?', 'BEFORE_CANCEL', 'Warning');
+      END IF;
+      
+      IF (col_rec_.shipment_connected = 'TRUE') THEN
+         Add_Message___(parent_key_, order_no_, line_no_, rel_no_, line_item_no_, 6, 'Shipments exist for the specified customer order line.', 'BEFORE_CANCEL', 'Information');
+      END IF;
+      
+      IF (col_rec_.sm_connection = 'CONNECTED') THEN
+         Add_Message___(parent_key_, order_no_, line_no_, rel_no_, line_item_no_, 7, 'Do you want to Cancel the connected Service Request too?', 'AFTER_CANCEL', 'Warning');
+      END IF;
+      
+      IF (col_rec_.demand_code = 'PO' AND col_rec_.exchange_item = 'ITEM NOT EXCHANGED') THEN
+          Add_Message___(parent_key_, order_no_, line_no_, rel_no_, line_item_no_, 8, 'This order is connected to a purchase order which will not be updated automatically.', 'AFTER_CANCEL', 'Information');
+      END IF;
+      
+      IF (col_rec_.demand_code = 'WO') THEN
+          Add_Message___(parent_key_, order_no_, line_no_, rel_no_, line_item_no_, 9, 'This order is connected to a work order which will not be updated automatically.', 'AFTER_CANCEL', 'Information');
+      END IF;
+      
+      IF (Sales_Promotion_Util_API.Check_Promo_Exist_Ord_Line_Num(order_no_, line_no_, rel_no_, line_item_no_) = 1) THEN
+         Add_Message___(parent_key_, order_no_, line_no_, rel_no_, line_item_no_, 10, 'There are connected sales promotion charge lines that may have to be recalculated or reviewed. Do you still want to cancel the line(s)?', 'BEFORE_CANCEL', 'Warning');
+      END IF;
+   END LOOP;
+   
+   key_.objkey := parent_key_.objkey;   
+   FOR message_ IN get_messages LOOP
+      message_exist_ := TRUE;
+      IF message_.message_type = 'Warning' THEN
+         warning_exist_ := TRUE;
+      END IF;  
+      IF message_.message_type = 'Information' THEN
+         info_exist_ := TRUE;
+      END IF;   
+      IF message_.message_type = 'Error' THEN
+         state_ := 'Error';
+         EXIT;
+      END IF;        
+   END LOOP;
+   
+   IF state_ != 'Error' THEN
+      IF warning_exist_ AND info_exist_ THEN 
+         state_ := 'Info/Warning';
+      ELSIF warning_exist_ THEN 
+         state_ := 'Warning';
+      ELSIF info_exist_ THEN 
+         state_ := 'Information';
+      END IF;
+   END IF;  
+      
+   old_rec_ := Get_Record___(key_);
+   new_rec_ := old_rec_;
+   new_rec_.exist := message_exist_;
+   new_rec_.cancel_reason := cancel_reason_;
+   new_rec_.state := state_;
+   Crud_Update___(old_rec_, new_rec_);
+END Check_Customer_Order_Lines___;
+
+
+PROCEDURE Add_Message___(
+   parent_key_   IN Cancel_Order_Virtual_Key,
+   order_no_     IN VARCHAR2,
+   line_no_      IN VARCHAR2,
+   rel_no_       IN VARCHAR2,
+   line_item_no_ IN VARCHAR2,
+   error_code_   IN NUMBER,
+   message_      IN VARCHAR2,
+   action_       IN VARCHAR2,
+   type_         IN VARCHAR2 DEFAULT NULL)
+IS
+   message_rec_ Cancel_Order_Message_Virtual_Rec;   
+BEGIN   
+   message_rec_.parent_objkey := parent_key_.objkey;
+   message_rec_.objkey := sys_guid();
+   message_rec_.order_no := order_no_;
+   IF line_no_ IS NOT NULL THEN 
+      message_rec_.line_no := line_no_;
+   END IF;
+   IF rel_no_ IS NOT NULL THEN 
+      message_rec_.rel_no := rel_no_;
+   END IF;
+   IF line_item_no_ IS NOT NULL THEN 
+      message_rec_.line_item_no := line_item_no_;
+   END IF;
+   IF type_ = 'Warning' THEN
+      message_rec_.answer := 'Y';
+   ELSE 
+      message_rec_.answer := 'N';
+   END IF;
+   message_rec_.message := message_;
+   message_rec_.error_code := error_code_;       
+   message_rec_.cancel := action_;
+   message_rec_.message_type := type_;
+   CRUD_Create___(message_rec_);
+END Add_Message___;
+
+
+PROCEDURE Check_Cancellation_Reason_Exist___ (
+   cancellation_reason_ IN VARCHAR2,
+   entity_code_         IN VARCHAR2 ) 
+IS   
+BEGIN
+   Order_Cancel_Reason_API.Exist(cancellation_reason_, entity_code_);
+END Check_Cancellation_Reason_Exist___;
+
+
+PROCEDURE Process_Cancel_Order___ (
+   key_             IN Cancel_Order_Virtual_Key,
+   order_selection_ IN VARCHAR2,
+   cancel_reason_   IN VARCHAR2,
+   unpeg_ipd_flag_  IN VARCHAR2,
+   source_          IN VARCHAR2,
+   replicate_flag_  IN VARCHAR2,
+   change_req_flag_ IN VARCHAR2,
+   info$_          OUT VARCHAR2 )
+IS        
+   warning_found_                 BOOLEAN:=FALSE;   
+   cancel_answer_                 BOOLEAN:=FALSE;
+   cancel_co_                     BOOLEAN:=FALSE;   
+   cancel_service_request_        BOOLEAN:=FALSE;
+   cancel_service_request_answer_ VARCHAR2(5) := 'FALSE';
+   order_no_                      customer_order_tab.order_no%TYPE;
+   line_no_                       customer_order_line_tab.line_no%TYPE;
+   rel_no_                        customer_order_line_tab.rel_no%TYPE;
+   line_item_no_                  customer_order_line_tab.line_item_no%TYPE;
+   orders_                        json_array_t := json_array_t.parse(order_selection_);
+   current_selection_             VARCHAR2(32000);
+   
+   CURSOR get_errors_ IS
+      SELECT answer, error_code
+        FROM ${PROJECTION}_Cancel_Order_Message_Virtual_VRT
+       WHERE parent_objkey = key_.objkey
+         AND order_no = order_no_
+         AND message_type = 'Warning'
+         AND cancel = 'BEFORE_CANCEL'
+         AND (line_no = line_no_ OR line_no_ IS NULL)
+         AND (rel_no = rel_no_ OR rel_no_ IS NULL)
+         AND (line_item_no = line_item_no_ OR line_item_no_ IS NULL);    
+BEGIN
+   FOR order_ IN 0 .. orders_.get_size - 1 LOOP
+      current_selection_ := orders_.get_string(order_);
+      order_no_          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');
+      
+      Customer_Order_Initial_Check___(order_no_);
+      IF (source_ = 'COL') THEN 
+         line_no_      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_NO');
+         rel_no_       := Client_SYS.Get_Key_Reference_Value(current_selection_, 'REL_NO');
+         line_item_no_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_ITEM_NO');
+         Customer_Order_Line_Initial_Check___(order_no_, line_no_, rel_no_, line_item_no_);
+      END IF;
+      cancel_co_     := FALSE;
+      warning_found_ := FALSE;
+      cancel_answer_ := TRUE; 
+      
+      FOR rec_ IN get_errors_ LOOP 
+         warning_found_ := TRUE;
+
+         -- Decide whether CO/CO Line is Cancelled or not based on the answer given to WARNINGs
+         IF (NOT(cancel_answer_ AND rec_.answer = 'Y')) THEN
+            -- In case of multiple warnings per CO line, answer "No" to any warning should stop cancelling
+            cancel_answer_ := FALSE;         
+         END IF;      
+         cancel_co_ := cancel_co_ OR cancel_answer_;      
+
+         -- Decide to Cancel the connected Service Request too?
+         IF rec_.error_code = 7 THEN
+            cancel_service_request_ := TRUE;
+            IF rec_.answer = 'Y' THEN
+               cancel_service_request_answer_ := 'TRUE';
+            ELSE
+               cancel_service_request_answer_ := 'FALSE';         
+            END IF;
+         END IF;
+      END LOOP;        
+
+      IF (warning_found_ AND cancel_co_) OR (NOT warning_found_) THEN
+         dbms_output.put_line ('************* CANCELL PROCESS');
+
+         info$_ := Cancel_Customer_Order_API.Cancel_Order__(source_, cancel_reason_, change_req_flag_, replicate_flag_, 
+                                                            unpeg_ipd_flag_, cancel_service_request_answer_,
+                                                            order_no_, line_no_, rel_no_, line_item_no_);
+         -- Cancel the connected Service Request
+         $IF Component_Wo_SYS.INSTALLED $THEN
+            IF (Customer_Order_API.Get_Sm_Connection_Db(order_no_) = 'CONNECTED' AND source_ != 'COL') THEN
+               IF cancel_service_request_ THEN
+                  IF cancel_service_request_answer_ = 'TURE' THEN
+                     Active_Work_Order_API.Cancel_Wo_For_Co(order_no_);
+                  ELSE
+                     Active_Work_Order_API.Disconnect_Wo_From_Co(order_no_);
+                  END IF;
+               END IF;
+            END IF;
+         $ELSE
+            NULL;
+         $END     
+      END IF;   
+   END LOOP;
+END Process_Cancel_Order___;
+
+
+PROCEDURE Answer_All___ (
+   parent_objkey_ IN VARCHAR2,
+   answer_        IN NUMBER) 
+IS
+BEGIN
+   UPDATE ${PROJECTION}_Cancel_Order_Message_Virtual_VRT
+      SET answer = answer_
+   WHERE parent_objkey = parent_objkey_;
+END Answer_All___;
+
+
+FUNCTION Get_Cancel_Replication_Info___(
+   order_selection_ IN VARCHAR2 ) RETURN Cancel_Replication_Info_Structure_Rec
+IS
+   current_selection_ VARCHAR2(32000);
+   orders_            json_array_t := json_array_t.parse(order_selection_);
+   order_no_          customer_order_tab.order_no%TYPE;
+   rec_               Cancel_Replication_Info_Structure_Rec;
+   allowed_flag_      VARCHAR2(5);
+   pegged_obj_        VARCHAR2(5);
+   order_state_       VARCHAR2(20);
+BEGIN
+   FOR order_ IN 0 .. orders_.get_size - 1 LOOP
+      current_selection_ := orders_.get_string(order_);
+      order_no_          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');
+      
+      Customer_Order_API.Check_Line_Peggings__(allowed_flag_, pegged_obj_, order_no_);
+      order_state_ := Customer_Order_API.Get_Objstate(order_no_);
+
+      IF ((NVL(pegged_obj_, 'FALSE') = 'TRUE') AND (order_state_ != 'Planned')) THEN
+         rec_.replicate_flag := 'TRUE';
+         IF (allowed_flag_ = 'TRUE') THEN
+            rec_.send_change_request := TRUE;
+         ELSE
+            rec_.send_change_request := FALSE;
+         END IF;
+         EXIT; -- exit when any order/line should be replicated
+      ELSE
+         rec_.replicate_flag := 'FALSE';
+      END IF;
+   END LOOP;
+   
+   RETURN rec_;
+END Get_Cancel_Replication_Info___;
+

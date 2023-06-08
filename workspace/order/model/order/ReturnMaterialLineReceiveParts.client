@@ -1,0 +1,464 @@
+--------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  ---------------------------------------------------------------
+-- 2020-03-03  Kagalk  GESPRING20-1797, Added warehouse_journal functionality.
+-- 2020-01-31  Kagalk  GESPRING20-1624, Added modify_date_applied functionality.
+-- 2019-06-21  MaEelk  SCUXXW4-22786, ReturnTotalQty was taken as the first column of the list.
+-- 2019-06-20  MaEelk  SCUXXW4-13507, Merged LCS Bugs 143062 and 147914.
+-- 2019-03-12  ErRalk  SCUXXW4-17216, Added Dependency Annotation for the relevant fields.
+-- 2018-06-01  MAHPLK  SCUXXW4-8757, Converted from dlgRmaLineReceiveParts using MTG Version: 1.18
+--------------------------------------------------------------------------------------
+
+client ReturnMaterialLineReceiveParts;
+component ORDER;
+layer Core;
+
+include fragment InventoryLocation5Selector;
+include fragment AllSalesPartActiveLovSelector;
+-------------------------------- MAIN PAGES ---------------------------------
+
+
+-------------------------------- ASSISTANTS ---------------------------------
+
+assistant Assistant using ReturnMaterialLineReceiveParts {
+   label = "Receive Parts";
+   savemode = OnLostFocus;
+
+   setup InitParameters {
+      variable RmaNoNum {
+         type = Number;
+      }
+      variable RmaLineNoNum {
+         type = Number;
+      }
+
+      execute {
+         set RmaNo = RmaNoNum;
+         set RmaLineNo = RmaLineNoNum;
+
+         call FetchRmaLineDetails(RmaNo, RmaLineNo) into RmaLineDetails;
+
+         set Contract = RmaLineDetails.Contract;
+         set PartNo = RmaLineDetails.PartNo;
+         set CatalogNo = RmaLineDetails.CatalogNo;
+         set ConfigurationId = RmaLineDetails.ConfigurationId;
+         set ConditionCode = RmaLineDetails.ConditionCode;
+         set SalesQtyToReturn = RmaLineDetails.SalesQtyToReturn;
+         set SalesUnitMeas = RmaLineDetails.SalesUnitMeas;
+         set InventoryQtyToReturn = RmaLineDetails.InventoryQtyToReturn;
+         set InventoryUnitMeas = RmaLineDetails.InventoryUnitMeas;
+         set CreditInvoiceNo = RmaLineDetails.CreditInvoiceNo;
+         set OrderNo = RmaLineDetails.OrderNo;
+         set LineNo = RmaLineDetails.LineNo;
+         set ConversionFactor = RmaLineDetails.ConversionFactor;
+         set InvertedConversionFactor = RmaLineDetails.InvertedConversionFactor;
+         set ReturnUnitMeas = RmaLineDetails.ReturnUnitMeas;
+         set StopNewSerialInRmaDb = RmaLineDetails.StopNewSerialInRmaDb;
+         set LatestReturnDate = RmaLineDetails.LatestReturnDate;
+         set DurabilityDays = RmaLineDetails.DurabilityDays;
+         if [RmaLineDetails.OrderNo != null] {
+            set OrderConnected = true;
+         }
+         else {
+            set OrderConnected = false;
+         }
+         if [RmaLineDetails.CreditInvoiceNo != null] {
+            set Credited = true;
+         }
+         else {
+            set Credited = false;
+         }
+         -- gelr:modify_date_applied, begin
+         set ArrivalDate = RmaLineDetails.ArrivalDate;
+         -- gelr:modify_date_applied, end
+      }
+   }
+   steps {
+      step {
+         group RmaLineReceivePartsGroup;
+         -- gelr:modify_date_applied, begin
+         group DeliveryNoteGroup;
+         -- gelr:modify_date_applied, end
+         list ReceivePartList(ReceivePartArray);
+      }
+      final step {
+
+      }
+      cancelled step {
+
+      }
+   }
+
+   finish command {
+      variable SourceConsumption {
+         type = Number;
+      }
+
+      execute {
+         call ValidateOk(Objkey) into ValidateOkInfo {
+            when SUCCESS {
+               if [ValidateOkInfo.LatestReturnDate] {
+                  confirm("These parts are being received after the specified latest return date.") {
+                     when CANCEL {
+                        exit CANCEL;
+                     }
+                  }
+               }
+               if [ValidateOkInfo.NoOrderWarning] {
+                  confirm("The RMA line has not been connected to a customer order line.") {
+                     when CANCEL {
+                        exit CANCEL;
+                     }
+                  }
+               }
+               if [ValidateOkInfo.SerialConditionCodeDiff] {
+                  confirm("Condition code in Return Material Lines is different from the condition code defined for the serial number in Part Serial Catalog.
+               OK to change to condition code ${ValidateOkInfo.ConditionCode}?") {
+                     when CANCEL {
+                        exit CANCEL;
+                     }
+                  }
+               }
+               if [ValidateOkInfo.DiffLSRNo] {
+                  confirm("The possible quantity to receive, based on previous deliveries and/or returns, for the
+            lot/batch number ${ValidateOkInfo.LotBatchNo}, of serial number ${ValidateOkInfo.SerialNo}, and revision number ${ValidateOkInfo.EngChgLevel} is ${ValidateOkInfo.QtyCanReturnOnLot} ${ValidateOkInfo.ReturnUnitMeas}.
+               Do you want to receive ${ValidateOkInfo.QtyToReturn} ${ValidateOkInfo.ReturnUnitMeas} into inventory?") {
+                     when CANCEL {
+                        exit CANCEL;
+                     }
+                  }
+               }
+               if [ValidateOkInfo.WoExistForSerialObject] {
+                  confirm("Serial ${ValidateOkInfo.SerialNo} of part ${ValidateOkInfo.PartNo} which is going to be returned/scrapped has active work order(s) connected.") {
+                     when CANCEL {
+                        exit CANCEL;
+                     }
+                  }
+               }
+
+               call ExecuteOk(Objkey)into SourceConsumption;
+               @DynamicComponentDependency EXPCTR
+               if [SourceConsumption = 1] {
+                  confirm("Do you want to reduce consumption for the Customer Order license?") {
+                     when OK {
+                        call UpdateCoverageQuantities(Objkey);
+                        exit OK;
+                     }
+                  }
+               }
+            }
+         }
+
+         navigate back;
+      }
+   }
+   cancel command {
+      execute {
+         navigate back;
+      }
+   }
+   restart command {
+      visible = [false];
+   }
+}
+
+---------------------------------- GROUPS -----------------------------------
+
+group RmaLineReceivePartsGroup for ReturnMaterialLineReceivePartsVirtual {
+   label = "";
+   field RmaNo;
+   field RmaLineNo;
+   field Contract;
+   lov CatalogNoRef with ReferenceAllSalesPartActiveLovSelector {
+      label = "Sales Part";
+      description = CatalogNoRef.CatalogDesc;
+   }
+   field ConfigurationId;
+   lov ConditionCodeRef with ReferenceConditionCodeSelector {
+      label = "Condition Code";
+      description = ConditionCodeRef.Description;
+   }
+   measure SalesQtyToReturn(SalesUnitMeas);
+   measure InventoryQtyToReturn(InventoryUnitMeas);
+   field OrderConnected;
+   field Credited;
+   field PartNo {
+      visible = [false];
+   }
+   field StopNewSerialInRmaDb {
+      visible = [false];
+   }
+   field OrderNo {
+      visible = [false];
+   }
+   field ReturnUnitMeas {
+      visible = [false];
+   }
+}
+
+-- gelr:modify_date_applied, begin
+group DeliveryNoteGroup for ReturnMaterialLineReceivePartsVirtual {
+   label = "Delivery Note";
+   visible = [ArrivalDate != null];
+   -- gelr:warehouse_journal, begin
+   field ExternalDeliveryNoteRef {
+      visible = [WarehouseJournalEnabled];
+   }
+   field ExternalDeliveryNoteDate {
+      visible = [WarehouseJournalEnabled];
+   }
+   -- gelr:warehouse_journal, end
+   field ArrivalDate {
+      editable = [false];
+   }
+   -- gelr:warehouse_journal, begin
+   lov DeliveryReasonIdRef with ReferenceDeliveryReasonSelector {
+      description = DeliveryReasonIdRef.Description;
+      visible = [WarehouseJournalEnabled];
+   }
+   -- gelr:warehouse_journal, end
+}
+-- gelr:modify_date_applied, end
+
+----------------------------------- LISTS -----------------------------------
+
+list ReceivePartList for ReturnMaterialLineReceivedQuantitiesVirtual {
+   label = "";
+   editmode = SingleRowEdit;
+
+   field ReturnTotalQty {
+      validate command {
+         variable ValidateQtyStrucVar {
+            type = ValidateQtyStruc;
+         }
+         execute {
+            if [ReturnTotalQty = true] {
+               if [parent.PartNo = null] {
+                  set SalesQtyToReturn = parent.SalesQtyToReturn;
+
+                  call ValidateSalesQtyToReturn(parent.Objkey, Objkey, SalesQtyToReturn,
+                  parent.ConversionFactor, parent.InvertedConversionFactor) into ValidateQtyStrucVar;
+
+                  set QtyToReturn = ValidateQtyStrucVar.QtyToReturn;
+
+               }
+               else {
+                  set QtyToReturn = parent.InventoryQtyToReturn;
+
+                  call ValidateQtyToReturn(parent.Objkey, Objkey, QtyToReturn,
+                  parent.ConversionFactor, parent.InvertedConversionFactor) into ValidateQtyStrucVar;
+
+                  set SalesQtyToReturn = ValidateQtyStrucVar.SalesQtyToReturn;
+               }
+
+
+               if [ValidateQtyStrucVar.RaiseNegativeQtyError] {
+                  set SalesQtyToReturn = null;
+                  set QtyToReturn = null;
+                  error("The returned quantity can not be negative.");
+
+               }
+               if [ValidateQtyStrucVar.RaiseRemainingQtyError] {
+                  set SalesQtyToReturn = null;
+                  set QtyToReturn = null;
+                  error("Transaction quantity should not be more than the remaining quantity to be returned.");
+
+               }
+            }
+            else {
+               set SalesQtyToReturn = null;
+               set QtyToReturn = null;
+            }
+         }
+      }
+
+   }
+
+   field SalesQtyToReturn {
+      validate command {
+         variable ValidateQtyStrucVar {
+            type = ValidateQtyStruc;
+         }
+
+         execute {
+            if [ReturnTotalQty = true] {
+               set ReturnTotalQty = false;
+            }
+            if [SalesQtyToReturn = null] {
+               set QtyToReturn = null;
+            }
+            else {
+               call ValidateSalesQtyToReturn(parent.Objkey, Objkey, SalesQtyToReturn,
+               parent.ConversionFactor, parent.InvertedConversionFactor) into ValidateQtyStrucVar;
+
+               set QtyToReturn = ValidateQtyStrucVar.QtyToReturn;
+
+               if [ValidateQtyStrucVar.RaiseNegativeQtyError] {
+                  set SalesQtyToReturn = null;
+                  set QtyToReturn = null;
+                  error("The returned quantity can not be negative.");
+
+
+               }
+               if [ValidateQtyStrucVar.RaiseRemainingQtyError] {
+                  set SalesQtyToReturn = null;
+                  set QtyToReturn = null;
+                  error("Transaction quantity should not be more than the remaining quantity to be returned.");
+
+               }
+            }
+         }
+      }
+   }
+   field QtyToReturn {
+      editable = [parent.PartNo != null];
+      validate command {
+         variable ValidateQtyStrucVar {
+            type = ValidateQtyStruc;
+         }
+         execute {
+            if [ReturnTotalQty = true] {
+               set ReturnTotalQty = false;
+            }
+            if [QtyToReturn = null] {
+               set SalesQtyToReturn = null;
+            }
+            else {
+               call ValidateQtyToReturn(parent.Objkey, Objkey, QtyToReturn,
+               parent.ConversionFactor, parent.InvertedConversionFactor) into ValidateQtyStrucVar;
+
+               set SalesQtyToReturn = ValidateQtyStrucVar.SalesQtyToReturn;
+
+               if [ValidateQtyStrucVar.RaiseNegativeQtyError] {
+                  set QtyToReturn = null;
+                  error("The returned quantity can not be negative.");
+
+
+               }
+               if [ValidateQtyStrucVar.RaiseRemainingQtyError] {
+                  set QtyToReturn = null;
+                  error("Transaction quantity should not be more than the remaining quantity to be returned.");
+
+               }
+            }
+         }
+      }
+   }
+   field QtyOnhand;
+   field CatchQtyToReturn {
+      editable = [parent.PartNo != null];
+      validate command {
+         execute {
+            if [CatchQtyToReturn < 0] {
+               error("The returned quantity can not be negative.");
+            }
+         }
+      }
+   }
+   field CatchQtyOnhand;
+   lov LocationNoRef with ReferenceInventoryLocation5Selector {
+      required = [parent.PartNo != null];
+      editable = [parent.PartNo != null];
+      validate command {
+         execute {
+            set Warehouse = LocationNoRef.Warehouse;
+            set BayNo = LocationNoRef.BayNo;
+            set RowNo = LocationNoRef.RowNo;
+            set TierNo = LocationNoRef.TierNo;
+            set BinNo = LocationNoRef.BinNo;
+            call FetchStockDetails(Contract, PartNo, ConfigurationId, LocationNo, LotBatchNo, SerialNo, EngChgLevel, WaivDevRejNo, ActivitySeq, HandlingUnitId, ExpirationDate) into StockDetailStruc;
+            set StockExist = StockDetailStruc.StockExist;
+            set ExpirationDate = StockDetailStruc.ExpirationDate;
+         }
+      }
+   }
+   field ExpirationDate {
+      editable = [isNew];
+      required = [parent.DurabilityDays != null and not(StockExist)];
+   }
+   lov HandlingUnitIdRef with ReferenceHandlingUnitSelector {
+      required = [parent.PartNo != null];
+   }
+   lov HandlingUnitTypeIDRef with ReferenceHandlingUnitTypeSelector {
+      label = "Handling Unit Type";
+      description = HandlingUnitTypeIDRef.Description;
+      editable = [false];
+   }
+   field Sscc {
+      editable = [parent.PartNo != null];
+   }
+   field HandlingUnitIdRef.AltHandlingUnitLabelId {
+      editable = [parent.PartNo != null];
+   }
+   field LocationNoRef.Warehouse;
+   field LocationNoRef.BayNo;
+   field LocationNoRef.RowNo;
+   field LocationNoRef.TierNo;
+   field LocationNoRef.BinNo;
+   field LotBatchNo {
+      required = [parent.PartNo != null];
+      editable = [parent.PartNo != null];
+      validate command {
+         execute {
+            call FetchConditionCode(parent.CatalogNo, SerialNo, LotBatchNo, parent.ConditionCode) into ConditionCode;
+         }
+      }
+   }
+   field SerialNo {
+      required = [parent.PartNo != null];
+      editable = [parent.PartNo != null];
+      validate command {
+         variable PartSerialExistBool {
+            type = Boolean;
+         }
+         execute {
+            call FetchConditionCode(parent.CatalogNo, SerialNo, LotBatchNo, parent.ConditionCode) into ConditionCode;
+            if [SerialNo != "*" and parent.StopNewSerialInRmaDb = "FALSE" and parent.OrderConnected = false] {
+               call PartSerialExist(parent.CatalogNo, SerialNo)into PartSerialExistBool;
+               if [PartSerialExistBool = false] {
+                  confirm("New serial number ${SerialNo} will be created. Do you want to continue?") {
+                     when OK {
+                        exit;
+                     }
+                  }
+               }
+            }
+         }
+      }
+   }
+   lov ConditionCodeRef with ReferenceConditionCodeSelector {
+      label = "Condition Code";
+      description = ConditionCodeRef.Description;
+   }
+   field WaivDevRejNo {
+      required = [parent.PartNo != null];
+      editable = [parent.PartNo != null];
+   }
+   field EngChgLevel {
+      required = [parent.PartNo != null];
+   }
+   field HandlingUnitIdRef.ParentHandlingUnitId;
+   field TopParentHandlingUnitType;
+   field TopParentTypeDescription;
+   field TopParentSSCC;
+   field TopParentAltHULabelID;
+   field ActivitySeq {
+      required = [parent.PartNo != null];
+      columnvisible = [false];
+   }
+   field ConfigurationId {
+      required = [parent.PartNo != null];
+      columnvisible = [false];
+   }
+   field PartNo {
+      required = [parent.PartNo != null];
+      columnvisible = [false];
+   }
+   field Contract {
+      required = [parent.PartNo != null];
+      columnvisible = [false];
+   }
+   summary = SalesQtyToReturn, QtyToReturn;
+   fieldranking SalesQtyToReturn, QtyToReturn, ReturnTotalQty, LocationNoRef, ExpirationDate;
+}
+

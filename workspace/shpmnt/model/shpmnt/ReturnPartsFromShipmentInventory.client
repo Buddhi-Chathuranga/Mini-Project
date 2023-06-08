@@ -1,0 +1,476 @@
+-------------------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  --------------------------------------------------------------------------
+-- 2022-06-28  Aabalk  SCDEV-9149, Passed DemandCode to LocationTypeFilter to display QA and Arrival locations for Shipment Orders with demand code Purchase Receipt.
+-- 2022-05-09  AvWilk  SCDEV-9414, Changed LocationNoRef with 'InventoryLocation17' and added LocationTypeFilter.
+-- 2021-02-08  RoJalk  SC2020R1-12396, Renamed BeforeSaveCommand to CrudBeforeCommand and added the command SetParentCommand.
+-- 2020-09-08  ErRalk  SC2020R1-1420, Removed Sender and Receiver Concatenation.
+-- 2020-05-22  ErRalk  SC2020R1-2171, Modified ViewConfigurationCommand to support when the SourceRefType is ShipmentOrder.
+-- 2020-03-25  KiSalk  Bug 153030(SCZ-9615), In list ReturnToStockList, field QtyToReturn, CatchQtyToReturn set with number type value.
+-- 2020-01-06  Aabalk  SCSPRING20-1465, Moved sender and receiver info into seperate groups.
+-- 2019-11-27  Aabalk  SCSPRING20-720, Added sender type and id and name to ReturnFromShipInvGroup. Enabled receiver contact widget only when receiver type is customer.
+-- 2019-11-15  Aabalk  SCXTEND-1620, Specified number type for computed field TotalQtyToReturn.
+-- 2019-06-19  KHVESE  SCUXXW4-22712, Implemented ViewConfigurationCommand.
+-- 2019-06-16  JaBalk  SCUXXW4-20269, Corrected the labels for Warehouse and other fields and renamed the CatchUoM.
+-- 2018-09-24  KHVESE  SCUXXW4-4764, Added commands BeforeSaveCommand and AfterSaveCommand. also added crud actions to the list ReturnToStockList.
+-- 2018-04-26  KHVESE  SCUXXW4-4764, Converted from frmReturnFromShipInv using MTG Version: 1.15
+-------------------------------------------------------------------------------------------------
+
+client ReturnPartsFromShipmentInventory;
+component SHPMNT;
+layer Core;
+include fragment InventoryLocation5Selector;
+include fragment ShipmentSenderSelector;
+include fragment ShipmentReceiverSelector;
+include fragment InventoryPartLov;
+include fragment UserAllowedSiteLovSelector;
+include fragment InventoryLocation17Selector;
+
+warningsenabled = ReturnFromShipInv, ReturnFromShipInvToNewLoc;
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+
+-------------------------------- MAIN PAGES ---------------------------------
+
+page Form using InventoryPartsInShipmentInventories {
+   label = "Return Parts from Shipment Inventory";
+   selector InventoryPartsInShipmentInventorySelector;
+   group ReturnFromShipInvGroup;
+   arrange {
+      group SenderInfoGroup;
+      group ReceiverInfoGroup;
+   }
+   arrange {
+      group LocationGroup;
+      group CharacteristicsGroup;
+   }
+   arrange {
+      group HandlingUnitGroup;
+      group PickingGroup;
+   }
+   list ReturnToStockList(DetailReturnToStock);
+
+   commandgroup ViewConfigurationCmdGroup {
+      label = "View Configuration Command Group";
+      command ViewConfigurationCommand;
+   }
+}
+
+-------------------------------- ASSISTANTS ---------------------------------
+
+--------------------------------- COMMANDS ----------------------------------
+
+command ViewConfigurationCommand for InventoryPartsInShipmentInventory {
+   label = "View Configuration";
+   mode = SingleRecord;
+   enabled = [ConfigurationId != "*"];
+   variable SourceRef4Var Number;
+   execute {
+      if [SourceRefType = "CustomerOrder"] {
+         set Usage = "CustomerOrder";
+      }
+      else {
+         if [SourceRefType = "ProjectDeliverables"] {
+            set Usage = "ProjectDeliverable";
+         }
+         else {
+            if[SourceRefType = "ShipmentOrder"] {
+               set Usage = "ShipmentOrder";
+            }
+         }
+      }
+      call StringToNumber(SourceRef4) into SourceRef4Var;
+      navigate "assistant/PartConfigurationAssistant/EditConfiguration?$action=InitConfiguration{VarUsage:$[Usage],
+                                                                                                 VarMode:'View',
+                                                                                                 VarIdentity1:$[SourceRef1],
+                                                                                                 VarIdentity2:$[SourceRef2],
+                                                                                                 VarIdentity3:$[SourceRef3],
+                                                                                                 VarIdentity4:$[SourceRef4Var]}";
+   }
+}
+
+command SetParentCommand for InventoryPartInStock {
+   bulkexecute {
+      bulkset SourceRef1 = "${parent.SourceRef1}";
+      bulkset SourceRef2 = "${parent.SourceRef2}";
+      bulkset SourceRef3 = "${parent.SourceRef3}";
+      // bulkset will set the value to "null" instead of "" when parent sourceref4 is null. so we need to do bulk set only when it is not null. Bug has been reported to framework.
+      if [parent.SourceRef4 != null] {
+         bulkset SourceRef4 = "${parent.SourceRef4}";
+      }
+      bulkset SourceRefType = "${parent.SourceRefType}";
+      bulkset ShipmentId = parent.ShipmentId;
+      bulkset PickListNo = "${parent.PickListNo}";
+      bulkset FromLocationNo = "${parent.LocationNo}";
+      bulkset FromContract = "${parent.Contract}";
+      bulkset FromHandlingUnitId = parent.HandlingUnitId;
+   }
+}
+
+command CrudBeforeCommand clone SetParentCommand {
+   execute {
+      if [parent.computed.TotalQtyToReturn > parent.QtyPicked] {
+         error("Total quantity to return can not be greater than the picked quantity.");
+         exit CANCEL;
+      }
+      super;
+   }
+}
+
+command AfterSaveCommand for InventoryPartInStock {
+   execute {
+      if [parent.SourceRefType = "CustomerOrder" and parent.DelnoteNo != null] {
+         confirm("Quantity connected to Pre-Ship Delivery Note no ${parent.DelnoteNo} has been modified. It is in status invalid. Do you want to re-create and print the Pre-Ship Delivery Note?") {
+            when OK {
+               call CreateOrdPreShipDelNote(parent.SourceRef1, parent.LocationNo);
+            }
+         }
+      }
+   }
+}
+
+--------------------------------- SELECTORS ---------------------------------
+
+@Overtake Core
+selector InventoryPartsInShipmentInventorySelector for InventoryPartsInShipmentInventory {
+   label = "";
+   static PartNo;
+   static Contract;
+   static LocationNo;
+   static ShipmentId;
+   static SourceRef1;
+   static SourceRef2;
+   static SourceRef3;
+   // Hidden feild for identify unique record
+   static SourceRefType {
+      visible = [false];
+      searchable = false;
+   }
+   static PickListNo {
+      visible = [false];
+      searchable = false;
+   }
+   static LotBatchNo {
+      visible = [false];
+      searchable = false;
+   }
+   static SerialNo {
+      visible = [false];
+      searchable = false;
+   }
+   static EngChgLevel {
+      visible = [false];
+      searchable = false;
+   }
+   static WaivDevRejNo {
+      visible = [false];
+      searchable = false;
+   }
+   static ConfigurationId {
+      visible = [false];
+      searchable = false;
+   }
+   @DynamicComponentDependency PROJ
+   static ProjectId {
+      visible = [false];
+      searchable = false;
+   }
+   static ActivitySeq {
+      visible = [false];
+      searchable = false;
+   }
+   static HandlingUnitId {
+      visible = [false];
+      searchable = false;
+   }
+   static SourceRef2Db {
+      visible = [false];
+      searchable = false;
+   }
+   static SourceRef3Db {
+      visible = [false];
+      searchable = false;
+   }
+   static SourceRef4Db {
+      visible = [false];
+      searchable = false;
+   }
+}
+
+---------------------------------- GROUPS -----------------------------------
+
+group ReturnFromShipInvGroup for InventoryPartsInShipmentInventory {
+   label = "";
+   field SourceRef1 {
+      size = Small;
+   }
+   field SourceRef2 {
+      size = Small;
+   }
+   field SourceRef3 {
+      size = Small;
+   }
+   field SourceRef4 {
+      size = Small;
+   }
+   field SourceRefType {
+      size = Small;
+   }
+   field SourcePartNo {
+      size = Small;
+   }
+   field SourcePartDescription;
+   lov PartNoRef with InventoryPartLovSelector {
+      label = "Part No";
+      size = Small;
+   }
+   field PartDescription;
+   field ShipmentId {
+      size = Small;
+   }
+   field ShipmentLineNo {
+      size = Small;
+   }
+   lov ContractRef with ReferenceUserAllowedSiteLovSelector {
+      description = ContractDesc;
+   }
+}
+
+group SenderInfoGroup for InventoryPartsInShipmentInventory {
+   label = "Sender";
+   collapsed = [true];
+   field SenderType {
+      size = Small;
+   }
+   lov SenderIdRef with ReferenceShipmentSenderSelector using SenderIdFilter(SenderType);
+   field SenderName;
+}
+
+group ReceiverInfoGroup for InventoryPartsInShipmentInventory {
+   label = "Receiver";
+   collapsed = [true];
+   field ReceiverType;
+   lov ReceiverIdRef with ReferenceShipmentReceiverSelector using ReceiverIdFilter(ReceiverType) {
+      contactwidget {
+         enabled = [ReceiverId != null and ReceiverType = "Customer"];
+         source = Customer;
+      }
+   }
+   field ReceiverName;
+}
+
+group PickingGroup for InventoryPartsInShipmentInventory {
+   label = "Picking";
+   field PickListNo {
+      size = Small;
+   }
+   field QtyPicked {
+      size = Small;
+   }
+   field CatchQtyPicked {
+      size = Small;
+   }
+   computedfield TotalQtyToReturn {
+      label = "Total Qty to Return";
+      value = "#{DetailReturnToStock.sum(QtyToReturn)}";
+      size = Small;
+      type = Number;
+   }
+}
+group LocationGroup for InventoryPartsInShipmentInventory {
+   label = "Location";
+   field LocationNo {
+      size = Small;
+   }
+   field Warehouse {
+      size = Small;
+   }
+   field BayNo {
+      size = Small;
+   }
+   field RowNo {
+      size = Small;
+   }
+   field TierNo {
+      size = Small;
+   }
+   field BinNo {
+      size = Small;
+   }
+}
+
+group HandlingUnitGroup for InventoryPartsInShipmentInventory {
+   label = "Handling Unit";
+   field HandlingUnitId {
+      size = Small;
+   }
+   lov HandlingUnitTypeIdRef with HandlingUnitTypeSelector {
+      description = HandlingUnitTypeDesc;
+   }
+   field Sscc;
+   field AltHandlingUnitLabelId {
+      size = Small;
+   }
+}
+
+group CharacteristicsGroup for InventoryPartsInShipmentInventory {
+   label = "Characteristics";
+   field LotBatchNo {
+      size = Small;
+   }
+   field SerialNo {
+      size = Small;
+   }
+   field EngChgLevel {
+      size = Small;
+   }
+   field WaivDevRejNo {
+      size = Small;
+   }
+   field ConfigurationId {
+      size = Small;
+   }
+   @DynamicComponentDependency PROJ
+   field ProjectId {
+      size = Small;
+   }
+   field ActivitySeq {
+      size = Small;
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+
+list ReturnToStockList for InventoryPartInStock {
+   label = "";
+   crudactions {
+      before command CrudBeforeCommand;
+      update action = ReturnFromShipInv;
+      create action = ReturnFromShipInvToNewLoc;
+      after command AfterSaveCommand;
+   }
+   field QtyToReturn {
+      size = Small;
+      validate command {
+         execute {
+            if [QtyToReturn <= 0] {
+               error("The quantity to return must be greater than 0.");
+               set QtyToReturn = null;
+            }
+            if [QtyToReturn = parent.QtyPicked] {
+               set CatchQtyToReturn = "#{parent.CatchQtyPicked}";
+            }
+         }
+      }
+   }
+   field CatchQtyToReturn {
+      size = Small;
+      editable = [CatchUom != null];
+      validate command {
+         execute {
+            if [CatchQtyOnhand != null] {
+               if [CatchQtyToReturn <= 0] {
+                  error("The catch quantity to return must be greater than 0.");
+               }
+               if [QtyToReturn = null] {
+                  error("The quantity to return must have a value.");
+               }
+            }
+         }
+      }
+   }
+   field CatchUom {
+      size = Small;
+   }
+   field QtyOnhand {
+      size = Small;
+   }
+   field CatchQtyOnhand {
+      size = Small;
+   }
+   lov LocationNoRef with ReferenceInventoryLocation17Selector using LocationTypeFilter(parent.SourceRefType, parent.DemandCode) {
+      size = Small;
+      validate command {
+         variable OnhandQtyStrucVar {
+            type = OnhandQtyStruc;
+         }
+         execute {
+            call GetOnhandQtys(Contract, PartNo, ConfigurationId, LocationNo, LotBatchNo, SerialNo, EngChgLevel, WaivDevRejNo, ActivitySeq, HandlingUnitId) into OnhandQtyStrucVar;
+            set QtyOnhand = OnhandQtyStrucVar.QtyOnhand;
+            set CatchQtyOnhand = OnhandQtyStrucVar.CatchQtyOnhand;
+         }
+      }
+   }
+   field LocationNoRef.Warehouse {
+      label = "Warehouse ID";
+   }
+   field LocationNoRef.BayNo {
+      label = "Bay ID";
+      size = Small;
+   }
+   field LocationNoRef.RowNo {
+      label = "Row ID";
+      size = Small;
+   }
+   field LocationNoRef.TierNo {
+      label = "Tier ID";
+      size = Small;
+   }
+   field LocationNoRef.BinNo {
+      label = "Bin ID";
+      size = Small;
+   }
+   field Note;
+   // We need to have the following fields in the client, eventhough we don't show them, otherwise crud action cannot refresh these fileds correctly
+   // after save and user will receive an error if he/she edit same record again and save.
+   field SourceRef1 {
+      columnexclude = [true];
+   }
+   field SourceRef2 {
+      columnexclude = [true];
+   }
+   field SourceRef3 {
+      columnexclude = [true];
+   }
+   field SourceRef4 {
+      columnexclude = [true];
+   }
+   field ShipmentId {
+      columnexclude = [true];
+   }
+   field PickListNo {
+      columnexclude = [true];
+   }
+   field FromLocationNo {
+      columnexclude = [true];
+   }
+   field FromContract {
+      columnexclude = [true];
+   }
+   field FromHandlingUnitId {
+      columnexclude = [true];
+   }
+}
+
+
+
+
+----------------------------------- CARDS -----------------------------------
+
+---------------------------------- DIALOGS ----------------------------------
+
+---------------------------------- CHARTS -----------------------------------
+
+--------------------------------- CALENDARS ---------------------------------
+
+---------------------------------- SHEETS -----------------------------------
+
+----------------------------- STATE INDICATORS ------------------------------
+
+----------------------------------- TREES -----------------------------------
+
+---------------------------------- PLUGINS ----------------------------------
+
+------------------------------- IMAGE VIEWERS -------------------------------
+
+

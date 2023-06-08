@@ -1,0 +1,178 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     CustomerOrderLineRentalTab
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date        Sign    History
+--  ----------  ------  --------------------------------------------------------------------------------
+--  2021-01-26  MaRalk  SC2020R1-11958, Removed assigning the values ORIGINAL-_ORDER_NO, LINE_NO, REL_NO, ITEM_NO for attribute string 
+--  2021-01-26          in the method CRUD_Default_Copy___ as the values are already passed to the method and removed the unused code from Crud_Create___
+--  2021-01-26          that those values are again fetching from IDENTITY1,2 etc.
+--  2021-01-08  MaRalk  SC2020R1-11764, Modified Set_Values_On_Duplicate___ by allowing to fetch primary_rental_no from the server.
+--  2020-03-24  MaRalk  SCXTEND-2206, Override method CRUD_Default_Copy___ in order to support duplicate functionality.
+--  2020-03-24          Modified method CRUD_Create___ in order to pass original order line information when copying tax lines from the original line.
+--  2019-03-11  JeLise  SCUXXW4-781, Added CRUD_Update___ to call the method Replicate___.
+--------------------------------------------------------------------------------------------------------
+
+layer Core;
+
+@Override
+@DynamicComponentDependency RENTAL
+PROCEDURE CRUD_Default___ (
+   key_  IN     Customer_Order_Rental_Line_Key,
+   attr_ IN OUT VARCHAR2,
+   info_    OUT VARCHAR2 )
+IS
+BEGIN
+   Client_SYS.Add_To_Attr('RENTAL_DB', 'TRUE', attr_);
+   super(key_, attr_, info_);
+   Client_SYS.Add_To_Attr('LINE_ITEM_NO', 0, attr_);
+   Client_SYS.Add_To_Attr('FREE_OF_CHAREGE_DB', 'FALSE', attr_);
+   Client_SYS.Add_To_Attr('PLANNED_RENTAL_START_DATE_EDITABLE', Client_SYS.Get_Item_Value('PLANNED_RENTAL_START_DATE', attr_), attr_);
+   Client_SYS.Add_To_Attr('PLANNED_RENTAL_START_TIME_EDITABLE', Client_SYS.Get_Item_Value('PLANNED_RENTAL_START_TIME', attr_), attr_);
+END CRUD_Default___;
+
+
+@Override
+PROCEDURE CRUD_Default_Copy___ (
+   objid_     IN  VARCHAR2,
+   key_       IN  Customer_Order_Rental_Line_Key,
+   values_    IN  Copy_Values_Rec,
+   attr_      OUT VARCHAR2,
+   info_      OUT VARCHAR2 )
+IS
+   planned_ship_date_ DATE; 
+   dummy_number_      NUMBER := NULL;
+BEGIN   
+   super(objid_,key_, values_, attr_,info_ );
+   
+   Client_SYS.Set_Item_Value('ORDER_NO', key_.order_no, attr_);
+   Client_SYS.Set_Item_Value('CUSTOMER_NO', Customer_Order_API.Get_Customer_No(key_.order_no), attr_);
+   Client_SYS.Set_Item_Value('PLANNED_SHIP_DATE', planned_ship_date_, attr_);   
+   
+   Set_Values_On_Duplicate___(attr_); 
+   
+   Client_SYS.Set_Item_Value('PRIMARY_RENTAL_NO', dummy_number_, attr_);
+   Client_SYS.Set_Item_Value('CREATE_SM_OBJECT_OPTION_DB', 'DONOTCREATESMOBJECT', attr_);
+   -- Removed incorrect element from the attribute string and added the correct one FREE_OF_CHARGE_DB
+   -- The reason behind is we should have the attribute FreeOfCharge in the CustomerOrderRentalLine entity
+   -- (Note that attribute is not in the customer_order_rental_line view) in order to work common validations.
+   -- ex SalesOrderLineCommonValidationCommands.fragment - ValidateCatalogNoBaseCommand referring the name as FreeOfCharge
+   attr_ := Client_Sys.Remove_Attr('FREE_OF_CHARGE', attr_);
+   Client_SYS.Set_Item_Value('FREE_OF_CHARGE_DB', 'FALSE', attr_);    
+ 
+END CRUD_Default_Copy___;
+
+
+@Override
+PROCEDURE CRUD_Create___ (
+   etag_   IN OUT VARCHAR2,
+   key_    IN OUT Customer_Order_Rental_Line_Key,
+   attr_   IN OUT VARCHAR2,
+   info_   OUT VARCHAR2,
+   action_ IN  VARCHAR2 )
+IS
+   tax_calc_method_ VARCHAR2(50);
+BEGIN
+   tax_calc_method_ := Company_Tax_Control_API.Get_External_Tax_Cal_Method_Db(Site_API.Get_Company(Client_SYS.Get_Item_Value('CONTRACT', attr_)));   
+   IF (Client_SYS.Get_Item_Value('DUPLICATE_LINE', attr_) = 'TRUE') THEN
+      Client_SYS.Add_To_Attr('SET_TAX_FROM_ORIGINAL', 'TRUE', attr_);
+   ELSE
+      Client_SYS.Add_To_Attr('SET_TAX_FROM_ORIGINAL', 'FALSE', attr_);
+   END IF;    
+   
+   IF NVL(Client_SYS.Get_Item_Value('DISCONNECT_EXPLIC', attr_), 'FALSE') = 'TRUE' THEN
+      Client_SYS.Set_Item_Value('DISCONNECT_EXP_LICENSE', 'TRUE', attr_);       
+   END IF;
+      
+   super(etag_, key_, attr_, info_, action_);
+   --Add post-processing code here
+END CRUD_Create___;
+
+@Override
+PROCEDURE CRUD_Update___ (
+   etag_ IN OUT VARCHAR2,
+   key_  IN OUT Customer_Order_Rental_Line_Key,
+   attr_ IN OUT VARCHAR2,
+   info_    OUT VARCHAR2,
+   action_  IN  VARCHAR2 )
+IS
+   price_source_      customer_order_line_tab.price_source%TYPE;
+   replicate_changes_ VARCHAR2(5) := 'FALSE';
+BEGIN
+   IF Client_SYS.Get_Item_Value('REFRESSH_PRICE_SOURCE', attr_) = 'TRUE' AND NOT Client_SYS.Item_Exist('PRICE_SOURCE', attr_) THEN
+      price_source_ := Customer_Order_Line_API.Get_Price_Source(key_.order_no, 
+                key_.line_no, 
+                key_.rel_no, 
+                key_.line_item_no);
+      Client_SYS.Add_To_Attr('PRICE_SOURCE', price_source_, attr_);   
+   END IF;
+   
+   replicate_changes_ := Client_SYS.Get_Item_Value('REPLICATE_CHANGES', attr_);
+   IF (replicate_changes_ = 'TRUE') THEN
+      Replicate___(attr_,
+                   key_.order_no, 
+                   key_.line_no, 
+                   key_.rel_no, 
+                   key_.line_item_no);
+   END IF;
+   
+   Client_SYS.Add_To_Attr('SET_TAX_FROM_ORIGINAL', 'FALSE', attr_);
+   super(etag_, key_, attr_, info_, action_);
+END CRUD_Update___;
+
+FUNCTION Set_Order_Price_And_Sales_Line_Total___ (
+   validation_rec_ IN Cust_Ord_Line_Validation_Rec,
+   tax_from_defaults_   IN VARCHAR2,
+   currency_code_       IN VARCHAR2,
+   use_price_incl_tax_  IN BOOLEAN,
+   tax_code_flag_       IN BOOLEAN,
+   new_line_            IN BOOLEAN,
+   duplicate_line_      IN BOOLEAN,
+   tax_edited_          IN BOOLEAN,
+   recalc_line_disc_    IN BOOLEAN,
+   validate_price_list_ IN BOOLEAN,
+   planned_rental_start_date_ IN DATE,
+   free_of_charge_db_   IN BOOLEAN) RETURN Cust_Ord_Line_Validation_Rec
+IS
+   temp_validation_rec_     Cust_Ord_Line_Validation_Rec;
+BEGIN 
+   temp_validation_rec_  := validation_rec_;
+   -- temporay fix for SCUXXW4-20474
+   temp_validation_rec_.planned_rental_start_date  := planned_rental_start_date_;
+   IF validate_price_list_ THEN
+      Sales_Price_List_API.Get_Valid_Price_List(temp_validation_rec_.customer_level, 
+                                                temp_validation_rec_.customer_level_id, 
+                                                temp_validation_rec_.price_list_no, 
+                                                validation_rec_.contract, 
+                                                validation_rec_.catalog_no, 
+                                                validation_rec_.customer_no, 
+                                                customer_order_API.Get_Currency_Code(validation_rec_.order_no),
+                                                planned_rental_start_date_,
+                                                NULL,                                                                      
+                                                'RENTAL PRICES');
+   END IF;                                          
+
+   temp_validation_rec_ := Get_Order_Price___ ( temp_validation_rec_ ,
+                                                tax_from_defaults_,
+                                                use_price_incl_tax_,   
+                                                tax_code_flag_ ,
+                                                new_line_ ,
+                                                duplicate_line_,
+                                                tax_edited_,
+                                                recalc_line_disc_,
+                                                free_of_charge_db_);                                               
+   RETURN Calculate_And_Fetch_Sales_Line_Total___ (temp_validation_rec_ ,
+                                                tax_from_defaults_,
+                                                currency_code_,
+                                                use_price_incl_tax_,   
+                                                tax_code_flag_ ,
+                                                new_line_,
+                                                duplicate_line_,
+                                                tax_edited_,
+                                                recalc_line_disc_,
+                                                free_of_charge_db_);
+                                                
+END Set_Order_Price_And_Sales_Line_Total___;

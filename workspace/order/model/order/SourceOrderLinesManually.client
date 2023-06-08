@@ -1,0 +1,754 @@
+-----------------------------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  ------------------------------------------------------------------------------------
+-- 2022-01-19  ShWtlk  MF21R2-6632, Removed code related to capability check functionality from source order lines.
+-- 2021-12-16  ShWtlk  MF21R2-6257, Modified RunCapabilityCheckCommand to save the due date and removed the navigation to the obsolete assistant.
+-- 2020-11-12  RavDlk  SC2020R1-11228, Handled the enumerations for some attrbutes
+-- 2019-10-31  Hairlk  SCXTEND-1323, Set the startupmode to search.
+-- 2019-04-16  JaThlk  SCUXXW4-9522, Converted from frmSourceOrderLines using MTG Version: 1.34
+-----------------------------------------------------------------------------------------------------------
+client SourceOrderLinesManually;
+component ORDER;
+layer Core;
+projection SourceOrderLinesManuallyHandling;
+
+--------------------------------- FRAGMENTS ---------------------------------
+include fragment CustOrdCust1Selector;
+include fragment NonRentalSalesPartLovSelector;
+@DynamicComponentDependency PURCH
+include fragment PurchasePartLovSelector;
+include fragment SupplySiteReservationDialog;
+
+warningsenabled = CustomerOrderLine;
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+navigator {
+   entry SourceOrderLinesManuallyNavEntry parent OrderNavigator.SalesSourcing at index 200 {
+      label = "Source Order Lines Manually";
+      page Form;
+   }
+}
+
+
+-------------------------------- MAIN PAGES ---------------------------------
+page Form using SourceOrderLinesManuallySet {
+   label = "Source Order Lines Manually";
+   startupmode = search;
+   editmode = MultiField;
+   selector CustomerOrderLineSelector;
+   group SourceOrderLinesGroup;
+   list SourcedCustomerOrderLinesList using GetSourcedCustOrderLine(OrderNo, LineNo, RelNo, LineItemNo, Contract, PartNo);
+   command SourceFromOrderSiteCommand;
+   @DynamicComponentDependency PURCH
+   command SourceFromSuppliersCommand;
+
+}
+
+
+-------------------------------- ASSISTANTS ---------------------------------
+assistant SourceFromOrderSiteAssistant using OrderSiteVirtualSet {
+   label = "Source From Order Site";
+
+   input(OrderNo, LineNo, RelNo, Contract, PartNo, LineItemNo, WantedDeliveryDate, ShipViaCode, CatalogTypeDb, RevisedQtyDue, CatalogNo, PartOwnershipDb, OwnInventLatestReleaseDate);
+   output(OwnInventLatestReleaseDate);
+
+   init command {
+      variable WantedDeliveryDateVar Timestamp;
+      execute {
+         call ConvertToDate(WantedDeliveryDate, Null, Null) into SourceOrderDateStructure;
+         set WantedDeliveryDateVar = SourceOrderDateStructure.WantedDeliveryDate;
+         call GetSrcOwnInventValues(OrderNo, WantedDeliveryDateVar, CustomerNo, ShipAddressNo, AddrFlag, ShipViaCode, DeliveryLeadtime, PickingLeadtime, ExtTransportCalendarId, SupplyCodeDb, Contract, PartNo, RouteId, CatalogTypeDb, RevisedQtyDue, true) into SrcOwnInventValuesStructure;
+         set DeliveryModeTransit = SrcOwnInventValuesStructure.DeliveryModeTransit;
+         set OrderObjState = SrcOwnInventValuesStructure.OrderObjState;
+         set CompanyOwnedStock = SrcOwnInventValuesStructure.CompanyOwnedStock;
+         if [SupplyCode = "ShopOrder"] {
+            set PlannableQty = null;
+         }
+         else {
+            set PlannableQty = SrcOwnInventValuesStructure.PlannableQty;
+         }
+         set EarliestPossibleDelDate = SrcOwnInventValuesStructure.EarliestDeliveryDate;
+         set TotalShipTime = SrcOwnInventValuesStructure.TotalShippingTime;
+         set PlannedDueDate = SrcOwnInventValuesStructure.PlannedDueDate;
+         set Distance = SrcOwnInventValuesStructure.TotalDistance;
+         set ExpectedAdditionalCost = SrcOwnInventValuesStructure.TotalExpectedCost;
+         set FulfillsDemandVar = SrcOwnInventValuesStructure.FulfillsDemand;
+         set SupplyCode = SrcOwnInventValuesStructure.SupplyCode;
+         if [FulfillsDemandVar = "TRUE"] {
+            set FulfillsDemand = true;
+         }
+         else {
+            set FulfillsDemand = false;
+         }
+      }
+
+   }
+
+   singlestep {
+      group OrderSiteGroup;
+   }
+   command SourcingFromOrderSiteOkCommand;
+   command SourcingFromOrderSiteCancelCommand;
+}
+
+@DynamicComponentDependency PURCH
+assistant SourceFromSuppliersAssistant using PurchasePartSupplierHeaderVirtualSet {
+   label = "Source From Suppliers";
+
+   input(OrderNo, LineNo, RelNo, LineItemNo, Contract, PartNo, WantedDeliveryDate, CatalogNo, PartOwnershipDb, CustomerNo, ShipAddrNo, AddrFlagDb, RouteId, RevisedQtyDue, ShipViaCode, DeliveryLeadtime, PickingLeadtime, ExtTransportCalendarId);
+
+   singlestep {
+      group SupplierHeaderGroup;
+      list PurchasePartSupplierList(PurchasePartSuppliersArray);
+   }
+   command SourcingFromSuppliersOkCommand;
+   command SourcingFromSuppliersCancelCommand;
+}
+
+
+--------------------------------- COMMANDS ----------------------------------
+
+----------------------------- Source From Order Site ------------------------
+command SourceFromOrderSiteCommand for SourceOrderLinesManually {
+   label = "Source From Order Site";
+   enabled = [true];
+   variable OwnInventLatestReleaseDateVar Timestamp;
+   execute {
+      assistant SourceFromOrderSiteAssistant(OrderNo, LineNo, RelNo, Contract, PartNo, LineItemNo, WantedDeliveryDate, ShipViaCode, CatalogTypeDb, RevisedQtyDue, CatalogNo, PartOwnershipDb, OwnInventLatestReleaseDate) into(OwnInventLatestReleaseDateVar) {
+         when OK {
+            set OwnInventLatestReleaseDate = OwnInventLatestReleaseDateVar;
+         }
+         when CANCEL {
+            set OwnInventLatestReleaseDate = OwnInventLatestReleaseDateVar;
+         }
+
+      }
+   }
+
+}
+
+command SourcingFromOrderSiteOkCommand for OrderSiteVirtual {
+   label = "OK";
+   variable WantedDeliveryDateVar Timestamp;
+   variable PlannedDueDateVar Timestamp;
+   execute {
+      if [CatalogTypeDb = "INV" and PartNo != null] {
+         if [SupplyCodeTemp = "ShopOrder"] {
+            set SupplyCodeDb = "SO";
+         }
+         else {
+            set SupplyCodeDb = "IO";
+         }
+      }
+      else {
+         set SupplyCodeDb = "NO";
+      }
+      call ConvertToDate(WantedDeliveryDate, PlannedDueDate, EarliestPossibleDelDate) into SourceOrderDateStructure;
+      set WantedDeliveryDateVar = SourceOrderDateStructure.WantedDeliveryDate;
+      set PlannedDueDateVar = SourceOrderDateStructure.PlannedDueDate;
+      call CreateSourcingLines(OrderNo, LineNo, RelNo, LineItemNo, SourcedQty, ShipViaCode, SupplyCodeDb, WantedDeliveryDateVar, PlannedDueDateVar, OwnInventLatestReleaseDate);
+      exit OK;
+   }
+
+}
+
+command SourcingFromOrderSiteCancelCommand for OrderSiteVirtual {
+   label = "Cancel";
+   execute {
+      exit CANCEL;
+   }
+}
+
+----------------------------- Source From Suppliers -------------------------
+@DynamicComponentDependency PURCH
+command SourceFromSuppliersCommand for SourceOrderLinesManually {
+   label = "Source From Suppliers";
+   enabled = [true];
+   execute {
+      assistant SourceFromSuppliersAssistant(OrderNo, LineNo, RelNo, LineItemNo, Contract, PartNo, WantedDeliveryDate, CatalogNo, PartOwnershipDb, CustomerNo, ShipAddrNo, AddrFlag, RouteId, RevisedQtyDue, ShipViaCode, DeliveryLeadtime, PickingLeadtime, ExtTransportCalendarId) {
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+
+@DynamicComponentDependency PURCH
+command SourcingFromSuppliersOkCommand for PurchasePartSupplierHeaderVirtual {
+   label = "OK";
+   execute {
+      call CreateSrcLinesFromSuppliers(Objkey, OrderNo, LineNo, RelNo, LineItemNo);
+   }
+}
+
+@DynamicComponentDependency PURCH
+command SourcingFromSuppliersCancelCommand for PurchasePartSupplierHeaderVirtual {
+   label = "Cancel";
+   execute {
+      exit CANCEL;
+   }
+}
+
+@DynamicComponentDependency PURCH
+command InventoryAvailabilityPlanningCommand  for PurchasePartSupplierVirtual {
+   label = "Inventory Part Availability Planning";
+   enabled = [(SupplySite != null and InventoryPartExist = 1) or(SupplySite = null and PartNo != null)];
+   mode = SelectedRecords;
+   execute {
+      navigate "page/InventoryPartAvailabilityPlanning/Form?$filter=PartNo eq $[PartNo] and Contract eq $[Contract] and ConfigurationId eq '*' and ProjectId eq '*'";
+   }
+}
+
+----------------------------- Sourced Order Lines ---------------------------
+command LocalSiteReservationCommand for SourcedCustOrderLine {
+   enabled = [SupplyCode = "InventOrder" and LineItemNo >= 0];
+   label = "Local Site Reservation";
+   variable ReservationsVar {
+      type = Text;
+   }
+   variable FormSourceVar {
+      type = Text;
+   }
+   variable SuccessVar {
+      type = Boolean;
+   }
+
+   execute {
+      set FormSourceVar = "SOURCING";
+      dialog SupplySiteReservationDialog(OrderNo, LineNo, RelNo, LineItemNo, FormSourceVar) into(ReservationsVar) {
+         when OK {
+
+            if [ReservationsVar = "MANUAL"] {
+               if [FormSourceVar = "ORDER"] {
+                  navigate "page/ManualReservationsOnSupplySite/Form?$filter=OrderNo eq $[OrderNo] and LineNo eq $[LineNo] and RelNo eq $[RelNo] and LineItemNo eq $[LineItemNo]";
+               }
+               else {
+                  navigate "page/ManualReservationsOnSourcedSupplySite/Form?$filter=OrderNo eq $[OrderNo] and LineNo eq $[LineNo] and RelNo eq $[RelNo] and LineItemNo eq $[LineItemNo] and SourceId eq $[SourceId]";
+               }
+            }
+            else {
+               call ReserveAutomatic(OrderNo, LineNo, RelNo, LineItemNo, FormSourceVar, SourceId) into SuccessVar;
+               if [SuccessVar] {
+                  // Supply chain reservation has been made
+                  if [FormSourceVar = "ORDER"] {
+                     info("The Customer Order Line has been automatically reserved.");
+                  }
+                  else {
+                     info("The Sourced Line has been automatically reserved.");
+                  }
+               }
+               else {
+                  // Nothing has been reserved or error occured
+                  if [FormSourceVar = "ORDER"] {
+                     info("Nothing has been reserved automatically on the Customer Order Line.");
+                  }
+                  else {
+                     info("Nothing has been reserved automatically on the Sourced Line.");
+                  }
+               }
+            }
+         }
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+
+}
+
+command SupplySiteReservationCommand for SourcedCustOrderLine {
+   enabled = [(SupplyCode = "IntPurchTrans" or SupplyCode = "IntPurchDir") and LineItemNo >= 0 and IsSupplySiteAllowed > 0];
+   label = "Supply Site Reservation";
+   variable ReservationsVar {
+      type = Text;
+   }
+   variable FormSourceVar {
+      type = Text;
+   }
+   variable SuccessVar {
+      type = Boolean;
+   }
+
+   execute {
+      set FormSourceVar = "SOURCING";
+      dialog SupplySiteReservationDialog(OrderNo, LineNo, RelNo, LineItemNo, FormSourceVar) into(ReservationsVar) {
+         when OK {
+
+            if [ReservationsVar = "MANUAL"] {
+               if [FormSourceVar = "ORDER"] {
+                  navigate "page/ManualReservationsOnSupplySite/Form?$filter=OrderNo eq $[OrderNo] and LineNo eq $[LineNo] and RelNo eq $[RelNo] and LineItemNo eq $[LineItemNo]";
+               }
+               else {
+                  navigate "page/ManualReservationsOnSourcedSupplySite/Form?$filter=OrderNo eq $[OrderNo] and LineNo eq $[LineNo] and RelNo eq $[RelNo] and LineItemNo eq $[LineItemNo] and SourceId eq $[SourceId]";
+               }
+            }
+            else {
+               call ReserveAutomatic(OrderNo, LineNo, RelNo, LineItemNo, FormSourceVar, SourceId) into SuccessVar;
+               if [SuccessVar] {
+                  // Supply chain reservation has been made
+                  if [FormSourceVar = "ORDER"] {
+                     info("The Customer Order Line has been automatically reserved.");
+                  }
+                  else {
+                     info("The Sourced Line has been automatically reserved.");
+                  }
+               }
+               else {
+                  // Nothing has been reserved or error occured
+                  if [FormSourceVar = "ORDER"] {
+                     info("Nothing has been reserved automatically on the Customer Order Line.");
+                  }
+                  else {
+                     info("Nothing has been reserved automatically on the Sourced Line.");
+                  }
+               }
+            }
+         }
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+
+--------------------------------- SELECTORS ---------------------------------
+selector CustomerOrderLineSelector for SourceOrderLinesManually {
+   label = "${OrderNo} - ${LineNo} - ${RelNo}";
+   static OrderNo;
+   static LineNo;
+   static RelNo;
+}
+
+---------------------------------- GROUPS -----------------------------------
+group SourceOrderLinesGroup for SourceOrderLinesManually {
+   label = "";
+   field OrderNoRef {
+      size = Small;
+   }
+   field LineNo {
+      size = Small;
+   }
+   field RelNo {
+      size = Small;
+   }
+   field Contract {
+      size = Small;
+   }
+   lov DeliverToCustomerNoRef with ReferenceCustOrdCust1Selector {
+      preview = CustOrdCust1Card;
+      size = Small;
+   }
+   field ShipAddrNo {
+      size = Small;
+      visible = [AddrFlag = false];
+   }
+   field AddrFlag {
+      size = Small;
+      enumerationtrue = "Yes";
+      enumerationfalse = "No";
+      truelabel = "Yes";
+      falselabel = "No";
+   }
+   field ConditionCode {
+      visible = [ConditionCode != null];
+      size = Small;
+   }
+   lov CatalogNoRef with ReferenceNonRentalSalesPartLovSelector {
+      preview = NonRentalSalesPartLovCard;
+      size = Small;
+   }
+   @DynamicComponentDependency PURCH
+   lov PurchasePartNoRef with ReferencePurchasePartLovSelector {
+      preview = PurchasePartLovCard;
+      size = Small;
+   }
+   measure BuyQtyDue(SalesUnitMeas) {
+      size = Small;
+      validate command {
+         variable TotalSourcedQtyVar Number;
+         variable QuantityVar Number;
+
+         execute {
+            call GetTotalSourcedQty(OrderNo, LineNo, RelNo, LineItemNo) into TotalSourcedQtyVar;
+            if [BuyQtyDue != null] {
+               set QuantityVar = "#{BuyQtyDue*ConvFactor/InvertedConvFactor}";
+            }
+            if [TotalSourcedQtyVar > QuantityVar] {
+               warning("Sourced quantity exceeds revised quantity");
+            }
+         }
+      }
+   }
+   measure RevisedQtyDue(UoM) {
+      size = Small;
+   }
+   field WantedDeliveryDate {
+      size = Small;
+   }
+   field CatalogTypeDb {
+      columnexclude = [true];
+      visible = [false];
+   }
+   field RevisedQtyDue {
+      columnexclude = [true];
+      visible = [false];
+   }
+   field CatalogNo {
+      columnexclude = [true];
+      visible = [false];
+   }
+   field PartOwnershipDb {
+      columnexclude = [true];
+      visible = [false];
+   }
+   field PartNoRef {
+      visible = [false];
+   }
+}
+
+group OrderSiteGroup for OrderSiteVirtual {
+   field SourcedQty;
+   field WantedDeliveryDate {
+      validate command {
+         variable WantedDeliveryDateVar Date;
+         execute {
+            call ConvertToDate(WantedDeliveryDate, Null, Null) into SourceOrderDateStructure;
+            set WantedDeliveryDateVar = SourceOrderDateStructure.WantedDeliveryDate;
+            call GetSrcOwnInventValues(OrderNo, WantedDeliveryDateVar, CustomerNo, ShipAddressNo, AddrFlag, ShipViaCode, DeliveryLeadtime, PickingLeadtime, ExtTransportCalendarId, SupplyCodeDb, Contract, PartNo, RouteId, CatalogTypeDb, RevisedQtyDue, true) into SrcOwnInventValuesStructure;
+            set DeliveryModeTransit = SrcOwnInventValuesStructure.DeliveryModeTransit;
+            set OrderObjState = SrcOwnInventValuesStructure.OrderObjState;
+            set CompanyOwnedStock = SrcOwnInventValuesStructure.CompanyOwnedStock;
+            if [SupplyCode = "ShopOrder"] {
+               set PlannableQty = null;
+            }
+            else {
+               set PlannableQty = SrcOwnInventValuesStructure.PlannableQty;
+            }
+            set EarliestPossibleDelDate = SrcOwnInventValuesStructure.EarliestDeliveryDate;
+            set TotalShipTime = SrcOwnInventValuesStructure.TotalShippingTime;
+            set PlannedDueDate = SrcOwnInventValuesStructure.PlannedDueDate;
+            set Distance = SrcOwnInventValuesStructure.TotalDistance;
+            set ExpectedAdditionalCost = SrcOwnInventValuesStructure.TotalExpectedCost;
+            set FulfillsDemandVar = SrcOwnInventValuesStructure.FulfillsDemand;
+            if [FulfillsDemandVar = "TRUE"] {
+               set FulfillsDemand = true;
+            }
+            else {
+               set FulfillsDemand = false;
+            }
+         }
+      }
+   }
+   field ShipViaCodeRef {
+      validate command {
+         variable WantedDeliveryDateVar Date;
+         execute {
+            call ValidateShipVia(ShipViaCode);
+            call ConvertToDate(WantedDeliveryDate, Null, Null) into SourceOrderDateStructure;
+            set WantedDeliveryDateVar = SourceOrderDateStructure.WantedDeliveryDate;
+            call GetSrcOwnInventValues(OrderNo, WantedDeliveryDateVar, CustomerNo, ShipAddressNo, AddrFlag, ShipViaCode, DeliveryLeadtime, PickingLeadtime, ExtTransportCalendarId, SupplyCodeDb, Contract, PartNo, RouteId, CatalogTypeDb, RevisedQtyDue, true) into SrcOwnInventValuesStructure;
+            set DeliveryModeTransit = SrcOwnInventValuesStructure.DeliveryModeTransit;
+            set OrderObjState = SrcOwnInventValuesStructure.OrderObjState;
+            set CompanyOwnedStock = SrcOwnInventValuesStructure.CompanyOwnedStock;
+            if [SupplyCode = "ShopOrder"] {
+               set PlannableQty = null;
+            }
+            else {
+               set PlannableQty = SrcOwnInventValuesStructure.PlannableQty;
+            }
+            set EarliestPossibleDelDate = SrcOwnInventValuesStructure.EarliestDeliveryDate;
+            set TotalShipTime = SrcOwnInventValuesStructure.TotalShippingTime;
+            set PlannedDueDate = SrcOwnInventValuesStructure.PlannedDueDate;
+            set Distance = SrcOwnInventValuesStructure.TotalDistance;
+            set ExpectedAdditionalCost = SrcOwnInventValuesStructure.TotalExpectedCost;
+            set FulfillsDemandVar = SrcOwnInventValuesStructure.FulfillsDemand;
+            if [FulfillsDemandVar = "TRUE"] {
+               set FulfillsDemand = true;
+            }
+            else {
+               set FulfillsDemand = false;
+            }
+         }
+      }
+
+   }
+   field PlannableQty {
+      visible = [PlannableQty != null];
+   }
+   field SupplyCode {
+      validate command {
+         variable WantedDeliveryDateVar Date;
+         execute {
+            set SupplyCodeTemp = SupplyCode;
+            call ConvertToDate(WantedDeliveryDate, Null, Null) into SourceOrderDateStructure;
+            set WantedDeliveryDateVar = SourceOrderDateStructure.WantedDeliveryDate;
+            call GetSrcOwnInventValues(OrderNo, WantedDeliveryDateVar, CustomerNo, ShipAddressNo, AddrFlag, ShipViaCode, DeliveryLeadtime, PickingLeadtime, ExtTransportCalendarId, SupplyCodeDb, Contract, PartNo, RouteId, CatalogTypeDb, RevisedQtyDue, true) into SrcOwnInventValuesStructure;
+            set DeliveryModeTransit = SrcOwnInventValuesStructure.DeliveryModeTransit;
+            set OrderObjState = SrcOwnInventValuesStructure.OrderObjState;
+            set CompanyOwnedStock = SrcOwnInventValuesStructure.CompanyOwnedStock;
+            if [SupplyCode = "ShopOrder"] {
+               set PlannableQty = null;
+            }
+            else {
+               set PlannableQty = SrcOwnInventValuesStructure.PlannableQty;
+            }
+            set EarliestPossibleDelDate = SrcOwnInventValuesStructure.EarliestDeliveryDate;
+            set TotalShipTime = SrcOwnInventValuesStructure.TotalShippingTime;
+            set PlannedDueDate = SrcOwnInventValuesStructure.PlannedDueDate;
+            set Distance = SrcOwnInventValuesStructure.TotalDistance;
+            set ExpectedAdditionalCost = SrcOwnInventValuesStructure.TotalExpectedCost;
+            set FulfillsDemandVar = SrcOwnInventValuesStructure.FulfillsDemand;
+            if [FulfillsDemandVar = "TRUE"] {
+               set FulfillsDemand = true;
+            }
+            else {
+               set FulfillsDemand = false;
+            }
+         }
+      }
+   }
+   field Distance;
+   field EarliestPossibleDelDate;
+   field TotalShipTime;
+   field ExpectedAdditionalCost;
+   field FulfillsDemand;
+   field PlannedDueDate {
+      columnexclude = [true];
+      visible = [false];
+   }
+   field SupplyCodeDb {
+      columnexclude = [true];
+      visible = [false];
+   }
+   field CatalogTypeDb {
+      columnexclude = [true];
+      visible = [false];
+   }
+   field DeliveryModeTransit {
+      columnexclude = [true];
+      visible = [false];
+   }
+   field OrderObjState {
+      columnexclude = [true];
+      visible = [false];
+   }
+   field CompanyOwnedStock {
+      columnexclude = [true];
+      visible = [false];
+   }
+   field PartOwnershipDb {
+      columnexclude = [true];
+      visible = [false];
+   }
+   field CatalogNo {
+      columnexclude = [true];
+      visible = [false];
+   }
+}
+
+@DynamicComponentDependency PURCH
+group SupplierHeaderGroup for PurchasePartSupplierHeaderVirtual {
+   label = "Quantity Details";
+   field Contract {
+      visible = [false];
+   }
+   field PartNo {
+      visible = [false];
+   }
+   field OrderNo {
+      visible = [false];
+   }
+   field LineNo {
+      visible = [false];
+   }
+   field RelNo {
+      visible = [false];
+   }
+   field LineItemNo {
+      visible = [false];
+   }
+   field WantedDeliveryDate {
+      visible = [false];
+   }
+   field CatalogNo {
+      visible = [false];
+   }
+   field PartOwnershipDb {
+      visible = [false];
+   }
+   field CustomerNo {
+      visible = [false];
+   }
+   field ShipAddrNo {
+      visible = [false];
+   }
+   field AddrFlagDb {
+      visible = [false];
+   }
+   field RouteId {
+      visible = [false];
+   }
+   field RevisedQtyDue {
+      visible = [false];
+   }
+   field ShipViaCode {
+      visible = [false];
+   }
+   field DeliveryLeadtime {
+      visible = [false];
+   }
+   field PickingLeadtime {
+      visible = [false];
+   }
+   field ExtTransportCalendarId {
+      visible = [false];
+   }
+   field AlreadySourcedQty {
+      visible = [false];
+   }
+   computedfield TotalSourcingQty {
+      value = "#{PurchasePartSuppliersArray.sum(SourcedQty) +  AlreadySourcedQty}";
+      type = Number;
+   }
+   computedfield RemainingQty {
+      value = "#{RevisedQtyDue - (AlreadySourcedQty + PurchasePartSuppliersArray.sum(SourcedQty))}";
+      type = Number;
+   }
+}
+
+
+----------------------------------- LISTS -----------------------------------
+@DynamicComponentDependency PURCH
+list PurchasePartSupplierList for PurchasePartSupplierVirtual {
+   label = "Purchase Part Supplier";
+
+   field SourcedQty;
+   field PartNo {
+      columnexclude = [true];
+   }
+   field Contract {
+      columnexclude = [true];
+   }
+   field InternalSupplier {
+      columnexclude = [true];
+   }
+   field WantedDeliveryDate {
+      validate command {
+         variable WantedDeliveryDateVar Timestamp;
+         execute {
+            call ConvertToDate(WantedDeliveryDate, Null, Null) into SourceOrderDateStructure;
+            set WantedDeliveryDateVar = SourceOrderDateStructure.WantedDeliveryDate;
+            call ValidateSupplierSiteInfo(parent.ShipViaCode, SupplierShipViaTransit, WantedDeliveryDateVar, parent.CustomerNo, parent.ShipAddrNo, parent.AddrFlagDb, VendorNo, Contract, CatalogNo, PartNo, parent.RouteId, parent.RevisedQtyDue, parent.DeliveryLeadtime, parent.PickingLeadtime, parent.ExtTransportCalendarId, CurrencyCode, DeliveryMode, DeliveryModeTransit, false, false) into SrcSupplierValuesStructure;
+            set DesiredTimeToDelivery = SrcSupplierValuesStructure.DddTotalDelLeadtime;
+            set EarliestPossibleDeliveryDate = SrcSupplierValuesStructure.EarliestPossibleDeliveryDate;
+            set EpDueDate = SrcSupplierValuesStructure.EpddAtSupplier;
+            set MinTimeToDelivery = SrcSupplierValuesStructure.EpddTotalDelLeadtime;
+            set TotalDistance = SrcSupplierValuesStructure.TotalDistance;
+            set TotalShippingTime = SrcSupplierValuesStructure.TotalShippingTime;
+            set ExpectedAdditionalCost = SrcSupplierValuesStructure.TotExpAdditionalCost;
+            set PlannedDueDate = SrcSupplierValuesStructure.SupplierPlannedDueDate;
+            set CoPlannableQuantity = SrcSupplierValuesStructure.AvailabletoPromiseQty;
+            set SupplySiteDueDate = SrcSupplierValuesStructure.SupplySiteDueDate;
+         }
+      }
+   }
+   field DeliveryMode {
+      validate command {
+         variable WantedDeliveryDateVar Timestamp;
+         execute {
+            call ConvertToDate(WantedDeliveryDate, NULL, NULL) into SourceOrderDateStructure;
+            set WantedDeliveryDateVar = SourceOrderDateStructure.WantedDeliveryDate;
+            call ValidateSupplierSiteInfo(parent.ShipViaCode, SupplierShipViaTransit, WantedDeliveryDateVar, parent.CustomerNo, parent.ShipAddrNo, parent.AddrFlagDb, VendorNo, Contract, CatalogNo, PartNo, parent.RouteId, parent.RevisedQtyDue, parent.DeliveryLeadtime, parent.PickingLeadtime, parent.ExtTransportCalendarId, CurrencyCode, DeliveryMode, DeliveryModeTransit, true, false) into SrcSupplierValuesStructure;
+            set DesiredTimeToDelivery = SrcSupplierValuesStructure.DddTotalDelLeadtime;
+            set EarliestPossibleDeliveryDate = SrcSupplierValuesStructure.EarliestPossibleDeliveryDate;
+            set EpDueDate = SrcSupplierValuesStructure.EpddAtSupplier;
+            set MinTimeToDelivery = SrcSupplierValuesStructure.EpddTotalDelLeadtime;
+            set TotalDistance = SrcSupplierValuesStructure.TotalDistance;
+            set TotalShippingTime = SrcSupplierValuesStructure.TotalShippingTime;
+            set ExpectedAdditionalCost = SrcSupplierValuesStructure.TotExpAdditionalCost;
+            set PlannedDueDate = SrcSupplierValuesStructure.SupplierPlannedDueDate;
+            set SupplierShipViaTransit = SrcSupplierValuesStructure.ShipViaCode;
+            set CoPlannableQuantity = SrcSupplierValuesStructure.AvailabletoPromiseQty;
+            set SupplySiteDueDate = SrcSupplierValuesStructure.SupplySiteDueDate;
+            set SupplyCodeDb = SrcSupplierValuesStructure.SupplyCodeDb;
+         }
+      }
+   }
+   lov SupplierShipViaCodeRef with ReferenceMpccomShipViaSelector {
+      validate command {
+         variable WantedDeliveryDateVar Timestamp;
+         execute {
+            call ConvertToDate(WantedDeliveryDate, NULL, NULL) into SourceOrderDateStructure;
+            set WantedDeliveryDateVar = SourceOrderDateStructure.WantedDeliveryDate;
+            call ValidateSupplierSiteInfo(parent.ShipViaCode, SupplierShipViaTransit, WantedDeliveryDateVar, parent.CustomerNo, parent.ShipAddrNo, parent.AddrFlagDb, VendorNo, Contract, parent.CatalogNo, PartNo, parent.RouteId, parent.RevisedQtyDue, parent.DeliveryLeadtime, parent.PickingLeadtime, parent.ExtTransportCalendarId, CurrencyCode, DeliveryMode, DeliveryModeTransit, false, true) into SrcSupplierValuesStructure;
+            set DesiredTimeToDelivery = SrcSupplierValuesStructure.DddTotalDelLeadtime;
+            set EarliestPossibleDeliveryDate = SrcSupplierValuesStructure.EarliestPossibleDeliveryDate;
+            set EpDueDate = SrcSupplierValuesStructure.EpddAtSupplier;
+            set MinTimeToDelivery = SrcSupplierValuesStructure.EpddTotalDelLeadtime;
+            set TotalDistance = SrcSupplierValuesStructure.TotalDistance;
+            set TotalShippingTime = SrcSupplierValuesStructure.TotalShippingTime;
+            set ExpectedAdditionalCost = SrcSupplierValuesStructure.TotExpAdditionalCost;
+            set PlannedDueDate = SrcSupplierValuesStructure.SupplierPlannedDueDate;
+            set CoPlannableQuantity = SrcSupplierValuesStructure.AvailabletoPromiseQty;
+            set SupplySiteDueDate = SrcSupplierValuesStructure.SupplySiteDueDate;
+         }
+      }
+   }
+   field VendorNoRef;
+   field SupplySite;
+   field SupplierName;
+   field PrimarySupplier;
+   field FulfillsDemand;
+   field CoPlannableQuantity;
+   field SupplySiteDueDate;
+   field DesiredTimeToDelivery;
+   field EarliestPossibleDeliveryDate;
+   field EpDueDate;
+   field MinTimeToDelivery;
+   field TotalDistance;
+   field TotalShippingTime;
+   field ExpectedAdditionalCost;
+   field AvailableQty;
+   command InventoryAvailabilityPlanningCommand;
+}
+
+list SourcedCustomerOrderLinesList for SourcedCustOrderLine {
+   label = "Sourced Customer Order Lines";
+   field SourceId;
+   @DynamicComponentDependency PURCH
+   field VendorNoRef;
+   @DynamicComponentDependency PURCH
+   field SupplierName;
+   field SupplySite;
+   field ShipViaCodeRef;
+   field SupplyCode;
+   field SourcedQty;
+   field SupplySiteQtyReserved;
+   field WantedDeliveryDate;
+//   @DynamicComponentDependency PURCH
+   field PartType;
+   field PlannedDueDate;
+   field SupplySiteDueDate;
+   field LatestReleaseDate;
+   summary = SourcedQty;
+   command LocalSiteReservationCommand;
+   command SupplySiteReservationCommand;
+}
+
+----------------------------------- CARDS -----------------------------------
+
+---------------------------------- DIALOGS ----------------------------------
+
+---------------------------------- CHARTS -----------------------------------
+
+--------------------------------- CALENDARS ---------------------------------
+
+---------------------------------- SHEETS -----------------------------------
+
+----------------------------- STATE INDICATORS ------------------------------
+
+----------------------------------- TREES -----------------------------------
+
+---------------------------------- PLUGINS ----------------------------------
+
+------------------------------- IMAGE VIEWERS -------------------------------

@@ -1,0 +1,1548 @@
+--------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  ---------------------------------------------------------------
+-- 2021-03-04  MaEelk  SC2020R1-1662, Connected return_material_charge_info to ReturnMaterialCharge entity.
+-- 2019-10-17  hairlk  SCXTEND-805, Avalara integration, Added lov CustomerTaxUsageTypeRef to RMA charges.
+-- 2019-05-17  fgusse  SCUXXW4-20685, Added translatable in DocumentTextCommand
+-- 2019-01-28  IzShlk  SCUXXW4-1381, Converted from tbwReturnMaterialCharge Charges Tab using MTG Version: 1.34
+--------------------------------------------------------------------------------------
+
+fragment ReturnMaterialChargeTab;
+component ORDER;
+layer Core;
+description "Use this API to enter and maintain charges in connection with the RMA or the RMA line.";
+include fragment CustomerOrderChargeLovSelector;
+include fragment TaxCalcStructureActiveSelector;
+include fragment TaxLiabilityLovSelector;
+include fragment TaxCodeRestrictedSelector;
+include fragment TaxCodeExemptRestrictedSelector;
+include fragment TaxLinesCommonAssistant;
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+
+--------------------------------- COMMANDS ----------------------------------
+@Override
+command BulkRelease for ReturnMaterialCharge {
+   label = "Release";
+   enabled = [Objstate = "Planned" and RmaNo != null and substring(Condition, 0, 1) != "*"];
+   mode = SelectedRecords;
+   bulkexecute {
+      confirm("This will RELEASE the selected RMA charge/charges") {
+         when OK {
+            bulkcall Release();
+            refresh;
+         }
+         when CANCEL {
+            exit CANCEL;
+         }
+      }
+   }
+}
+
+@Override
+command BulkDeny for ReturnMaterialCharge {
+   label = "Deny";
+   enabled = [Objstate = "Planned" and RmaNo != null and substring(Condition, 1, 1) != "*"];
+   mode = SelectedRecords;
+   bulkexecute {
+      confirm("This will DENY any returns of the selected RMA line/lines") {
+         when OK {
+            bulkcall Deny();
+            refresh;
+         }
+         when CANCEL {
+            exit CANCEL;
+         }
+      }
+   }
+}
+
+command RMAChargeTaxLinesCommand for ReturnMaterialCharge {
+   label = "RMA Charge Tax Lines";
+   mode = SingleRecord;
+   enabled = [true];
+
+   variable PackageNameVar Text;
+   variable ReadOnlyVar Boolean;
+   variable CalcBaseVar Text;
+   variable TitleVar Text;
+   variable SetDefaultCmdVisibleVar Boolean;
+
+   execute {
+      set PackageNameVar = "RETURN_MATERIAL_CHARGE_API";
+      if [parent.UsePriceInclTaxDb = true] {
+         set CalcBaseVar = "GROSS_BASE";
+      }
+      else {
+         set CalcBaseVar = "NET_BASE";
+      }
+
+      if [Objstate = "Denied"  or Objstate = "Cancelled" or parent.TaxCalcMethod != "NOT_USED"] {
+         set ReadOnlyVar = true;
+      }
+      else {
+         set ReadOnlyVar = false;
+      }
+
+      set TitleVar = "Return Material Charge Tax Lines" {
+         translatable = true;
+      }
+
+      set SetDefaultCmdVisibleVar = true;
+
+      assistant TaxLinesCommonAssistant(keyref, PackageNameVar, ReadOnlyVar, CalcBaseVar, TitleVar, null, SetDefaultCmdVisibleVar) {
+         when OK {
+            call RefreshChargeLines();
+            exit OK;
+         }
+         when CANCEL {
+            exit CANCEL;
+         }
+      }
+   }
+}
+command ApproveforCreditCommand for ReturnMaterialCharge {
+   label = "Approve for Credit";
+   enabled = [Objstate = "Released" and RmaNo != null and substring(Condition, 4, 1) != "*"];
+   mode = SelectedRecords;
+   bulkexecute {
+      confirm("This will APPROVE the selected RMA line/lines for credit") {
+         when OK {
+            bulkcall ApproveForCreditCharge();
+            refresh;
+         }
+         when CANCEL {
+            exit CANCEL;
+         }
+      }
+   }
+}
+command RemoveCreditApprovalCommand for ReturnMaterialCharge {
+   label = "Remove Credit Approval";
+   enabled = [Objstate = "Released" and RmaNo != null and substring(Condition, 5, 1) != "*"];
+   mode = SelectedRecords;
+   bulkexecute {
+      confirm("This will remove the approval for credit of the selected RMA line/lines") {
+         when OK {
+            bulkcall RemoveCreditApprovalCharge();
+            refresh;
+         }
+         when CANCEL {
+            exit CANCEL;
+         }
+      }
+   }
+}
+command CreateCreditInvoiceCommand for ReturnMaterialCharge {
+   label = "Create Credit Invoice";
+   enabled = [Objstate = "Released" and RmaNo != null and substring(Condition, 2, 1) != "*"];
+   mode = SelectedRecords;
+   variable RmaSelectionVar
+      {
+      type = Text;
+   }
+
+   bulkexecute {
+      stringify(records, "RMA_NO=${RmaNo}^RMA_CHARGE_NO=${RmaChargeNo}^", JSON) into RmaSelectionVar;
+      assistant CreateCreditInvoice.CreateCreditInvoiceAssistant(RmaSelectionVar, "RMC") {
+         when OK {
+            exit OK;
+         }
+      }
+   }
+}
+command ViewCreditInvoiceCommand for ReturnMaterialCharge {
+   label = "View Credit Invoice";
+   enabled = [Objstate = "Credited" and RmaNo != null and substring(Condition, 3, 1) != "*"];
+   mode = SelectedRecords;
+   bulkexecute {
+      bulknavigate "page/CustomerOrderInvoice/Form?$filter=Company eq $[Company] and InvoiceId eq $[CreditInvoiceId]";
+   }
+}
+command DocumentTextCommand for ReturnMaterialCharge {
+   label = "Document Text";
+   enabled = [NoteId != null];
+
+   variable LabelTextVar;
+   execute {
+      set LabelTextVar = " for Return Material Authorization - ${RmaNo} ${RmaChargeNo}" {
+         translatable = true;
+      }
+      assistant DocumentText(NoteId, LabelTextVar) {
+         when NO {
+            exit CANCEL;
+         }
+      }
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+
+list ReturnMaterialChargeList for ReturnMaterialCharge {
+   crudactions {
+      new {
+         enabled = [not(parent.Objstate in("Denied", "Cancelled"))];
+      }
+      edit {
+         enabled = [not(parent.Objstate in("Denied", "Cancelled"))];
+      }
+      delete {
+         enabled = [not(parent.Objstate in("Denied", "Cancelled"))];
+      }
+   }
+   field RmaChargeNo;
+   badge Objstate {
+      label = "Status";
+      emphasis StateBlocked = [Objstate = "Denied"];
+      emphasis Progress1 = [Objstate = "Planned"];
+      emphasis Progress5 = [Objstate = "Released"];
+      emphasis Progress10 = [Objstate = "Credited"];
+      style = TextOnly;
+   }
+   field ChargeTypeRef {
+      size = Small;
+      validate command {
+         variable ChangeValueFlag Boolean;
+
+         variable ValidateCOChargeStructVar {
+            type = ValidateCustomerOrderChargeStructure;
+         }
+         variable NewLineVar {
+            type = Boolean;
+         }
+
+         execute {
+            if [isNew] {
+               set NewLineVar = true;
+            }
+            else {
+               set NewLineVar = false;
+            }
+
+            set ChangeValueFlag = false;
+            if [ChargeType != original.ChargeType] {
+               set ChangeValueFlag = true;
+            }
+            -- Fetch Customer order Charge information, CalculateLinePrices and CalculateTotalChargeAmount
+            call CustomerOrderChargeInfo(RmaNo, RmaChargeNo, parent.Company, Contract, OrderNo, Charge, MultipleTaxLines, SequenceNo, ChargeAmount, ChargeAmountInclTax, BaseChargeAmount, BaseChargeAmtInclTax, TotalBase, FeeCode, TaxCalcStructureId, TaxClassId, parent.ShipAddrNo, parent.DateRequested, parent.CustomerNo, parent.CustomerNoCredit, parent.TaxLiability, parent.SupplyCountryDb, DeliveryType, ChargeType, parent.UsePriceInclTaxDb, parent.CurrencyCode, CurrencyRate, TaxLiability, TaxLiabilityTypeDb, ChargedQty, FetchTaxCodes, TaxCodeFlag, NewLineVar, TaxEditedFlag, true, false, ChangeValueFlag) into ValidateCOChargeStructVar;
+
+            if [SequenceNo = null] {
+               set OrderNo = null;
+               set ChargePercentBasis = null;
+               set BaseChargePercentBasis = null;
+            }
+
+            set ChargeType = ValidateCOChargeStructVar.ChargeType;
+            set ChargeTypeDescription = ValidateCOChargeStructVar.ChargeTypeDescription;
+            set ChargeGroupDescription = ValidateCOChargeStructVar.ChargeGroupDescription;
+            set TaxLiability = ValidateCOChargeStructVar.TaxLiability;
+            set Charge = ValidateCOChargeStructVar.Charge;
+            set ChargeCostPercent = ValidateCOChargeStructVar.ChargeCostPercent;
+            set ChargePercentBasis = ValidateCOChargeStructVar.ChargePercentBasis;
+            set SalesUnitMeas = ValidateCOChargeStructVar.SalesUnitMeas;
+            set BaseChargePercentBasis = ValidateCOChargeStructVar.BaseChargePercentBasis;
+            set ChargeCost = ValidateCOChargeStructVar.ChargeCost;
+            set SequenceNo = ValidateCOChargeStructVar.SequenceNo;
+            set StatisticalChargeDiff = ValidateCOChargeStructVar.StatisticalChargeDiff;
+            set DeliveryType = ValidateCOChargeStructVar.DeliveryType;
+
+            set BaseChargeAmount = ValidateCOChargeStructVar.BaseChargeAmount;
+            set BaseChargeAmtInclTax = ValidateCOChargeStructVar.BaseChargeAmtInclTax;
+            set ChargeAmount = ValidateCOChargeStructVar.ChargeAmount;
+            set ChargeAmountInclTax = ValidateCOChargeStructVar.ChargeAmountInclTax;
+            set CurrencyRate = ValidateCOChargeStructVar.CurrencyRate;
+            set MultipleTaxLines = ValidateCOChargeStructVar.MultipleTaxLines;
+            set FeeCode = ValidateCOChargeStructVar.TaxCode;
+            set TaxCalcStructureId = ValidateCOChargeStructVar.TaxCalcStructureId;
+            set TaxClassId = ValidateCOChargeStructVar.TaxClassId;
+            set FetchTaxCodes = ValidateCOChargeStructVar.FetchTaxCodes;
+
+            set TotalCurrency = ValidateCOChargeStructVar.TotalCurrency;
+            set TotalBase = ValidateCOChargeStructVar.TotalBase;
+            set GrossTotalCurrency = ValidateCOChargeStructVar.GrossTotalCurr;
+            set GrossTotalBase = ValidateCOChargeStructVar.GrossTotalBase;
+            set TaxAmountCurr = ValidateCOChargeStructVar.TaxAmountCurr;
+         }
+      }
+   }
+   field ChargeTypeDescription;
+   field ChargeTypeRef.ChargeGroup {
+      size = Small;
+      label = "Charge Group";
+   }
+   field ChargeGroupDescription;
+   field ChargeAmount {
+      editable = [(Charge = null) and(parent.UsePriceInclTaxDb = false)];
+      preserveprecision = [true];
+
+      validate command {
+         variable ValidateChargeAmountStructVar {
+            type = ValidateChargeAmountStructure;
+         }
+         variable NewLineVar {
+            type = Boolean;
+         }
+         variable TaxFromDefaultsVar;
+
+         execute {
+            set TaxFromDefaultsVar = "FALSE";
+            if [isNew] {
+               set NewLineVar = true;
+            }
+            else {
+               set NewLineVar = false;
+            }
+            call ValidateChargeAmount(RmaNo, RmaChargeNo, Company, Contract, OrderNo, Charge, MultipleTaxLines, SequenceNo, ChargeAmount, ChargeAmountInclTax, BaseChargeAmount, BaseChargeAmtInclTax, TotalBase, FeeCode, TaxCalcStructureId, TaxClassId, parent.ShipAddrNo, parent.DateRequested, parent.CustomerNo, parent.CustomerNoCredit, parent.SupplyCountryDb, DeliveryType, ChargeType, parent.UsePriceInclTaxDb, parent.CurrencyCode, CurrencyRate, TaxLiability, TaxLiabilityTypeDb, ChargedQty, TaxFromDefaultsVar, FetchTaxCodes, TaxCodeFlag, NewLineVar, TaxEditedFlag, true, "ChargeAmount") into ValidateChargeAmountStructVar;
+            set BaseChargeAmount = ValidateChargeAmountStructVar.BaseChargeAmount;
+            set BaseChargeAmtInclTax = ValidateChargeAmountStructVar.BaseChargeAmtInclTax;
+            set ChargeAmount = ValidateChargeAmountStructVar.ChargeAmount;
+            set ChargeAmountInclTax = ValidateChargeAmountStructVar.ChargeAmountInclTax;
+            set CurrencyRate = ValidateChargeAmountStructVar.CurrencyRate;
+            set MultipleTaxLines = ValidateChargeAmountStructVar.MultipleTaxLines;
+            set FeeCode = ValidateChargeAmountStructVar.TaxCode;
+            set TaxCalcStructureId = ValidateChargeAmountStructVar.TaxCalcStructureId;
+            set TaxClassId = ValidateChargeAmountStructVar.TaxClassId;
+            set FetchTaxCodes = ValidateChargeAmountStructVar.FetchTaxCodes;
+
+            set TotalCurrency = ValidateChargeAmountStructVar.TotalCurrency;
+            set TotalBase = ValidateChargeAmountStructVar.TotalBase;
+            set GrossTotalCurrency = ValidateChargeAmountStructVar.GrossTotalCurr;
+            set GrossTotalBase = ValidateChargeAmountStructVar.GrossTotalBase;
+            set TaxAmountCurr = ValidateChargeAmountStructVar.TaxAmountCurr;
+         }
+      }
+   }
+   field ChargeAmountInclTax {
+      editable = [(Charge = null) and(parent.UsePriceInclTaxDb = true)];
+      preserveprecision = [true];
+
+      validate command {
+         variable ValidateChargeAmountStructVar {
+            type = ValidateChargeAmountStructure;
+         }
+         variable NewLineVar {
+            type = Boolean;
+         }
+         variable TaxFromDefaultsVar;
+
+         execute {
+            set TaxFromDefaultsVar = "FALSE";
+            if [isNew] {
+               set NewLineVar = true;
+            }
+            else {
+               set NewLineVar = false;
+            }
+            call ValidateChargeAmount(RmaNo, RmaChargeNo, Company, Contract, OrderNo, Charge, MultipleTaxLines, SequenceNo, ChargeAmount, ChargeAmountInclTax, BaseChargeAmount, BaseChargeAmtInclTax, TotalBase, FeeCode, TaxCalcStructureId, TaxClassId, parent.ShipAddrNo, parent.DateRequested, parent.CustomerNo, parent.CustomerNoCredit, parent.SupplyCountryDb, DeliveryType, ChargeType, parent.UsePriceInclTaxDb, parent.CurrencyCode, CurrencyRate, TaxLiability, TaxLiabilityTypeDb, ChargedQty, TaxFromDefaultsVar, FetchTaxCodes, TaxCodeFlag, NewLineVar, TaxEditedFlag, true, "ChargeAmountInclTax") into ValidateChargeAmountStructVar;
+            set BaseChargeAmount = ValidateChargeAmountStructVar.BaseChargeAmount;
+            set BaseChargeAmtInclTax = ValidateChargeAmountStructVar.BaseChargeAmtInclTax;
+            set ChargeAmount = ValidateChargeAmountStructVar.ChargeAmount;
+            set ChargeAmountInclTax = ValidateChargeAmountStructVar.ChargeAmountInclTax;
+            set CurrencyRate = ValidateChargeAmountStructVar.CurrencyRate;
+            set MultipleTaxLines = ValidateChargeAmountStructVar.MultipleTaxLines;
+            set FeeCode = ValidateChargeAmountStructVar.TaxCode;
+            set TaxCalcStructureId = ValidateChargeAmountStructVar.TaxCalcStructureId;
+            set TaxClassId = ValidateChargeAmountStructVar.TaxClassId;
+            set FetchTaxCodes = ValidateChargeAmountStructVar.FetchTaxCodes;
+
+            set TotalCurrency = ValidateChargeAmountStructVar.TotalCurrency;
+            set TotalBase = ValidateChargeAmountStructVar.TotalBase;
+            set GrossTotalCurrency = ValidateChargeAmountStructVar.GrossTotalCurr;
+            set GrossTotalBase = ValidateChargeAmountStructVar.GrossTotalBase;
+            set TaxAmountCurr = ValidateChargeAmountStructVar.TaxAmountCurr;
+         }
+      }
+   }
+   field Charge {
+      editable = [ChargeAmount = null];
+      validate command {
+         variable CalculateTotalChargeAmountsStructVar {
+            type = CalculateTotalChargeAmountsStructure;
+         }
+         variable NewLineVar {
+            type = Boolean;
+         }
+         variable TaxFromDefaultsVar;
+         execute {
+            set TaxFromDefaultsVar = "FALSE";
+            call CalculateTotalChargeAmount(RmaNo, RmaChargeNo, Contract, OrderNo, SequenceNo, Company, TotalBase, ChargeAmount, ChargeAmountInclTax, BaseChargeAmount, BaseChargeAmtInclTax, ChargedQty, CurrencyRate, FeeCode, TaxCalcStructureId, parent.ShipAddrNo, parent.DateRequested, parent.CustomerNo, parent.SupplyCountryDb, DeliveryType, ChargeType, parent.UsePriceInclTaxDb, parent.CurrencyCode, TaxLiability, TaxLiabilityTypeDb, TaxFromDefaultsVar, TaxCodeFlag, NewLineVar, TaxEditedFlag, true) into CalculateTotalChargeAmountsStructVar;
+
+            set TotalCurrency = CalculateTotalChargeAmountsStructVar.TotalCurrChargedAmount;
+            set TotalBase = CalculateTotalChargeAmountsStructVar.TotalBaseChargedAmount;
+            set GrossTotalCurrency = CalculateTotalChargeAmountsStructVar.GrossTotalCurr;
+            set GrossTotalBase = CalculateTotalChargeAmountsStructVar.GrossTotalBase;
+            set TaxAmountCurr = CalculateTotalChargeAmountsStructVar.TaxAmountCurrency;
+            set TaxCalcStructureId = CalculateTotalChargeAmountsStructVar.TaxCalcStructureId;
+         }
+      }
+   }
+   field ChargeBasisCurr;
+   field ChargedQty {
+      validate command {
+         variable ValidateChargeAmountStructVar {
+            type = ValidateChargeAmountStructure;
+         }
+         variable NewLineVar {
+            type = Boolean;
+         }
+         variable TaxFromDefaultsVar;
+
+         execute {
+            set TaxFromDefaultsVar = "FALSE";
+            if [isNew] {
+               set NewLineVar = true;
+            }
+            else {
+               set NewLineVar = false;
+            }
+            call ValidateChargeAmount(RmaNo, RmaChargeNo, Company, Contract, OrderNo, Charge, MultipleTaxLines, SequenceNo, ChargeAmount, ChargeAmountInclTax, BaseChargeAmount, BaseChargeAmtInclTax, TotalBase, FeeCode, TaxCalcStructureId, TaxClassId, parent.ShipAddrNo, parent.DateRequested, parent.CustomerNo, parent.CustomerNoCredit, parent.SupplyCountryDb, DeliveryType, ChargeType, parent.UsePriceInclTaxDb, parent.CurrencyCode, CurrencyRate, TaxLiability, TaxLiabilityTypeDb, ChargedQty, TaxFromDefaultsVar, FetchTaxCodes, TaxCodeFlag, NewLineVar, TaxEditedFlag, true, "ChargeAmount") into ValidateChargeAmountStructVar;
+            set BaseChargeAmount = ValidateChargeAmountStructVar.BaseChargeAmount;
+            set BaseChargeAmtInclTax = ValidateChargeAmountStructVar.BaseChargeAmtInclTax;
+            set ChargeAmount = ValidateChargeAmountStructVar.ChargeAmount;
+            set ChargeAmountInclTax = ValidateChargeAmountStructVar.ChargeAmountInclTax;
+            set CurrencyRate = ValidateChargeAmountStructVar.CurrencyRate;
+            set MultipleTaxLines = ValidateChargeAmountStructVar.MultipleTaxLines;
+            set FeeCode = ValidateChargeAmountStructVar.TaxCode;
+            set TaxCalcStructureId = ValidateChargeAmountStructVar.TaxCalcStructureId;
+            set TaxClassId = ValidateChargeAmountStructVar.TaxClassId;
+            set FetchTaxCodes = ValidateChargeAmountStructVar.FetchTaxCodes;
+
+            set TotalCurrency = ValidateChargeAmountStructVar.TotalCurrency;
+            set TotalBase = ValidateChargeAmountStructVar.TotalBase;
+            set GrossTotalCurrency = ValidateChargeAmountStructVar.GrossTotalCurr;
+            set GrossTotalBase = ValidateChargeAmountStructVar.GrossTotalBase;
+            set TaxAmountCurr = ValidateChargeAmountStructVar.TaxAmountCurr;
+         }
+      }
+   }
+   field SalesUnitMeas {
+      size = Small;
+   }
+   field BaseChargeAmount {
+      editable = [(Charge = null) and(parent.UsePriceInclTaxDb = false)];
+      preserveprecision = [true];
+      validate command {
+         variable ValidateChargeAmountStructVar {
+            type = ValidateChargeAmountStructure;
+         }
+         variable NewLineVar {
+            type = Boolean;
+         }
+         variable TaxFromDefaultsVar;
+
+         execute {
+            set TaxFromDefaultsVar = "FALSE";
+            if [isNew] {
+               set NewLineVar = true;
+            }
+            else {
+               set NewLineVar = false;
+            }
+            call ValidateChargeAmount(RmaNo, RmaChargeNo, Company, Contract, OrderNo, Charge, MultipleTaxLines, SequenceNo, ChargeAmount, ChargeAmountInclTax, BaseChargeAmount, BaseChargeAmtInclTax, TotalBase, FeeCode, TaxCalcStructureId, TaxClassId, parent.ShipAddrNo, parent.DateRequested, parent.CustomerNo, parent.CustomerNoCredit, parent.SupplyCountryDb, DeliveryType, ChargeType, parent.UsePriceInclTaxDb, parent.CurrencyCode, CurrencyRate, TaxLiability, TaxLiabilityTypeDb, ChargedQty, TaxFromDefaultsVar, FetchTaxCodes, TaxCodeFlag, NewLineVar, TaxEditedFlag, true, "BaseChargeAmount") into ValidateChargeAmountStructVar;
+            set BaseChargeAmount = ValidateChargeAmountStructVar.BaseChargeAmount;
+            set BaseChargeAmtInclTax = ValidateChargeAmountStructVar.BaseChargeAmtInclTax;
+            set ChargeAmount = ValidateChargeAmountStructVar.ChargeAmount;
+            set ChargeAmountInclTax = ValidateChargeAmountStructVar.ChargeAmountInclTax;
+            set CurrencyRate = ValidateChargeAmountStructVar.CurrencyRate;
+            set MultipleTaxLines = ValidateChargeAmountStructVar.MultipleTaxLines;
+            set FeeCode = ValidateChargeAmountStructVar.TaxCode;
+            set TaxCalcStructureId = ValidateChargeAmountStructVar.TaxCalcStructureId;
+            set TaxClassId = ValidateChargeAmountStructVar.TaxClassId;
+            set FetchTaxCodes = ValidateChargeAmountStructVar.FetchTaxCodes;
+
+            set TotalCurrency = ValidateChargeAmountStructVar.TotalCurrency;
+            set TotalBase = ValidateChargeAmountStructVar.TotalBase;
+            set GrossTotalCurrency = ValidateChargeAmountStructVar.GrossTotalCurr;
+            set GrossTotalBase = ValidateChargeAmountStructVar.GrossTotalBase;
+            set TaxAmountCurr = ValidateChargeAmountStructVar.TaxAmountCurr;
+         }
+      }
+   }
+   field BaseChargeAmtInclTax {
+      editable = [(Charge = null) and(parent.UsePriceInclTaxDb = true)];
+      preserveprecision = [true];
+
+      validate command {
+         variable ValidateChargeAmountStructVar {
+            type = ValidateChargeAmountStructure;
+         }
+         variable NewLineVar {
+            type = Boolean;
+         }
+         variable TaxFromDefaultsVar;
+
+         execute {
+            set TaxFromDefaultsVar = "FALSE";
+            if [isNew] {
+               set NewLineVar = true;
+            }
+            else {
+               set NewLineVar = false;
+            }
+            call ValidateChargeAmount(RmaNo, RmaChargeNo, Company, Contract, OrderNo, Charge, MultipleTaxLines, SequenceNo, ChargeAmount, ChargeAmountInclTax, BaseChargeAmount, BaseChargeAmtInclTax, TotalBase, FeeCode, TaxCalcStructureId, TaxClassId, parent.ShipAddrNo, parent.DateRequested, parent.CustomerNo, parent.CustomerNoCredit, parent.SupplyCountryDb, DeliveryType, ChargeType, parent.UsePriceInclTaxDb, parent.CurrencyCode, CurrencyRate, TaxLiability, TaxLiabilityTypeDb, ChargedQty, TaxFromDefaultsVar, FetchTaxCodes, TaxCodeFlag, NewLineVar, TaxEditedFlag, true, "BaseChargeAmtInclTax") into ValidateChargeAmountStructVar;
+            set BaseChargeAmount = ValidateChargeAmountStructVar.BaseChargeAmount;
+            set BaseChargeAmtInclTax = ValidateChargeAmountStructVar.BaseChargeAmtInclTax;
+            set ChargeAmount = ValidateChargeAmountStructVar.ChargeAmount;
+            set ChargeAmountInclTax = ValidateChargeAmountStructVar.ChargeAmountInclTax;
+            set CurrencyRate = ValidateChargeAmountStructVar.CurrencyRate;
+            set MultipleTaxLines = ValidateChargeAmountStructVar.MultipleTaxLines;
+            set FeeCode = ValidateChargeAmountStructVar.TaxCode;
+            set TaxCalcStructureId = ValidateChargeAmountStructVar.TaxCalcStructureId;
+            set TaxClassId = ValidateChargeAmountStructVar.TaxClassId;
+            set FetchTaxCodes = ValidateChargeAmountStructVar.FetchTaxCodes;
+
+            set TotalCurrency = ValidateChargeAmountStructVar.TotalCurrency;
+            set TotalBase = ValidateChargeAmountStructVar.TotalBase;
+            set GrossTotalCurrency = ValidateChargeAmountStructVar.GrossTotalCurr;
+            set GrossTotalBase = ValidateChargeAmountStructVar.GrossTotalBase;
+            set TaxAmountCurr = ValidateChargeAmountStructVar.TaxAmountCurr;
+         }
+      }
+   }
+   field StatisticalChargeDiff;
+   field TotalCurrency;
+   field TotalBase;
+   field GrossTotalCurrency;
+   field GrossTotalBase;
+   field TaxLiability {
+      size = Small;
+      editable = [false];
+   }
+   field ChargeTypeRef.Taxable {
+      size = Small;
+      label = "Taxable";
+   }
+   field FeeCode {
+      editable = [parent.ExternalTaxCalMethod = "NOT_USED"];
+
+      lovswitch {
+         when [ChargeTypeRef.Taxable and TaxLiability = "TAX"] {
+            lov TaxCodeRef with ReferenceTaxCodeRestrictedSelector using TaxCodeRestrictedFetchValidTaxCodes(CurrDate) {
+               preview = TaxCodeRestrictedCard;
+               description = TaxCodeRef.Description;
+            }
+         }
+
+         when [true] {
+            lov TaxCodeExemptRef with ReferenceTaxCodeExemptRestrictedSelector using TaxCodeExemptRestrictedFetchValidTaxCodes(CurrDate) {
+               preview = TaxCodeExemptRestrictedCard;
+               description = TaxCodeExemptRef.Description;
+            }
+         }
+      }
+      validate command {
+         variable ValidateChargeAmountStructVar {
+            type = ValidateChargeAmountStructure;
+         }
+         variable NewLineVar {
+            type = Boolean;
+         }
+         variable TaxFromDefaultsVar;
+
+         execute {
+            set TaxFromDefaultsVar = "FALSE";
+            if [isNew] {
+               set NewLineVar = true;
+            }
+            else {
+               set NewLineVar = false;
+            }
+
+            if [FeeCode != null] {
+               if [TaxCalcStructureId != null] {
+                  messagebox("", warning, "This will overwrite the existing tax calculation structure.Do you want to continue?") {
+                     when "Yes" {
+                        refresh;
+                     }
+                     when "No" {
+                        set TaxEditedFlag = false;
+                        exit NO;
+                     }
+                  }
+               }
+
+               if [MultipleTaxLines and TaxCalcStructureId = null] {
+                  messagebox("", warning, "This will overwrite the existing multiple tax lines.Do you want to continue?") {
+                     when "Yes" {
+                        refresh;
+                     }
+                     when "No" {
+                        set TaxEditedFlag = false;
+                        exit NO;
+                     }
+                  }
+               }
+               set MultipleTaxLines = false;
+            }
+
+            if [FeeCode = "" and MultipleTaxLines] {
+               set MultipleTaxLines = false;
+            }
+
+            if [FeeCode = "" and MultipleTaxLines = false] {
+               set TaxFromDefaultsVar = "DO_NOT_FETCH";
+               set FetchTaxCodes = "FALSE";
+            }
+
+            set TaxClassId = null;
+            set TaxCalcStructureId = null;
+            set TaxEditedFlag = true;
+
+            -- Calculate prices and amounts
+            call ValidateChargeAmount(RmaNo, RmaChargeNo, Company, Contract, OrderNo, Charge, MultipleTaxLines, SequenceNo, ChargeAmount, ChargeAmountInclTax, BaseChargeAmount, BaseChargeAmtInclTax, TotalBase, FeeCode, TaxCalcStructureId, TaxClassId, parent.ShipAddrNo, parent.DateRequested, parent.CustomerNo, parent.CustomerNoCredit, parent.SupplyCountryDb, DeliveryType, ChargeType, parent.UsePriceInclTaxDb, parent.CurrencyCode, CurrencyRate, TaxLiability, TaxLiabilityTypeDb, ChargedQty, TaxFromDefaultsVar, FetchTaxCodes, TaxCodeFlag, NewLineVar, TaxEditedFlag, true, "NULL") into ValidateChargeAmountStructVar;
+            set BaseChargeAmount = ValidateChargeAmountStructVar.BaseChargeAmount;
+            set BaseChargeAmtInclTax = ValidateChargeAmountStructVar.BaseChargeAmtInclTax;
+            set ChargeAmount = ValidateChargeAmountStructVar.ChargeAmount;
+            set ChargeAmountInclTax = ValidateChargeAmountStructVar.ChargeAmountInclTax;
+            set CurrencyRate = ValidateChargeAmountStructVar.CurrencyRate;
+            set MultipleTaxLines = ValidateChargeAmountStructVar.MultipleTaxLines;
+            set FeeCode = ValidateChargeAmountStructVar.TaxCode;
+            set TaxCalcStructureId = ValidateChargeAmountStructVar.TaxCalcStructureId;
+            set TaxClassId = ValidateChargeAmountStructVar.TaxClassId;
+            set FetchTaxCodes = ValidateChargeAmountStructVar.FetchTaxCodes;
+
+            set TotalCurrency = ValidateChargeAmountStructVar.TotalCurrency;
+            set TotalBase = ValidateChargeAmountStructVar.TotalBase;
+            set GrossTotalCurrency = ValidateChargeAmountStructVar.GrossTotalCurr;
+            set GrossTotalBase = ValidateChargeAmountStructVar.GrossTotalBase;
+            set TaxAmountCurr = ValidateChargeAmountStructVar.TaxAmountCurr;
+         }
+      }
+   }
+   lov TaxCalcStructureIdRef with ReferenceTaxCalcStructureActiveSelector {
+      editable = [parent.ExternalTaxCalMethod = "NOT_USED"];
+
+      validate command {
+         variable ValidateChargeAmountStructVar {
+            type = ValidateChargeAmountStructure;
+         }
+         variable NewLineVar {
+            type = Boolean;
+         }
+         variable TaxFromDefaultsVar;
+
+         execute {
+            set TaxFromDefaultsVar = "FALSE";
+            if [isNew] {
+               set NewLineVar = true;
+            }
+            else {
+               set NewLineVar = false;
+            }
+
+            if [TaxCalcStructureId != original.TaxCalcStructureId] {
+               if [TaxCalcStructureId != null] {
+                  if [FeeCode != null] {
+                     messagebox("", warning, "This will overwrite the existing tax code.Do you want to continue?") {
+                        when "Yes" {
+                           set FeeCode = null;
+                        }
+                        when "No" {
+                           set TaxEditedFlag = false;
+                           exit NO;
+                        }
+                     }
+                  }
+                  else {
+                     if [MultipleTaxLines and TaxCalcStructureId = null] {
+                        messagebox("", warning, "This will overwrite the existing multiple tax lines.Do you want to continue?") {
+                           when "Yes" {
+                              refresh;
+                           }
+                           when "No" {
+                              set TaxEditedFlag = false;
+                              exit NO;
+                           }
+                        }
+                     }
+                  }
+                  if [TaxClassId != null] {
+                     set TaxClassId = null;
+                  }
+               }
+               if [TaxCalcStructureId = null and original.TaxCalcStructureId != null] {
+                  set TaxFromDefaultsVar = "DO_NOT_FETCH";
+                  set FetchTaxCodes = "FALSE";
+               }
+               set TaxEditedFlag = true;
+               set TaxCodeFlag = true;
+
+               -- Calculate prices and amounts
+               call ValidateChargeAmount(RmaNo, RmaChargeNo, Company, Contract, OrderNo, Charge, MultipleTaxLines, SequenceNo, ChargeAmount, ChargeAmountInclTax, BaseChargeAmount, BaseChargeAmtInclTax, TotalBase, FeeCode, TaxCalcStructureId, TaxClassId, parent.ShipAddrNo, parent.DateRequested, parent.CustomerNo, parent.CustomerNoCredit, parent.SupplyCountryDb, DeliveryType, ChargeType, parent.UsePriceInclTaxDb, parent.CurrencyCode, CurrencyRate, TaxLiability, TaxLiabilityTypeDb, ChargedQty, TaxFromDefaultsVar, FetchTaxCodes, TaxCodeFlag, NewLineVar, TaxEditedFlag, true, "NULL") into ValidateChargeAmountStructVar;
+               set BaseChargeAmount = ValidateChargeAmountStructVar.BaseChargeAmount;
+               set BaseChargeAmtInclTax = ValidateChargeAmountStructVar.BaseChargeAmtInclTax;
+               set ChargeAmount = ValidateChargeAmountStructVar.ChargeAmount;
+               set ChargeAmountInclTax = ValidateChargeAmountStructVar.ChargeAmountInclTax;
+               set CurrencyRate = ValidateChargeAmountStructVar.CurrencyRate;
+               set MultipleTaxLines = ValidateChargeAmountStructVar.MultipleTaxLines;
+               set FeeCode = ValidateChargeAmountStructVar.TaxCode;
+               set TaxCalcStructureId = ValidateChargeAmountStructVar.TaxCalcStructureId;
+               set TaxClassId = ValidateChargeAmountStructVar.TaxClassId;
+               set FetchTaxCodes = ValidateChargeAmountStructVar.FetchTaxCodes;
+
+               set TotalCurrency = ValidateChargeAmountStructVar.TotalCurrency;
+               set TotalBase = ValidateChargeAmountStructVar.TotalBase;
+               set GrossTotalCurrency = ValidateChargeAmountStructVar.GrossTotalCurr;
+               set GrossTotalBase = ValidateChargeAmountStructVar.GrossTotalBase;
+               set TaxAmountCurr = ValidateChargeAmountStructVar.TaxAmountCurr;
+            }
+         }
+      }
+   }
+   lov TaxClassIdRef with ReferenceTaxClassSelector {
+      description = TaxClassIdRef.Description;
+   }
+   field MultipleTaxLines;
+   lov DeliveryTypeRef with ReferenceDeliveryTypeSelector {
+      description = DeliveryTypeRef.Description;
+      validate command {
+         variable ValidateChargeAmountStructVar {
+            type = ValidateChargeAmountStructure;
+         }
+         variable NewLineVar {
+            type = Boolean;
+         }
+         variable TaxFromDefaultsVar;
+
+         execute {
+            set TaxFromDefaultsVar = "TRUE";
+            if [isNew] {
+               set NewLineVar = true;
+            }
+            else {
+               set NewLineVar = false;
+            }
+            -- calculate prices & amounts only if the tax liability is EXEMPT.
+            call ValidateDeliveryType(RmaNo, RmaChargeNo, Company, Contract, OrderNo, Charge, MultipleTaxLines, SequenceNo, ChargeAmount, ChargeAmountInclTax, TotalBase, FeeCode, TaxCalcStructureId, TaxClassId, parent.ShipAddrNo, parent.DateRequested, parent.CustomerNo, parent.SupplyCountryDb, DeliveryType, ChargeType, parent.UsePriceInclTaxDb, parent.CurrencyCode, CurrencyRate, TaxLiability, TaxLiabilityTypeDb, ChargedQty, TaxFromDefaultsVar, FetchTaxCodes, TaxCodeFlag, NewLineVar, TaxEditedFlag, true) into ValidateChargeAmountStructVar;
+            -- Returned values will be assigned only if the prices & amounts are calculated, ChargeAmount = null means prices & amounts was not calculated. So old values exist.
+            if [ValidateChargeAmountStructVar.ChargeAmount != null] {
+               set BaseChargeAmount = ValidateChargeAmountStructVar.BaseChargeAmount;
+               set BaseChargeAmtInclTax = ValidateChargeAmountStructVar.BaseChargeAmtInclTax;
+               set ChargeAmount = ValidateChargeAmountStructVar.ChargeAmount;
+               set ChargeAmountInclTax = ValidateChargeAmountStructVar.ChargeAmountInclTax;
+               set MultipleTaxLines = ValidateChargeAmountStructVar.MultipleTaxLines;
+               set FeeCode = ValidateChargeAmountStructVar.TaxCode;
+               set TaxCalcStructureId = ValidateChargeAmountStructVar.TaxCalcStructureId;
+               set TaxClassId = ValidateChargeAmountStructVar.TaxClassId;
+               set FetchTaxCodes = ValidateChargeAmountStructVar.FetchTaxCodes;
+
+               set TotalCurrency = ValidateChargeAmountStructVar.TotalCurrency;
+               set TotalBase = ValidateChargeAmountStructVar.TotalBase;
+               set GrossTotalCurrency = ValidateChargeAmountStructVar.GrossTotalCurr;
+               set GrossTotalBase = ValidateChargeAmountStructVar.GrossTotalBase;
+               set TaxAmountCurr = ValidateChargeAmountStructVar.TaxAmountCurr;
+            }
+         }
+      }
+   }
+   field ChargeCost;
+   field ChargeCostPercent {
+      editable = [ChargeCost = null];
+   }
+   field TotalChargeCost;
+   field CreditApproverIdRef {
+      size = Small;
+   }
+   field CredInvoiceNo {
+      size = Small;
+   }
+   field CreditInvoiceItemId;
+   field DateEntered;
+   lov OrderNoRef with ReferenceCustomerOrderChargeLovSelector using OrderNoFileter(ChargeType, parent.OrderNo, parent.CustomerNo, parent.UsePriceInclTaxDb) {
+      size = Small;
+      freeinput = [true];
+      validate command {
+         variable ChangeValueFlag Boolean;
+
+         variable ValidateCOChargeStructVar {
+            type = ValidateCustomerOrderChargeStructure;
+         }
+         variable NewLineVar {
+            type = Boolean;
+         }
+
+         execute {
+            if [isNew] {
+               set NewLineVar = true;
+            }
+            else {
+               set NewLineVar = false;
+            }
+
+            set ChangeValueFlag = false;
+
+            if [OrderNo = null] {
+               set SequenceNo = null;
+               set ChargePercentBasis = null;
+               set BaseChargePercentBasis = null;
+            }
+            else {
+               set SequenceNo = OrderNoRef.SequenceNo;
+               set ChargedQty = OrderNoRef.QtyAvailable;
+            }
+
+            call CustomerOrderChargeInfo(RmaNo, RmaChargeNo, parent.Company, Contract, OrderNo, Charge, MultipleTaxLines, SequenceNo, ChargeAmount, ChargeAmountInclTax, BaseChargeAmount, BaseChargeAmtInclTax, TotalBase, FeeCode, TaxCalcStructureId, TaxClassId, parent.ShipAddrNo, parent.DateRequested, parent.CustomerNo, parent.CustomerNoCredit, parent.TaxLiability, parent.SupplyCountryDb, DeliveryType, ChargeType, parent.UsePriceInclTaxDb, parent.CurrencyCode, CurrencyRate, TaxLiability, TaxLiabilityTypeDb, ChargedQty, FetchTaxCodes, TaxCodeFlag, NewLineVar, TaxEditedFlag, true, false, ChangeValueFlag) into ValidateCOChargeStructVar;
+
+            set ChargeType = ValidateCOChargeStructVar.ChargeType;
+            set ChargeTypeDescription = ValidateCOChargeStructVar.ChargeTypeDescription;
+            set ChargeGroupDescription = ValidateCOChargeStructVar.ChargeGroupDescription;
+            set TaxLiability = ValidateCOChargeStructVar.TaxLiability;
+            set Charge = ValidateCOChargeStructVar.Charge;
+            set ChargeCostPercent = ValidateCOChargeStructVar.ChargeCostPercent;
+            set ChargePercentBasis = ValidateCOChargeStructVar.ChargePercentBasis;
+            set SalesUnitMeas = ValidateCOChargeStructVar.SalesUnitMeas;
+            set BaseChargePercentBasis = ValidateCOChargeStructVar.BaseChargePercentBasis;
+            set ChargeCost = ValidateCOChargeStructVar.ChargeCost;
+            set SequenceNo = ValidateCOChargeStructVar.SequenceNo;
+            set StatisticalChargeDiff = ValidateCOChargeStructVar.StatisticalChargeDiff;
+            set DeliveryType = ValidateCOChargeStructVar.DeliveryType;
+
+            set BaseChargeAmount = ValidateCOChargeStructVar.BaseChargeAmount;
+            set BaseChargeAmtInclTax = ValidateCOChargeStructVar.BaseChargeAmtInclTax;
+            set ChargeAmount = ValidateCOChargeStructVar.ChargeAmount;
+            set ChargeAmountInclTax = ValidateCOChargeStructVar.ChargeAmountInclTax;
+            set CurrencyRate = ValidateCOChargeStructVar.CurrencyRate;
+            set MultipleTaxLines = ValidateCOChargeStructVar.MultipleTaxLines;
+            set FeeCode = ValidateCOChargeStructVar.TaxCode;
+            set TaxCalcStructureId = ValidateCOChargeStructVar.TaxCalcStructureId;
+            set TaxClassId = ValidateCOChargeStructVar.TaxClassId;
+            set FetchTaxCodes = ValidateCOChargeStructVar.FetchTaxCodes;
+
+            set TotalCurrency = ValidateCOChargeStructVar.TotalCurrency;
+            set TotalBase = ValidateCOChargeStructVar.TotalBase;
+            set GrossTotalCurrency = ValidateCOChargeStructVar.GrossTotalCurr;
+            set GrossTotalBase = ValidateCOChargeStructVar.GrossTotalBase;
+            set TaxAmountCurr = ValidateCOChargeStructVar.TaxAmountCurr;
+         }
+      }
+   }
+   lov SequenceNoRef  with ReferenceCustomerOrderChargeSelector {
+      validate command {
+         variable ChangeValueFlag Boolean;
+
+         variable ValidateCOChargeStructVar {
+            type = ValidateCustomerOrderChargeStructure;
+         }
+         variable NewLineVar {
+            type = Boolean;
+         }
+
+         execute {
+            if [isNew] {
+               set NewLineVar = true;
+            }
+            else {
+               set NewLineVar = false;
+            }
+
+            set ChangeValueFlag = false;
+
+            if [SequenceNo = null] {
+               set OrderNo = null;
+               set ChargePercentBasis = null;
+               set BaseChargePercentBasis = null;
+            }
+            set OrderNo = SequenceNoRef.OrderNo;
+            call CustomerOrderChargeInfo(RmaNo, RmaChargeNo, parent.Company, Contract, OrderNo, Charge, MultipleTaxLines, SequenceNo, ChargeAmount, ChargeAmountInclTax, BaseChargeAmount, BaseChargeAmtInclTax, TotalBase, FeeCode, TaxCalcStructureId, TaxClassId, parent.ShipAddrNo, parent.DateRequested, parent.CustomerNo, parent.CustomerNoCredit, parent.TaxLiability, parent.SupplyCountryDb, DeliveryType, ChargeType, parent.UsePriceInclTaxDb, parent.CurrencyCode, CurrencyRate, TaxLiability, TaxLiabilityTypeDb, ChargedQty, FetchTaxCodes, TaxCodeFlag, NewLineVar, TaxEditedFlag, true, false, ChangeValueFlag) into ValidateCOChargeStructVar;
+
+            set ChargeType = ValidateCOChargeStructVar.ChargeType;
+            set ChargeTypeDescription = ValidateCOChargeStructVar.ChargeTypeDescription;
+            set ChargeGroupDescription = ValidateCOChargeStructVar.ChargeGroupDescription;
+            set TaxLiability = ValidateCOChargeStructVar.TaxLiability;
+            set Charge = ValidateCOChargeStructVar.Charge;
+            set ChargeCostPercent = ValidateCOChargeStructVar.ChargeCostPercent;
+            set ChargePercentBasis = ValidateCOChargeStructVar.ChargePercentBasis;
+            set SalesUnitMeas = ValidateCOChargeStructVar.SalesUnitMeas;
+            set BaseChargePercentBasis = ValidateCOChargeStructVar.BaseChargePercentBasis;
+            set ChargeCost = ValidateCOChargeStructVar.ChargeCost;
+            set SequenceNo = ValidateCOChargeStructVar.SequenceNo;
+            set StatisticalChargeDiff = ValidateCOChargeStructVar.StatisticalChargeDiff;
+            set DeliveryType = ValidateCOChargeStructVar.DeliveryType;
+
+            set BaseChargeAmount = ValidateCOChargeStructVar.BaseChargeAmount;
+            set BaseChargeAmtInclTax = ValidateCOChargeStructVar.BaseChargeAmtInclTax;
+            set ChargeAmount = ValidateCOChargeStructVar.ChargeAmount;
+            set ChargeAmountInclTax = ValidateCOChargeStructVar.ChargeAmountInclTax;
+            set CurrencyRate = ValidateCOChargeStructVar.CurrencyRate;
+            set MultipleTaxLines = ValidateCOChargeStructVar.MultipleTaxLines;
+            set FeeCode = ValidateCOChargeStructVar.TaxCode;
+            set TaxCalcStructureId = ValidateCOChargeStructVar.TaxCalcStructureId;
+            set TaxClassId = ValidateCOChargeStructVar.TaxClassId;
+            set FetchTaxCodes = ValidateCOChargeStructVar.FetchTaxCodes;
+
+            set TotalCurrency = ValidateCOChargeStructVar.TotalCurrency;
+            set TotalBase = ValidateCOChargeStructVar.TotalBase;
+            set GrossTotalCurrency = ValidateCOChargeStructVar.GrossTotalCurr;
+            set GrossTotalBase = ValidateCOChargeStructVar.GrossTotalBase;
+            set TaxAmountCurr = ValidateCOChargeStructVar.TaxAmountCurr;
+         }
+      }
+   }
+   field NoteText {
+      multiline = true;
+      searchable = false;
+   }
+   field DocumentText;
+   lov CustomerTaxUsageTypeRef with ReferenceCustomerTaxUsageTypeSelector {
+      description = CustomerTaxUsageTypeRef.Description;
+   }
+
+   fieldranking RmaChargeNo, Objstate, ChargeTypeRef, ChargeTypeDescription, SalesChargeTypeRef.ChargeGroup, ChargeGroupDescription, ChargedQty, StatisticalChargeDiff, TaxLiabilityRef, DateEntered;
+
+   commandgroup CommandGroupCmdGroup {
+      command BulkRelease;
+      command BulkDeny;
+   }
+
+   commandgroup CommandGroup2CmdGroup {
+      command RMAChargeTaxLinesCommand;
+      command ApproveforCreditCommand;
+      command RemoveCreditApprovalCommand;
+      command CreateCreditInvoiceCommand;
+      command ViewCreditInvoiceCommand;
+   }
+
+   commandgroup DocumentTextCommandGroup {
+      command DocumentTextCommand;
+   }
+}
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+
+----------------------------- MAIN ENTRY POINTS -----------------------------
+
+------------------------------ ENTITY DETAILS -------------------------------
+@Override
+entity ReturnMaterialCharge {
+   crud = Create, Read, Update, Delete;
+   ludependencies = DocumentText;
+
+   from = "return_material_charge_info";
+   exec = "RETURN_MATERIAL_CHARGE_API";
+   keys = RmaNo, RmaChargeNo {
+      where = "RMA_NO = :RmaNo and RMA_CHARGE_NO = :RmaChargeNo";
+   }
+   use attributes = ChargeType, ChargeAmount, ChargeAmountInclTax, Charge, ChargedQty, SalesUnitMeas, BaseChargeAmount, BaseChargeAmtInclTax, StatisticalChargeDiff, TaxLiability, FeeCode, TaxCalcStructureId, TaxClassId, DeliveryType, ChargeCost, ChargeCostPercent, CreditApproverId, CreditInvoiceItemId, DateEntered, OrderNo, SequenceNo, CreditInvoiceNo, NoteText, NoteId, Contract, Company, ChargePercentBasis, BaseChargePercentBasis, CurrencyRate, CustomerTaxUsageType;
+   attribute RmaNo Number {
+      label = "RMA No";
+      editable = [false];
+   }
+   attribute RmaChargeNo Number {
+      label = "RMA Charge No";
+      editable = [false];
+      required = [false];
+   }
+   attribute ChargeType Text {
+      label = "Charge Type";
+      maxlength = 25;
+      required = [true];
+      format = uppercase;
+   }
+   attribute ChargeTypeDescription Text {
+      editable = [false];
+   }
+   attribute ChargeGroupDescription Text {
+      editable = [false];
+   }
+   attribute ChargeAmount Number {
+      label = "Charge Price/Curr";
+      format = ifscurrency;
+   }
+   attribute ChargeAmountInclTax Number {
+      label = "Charge Price incl Tax/Curr";
+      format = ifscurrency;
+   }
+   attribute Charge Number {
+      label = "Charge (%)";
+   }
+   attribute ChargeBasisCurr Number {
+      editable = [false];
+      format = ifscurrency;
+   }
+   attribute ChargedQty Number {
+      label = "Charged Qty";
+      required = [true];
+   }
+   attribute SalesUnitMeas Text {
+      label = "Price UoM";
+      editable = [false];
+   }
+   attribute BaseChargeAmount Number {
+      label = "Charge Price/Base";
+      format = ifscurrency;
+   }
+   attribute BaseChargeAmtInclTax Number {
+      label = "Charge Price incl Tax/Base";
+      format = ifscurrency;
+   }
+   attribute StatisticalChargeDiff Number {
+      label = "Statistical Charge Diff/Base";
+      required = [true];
+      format = ifscurrency;
+   }
+   attribute TotalCurrency Number {
+      editable = [false];
+      updatable = [false];
+      insertable = [false];
+      format = ifscurrency;
+   }
+   attribute TotalBase Number {
+      editable = [false];
+      updatable = [false];
+      insertable = [false];
+      format = ifscurrency;
+   }
+   attribute GrossTotalCurrency Number {
+      editable = [false];
+      updatable = [false];
+      insertable = [false];
+      format = ifscurrency;
+   }
+   attribute GrossTotalBase Number {
+      editable = [false];
+      updatable = [false];
+      insertable = [false];
+      format = ifscurrency;
+   }
+   attribute TaxLiabilityTypeDb Text {
+      fetch = "tax_liability_type";
+      editable = [false];
+   }
+   attribute TaxLiability Text {
+      label = "Tax Liability";
+      maxlength = 20;
+      required = [true];
+      format = uppercase;
+   }
+   attribute FeeCode Text {
+      label = "Tax Code";
+      maxlength = 20;
+      format = uppercase;
+   }
+   attribute TaxCalcStructureId Text {
+      label = "Tax Calculation Structure";
+      maxlength = 20;
+      format = uppercase;
+   }
+   attribute TaxClassId Text {
+      label = "Tax Class";
+      editable = [false];
+      format = uppercase;
+   }
+   attribute MultipleTaxLines Boolean("TRUE", "FALSE") {
+      editable = [false];
+      updatable = [true];
+      insertable = [false];
+   }
+   attribute DeliveryType Text {
+      label = "Delivery Type";
+      maxlength = 20;
+      format = uppercase;
+   }
+   attribute ChargeCost Number {
+      label = "Charge Cost";
+   }
+   attribute ChargeCostPercent Number {
+      label = "Charge Cost (%)";
+   }
+   attribute TotalChargeCost Number {
+      editable = [false];
+      format = ifscurrency;
+   }
+   attribute CreditApproverId Text {
+      label = "Credit Approver ID";
+      editable = [false];
+   }
+   attribute CredInvoiceNo Text {
+      maxlength = 50;
+      editable = [false];
+   }
+   attribute CreditInvoiceItemId Number {
+      label = "Credit/Corr Invoice Line Pos";
+      editable = [false];
+   }
+   attribute DateEntered Date {
+      default = "sysdate";
+      label = "Created";
+      required = [true];
+      editable = [ETag = null];
+   }
+   attribute OrderNo Text {
+      label = "Order No";
+      maxlength = 12;
+      format = uppercase;
+   }
+   attribute SequenceNo Number {
+      label = "Sequence No";
+   }
+   attribute DocumentText Boolean {
+      fetch = "DECODE(Document_Text_API.Note_Id_Exist(note_id), '1', 'TRUE', 'FALSE')";
+      label = "Document Text";
+      editable = [false];
+   }
+   attribute CreditInvoiceId Number {
+      fetch = "credit_invoice_no";
+      label = "Credit Invoice ID";
+      editable = [false];
+   }
+   attribute NoteText Text {
+      label = "Notes";
+      maxlength = 2000;
+   }
+   attribute NoteId Number {
+      label = "Note ID";
+      editable = [false];
+   }
+   attribute Contract Text {
+      label = "Site";
+      required = [true];
+      editable = [ETag = null];
+      format = uppercase;
+   }
+   attribute Condition Text {
+      editable = [false];
+   }
+   attribute Company Text {
+      label = "Company";
+      editable = [ETag != null];
+      format = uppercase;
+   }
+   attribute TotalTaxPercentage Number {
+      editable = [false];
+   }
+   attribute ChargePercentBasis Number {
+      label = "Charge % Basis/Curr";
+      format = ifscurrency;
+   }
+   attribute BaseChargePercentBasis Number {
+      label = "Charge % Basis/Base";
+      format = ifscurrency;
+   }
+   attribute CurrencyRate Number {
+      label = "Currency Rate";
+   }
+   attribute TaxAmountCurr Number {
+      fetch = "tax_amount";
+      editable = [false];
+      updatable = [false];
+      insertable = [false];
+      format = ifscurrency;
+   }
+   attribute CustomerNo Text {
+      editable = [false];
+   }
+   attribute CurrencyCode Text {
+      editable = [false];
+   }
+   attribute CurrDate Date {
+      fetch = "trunc(Site_API.Get_Site_Date(Contract))";
+   }
+   attribute TaxEditedFlag Boolean {
+      fetch = "'FALSE'";
+      editable = [false];
+      insertable = [false];
+      updatable = [false];
+      required = [false];
+
+   }
+   attribute TaxCodeFlag Boolean {
+      fetch = "'FALSE'";
+      editable = [false];
+      insertable = [false];
+      updatable = [false];
+      required = [false];
+   }
+   attribute FetchTaxCodes Text {
+      fetch = "'TRUE'";
+      default = "'TRUE'";
+      insertable = [true];
+      updatable = [false];
+      required = [false];
+   }
+   attribute SetTaxFromOriginal Text {
+      fetch = "'FALSE'";
+      editable = [false];
+      updatable = [false];
+      insertable = [true];
+   }
+   attribute CustomerTaxUsageType Text;
+   attribute BaseCurrencyCode Text {
+      fetch = "Company_Finance_API.Get_Currency_Code(Company)";
+   }
+   reference RmaNoRef(RmaNo) to ReturnMaterial(RmaNo) {
+      label = "RMA No";
+   }
+   reference ChargeTypeRef(Contract, ChargeType) to SalesChargeType(Contract, ChargeType) {
+      label = "Charge Type";
+   }
+   reference TaxLiabilityRef(TaxLiability) to TaxLiabilityLov(TaxLiability) {
+      label = "Tax Liability";
+   }
+   reference TaxCalcStructureIdRef(Company, TaxCalcStructureId) to TaxCalcStructureActive(Company, TaxCalcStructureId) {
+      label = "Tax Calculation Structure";
+   }
+   reference TaxClassIdRef(Company, TaxClassId) to TaxClass(Company, TaxClassId) {
+      label = "Tax Class";
+   }
+   reference DeliveryTypeRef(Company, DeliveryType) to DeliveryType(Company, DelivTypeId) {
+      label = "Delivery Type";
+   }
+   reference CreditApproverIdRef(CreditApproverId) to OrderCoordinator(AuthorizeCode) {
+      label = "Credit Approver ID";
+   }
+   reference OrderNoRef(Contract, CustomerNo, SequenceNo, OrderNo) to CustomerOrderChargeLov(Contract, CustomerNo, SequenceNo, OrderNo) {
+      label = "Order No";
+     -- copy SequenceNo to SequenceNo;
+   }
+   reference SequenceNoRef(OrderNo, ChargeType, SequenceNo) to CustomerOrderCharge(OrderNo, ChargeType, SequenceNo) {
+      label = "Sequence No";
+   }
+   reference TaxCodeRef(Company, FeeCode) to TaxCodeRestricted(Company, FeeCode) {
+      label = "Tax Code";
+   }
+   reference TaxCodeExemptRef(Company, FeeCode) to TaxCodeExemptRestricted(Company, FeeCode) {
+      label = "Tax Code Exempt";
+   }
+   reference CustomerTaxUsageTypeRef(CustomerTaxUsageType) to CustomerTaxUsageType(CustomerTaxUsageType) {
+      label = "Customer Tax Usage Type";
+   }
+
+   action ApproveForCreditCharge;
+   action RemoveCreditApprovalCharge;
+}
+
+@Override
+query CustomerOrderChargeLov {
+   from = "customer_order_charge_lov";
+   lu = CustomerOrderCharge;
+   keys = Contract, CustomerNo, OrderNo, SequenceNo;
+   ludependencies = CustomerOrderCharge;
+   attribute Contract Text {
+      label = "Site";
+      format = uppercase;
+      lovcolumn = [false];
+   }
+   attribute CustomerNo Text {
+      lovcolumn = [false];
+   }
+   attribute OrderNo Text {
+      format = uppercase;
+      lovcolumn = [true];
+   }
+   attribute SequenceNo Number {
+      lovcolumn = [true];
+   }
+   attribute ChargeType Text {
+      format = uppercase;
+      lovcolumn = [true];
+   }
+   attribute ChargeAmount Number {
+      lovcolumn = [true];
+   }
+   attribute ChargeAmountInclTax Number {
+      lovcolumn = [true];
+   }
+   attribute BaseChargeAmount Number {
+      lovcolumn = [true];
+   }
+   attribute BaseChargeAmtInclTax Number {
+      label = "Base Charge Amount Incl Tax";
+      lovcolumn = [true];
+   }
+   attribute ChargeCost Number {
+      lovcolumn = [true];
+   }
+   attribute QtyAvailable Number {
+      label = "Possible Qty to Return";
+      lovcolumn = [true];
+   }
+   attribute ChargedQty Number {
+      label = "Charge Qty";
+      lovcolumn = [true];
+   }
+   attribute InvoicedQty Number {
+      lovcolumn = [true];
+   }
+   attribute QtyReturned Number {
+      lovcolumn = [true];
+   }
+   attribute SalesUnitMeas Text {
+      label = "Price Unit Meas";
+      lovcolumn = [true];
+   }
+   attribute TaxCode Text {
+      lovcolumn = [true];
+   }
+   attribute TaxClassId Text {
+      format = uppercase;
+      lovcolumn = [true];
+   }
+   attribute DateEntered Date {
+      lovcolumn = [true];
+   }
+   attribute UsePriceInclTaxDb Text {
+      label = "Use Price Incl Tax";
+      lovcolumn = [false];
+   }
+}
+
+---------------------------------- ACTIONS ----------------------------------
+action RefreshChargeLines {
+   initialcheck none;
+   ludependencies = ReturnMaterialCharge;
+}
+
+--------------------------------- FUNCTIONS ---------------------------------
+
+function CalculateTotalChargeAmount Structure(CalculateTotalChargeAmountsStructure) {
+   parameter RmaNo Number;
+   parameter RmaChargeNo Number;
+   parameter Contract Text;
+   parameter OrderNo Text;
+   parameter SequenceNo Number;
+   parameter Company Text;
+   parameter TotalBaseChargedAmount Number;
+   parameter ChargeAmount Number;
+   parameter ChargeAmountInclTax Number;
+   parameter BaseChargeAmount Number;
+   parameter BaseChargeAmountInclTax Number;
+   parameter ChargedQty Number;
+   parameter CurrencyRate Number;
+   parameter TaxCode Text;
+   parameter TaxCalcStructureId Text;
+   parameter ShipAddrNoParent Text;
+   parameter PlannedShipParentDate Date;
+   parameter CustomerNoParent Text;
+   parameter SupplyCountryDbParent Text;
+   parameter DeliveryType Text;
+   parameter ChargeType Text;
+   parameter UsePriceInclTaxParent Boolean;
+   parameter CurrencyCodeParent Text;
+   parameter TaxLiability Text;
+   parameter TaxLiabilityType Text;
+   parameter TaxFromDefaults Text;
+   parameter TaxCodeFlag Boolean;
+   parameter NewLine Boolean;
+   parameter TaxEditedFlag Boolean;
+   parameter RecalculateValues Boolean;
+}
+
+function ValidateChargeAmount Structure(ValidateChargeAmountStructure) {
+   parameter RmaNo Number;
+   parameter RmaChargeNo Number;
+   parameter Company Text;
+   parameter Contract Text;
+   parameter OrderNo Text;
+   parameter Charge Number;
+   parameter MultipleTaxLines Boolean;
+   parameter SequenceNo Number;
+   parameter ChargeAmount Number;
+   parameter ChargeAmountInclTax Number;
+   parameter BaseChargeAmount Number;
+   parameter BaseChargeAmountInclTax Number;
+   parameter TotalBase Number;
+   parameter TaxCode Text;
+   parameter TaxCalcStructureId Text;
+   parameter TaxClassId Text;
+   parameter ShipAddrNoParent Text;
+   parameter PlannedShipParentDate Date;
+   parameter CustomerNoParent Text;
+   parameter CustomerNoCreditParent Text;
+   parameter SupplyCountryDbParent Text;
+   parameter DeliveryType Text;
+   parameter ChargeType Text;
+   parameter UsePriceInclTaxParent Boolean;
+   parameter CurrencyCodeParent Text;
+   parameter CurrRate Number;
+   parameter TaxLiability Text;
+   parameter TaxLiabilityType Text;
+   parameter ChargedQty Number;
+   parameter TaxFromDefaults Text;
+   parameter FetchTaxCodes Text;
+   parameter TaxCodeFlag Boolean;
+   parameter NewLine Boolean;
+   parameter TaxEditedFlag Boolean;
+   parameter RecalculateValues Boolean;
+   parameter Source Text;
+}
+
+function ValidateDeliveryType Structure(ValidateChargeAmountStructure) {
+   parameter RmaNo Number;
+   parameter RmaChargeNo Number;
+   parameter Company Text;
+   parameter Contract Text;
+   parameter OrderNo Text;
+   parameter Charge Number;
+   parameter MultipleTaxLines Boolean;
+   parameter SequenceNo Number;
+   parameter ChargeAmount Number;
+   parameter ChargeAmountInclTax Number;
+   parameter TotalBase Number;
+   parameter TaxCode Text;
+   parameter TaxCalcStructureId Text;
+   parameter TaxClassId Text;
+   parameter ShipAddrNoParent Text;
+   parameter PlannedShipParentDate Date;
+   parameter CustomerNoParent Text;
+   parameter SupplyCountryDbParent Text;
+   parameter DeliveryType Text;
+   parameter ChargeType Text;
+   parameter UsePriceInclTaxParent Boolean;
+   parameter CurrencyCodeParent Text;
+   parameter CurrencyRate Number;
+   parameter TaxLiability Text;
+   parameter TaxLiabilityType Text;
+   parameter ChargedQty Number;
+   parameter TaxFromDefaults Text;
+   parameter FetchTaxCodes Text;
+   parameter TaxCodeFlag Boolean;
+   parameter NewLine Boolean;
+   parameter TaxEditedFlag Boolean;
+   parameter RecalculateValues Boolean;
+}
+
+function CustomerOrderChargeInfo Structure(ValidateCustomerOrderChargeStructure) {
+   parameter RmaNo Number;
+   parameter RmaChargeNo Number;
+   parameter Company Text;
+   parameter Contract Text;
+   parameter OrderNo Text;
+   parameter Charge Number;
+   parameter MultipleTaxLines Boolean;
+   parameter SequenceNo Number;
+   parameter ChargeAmount Number;
+   parameter ChargeAmountInclTax Number;
+   parameter BaseChargeAmount Number;
+   parameter BaseChargeAmountInclTax Number;
+   parameter TotalBase Number;
+   parameter TaxCode Text;
+   parameter TaxCalcStructureId Text;
+   parameter TaxClassId Text;
+   parameter ShipAddrNoParent Text;
+   parameter PlannedShipParentDate Date;
+   parameter CustomerNoParent Text;
+   parameter CustomerNoCreditParent Text;
+   parameter TaxLiabilityParent Text;
+   parameter SupplyCountryDbParent Text;
+   parameter DeliveryType Text;
+   parameter ChargeType Text;
+   parameter UsePriceInclTaxParent Boolean;
+   parameter CurrencyCodeParent Text;
+   parameter CurrRate Number;
+   parameter TaxLiability Text;
+   parameter TaxLiabilityType Text;
+   parameter ChargedQty Number;
+   parameter FetchTaxCodes Text;
+   parameter TaxCodeFlag Boolean;
+   parameter NewLine Boolean;
+   parameter TaxEditedFlag Boolean;
+   parameter RecalculateValues Boolean;
+   parameter FetchingFromCoFlag Boolean;
+   parameter ChangeValueFlag Boolean;
+}
+
+function OrderNoFileter List < Entity(CustomerOrderChargeLov) > {
+   parameter ChargeType Text;
+   parameter OrderNoParent Text;
+   parameter CustomerNoParent Text;
+   parameter UsePriceInclTaxParent Boolean;
+
+   where = "(ORDER_NO = NVL(:OrderNoParent, ORDER_NO) AND CUSTOMER_NO = :CustomerNoParent AND USE_PRICE_INCL_TAX_DB = :UsePriceInclTaxParent AND NVL(:ChargeType, CHARGE_TYPE) = CHARGE_TYPE)";
+}
+
+-------------------------------- STRUCTURES ---------------------------------
+
+structure CalculateLinePricesStructure {
+   attribute BaseChargeAmount Number;
+   attribute BaseChargeAmtInclTax Number;
+   attribute ChargeAmount Number;
+   attribute ChargeAmountInclTax Number;
+   attribute MultipleTaxLines Boolean;
+   attribute TaxCode Text;
+   attribute TaxCalcStructureId Text;
+   attribute TaxClassId Text;
+   attribute TaxFromDefaults Text;
+   attribute FetchTaxCodes Text;
+}
+
+structure CalculateTotalChargeAmountsStructure {
+   attribute TotalCurrChargedAmount Number;
+   attribute TotalBaseChargedAmount Number;
+   attribute GrossTotalCurr Number;
+   attribute GrossTotalBase Number;
+   attribute TaxAmountCurrency Number;
+   attribute TaxCalcStructureId Text;
+}
+
+structure ValidateChargeAmountStructure {
+   attribute CurrencyRate Number;
+   attribute BaseChargeAmount Number;
+   attribute BaseChargeAmtInclTax Number;
+   attribute ChargeAmount Number;
+   attribute ChargeAmountInclTax Number;
+   attribute MultipleTaxLines Boolean;
+   attribute TaxCode Text;
+   attribute TaxCalcStructureId Text;
+   attribute TaxClassId Text;
+   attribute TotalCurrency Number;
+   attribute TotalBase Number;
+   attribute GrossTotalCurr Number;
+   attribute GrossTotalBase Number;
+   attribute TaxAmountCurr Number;
+   attribute FetchTaxCodes Text;
+}
+
+structure ValidateCustomerOrderChargeStructure {
+   attribute CurrencyRate Number;
+   attribute BaseChargeAmount Number;
+   attribute BaseChargeAmtInclTax Number;
+   attribute ChargeAmount Number;
+   attribute ChargeAmountInclTax Number;
+   attribute MultipleTaxLines Boolean;
+   attribute TaxCode Text;
+   attribute TaxCalcStructureId Text;
+   attribute TaxClassId Text;
+   attribute ChargeType Text;
+   attribute TaxLiability Text;
+   attribute Charge Number;
+   attribute ChargeCostPercent Number;
+   attribute ChargePercentBasis Number;
+   attribute SalesUnitMeas Text;
+   attribute BaseChargePercentBasis Number;
+   attribute ChargeCost Number;
+   attribute SequenceNo Number;
+   attribute StatisticalChargeDiff Number;
+   attribute DeliveryType Text;
+   attribute TotalCurrency Number;
+   attribute TotalBase Number;
+   attribute GrossTotalCurr Number;
+   attribute GrossTotalBase Number;
+   attribute TaxAmountCurr Number;
+   attribute FetchTaxCodes Text;
+   attribute ChargeTypeDescription Text;
+   attribute ChargeGroupDescription Text;
+}
+
+structure OrderInfoStructure {
+   attribute TaxCode Text;
+   attribute TaxClassId Text;
+   attribute ChargeType Text;
+   attribute TaxLiability Text;
+   attribute BaseChargeAmount Number;
+   attribute BaseChargeAmtInclTax Number;
+   attribute Charge Number;
+   attribute ChargeCostPercent Number;
+   attribute ChargePercentBasis Number;
+   attribute BaseChargePercentBasis Number;
+   attribute ChargeCost Number;
+   attribute ChargeAmount Number;
+   attribute ChargeAmountInclTax Number;
+   attribute SalesUnitMeas Text;
+   attribute SequenceNo Number;
+   attribute CurrencyRate Number;
+   attribute DeliveryType Text;
+   attribute StatisticalChargeDiff Number;
+}
+
+
+

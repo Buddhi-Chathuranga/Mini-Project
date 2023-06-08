@@ -1,0 +1,691 @@
+-------------------------------------------------------------------------------------------------
+-- Date        Sign     History
+-- ----------  ------   -------------------------------------------------------------------------
+-- 2021-02-01  DhAplk   SC2020R1-11784, Replaced complex project views using Get methods if reference is read only.
+-- 2019-10-31  Hairlk   SCXTEND-1320, Set the startupmode to search.
+-- 2019-07-01  SucPlk   SCUXXW4-20576, Modified if condition of validatecommand for Input UoM to merge corrections from support bug SCZ-3466.
+-- 2019-06-21  RasDlk   SCUXXW4-15881, Corrected few issues related to InputUoM.
+-- 2019-06-13  JaBalk   SCUXXW4-21993, Overridden CustomerOrderLovList to show fields while finding PO numbers.
+-- 2019-06-06  JaBalk   SCUXXW4-21993, Corrected misc issues.
+-- 2019-05-30  JaBalk   SCUXXW4-21993, Added Objstate to ShipDiffGroup and made searchable = false.
+-- 2019-05-30  RasDlk   SCUXXW4-21898, Overrided the ReferenceInputUnitMeasSelector to show only the required information for InputUomRef field.
+-- 2019-05-30  RasDlk   SCUXXW4-21756, Changed the editable condition of InputUomRef and InputQty.
+-- 2019-05-26  JaBalk   SCUXXW4-16045, Modfied Stringify to send multiple child of multiple parent.
+-- 2019-05-15  JaBalk   SCUXXW4-17701, Modified Stringify to deliver inv parts and non inv parts.
+-- 2019-05-09  RasDlk   SCUXXW4-20453,20549,20598, Implemented the code related to InputUoM.
+-- 2019-05-02  JaBalk   SCUXXW4-17701, Changed the bind list as list-in-list for dlgShipDiffInv and connected a DELIVER_CUSTOMER_ORDER view instead of
+-- 2019-05-02           connecting INVENTORY_PART_IN_STOCK as order line keys are needed in the second child list level to retrieve Qty to Deliver.
+-- 2019-04-10  JaBalk   SCUXXW4-17701, Implemented a bind list for dlgShipDiffInv.
+-- 2019-01-31  KuBalk   SCUXXW4-1549,  Converted from tbwShipDiffNonInventory.
+-- 2019-01-31  KuBalk   SCUXXW4-1544,  Converted from tbwShipDiffInventory.
+-- 2019-01-25  KuBalk   SCUXXW4-15894, Implemented CancelDeliveryCommand.
+-- 2019-01-24  KuBalk   SCUXXW4-15872, Converted from frmShipDiff using MTG Version: 1.34.
+-------------------------------------------------------------------------------------------------
+
+client DeliverCustomerOrderWithDifferences;
+component ORDER;
+layer Core;
+projection DeliverCustomerOrderWithDifferences;
+include fragment CustOrdCust2Selector;
+include fragment UserAllowedSiteLovSelector;
+include fragment InputUnitOfMeasure;
+include fragment CustomerOrderLineStateBadge;
+warningsenabled = CustomerOrder, CancelDeliverOrder, DeliverWithDifferences;
+
+--------------------------------- FRAGMENTS ---------------------------------
+
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+navigator {
+   entry DeliverCustomerOrderwithDifferencesNavEntry parent OrderNavigator.ShippingOrderDelivery at index 300 {
+      label = "Deliver Customer Order with Differences";
+      page Form;
+   }
+}
+
+-------------------------------- MAIN PAGES ---------------------------------
+page Form using CustomerOrderSet {
+   label = "Deliver Customer Order with Differences";
+   startupmode = search;
+   selector CustomerOrderSelector;
+   group ShipDiffGroup;
+   tabs {
+
+      tab {
+         label = "Inventory Parts";
+         list ShipDiffInventoryList(CustomerOrderArrayInv);
+         list ShipReservationList(ShipInvArray) bind ShipDiffInventoryList {
+            display = Nested;
+         }
+      }
+      tab {
+         label = "Non-Inventory Parts";
+         list ShipDiffNonInventoryList(CustomerOrderArray);
+      }
+   }
+
+   commandgroup CommandGroupCmdGroup {
+
+      command DeliverwithDifferencesCommand;
+      command CancelDeliveryCommand;
+      command AddChargesCommand;
+   }
+}
+
+-------------------------------- ASSISTANTS ---------------------------------
+
+--------------------------------- COMMANDS ----------------------------------
+command DeliverwithDifferencesCommand for CustomerOrderLineInv {
+   label = "Deliver with Differences";
+   mode = Global;
+   enabled = [(InventoryLinesExist = 1 or NonInventoryLinesExist = 1) and OrderNo != null];
+
+   variable DisplayInfoVar {
+      type = Number;
+   }
+   variable ReservationDetailsVar {
+      type = LongText;
+   }
+   variable NonInventoryDetailsVar {
+      type = LongText;
+   }
+   variable InventoryLineVar {
+      type = LongText;
+   }
+
+   execute {
+      confirm("The parts on order ${OrderNo} will be delivered") {
+         when CANCEL {
+            exit;
+         }
+      }
+      if [NonInventoryLinesExist = 1] {
+         call CheckAllLicenseConnected(OrderNo) into DisplayInfoVar {
+            when SUCCESS {
+               if [DisplayInfoVar = 1] {
+                  confirm("There are order line(s) which are not connected to an export license. Do you want to proceed?") {
+                     when CANCEL {
+                        exit;
+                     }
+                  }
+               }
+               if [DisplayInfoVar = 3] {
+                  alert("Export Licenses must be connected to order line(s) to proceed, please use the Find and Connect License");
+                  exit;
+               }
+            }
+            when FAIL {
+               exit;
+            }
+         }
+      }
+      -- collect Co line information
+      stringify(ShipDiffInventoryList, "ORDER_NO=${OrderNo}^LINE_NO=${LineNo}^REL_NO=${RelNo}^LINE_ITEM_NO=${LineItemNo}^CLOSE_LINE=${CloseLineDb}^", JSON) into InventoryLineVar;
+      -- collect reservation lines information
+      stringify(ShipDiffInventoryList/ShipReservationList, "ORDER_NO=${OrderNo}^LINE_NO=${LineNo}^REL_NO=${RelNo}^LINE_ITEM_NO=${LineItemNo}^QTY_TO_DELIVER=${QtyToDeliver}^CATCH_QTY_TO_DELIVER=${CatchQtyToDeliver}^LOCATION_NO=${LocationNo}^LOT_BATCH_NO=${LotBatchNo}^SERIAL_NO=${SerialNo}^ENG_CHG_LEVEL=${EngChgLevel}^WAIV_DEV_REJ_NO=${WaivDevRejNo}^QTY_PICKED=${QtyPicked}^HANDLING_UNIT_ID=${HandlingUnitId}^ACTIVITY_SEQ=${ActivitySeq}^WAREHOUSE=${Warehouse}^INPUT_UNIT_MEAS=${InputUom}^INPUT_QUANTITY=${InputQty}^INPUT_CONV_FACTOR=${InputConversion}^INPUT_VARIABLE_VALUES=${InputValue}^", JSON) into ReservationDetailsVar;
+      -- collect noninv lines information by checking IsDirty as if non inv tab is not selected, cannot access ShipDiffNonInventoryList when excute the command deliver, cursor waits and nothing happens
+      if [component.ShipDiffNonInventoryList.IsDirty] {
+         stringify(ShipDiffNonInventoryList, "NON_INV_MODIFIED=Y^ORDER_NO=${OrderNo}^LINE_NO=${LineNo}^REL_NO=${RelNo}^LINE_ITEM_NO=${LineItemNo}^QTY_TO_DELIVER=${QtyToDeliver}^CLOSE_LINE=${CloseLineDb}^", JSON) into NonInventoryDetailsVar;
+      }
+      else {
+         stringify(ShipDiffInventoryList, "NON_INV_MODIFIED=N", JSON) into NonInventoryDetailsVar;
+      }
+      call DeliverWithDifferences(OrderNo, InventoryLineVar, ReservationDetailsVar, NonInventoryDetailsVar) {
+         when FAIL {
+            error("${error.Message}");
+            alert("Load list ${OrderNo} was not delivered.");
+            exit;
+         }
+      }
+   }
+}
+
+command CancelDeliveryCommand for CustomerOrder {
+   label = "Undo Reserve and Picking";
+   enabled = [InventoryLinesExist = 1 or NonInventoryLinesExist = 1];
+   execute {
+      confirm("Undo picking and remove reservations for order ${OrderNo}.") {
+         when OK {
+            call CancelDeliverOrder(OrderNo);
+         }
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+command AddChargesCommand for CustomerOrder {
+   label = "Add Charges";
+   enabled = [true];
+   execute {
+      navigate "page/CustomerOrder/Form?$filter=OrderNo eq $[OrderNo]";
+   }
+}
+command InputUoMParametersCommand for CustomerOrderReservation {
+   label = "Input UoM Parameters";
+   mode = SingleRecord;
+   enabled = [parent.InputUomAllowed and MultiplePicking = "FALSE"];
+   execute {
+      assistant EnterInputUomParameters.EnterInputUnitParamAssistant(InputUomGroupId, InputValue, null, null, InputUom, InputConversion, "ORDER") into(InputValue, QtyToDeliver, InputQty, InputUom, InputConversion) {
+         when CANCEL {
+            exit CANCEL;
+         }
+      }
+   }
+}
+--------------------------------- SELECTORS ---------------------------------
+@Override
+selector CustomerOrderSelector for CustomerOrder {
+   label = "${OrderNo} - ${Contract} - ${CustomerNo}";
+   static OrderNo;
+   static Contract;
+   static CustomerNo;
+   badge Objstate {
+      label = "Status";
+      size = Small;
+      style = TextOnly;
+      visible = [false];
+      searchable = false;
+   }
+}
+
+@Override
+selector ReferenceInputUnitMeasSelector for InputUnitMeas {
+   static UnitCode {
+      label = "";
+   }
+   static CustUsageAllowed {
+      visible = [false];
+   }
+   static InputUnitMeasType {
+      visible = [false];
+   }
+   static DefaultInputUom {
+      visible = [false];
+   }
+}
+---------------------------------- GROUPS -----------------------------------
+group ShipDiffGroup for CustomerOrder {
+   label = "";
+   field OrderNoRef {
+      size = Small;
+   }
+   field ContractRef {
+      size = Small;
+   }
+   field WantedDeliveryDate {
+      size = Small;
+   }
+   lov CustomerNoRef with ReferenceCustOrdCust2Selector {
+      size = Small;
+      contactwidget {
+         enabled = [CustomerNoRef.CustomerNo != null];
+         source = Customer;
+      }
+   }
+
+   field RouteIdRef {
+      size = Small;
+      label = "Route ID";
+   }
+   field Description;
+
+}
+----------------------------------- CARDS -----------------------------------
+
+---------------------------------- DIALOGS ----------------------------------
+
+---------------------------------- CHARTS -----------------------------------
+
+--------------------------------- CALENDARS ---------------------------------
+
+---------------------------------- SHEETS -----------------------------------
+
+----------------------------- STATE INDICATORS ------------------------------
+
+----------------------------------- TREES -----------------------------------
+
+---------------------------------- PLUGINS ----------------------------------
+
+------------------------------- IMAGE VIEWERS -------------------------------
+
+//tbwShipDiffNonInventory
+
+--------------------------------- COMMANDS ----------------------------------
+command ViewConfigurationCommand for CustomerOrderLineNonInv {
+   label = "View Configuration";
+   enabled = [ConfigurationId != "*" and ConfigurationId != ""];
+   execute {
+      set Usage = "CustomerOrder";
+      navigate "assistant/PartConfigurationAssistant/EditConfiguration?$action=InitConfiguration{  VarUsage:$[Usage],
+                                                                                                   VarMode:'View',
+                                                                                                   VarPartNo:$[CatalogNo],
+                                                                                                   VarIdentity1:$[OrderNo],
+                                                                                                   VarIdentity2:$[LineNo],
+                                                                                                   VarIdentity3:$[RelNo],
+                                                                                                   VarIdentity4:$[LineItemNo],
+                                                                                                   VarConfigurationId:$[ConfigurationId]}";
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+@Overtake Base
+list InputUnitMeasLovList for InputUnitMeas {
+   label = "";
+   static UnitCode {
+      label = "Input UoM";
+   }
+   static Description;
+   static ConversionFactor;
+   static InputUnitMeasType;
+   static DefaultInputUom;
+}
+
+list ShipDiffNonInventoryList for CustomerOrderLineNonInv {
+   orderby = LineNumber, ReleaseNumber, LineItemNo;
+   savemode = Unbound;
+   editmode = SingleCellEdit;
+   field QtyToDeliver {
+      validate command {
+         execute {
+            if [QtyToDeliver < 0] {
+               alert("This quantity must be greater than 0");
+               set QtyToDeliver = 0;
+            }
+         }
+      }
+   }
+   field QtyToShip;
+   field BuyQtyDue;
+   field CloseLineDb {
+      label = "Close";
+   }
+   field LineNo {
+      size = Small;
+   }
+   field RelNo {
+      size = Small;
+   }
+   fieldset CustomerOrderLineStateFieldSet;
+   field CatalogNo {
+      size = Small;
+      label = "Sales Part No";
+   }
+   field CustomerOrderLineRef.CatalogDesc {
+      size = Small;
+      label = "Description";
+   }
+   @DynamicComponentDependency CFGCHR
+   field ConfigurationIdRef {
+      label = "Configuration ID";
+      size = Small;
+   }
+   field SalesUnitMeasRef {
+      size = Small;
+   }
+   field CatalogType {
+      size = Small;
+   }
+   field QtyShipped {
+      label = "Delivered Qty";
+   }
+   field PackagePartNo {
+      size = Small;
+      label = "Package Part No";
+   }
+
+   fieldranking QtyToShip, BuyQtyDue, LineNo, RelNo, Objstate, CatalogNo, CustomerOrderLineRef.CatalogDesc, ConfigurationIdRef, SalesUnitMeasRef, QtyShipped;
+
+   commandgroup CommandGroupCmdGroup {
+      command ViewConfigurationCommand;
+   }
+}
+
+--------------------------------- COMMANDS ----------------------------------
+command ViewConfigurationCommand for CustomerOrderLineInv {
+   label = "View Configuration";
+   enabled = [ConfigurationId != "*" and ConfigurationId != ""];
+   execute {
+      set Usage = "CustomerOrder";
+      navigate "assistant/PartConfigurationAssistant/EditConfiguration?$action=InitConfiguration{  VarUsage:$[Usage],
+                                                                                                   VarMode:'View',
+                                                                                                   VarPartNo:$[PartNo],
+                                                                                                   VarIdentity1:$[OrderNo],
+                                                                                                   VarIdentity2:$[LineNo],
+                                                                                                   VarIdentity3:$[RelNo],
+                                                                                                   VarIdentity4:$[LineItemNo],
+                                                                                                   VarConfigurationId:$[ConfigurationId],
+                                                                                                   VarSupplySite:$[Contract]}";
+   }
+}
+
+
+----------------------------------- LISTS -----------------------------------
+
+list ShipDiffInventoryList for CustomerOrderLineInv {
+   label = "";
+   orderby = LineNumber, ReleaseNumber, LineItemNo;
+   savemode = Unbound;
+   editmode = SingleCellEdit;
+
+   computedfield SumQtyToDeliver {
+      label = "Qty to Deliver";
+      value = "#{ShipInvArray.sum(QtyToDeliver)}";
+      type = Number;
+      size = Small;
+   }
+   computedfield SumCatchQtyToDeliver {
+      label = "Catch Qty to Deliver";
+      value = "#{ShipInvArray.sum(CatchQtyToDeliver)}";
+      type = Number;
+      size = Small;
+   }
+   field QtyPicked;
+   field CatchQtyPicked;
+   field CloseLineDb {
+      label = "Close";
+      columnvisible = [parent.UsesShipmentInventory = 0];
+   }
+
+   field LineNo {
+      size = Small;
+   }
+   field RelNo {
+      size = Small;
+   }
+   fieldset CustomerOrderLineStateFieldSet;
+   field PartNo {
+      size = Small;
+      label = "Sales Part No";
+   }
+   field CustomerOrderLineRef.CatalogDesc {
+      size = Small;
+      label = "Description";
+   }
+   field ConfigurationId {
+      label = "Configuration ID";
+      size = Small;
+   }
+   field PartOwnership {
+      size = Small;
+   }
+   field Owner {
+      size = Small;
+   }
+   field OwningCustomerName {
+      size = Small;
+   }
+   field UoM {
+      size = Small;
+   }
+   field CatchUomRef {
+      size = Small;
+   }
+   field CatalogType {
+      size = Small;
+   }
+   field QtyShipped {
+      label = "Delivered Qty";
+   }
+   field PackagePartNo {
+      size = Small;
+      label = "Package Part No";
+   }
+   field InputUomAllowed {
+      columnexclude = [true];
+      searchable = false;
+   }
+
+   fieldranking QtyPicked, CatchQtyPicked, LineNo, RelNo, Objstate, PartNo, CustomerOrderLineRef.CatalogDesc, ConfigurationId, PartOwnership, QtyShipped;
+
+   commandgroup CommandGroup2CmdGroup {
+      command ViewConfigurationCommand;
+   }
+}
+
+
+list ShipReservationList for CustomerOrderReservation {
+   label = "";
+   orderby = LocationNo, LotBatchNo, SerialNo, EngChgLevel, WaivDevRejNo;
+   savemode = Unbound;
+   editmode = SingleCellEdit;
+
+   field QtyToDeliver {
+      validate command {
+         execute {
+            set InputUom = null;
+            set InputQty = null;
+            set InputConversion = null;
+            set InputValue = null;
+            if [QtyToDeliver < 0] {
+               alert("This quantity must be greater than 0");
+               set QtyToDeliver = PreviousQtyToDeliver;
+            }
+            else {
+               if [QtyToDeliver > QtyPicked] {
+                  alert("Only ${QtyPicked} have been picked. Cannot deliver more than picked.");
+                  set QtyToDeliver = PreviousQtyToDeliver;
+               }
+               else {
+                  set PreviousQtyToDeliver = QtyToDeliver;
+               }
+            }
+         }
+      }
+   }
+   field InvUnitMeas;
+   -- this field is needed for the validaton of QtyToDeliver
+   field PreviousQtyToDeliver {
+      columnvisible = [false];
+   }
+   field CatchQtyToDeliver {
+      editable = [CatchQtyPicked != Null];
+      validate command {
+         execute {
+            if [CatchQtyToDeliver < 0] {
+               alert("This quantity must be greater than 0");
+
+            }
+         }
+      }
+   }
+   field CatchUnitMeas;
+   field QtyPicked;
+   field CatchQtyPicked;
+   lov InputUomRef with ReferenceInputUnitMeasSelector using GetUomValues(InputUomGroupId, "ORDER") {
+      size = Small;
+      searchable = false;
+      editable = [InputUomGroupId != null and MultiplePicking = "FALSE"];
+      validate command {
+         variable ShowUomDialog {
+            type = Text;
+         }
+         variable ConversionFactor {
+            type = Number;
+         }
+         variable InputUomInfoVar {
+            type = Structure(InputUomInfoStructure);
+         }
+         execute {
+            call ShowInputUomDialog(InputUomGroupId, InputUom) into ShowUomDialog;
+            if [ShowUomDialog = "TRUE"] {
+               assistant EnterInputUomParameters.EnterInputUnitParamAssistant(InputUomGroupId, InputValue, null, null, InputUom, InputConversion, "ORDER") into(InputValue, QtyToDeliver, InputQty, InputUom, InputConversion) {
+                  when CANCEL {
+                     exit CANCEL;
+                  }
+               }
+            }
+            else {
+               call GetConversionFactor(InputUomGroupId, InputUom) into ConversionFactor;
+               set InputConversion = ConversionFactor;
+               if [InputQty != null] {
+                  call GetDirectOutputQty(InputQty, InputUom, InputUomGroupId, InputConversion) into InputUomInfoVar;
+
+                  if [InputUomInfoVar.OutputQty > InputUomInfoVar.OutputQtyWithPrecision] {
+                     info("Rounded quantity is greater than the corresponding input quantity. Please review the rounded quantity again.");
+                  }
+
+                  set QtyToDeliver = InputUomInfoVar.OutputQty;
+               }
+            }
+         }
+      }
+   }
+   field InputQty {
+      searchable = false;
+      editable = [InputUomGroupId != null and MultiplePicking = "FALSE"];
+      validate command {
+         variable InputUomInfoVar {
+            type = Structure(InputUomInfoStructure);
+         }
+         execute {
+            call GetDirectOutputQty(InputQty, InputUom, InputUomGroupId, InputConversion) into InputUomInfoVar;
+
+            if [InputUomInfoVar.OutputQty != InputUomInfoVar.OutputQtyWithPrecision] {
+               info("Rounded quantity is greater than the corresponding input quantity. Please review the rounded quantity again.");
+            }
+            set QtyToDeliver = InputUomInfoVar.OutputQty;
+            set InputValue = InputUomInfoVar.InputValueString;
+         }
+      }
+   }
+   field InputConversion {
+      searchable = false;
+   }
+   field InputValue {
+      size = Small;
+      searchable = false;
+   }
+   field LocationNo {
+      size = Small;
+   }
+   field HandlingUnitIdRef;
+   field HandlingUnitRef.HandlingUnitTypeId {
+      size = Small;
+      label = "Handling Unit Type ID";
+   }
+   field TypeDescription {
+      size = Small;
+   }
+   field HandlingUnitRef.Sscc {
+      size = Small;
+      label = "SSCC";
+   }
+   field HandlingUnitRef.AltHandlingUnitLabelId {
+      size = Small;
+      label = "Alt Handling Unit Label ID";
+   }
+   field Warehouse {
+      size = Small;
+   }
+   field BayId {
+      size = Small;
+   }
+   field RowId {
+      size = Small;
+   }
+   field TierId {
+      size = Small;
+   }
+   field BinId {
+      size = Small;
+   }
+   field LotBatchNo {
+      size = Small;
+      label = "Lot/Batch No";
+
+   }
+   field SerialNo {
+      size = Small;
+   }
+   field WaivDevRejNo {
+      size = Small;
+   }
+   field EngChgLevel {
+      size = Small;
+   }
+   field AvailabilityControlIdRef {
+      size = Small;
+   }
+   field AvailabilityControlDescription {
+      size = Small;
+   }
+   @DynamicComponentDependency PROJ
+   field ProjectId;
+   @DynamicComponentDependency PROJ
+   field SubProjectId {
+      size = Small;
+   }
+   @DynamicComponentDependency PROJ
+   field SubProjectDescription {
+      size = Small;
+   }
+   @DynamicComponentDependency PROJ
+   field ActivityId {
+      size = Small;
+   }
+   @DynamicComponentDependency PROJ
+   field ActivityDescription {
+      size = Small;
+   }
+   @DynamicComponentDependency PROJ
+   field ActivitySeqRef;
+   field TopParentHandlingUnitID;
+   field TopParentHandlingUnitType {
+      size = Small;
+   }
+   field TopParentTypeDescription {
+      size = Small;
+   }
+   field TopParentSSCC {
+      size = Small;
+   }
+   field TopParentAltHandlingUnitLabelID {
+      size = Small;
+   }
+   field InputUomGroupId {
+      columnexclude = [true];
+      searchable = false;
+   }
+   field MultiplePicking {
+      columnexclude = [true];
+      searchable = false;
+   }
+   fieldranking LocationNo, HandlingUnitIdRef, HandlingUnitRef.HandlingUnitTypeId, TypeDescription, HandlingUnitRef.Sscc, HandlingUnitRef.AltHandlingUnitLabelId, LotBatchNo, SerialNo, WaivDevRejNo, EngChgLevel;
+   commandgroup CommandGroupCmdGroup {
+      command InputUoMParametersCommand;
+   }
+}
+
+-- Added fields to show in the find command for order no field
+@Override
+list CustomerOrderLovList for CustomerOrder {
+   label = "";
+   static OrderNo;
+   static AuthorizeCode;
+   static BillAddrNo;
+   static Contract;
+   static CustomerNo;
+   static CustomerNoPayRef;
+   static Priority;
+   static ProposedPrepaymentAmount;
+   static PrepaymentApproved;
+   static BackorderOption;
+   static ExpectedPrepaymentDate;
+   static FreightMapId;
+   static ZoneId;
+   static FreightPriceListNo;
+   static ApplyFixDelivFreightDb;
+   static ShipmentType;
+   static VendorNo;
+   static FreeOfChgTaxPayParty;
+   badge Objstate {
+      label = "Status";
+      emphasis Progress3 = [Objstate = "Released"];
+      emphasis Progress5 = [Objstate = "Reserved"];
+      emphasis Progress7 = [Objstate = "Picked"];
+      emphasis Progress8 = [Objstate = "PartiallyDelivered"];
+      emphasis Progress10 = [Objstate = "Delivered"];
+      style = TextOnly;
+   }
+}

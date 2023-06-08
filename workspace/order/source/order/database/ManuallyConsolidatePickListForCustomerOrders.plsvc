@@ -1,0 +1,207 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: ManuallyConsolidatePickListForCustomerOrders
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+-- 181225   SBalLK  SCUXXW4-9240, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+TYPE Customer_Order_Reservation_Key IS RECORD (
+   order_no                       VARCHAR2(12),
+   line_no                        VARCHAR2(4),
+   rel_no                         VARCHAR2(4),
+   line_item_no                   NUMBER,
+   contract                       VARCHAR2(5),
+   part_no                        VARCHAR2(25),
+   location_no                    VARCHAR2(35),
+   lot_batch_no                   VARCHAR2(20),
+   serial_no                      VARCHAR2(50),
+   eng_chg_level                  VARCHAR2(6),
+   waiv_dev_rej_no                VARCHAR2(15),
+   activity_seq                   NUMBER,
+   handling_unit_id               NUMBER,
+   configuration_id               VARCHAR2(50),
+   pick_list_no                   VARCHAR2(15),
+   shipment_id                    NUMBER);
+
+TYPE Reservation_Key_Colletion IS  TABLE OF Customer_Order_Reservation_Key INDEX BY PLS_INTEGER;
+
+FUNCTION Get_Available_Customer_Order_Lines___ (
+	preliminary_pick_list_no_ IN NUMBER,
+   storage_zone_id_          IN VARCHAR2 ) RETURN Objid_Arr
+IS
+   stmt_                   VARCHAR2(32000);
+   objid_arr_              Objid_Arr := Objid_Arr();
+   default_where_          VARCHAR2(32000);
+   manu_console_rec_       Manual_Consol_Pick_List_API.Public_Rec;
+   storage_filter_where_   VARCHAR2(28100);
+BEGIN
+   manu_console_rec_ := Manual_Consol_Pick_List_API.Get(preliminary_pick_list_no_);
+   IF manu_console_rec_.rowstate IS NOT NULL AND manu_console_rec_.rowstate != 'Created' THEN
+      default_where_ := ' WHERE PRELIMINARY_PICK_LIST_NO IS NULL 
+                         AND CONTRACT = :Contract
+                         AND (ORDER_NO, LINE_NO, REL_NO, LINE_ITEM_NO) IN (SELECT col.ORDER_NO, col.LINE_NO, col.REL_NO, col.LINE_ITEM_NO 
+                                                                           FROM CUSTOMER_ORDER_LINE col 
+                                                                           WHERE OBJSTATE IN (''Reserved'', ''Picked'', ''PartiallyDelivered'')) 
+                         AND PICK_LIST_NO = ''*''
+                         AND SHIPMENT_CONNECTED = ''FALSE'' 
+                         AND ( :WorkerId IS NULL OR ( :WorkerId IS NOT NULL AND ''CUSTOMER ORDER PICK LIST'' IN (SELECT task_type_db 
+                                                                                                                 FROM WAREHOUSE_WORKER_TASK_TYPE tt 
+                                                                                                                 WHERE tt.worker_id = :WorkerId
+                                                                                                                 AND CONTRACT = tt.contract 
+                                                                                                                 AND status_db = ''ACTIVE'')))';
+      stmt_ := CONCAT('SELECT OBJID FROM CREATE_PICK_LIST_JOIN_MAIN', default_where_);
+      IF storage_zone_id_ IS NOT NULL AND storage_zone_id_ != '%' THEN
+         storage_filter_where_ := CONCAT(CONCAT('(', Storage_Zone_API.Get_Sql_Where_Expression(manu_console_rec_.contract, storage_zone_id_)), ')');
+         storage_filter_where_ := REPLACE(storage_filter_where_, 'WAREHOUSE_ID', 'WAREHOUSE');
+         storage_filter_where_ := REPLACE(storage_filter_where_, 'BAY_ID',       'BAY_NO');
+         storage_filter_where_ := REPLACE(storage_filter_where_, 'ROW_ID',       'ROW_NO');
+         storage_filter_where_ := REPLACE(storage_filter_where_, 'TIER_ID',      'TIER_NO');
+         storage_filter_where_ := REPLACE(storage_filter_where_, 'BIN_ID',       'BIN_NO');
+         stmt_ := CONCAT(stmt_, CONCAT(' AND ', storage_filter_where_));
+      END IF;
+      @ApproveDynamicStatement(2018-12-24, sballk)
+      EXECUTE IMMEDIATE stmt_ BULK COLLECT INTO objid_arr_ USING manu_console_rec_.contract, manu_console_rec_.worker_id, manu_console_rec_.worker_id, manu_console_rec_.worker_id;
+   END IF;
+   RETURN objid_arr_;
+END Get_Available_Customer_Order_Lines___;
+
+PROCEDURE Start_Create_Consolidated_Pick_List___ (
+	key_      IN Manual_Consol_Pick_List_Key,
+	contract_ IN VARCHAR2)
+IS
+   message_ VARCHAR2(32000);
+BEGIN
+	message_:= Message_SYS.Construct('ConsolidatedPickList');
+   Message_SYS.Add_Attribute(message_, 'PRELIMINARY_PICK_LIST_NO', key_.preliminary_pick_list_no);
+   Message_SYS.Add_Attribute(message_, 'CONTRACT', contract_);
+   Message_SYS.Add_Attribute(message_, 'PRINT_PICK_LIST', 0);
+   
+   Create_Pick_List_API.Create_Consol_Pick_List__(message_);
+END Start_Create_Consolidated_Pick_List___;
+
+PROCEDURE Start_Print_Pick_List___ (
+	key_ IN Manual_Consol_Pick_List_Key)
+IS
+BEGIN
+	Manual_Consol_Pick_List_API.Print_Pick_Lists__(key_.preliminary_pick_list_no);
+END Start_Print_Pick_List___;
+
+PROCEDURE Connect_All_Order_Lines___ (
+	full_selection_ IN VARCHAR2)
+IS
+   records_                   json_array_t := json_array_t.parse(full_selection_);
+   key_                       Available_Customer_Order_Reservation_Key;
+   current_selection_         VARCHAR2(2000);
+   preliminary_pick_list_no_  NUMBER;
+BEGIN
+   FOR count_ IN 0 .. records_.get_size - 1 LOOP
+      current_selection_ := records_.get_string(count_);
+      preliminary_pick_list_no_ := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'PRELIMINARY_PICK_LIST_NO'));
+      key_.order_no           := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');
+      key_.line_no            := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_NO');
+      key_.rel_no             := Client_SYS.Get_Key_Reference_Value(current_selection_, 'REL_NO');
+      key_.line_item_no       := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_ITEM_NO'));
+      key_.contract           := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT');
+      key_.part_no            := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PART_NO');
+      key_.location_no        := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOCATION_NO');
+      key_.lot_batch_no       := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOT_BATCH_NO');
+      key_.serial_no          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SERIAL_NO');
+      key_.eng_chg_level      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ENG_CHG_LEVEL');
+      key_.waiv_dev_rej_no    := Client_SYS.Get_Key_Reference_Value(current_selection_, 'WAIV_DEV_REJ_NO');
+      key_.activity_seq       := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'ACTIVITY_SEQ'));
+      key_.handling_unit_id   := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'HANDLING_UNIT_ID'));
+      key_.pick_list_no       := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PICK_LIST_NO');
+      key_.configuration_id   := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONFIGURATION_ID');
+      key_.shipment_id        := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'SHIPMENT_ID'));
+      
+      Customer_Order_reservation_Initial_Check___(key_.order_no, key_.line_no, key_.rel_no, key_.line_item_no, key_.contract, key_.part_no, key_.location_no,
+                                                  key_.lot_batch_no, key_.serial_no, key_.eng_chg_level, key_.waiv_dev_rej_no, key_.activity_seq, 
+                                                  key_.handling_unit_id, key_.configuration_id, key_.pick_list_no, key_.shipment_id);
+      Connect_Available_Order_Line___( key_.order_no,          key_.line_no,          key_.rel_no,        key_.line_item_no,   key_.contract,          key_.part_no,
+                                       key_.location_no,       key_.lot_batch_no,     key_.serial_no,     key_.eng_chg_level,  key_.waiv_dev_rej_no,   key_.activity_seq,
+                                       key_.handling_unit_id,  key_.configuration_id, key_.pick_list_no,  key_.shipment_id,    preliminary_pick_list_no_);
+   END LOOP;
+END Connect_All_Order_Lines___;
+
+FUNCTION Get_Storage_Zone_Search_Context_Defaults___ (
+	preliminary_pick_list_no_ IN NUMBER) RETURN Storage_Zones_Search_Context_Structure_Rec
+IS
+   search_context_rec_ Storage_Zones_Search_Context_Structure_Rec;
+BEGIN
+   search_context_rec_.storage_zone_id := NULL;
+   search_context_rec_.contract        := Manual_Consol_Pick_List_API.Get_Contract(preliminary_pick_list_no_);
+	
+   RETURN search_context_rec_;
+END Get_Storage_Zone_Search_Context_Defaults___;
+
+
+
+FUNCTION Create_Pick_List_No_List_For_Navigation___ (
+	preliminary_pick_list_no_ IN NUMBER) RETURN VARCHAR2
+IS
+   CURSOR get_pick_lists IS
+   SELECT DISTINCT pick_list_no
+   FROM   create_pick_list_join_main
+   WHERE  preliminary_pick_list_no = preliminary_pick_list_no_;
+   
+   pick_list_no_list_ VARCHAR2(32000);
+BEGIN
+   FOR rec_ IN get_pick_lists LOOP
+      pick_list_no_list_ := CONCAT(pick_list_no_list_, REPLACE('PickListNo eq '':P1'' or ', ':P1', rec_.pick_list_no));
+   END LOOP;
+   
+   IF pick_list_no_list_ IS NOT NULL THEN
+      pick_list_no_list_ := SUBSTR(pick_list_no_list_, 0, length(pick_list_no_list_)-4);
+   END IF;
+   RETURN pick_list_no_list_;
+END Create_Pick_List_No_List_For_Navigation___;
+
+PROCEDURE Disconnect_Order_Line___ (
+	key_ IN Connected_Customer_Order_Reservation_Key)
+IS
+BEGIN
+	Customer_Order_Reservation_API.Modify_Prelim_Pick_List_No( key_.order_no, key_.line_no, key_.rel_no, key_.line_item_no, key_.contract, key_.part_no,
+                                                              key_.location_no, key_.lot_batch_no, key_.serial_no, key_.eng_chg_level, key_.waiv_dev_rej_no, key_.activity_seq,
+                                                              key_.handling_unit_id, key_.pick_list_no, key_.configuration_id, key_.shipment_id, NULL );
+END Disconnect_Order_Line___;
+
+PROCEDURE Connect_Available_Order_Line___ (
+	order_no_                  IN VARCHAR2,
+	line_no_                   IN VARCHAR2,
+	rel_no_                    IN VARCHAR2,
+	line_item_no_              IN NUMBER,
+	contract_                  IN VARCHAR2,
+	part_no_                   IN VARCHAR2,
+	location_no_               IN VARCHAR2,
+	lot_batch_no_              IN VARCHAR2,
+	serial_no_                 IN VARCHAR2,
+	eng_chg_level_             IN VARCHAR2,
+	waiv_dev_rej_no_           IN VARCHAR2,
+	activity_seq_              IN NUMBER,
+	handling_unit_id_          IN NUMBER,
+	configuration_id_          IN VARCHAR2,
+	pick_list_no_              IN VARCHAR2,
+	shipment_id_               IN NUMBER,
+	preliminary_pick_list_no_  IN NUMBER)
+IS
+BEGIN
+   Customer_Order_Reservation_API.Modify_Prelim_Pick_List_No( order_no_,          line_no_,       rel_no_,           line_item_no_,   contract_,                part_no_,
+                                                              location_no_,       lot_batch_no_,  serial_no_,        eng_chg_level_,  waiv_dev_rej_no_,         activity_seq_,
+                                                              handling_unit_id_,  pick_list_no_,  configuration_id_, shipment_id_,    preliminary_pick_list_no_ );
+END Connect_Available_Order_Line___;
+
+@Override
+PROCEDURE CRUD_Default_Copy___ (
+   rec_ IN OUT Manual_Consol_Pick_List_Rec )
+IS
+BEGIN
+   super(rec_);
+   rec_.preliminary_pick_list_no := NULL;
+END CRUD_Default_Copy___;

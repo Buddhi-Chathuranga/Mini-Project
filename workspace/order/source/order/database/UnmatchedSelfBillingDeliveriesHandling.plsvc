@@ -1,0 +1,145 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: UnmatchedSelfBillingDeliveriesHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign    History
+--  ---------  ------  ---------------------------------------------------------
+--  2018-08-21 KHVESE  SCUXXW4-1169, Added methods Create_Co_Self_Billing_Is_Allowed___ and Create_Self_Billing_Invoice___.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Create_Co_Self_Billing_Is_Allowed___ (
+   selection_ IN VARCHAR2 ) RETURN BOOLEAN
+IS
+   selected_records_     VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_    VARCHAR2(32000); 
+   order_no_             VARCHAR2(12);
+   line_no_              VARCHAR2(4);
+   rel_no_               VARCHAR2(4);
+   contract_             VARCHAR2(5);
+   customer_no_          VARCHAR2(20);
+   currency_code_        VARCHAR2(3);
+   base_contract_        VARCHAR2(5);
+   base_customer_no_     VARCHAR2(20);
+   base_currency_code_   VARCHAR2(3);
+   is_allowed_           BOOLEAN := TRUE;
+   index_                NUMBER := 1;
+   
+   CURSOR get_recs IS
+   SELECT contract, customer_no, currency_code 
+   FROM unmatched_sbi_deliveries_uiv
+   WHERE order_no = order_no_
+   AND line_no = line_no_
+   AND rel_no = rel_no_;
+BEGIN 
+   WHILE (INSTR(selected_records_, ';') > 0) LOOP
+      current_selection_  := substr(selected_records_, 0, INSTR(selected_records_, ';'));
+      order_no_         := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');
+      line_no_          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_NO');
+      rel_no_           := Client_SYS.Get_Key_Reference_Value(current_selection_, 'REL_NO');
+      IF index_ = 1 THEN 
+         OPEN get_recs;
+         FETCH get_recs INTO base_contract_, base_customer_no_, base_currency_code_;
+         CLOSE get_recs;
+         index_ := index_+1;
+      ELSE 
+         OPEN get_recs;
+         FETCH get_recs INTO contract_, customer_no_, currency_code_;
+         CLOSE get_recs;
+         IF contract_ != base_contract_ OR 
+            customer_no_ != base_customer_no_ OR 
+            currency_code_ != base_currency_code_ THEN 
+            is_allowed_ := FALSE;
+         END IF;
+      END IF;
+      selected_records_ := substr(selected_records_, INSTR(selected_records_, ';')+1);   
+   END LOOP;
+   RETURN is_allowed_;
+END Create_Co_Self_Billing_Is_Allowed___;
+
+
+FUNCTION Create_Self_Billing_Invoice___ (
+   selection_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   selected_records_     VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_    VARCHAR2(32000); 
+   order_no_             VARCHAR2(12);
+   line_no_              VARCHAR2(4);
+   rel_no_               VARCHAR2(4);
+   line_item_no_         NUMBER;
+   delivery_no_          NUMBER;
+   contract_             VARCHAR2(5);
+   customer_no_          VARCHAR2(20);
+   currency_code_        VARCHAR2(3);
+   sbi_no_               VARCHAR2(15);
+   attr_                 VARCHAR2(32000);
+   
+   CURSOR get_recs IS
+   SELECT line_item_no, contract, customer_no, currency_code, deliv_no 
+   FROM  unmatched_sbi_deliveries_uiv
+   WHERE order_no = order_no_
+   AND   line_no = line_no_
+   AND   rel_no = rel_no_;
+BEGIN 
+   WHILE (INSTR(selected_records_, ';') > 0) LOOP
+      current_selection_   := substr(selected_records_, 0, INSTR(selected_records_, ';'));
+      order_no_            := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');
+      line_no_             := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_NO');
+      rel_no_              := Client_SYS.Get_Key_Reference_Value(current_selection_, 'REL_NO');
+      
+      Order_Self_Billing_Manager_Initial_Check___(order_no_, line_no_, rel_no_);
+
+      OPEN get_recs;
+      FETCH get_recs INTO line_item_no_, contract_, customer_no_, currency_code_, delivery_no_;
+      CLOSE get_recs;
+
+      Client_SYS.Add_To_Attr('ORDER_NO', order_no_, attr_);
+      Client_SYS.Add_To_Attr('LINE_NO', line_no_, attr_);
+      Client_SYS.Add_To_Attr('REL_NO', rel_no_, attr_);
+      Client_SYS.Add_To_Attr('LINE_ITEM_NO', line_item_no_, attr_);
+      Client_SYS.Add_To_Attr('DELIV_NO', delivery_no_, attr_);
+      Client_SYS.Add_To_Attr('END', '', attr_);
+      selected_records_ := substr(selected_records_, INSTR(selected_records_, ';')+1);   
+   END LOOP;
+   Self_Billing_Header_API.Create_Self_Billing_Invoice__(sbi_no_, customer_no_, currency_code_, contract_, attr_);
+   RETURN sbi_no_;
+END Create_Self_Billing_Invoice___;
+
+FUNCTION Order_Self_Billing_Manager_Initial_Check___ (
+   order_no_ IN VARCHAR2,
+   line_no_  IN VARCHAR2,
+   rel_no_   IN VARCHAR2) RETURN BOOLEAN
+IS
+   found_ BOOLEAN := FALSE;
+   dummy_ NUMBER;
+   
+   CURSOR check_record IS
+      SELECT 1
+      FROM  UNMATCHED_SBI_DELIVERIES_UIV
+      WHERE order_no = order_no_
+      AND line_no = line_no_
+      AND rel_no = rel_no_ ;
+BEGIN
+   OPEN check_record;
+   FETCH check_record INTO dummy_;
+   IF check_record%FOUND THEN 
+      found_ := TRUE;
+   END IF ;
+   CLOSE check_record;
+   RETURN found_;   
+END Order_Self_Billing_Manager_Initial_Check___;
+
+PROCEDURE Order_Self_Billing_Manager_Initial_Check___ (
+   order_no_ IN VARCHAR2,
+   line_no_  IN VARCHAR2,
+   rel_no_   IN VARCHAR2 )
+IS
+BEGIN
+   IF (NOT (Order_Self_Billing_Manager_Initial_Check___(order_no_, line_no_, rel_no_))) THEN
+      Error_SYS.Appl_Failure(lu_name_, err_source_ => 'Order_Self_Billing_Manager_Initial_Check___(order_no_, line_no_, rel_no_)');
+   END IF;
+END Order_Self_Billing_Manager_Initial_Check___;

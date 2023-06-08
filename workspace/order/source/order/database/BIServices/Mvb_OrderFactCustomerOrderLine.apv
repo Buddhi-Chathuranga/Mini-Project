@@ -1,0 +1,221 @@
+------------------------------------------------------------------------------
+--  Module     : ORDER
+---
+--  Filename   : Mvb_OrderFactCustomerOrderLine.api
+--  
+--  ---
+--  Purpose    : Installs Business Intelligence specific view for 
+--               Refreshing Data for Datamart version of FactCustomerOrderLine in component ORDER
+--
+------------------------------------------------------------------------------
+--  Date    Sign    History
+--  ------  ------  ----------------------------------------------------------
+--  170321  MeAblk  STRSC-6770, Added attributes count_agreement_order, count_pricelist_order, count_campaign_order, count_baseprice_order.
+--  151103  IsSalk  FINHR-316, Renamed attribute FEE_CODE to TAX_CODE in Customer Order Line.  
+--  150624  AyAmlk  BOULDER-130, Used in-line SELECTs instead of method calls to improve performance.
+--  150407  MeAblk  BOULDER-940, Created.
+------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------
+-- Create Basic MV source view, i.e. the old MV select statement
+-- Related to entity FACT_CUSTOMER_ORDER_LINE
+------------------------------------------------------------------------------
+DEFINE MODULE      = ORDER
+DEFINE MVB_VIEW    = CUSTOMER_ORDER_LINE_MVB
+DEFINE LU          = BiFactCustomerOrderLine
+
+-- Create Basic view that selects source info for the entity
+PROMPT Creating snapshot MVB view &MVB_VIEW
+CREATE OR REPLACE VIEW &MVB_VIEW
+AS
+SELECT
+ -- original keys --
+ col.order_no                                                                                                                order_no_key,
+ col.line_no                                                                                                                 line_no_key,
+ col.rel_no                                                                                                                  rel_no_key,
+ col.line_item_no                                                                                                            line_item_no_key,
+ -- measure items --
+ col.buy_qty_due                                                                                                             buy_qty_due,
+ col.qty_assigned                                                                                                            qty_assigned,
+ col.qty_picked                                                                                                              qty_picked,
+ col.qty_short                                                                                                               qty_short,
+ col.qty_shipped                                                                                                             qty_shipped,
+ col.qty_shipdiff                                                                                                            qty_shipdiff,
+ col.qty_returned                                                                                                            qty_returned,
+ col.qty_invoiced                                                                                                            qty_invoiced,
+ col.revised_qty_due                                                                                                         qty_inventory,
+ ABS(col.buy_qty_due - col.qty_shipped)                                                                                      inv_qty_incomplete,
+ col.base_sale_unit_price                                                                                                    base_sale_unit_price,
+ col.base_unit_price_incl_tax                                                                                                base_unit_price_incl_tax,
+ Customer_Order_Line_API.Get_Base_Sale_Price_Total(col.order_no, col.line_no, col.rel_no, col.line_item_no)                  net_amount_base,
+ Customer_Order_Line_API.Get_Base_Price_Incl_Tax_Total(col.order_no, col.line_no, col.rel_no, col.line_item_no)              gross_amount_base,
+ Customer_Order_Line_API.Get_Sale_Price_Total(col.order_no, col.line_no, col.rel_no, col.line_item_no)                       net_amount_curr,
+ Customer_Order_Line_API.Get_Sale_Price_Incl_Tax_Total(col.order_no, col.line_no, col.rel_no, col.line_item_no)              gross_amount_curr,
+ col.buy_qty_due * col.price_conv_factor * col.base_sale_unit_price                                                          net_amount_before_disc_base,
+ col.buy_qty_due * col.price_conv_factor * col.base_unit_price_incl_tax                                                      gross_amount_before_disc_base,
+ col.buy_qty_due * col.price_conv_factor * col.sale_unit_price                                                               net_amount_before_disc_curr,
+ col.buy_qty_due * col.price_conv_factor * col.unit_price_incl_tax                                                           gross_amount_before_disc_curr,
+ DECODE(use_price_incl_tax, 'FALSE',
+        col.buy_qty_due * col.base_sale_unit_price * (col.discount/100),
+        col.buy_qty_due * col.base_unit_price_incl_tax * (col.discount/100))                                                 discount_amount_base,
+ DECODE(use_price_incl_tax, 'FALSE',
+        col.buy_qty_due * col.price_conv_factor * col.sale_unit_price * (col.discount/100),
+        col.buy_qty_due * col.price_conv_factor * col.unit_price_incl_tax * (col.discount/100))                              discount_amount_curr,
+ col.cost                                                                                                                    cost,
+ col.revised_qty_due * col.cost                                                                                              total_cost,
+ Customer_Order_Line_API.Get_Total_Discount_Percentage(col.order_no, col.line_no, col.rel_no, col.line_item_no)                         total_order_line_discount,
+ DECODE(SIGN(col.planned_ship_date - col.real_ship_date),1,(col.planned_ship_date - col.real_ship_date),0)                   ship_days_early,
+ DECODE(SIGN(col.planned_ship_date - col.real_ship_date),-1,(col.real_ship_date - col.planned_ship_date),0)                  ship_days_late,
+ ABS(col.planned_ship_date - col.real_ship_date)                                                                             ship_days_off_time,
+ DECODE(col.rowstate, 'Cancelled', 0, 1)                                                                                     count_order_line,
+ DECODE(col.rowstate, 'Cancelled', 0, DECODE(SIGN(col.planned_ship_date - col.real_ship_date), 1, 1, 0))                     count_early_order_line,
+ DECODE(col.rowstate, 'Cancelled', 0, DECODE(SIGN(col.planned_ship_date - col.real_ship_date), -1, 1, 0))                    count_late_order_line,
+ DECODE(col.rowstate, 'Cancelled', 0, DECODE(ABS(col.planned_ship_date - col.real_ship_date), 0, 1 ,0))                      count_on_time_order_line,
+ DECODE(col.rowstate, 'Cancelled' ,0, DECODE(ABS(col.buy_qty_due - col.qty_shipped), 0, 0, 1))                               count_incomplete_order_line,
+ NVL2(col.real_ship_date,1,0)                                                                                                count_delivered_order_line,
+ DECODE(NVL2(col.real_ship_date,1,0),1,
+      DECODE(col.rowstate,'PartiallyDelivered',0,DECODE(col.rowstate,'Invoiced',0,1)),0)                                     count_delivered_not_invoiced,
+ DECODE(NVL2(col.real_ship_date,1,0),1,
+      DECODE(LEAST(col.real_ship_date + col.delivery_leadtime, col.wanted_delivery_date),col.real_ship_date + col.delivery_leadtime,1,0),0)
+                                                                                                                             count_delivered_as_requested,
+ DECODE(NVL2(col.real_ship_date,1,0),1,
+      DECODE(LEAST(col.real_ship_date + col.delivery_leadtime, col.promised_delivery_date),col.real_ship_date + col.delivery_leadtime,1,0),0)
+                                                                                                                             count_delivered_as_promised,
+ DECODE(NVL2(col.real_ship_date,1,0),1,
+      DECODE(LEAST(col.real_ship_date + col.delivery_leadtime, col.planned_delivery_date),col.real_ship_date + col.delivery_leadtime,1,0),0)
+                                                                                                                             count_delivered_as_planned,
+ DECODE(col.rowstate,'Cancelled',0, 
+      DECODE(ABS(col.buy_qty_due - col.qty_shipped) + ABS(col.planned_ship_date - col.real_ship_date),0,1,0))                count_perfect_order_line,
+ DECODE(col.rowstate, 'Cancelled',0, DECODE(col.price_source,'AGREEMENT',1, 0))                                              count_agreement_order,
+ DECODE(col.rowstate, 'Cancelled',0, DECODE(col.price_source,'PRICELIST',1, 0))                                              count_pricelist_order,
+ DECODE(col.rowstate, 'Cancelled',0, DECODE(col.price_source,'CAMPAIGN',1, 0))                                               count_campaign_order,
+ DECODE(col.rowstate, 'Cancelled',0, DECODE(col.price_source,'BASE',1, 0))                                                   count_baseprice_order,
+ DECODE(col.rowstate,'Cancelled',0,
+      (Customer_Order_Line_API.Get_Base_Sale_Price_Total(col.order_no, col.line_no, col.rel_no, col.line_item_no) - col.revised_qty_due * col.cost))
+                                                                                                                             profit,
+ -- light items --
+ col.order_no                                                                                                                order_no,
+ col.line_no                                                                                                                 line_no,
+ col.rel_no                                                                                                                  rel_no,
+ col.line_item_no                                                                                                            line_item_no,
+ col.rowstate                                                                                                                state,
+ col.blocked_for_invoicing                                                                                                   blocked_for_invoicing,
+ col.supply_code                                                                                                             supply_code,
+ col.conv_factor                                                                                                             conv_factor,
+ col.price_source                                                                                                            price_source,
+ col.price_source_id                                                                                                         price_source_id,
+ col.sales_unit_meas                                                                                                         sales_unit_meas,
+ col.sale_unit_price                                                                                                         sale_unit_price,
+ col.unit_price_incl_tax                                                                                                     unit_price_incl_tax,
+ col.price_conv_factor                                                                                                       price_conv_factor,
+ col.inverted_conv_factor                                                                                                    inverted_conv_factor,
+ col.currency_rate                                                                                                           currency_rate,
+ col.tax_code                                                                                                                tax_code,
+ col.customer_part_no                                                                                                        customer_part_no,
+ col.demand_code                                                                                                             demand_code,
+ col.discount                                                                                                                discount,
+ col.order_discount                                                                                                          order_discount,
+ col.additional_discount                                                                                                     additional_discount,
+ col.route_id                                                                                                                route_id,
+ col.price_list_no                                                                                                           price_list_no,
+ col.date_entered                                                                                                            date_entered_time,
+ col.planned_delivery_date                                                                                                   planned_delivery_date_time,
+ (SELECT unit_meas 
+    FROM inventory_part_tab 
+   WHERE contract = col.contract 
+     AND part_no  = col.part_no)                                                                                             inventory_uom,
+ col.rental                                                                                                                  rental,
+ -- dimension identifiers --
+ (SELECT company 
+    FROM site_public 
+   WHERE contract = col.contract)                                                                                            dim_company_id,
+ col.contract                                                                                                                dim_site_id,
+ col.customer_no                                                                                                             dim_customer_id,
+ NVL(col.vendor_no, '#')                                                                                                     dim_supplier_id,
+ col.contract||'^'||NVL(col.catalog_no,'#')                                                                                  dim_sales_part_id,
+ col.contract||'^'||NVL(col.part_no,'#')                                                                                     dim_inventory_part_id,
+ NVL(co.order_id,'#')                                                                                                        dim_cust_order_type_id,
+ NVL(col.cancel_reason,'#')                                                                                                  dim_order_cancel_reason_id,
+ NVL(col.ship_via_code,'#')                                                                                                  dim_mpccom_ship_via_id,
+ NVL(col.delivery_terms, '#')                                                                                                dim_order_delivery_term_id,
+ NVL(col.district_code, '#')                                                                                                 dim_sales_district_id,
+ NVL(co.market_code, '#')                                                                                                    dim_sales_market_id,
+ NVL(co.salesman_code, '#')                                                                                                  dim_sales_person_id,
+ NVL(col.region_code, '#')                                                                                                   dim_sales_region_id,
+ NVL(col.project_id, '#')                                                                                                    dim_project_id,
+ NVL(col.activity_seq, 0)                                                                                                    dim_activity_id,
+ (SELECT company 
+    FROM site_public 
+   WHERE contract = col.contract)||'^'||NVL(co.currency_code,'#')                                                            dim_currency_code_id,
+ TRUNC(col.date_entered)                                                                                                     dim_col_created_date_id,
+ TRUNC(col.wanted_delivery_date)                                                                                             dim_col_wanted_del_date_id,
+ TRUNC(col.planned_delivery_date)                                                                                            dim_col_planned_del_date_id,
+ TRUNC(col.promised_delivery_date)                                                                                           dim_col_promised_del_date_id,
+ TRUNC(col.planned_ship_date)                                                                                                dim_col_planned_ship_date_id,
+ TRUNC(col.price_effectivity_date)                                                                                           dim_col_price_eff_date_id,
+ TRUNC(col.planned_due_date)                                                                                                 dim_col_planned_due_date_id,
+ TRUNC(col.first_actual_ship_date)                                                                                           dim_col_first_act_ship_date_id,
+ TRUNC(col.real_ship_date)                                                                                                   dim_col_last_act_ship_date_id,
+ TRUNC(col.real_ship_date + col.delivery_leadtime)                                                                           dim_col_actual_del_date_id,
+ (SELECT company 
+    FROM site_public 
+   WHERE contract = col.contract)||'^'||TO_CHAR(TRUNC(NVL(col.real_ship_date, col.date_entered)),'YYYY-MM-DD')
+                                                                                                                             dim_rpd_company_period_id,
+ TRUNC(NVL(col.real_ship_date, col.date_entered))                                                                            dim_rpd_period_id,
+ -- joiners --
+ (SELECT company 
+    FROM site_public 
+   WHERE contract = col.contract)                                                                                            company,
+ col.contract                                                                                                                site,
+ col.customer_no                                                                                                             customer,
+ col.vendor_no                                                                                                               supplier,
+ col.catalog_no                                                                                                              sales_part,
+ col.part_no                                                                                                                 inventory_part,
+ co.order_id                                                                                                                 cust_order_type,
+ col.cancel_reason                                                                                                           order_cancel_reason,
+ col.ship_via_code                                                                                                           mpccom_ship_via,
+ col.delivery_terms                                                                                                          order_delivery_term,
+ col.district_code                                                                                                           sales_district,
+ co.market_code                                                                                                              sales_market,
+ co.salesman_code                                                                                                            sales_person,
+ col.region_code                                                                                                             sales_region,
+ col.project_id                                                                                                              project,
+ col.activity_seq                                                                                                            activity,
+ co.currency_code                                                                                                            currency_code,
+ TRUNC(col.date_entered)                                                                                                     created_date,
+ TRUNC(col.wanted_delivery_date)                                                                                             wanted_delivery_date,
+ TRUNC(col.planned_delivery_date)                                                                                            planned_delivery_date,
+ TRUNC(col.promised_delivery_date)                                                                                           promised_delivery_date,
+ TRUNC(col.planned_ship_date)                                                                                                planned_ship_date,
+ TRUNC(col.price_effectivity_date)                                                                                           price_effectivity_date,
+ TRUNC(col.planned_due_date)                                                                                                 planned_due_date,
+ TRUNC(col.first_actual_ship_date)                                                                                           first_actual_ship_date,
+ TRUNC(col.real_ship_date)                                                                                                   last_actual_ship_date,
+ TRUNC(col.real_ship_date + col.delivery_leadtime)                                                                           actual_delivery_date,
+ TRUNC(NVL(col.real_ship_date, col.date_entered))                                                                            reporting_date,
+ -- unique key
+ col.order_no || '^' || col.line_no || '^' || col.rel_no || '^' || TO_CHAR(col.line_item_no)                                 id
+FROM CUSTOMER_ORDER_LINE_TAB col, CUSTOMER_ORDER_TAB co
+WHERE col.order_no = co.order_no
+WITH read only;
+
+COMMENT ON TABLE &MVB_VIEW
+   IS 'LU=&LU^PROMPT=Bi Fact Customer Order Line^MODULE=&MODULE^';
+
+------------------------------------------------------------------------------
+-- Make sure to create the source view (MVS) at this point but only if there
+-- are any entities that have been registered to use the MVB view.
+-- The reason is to be able to handle upgrades that affects the source view but
+-- not the incremental metadata. 
+------------------------------------------------------------------------------
+BEGIN
+   Is_Mv_Util_API.Create_Mvs_View('&MVB_VIEW');
+   COMMIT;
+END;
+/
+   
+------------------------------------------------------------------------------
+
+UNDEFINE MODULE
+UNDEFINE MVB_VIEW    
+UNDEFINE LU          

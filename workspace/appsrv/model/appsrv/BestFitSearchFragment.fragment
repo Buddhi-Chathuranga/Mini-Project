@@ -1,0 +1,545 @@
+-----------------------------------------------------------------------------
+--  Date         Sign    History
+--  ------      ------  ---------------------------------------------------------
+--  2020-01-21  LASSLK  SAXTEND-1244,Implement LOV Filtering
+--  2021-05-04  RUSSLK  AM21R2-1407,Added 'Object Detail' Command.
+-----------------------------------------------------------------------------
+fragment BestFitSearchFragment;
+component APPSRV;
+layer Core;
+description "Put some useful description here ...";
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+
+assistant TechnicalSearchWizardAssistant using TechnicalClasses {
+   label = "Best Fit Search - ${TechnicalClassRef.Description} ";
+   input(ReturnOptionEnable);
+   output(LuName, KeyRef);
+
+
+   steps {
+
+      step {
+//         step 1
+         label = "Initialize Search";
+         group TechnicalSearchWizardGroup;
+         markdowntext {
+            text = "Selection Count : ${SelectionCount}";
+         }
+         next command {
+            enabled = [TechnicalClassRef != null];
+
+            variable SearchNumber {
+               type = Number;
+            }
+            variable TestNo {
+               type = Number;
+            }
+            execute {
+               set TestNo = 0;
+               call DeleteSearchCriteria(TestNo);
+               call CopyAttribToCriteria(TechnicalClass, TechnicalSearchNo) into SearchNumber;
+               set TechnicalSearchNo = SearchNumber;
+            }
+         }
+      }
+      step {
+//         step 2
+         label = "Alphanumeric";
+         list TechnicalSearchAlphanumList(TechnicalSearchAlphanumArray);
+         markdowntext {
+            text = "Selection Count : ${SelectionCount}";
+         }
+         next command {
+            execute {
+               call DeleteSearchResult(TechnicalSearchNo);
+               call CreateAndExecuteSearch(TechnicalSearchNo, TechnicalClass);
+               call CountSelection(TechnicalSearchNo) into SelectionCount;
+            }
+
+         }
+
+      }
+      step {
+//         step 3
+         label = "Numeric";
+         list TechnicalSearchNumericList(TechnicalSearchNumArray);
+         markdowntext {
+            text = "Selection Count : ${SelectionCount}";
+         }
+         next command {
+            execute {
+               call CalculateHitRatio(TechnicalSearchNo);
+               call CountSelection(TechnicalSearchNo) into SelectionCount;
+            }
+         }
+      }
+      step {
+//         step 4
+         label = "Result";
+         list TechnicalSearchResultList(TechnicalSearchResultArray);
+         markdowntext {
+            text = "Selection Count : ${SelectionCount}";
+         }
+         next command {
+            variable SpecNo {
+               type = Number;
+            }
+
+            enabled = [component.TechnicalSearchResultList.SelectionCount = 1];
+            execute {
+               set SpecNo = component.TechnicalSearchResultList.Selection;
+               call TechSpecNo(SpecNo) into TechnicalSpecNo;
+            }
+         }
+      }
+      step {
+//         Final step
+         label = "Both";
+         list TechnicalSpecBothSearchList(TechnicalSpecBothArray);
+      }
+
+      final step {
+
+      }
+      cancelled step {
+
+      }
+   }
+   finish command {
+      enabled = [(component.TechnicalSearchWizardAssistant.ActiveStep = 5 or(ReturnOptionEnable = true and component.TechnicalSearchWizardAssistant.ActiveStep = 4 and component.TechnicalSearchResultList.SelectionCount = 1))];
+      execute {
+         if [ReturnOptionEnable] {
+            call GetSelectedRecord(component.TechnicalSearchResultList.Selection);
+         }
+         call DeleteSearchResult(TechnicalSearchNo);
+         call DeleteSearchCriteria(TechnicalSearchNo);
+
+         if [ReturnOptionEnable = true] {
+            exit OK;
+         }
+         else {
+            navigate back;
+         }
+      }
+   }
+   cancel command {
+      execute {
+         call DeleteSearchResult(TechnicalSearchNo);
+         call DeleteSearchCriteria(TechnicalSearchNo);
+         if [ReturnOptionEnable = true] {
+            exit CANCEL;
+         }
+         else {
+            navigate back;
+         }
+
+      }
+   }
+}
+
+---------------------------------- GROUPS -----------------------------------
+group AttributeTypeGroup for TechnicalClassVirtual {
+   label = "Attribute Type - ${SelectionParameters}";
+
+   radiogroup SelectionParameters {
+      showlabel = false;
+      size = FullWidth;
+   }
+}
+
+group TechnicalSearchWizardGroup for TechnicalClassVirtual {
+   label = "Best Fit Search";
+   lov TechnicalClassRef with ReferenceTechnicalClassSelector {
+      search = TechnicalClass, Description;
+      label = "Selected Technical Class";
+      size = Large;
+      validate command {
+         variable SelectedCount {
+            type = Number;
+         }
+         variable TestNo {
+            type = Number;
+         }
+         execute {
+            set TestNo = 0;
+            call SelectCount(TechnicalClassRef.TechnicalClass) into SelectedCount;
+            set SelectionCount = SelectedCount;
+            call DeleteSearchResult(TestNo);
+            call DeleteSearchCriteria(TestNo);
+         }
+      }
+   }
+   field TechnicalClassRef.Description {
+      label = "Description";
+      size = Small;
+      editable = [false];
+      required = [false];
+
+   }
+   field TechnicalClassRef.DescriptionLong {
+      label = "Long Description";
+      size = Large;
+      editable = [false];
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+
+list TechnicalSearchAlphanumList for TechnicalSearchCriteria {
+   label = "Alphanumeric Attributes";
+   editmode = SingleCellEdit;
+   crudactions {
+      after command AfterTechnicalSearchResultCommand;
+   }
+   field Attribute;
+   field TechnicalAttribStdRef.AttribDesc;
+   lov ValueTextRef with TechnicalAttribTextSelector {
+      label = "Value Text";
+      editable = [true];
+      freeinput = [true];
+   }
+}
+
+list TechnicalSearchNumericList for TechnicalCriteriaNumeric {
+   label = "Numeric Attributes";
+   editmode = SingleCellEdit;
+   crudactions {
+      after command AfterTechnicalSearchResultCommand;
+   }
+   field Attribute {
+      size = Small;
+   }
+   field TechnicalAttribStdRef.AttribDesc {
+      size = Large;
+      label = "Attribute Description";
+   }
+   field ValueNo;
+   field Unit {
+      size = Small;
+      label = "UoM";
+   }
+   field WhereText {
+      size = Large;
+   }
+}
+list TechnicalSearchResultList for TechnicalSearchResult {
+   label = "Search Result";
+   orderby = HitRatio desc;
+   multiselect = [true];
+
+   field TechnicalObjectReferenceRef.LuName {
+      size = Large;
+      label = "Object Type";
+      size = Medium;
+
+   }
+   field TechnicalObjKeys {
+      label = "Object Keys";
+      size = Large;
+
+   }
+   field ObjectDescription {
+      size = Large;
+      size = Large;
+
+   }
+   field HitRatio {
+      format = percentage;
+      size = Small;
+
+   }
+   field TechnicalObjKeyRef {
+      columnexclude = [true];
+   }
+
+   command ViewTechnicalSpecification;
+   command ObjectDetail;
+}
+
+list TechnicalSpecBothSearchList for TechnicalSpecificationSearch {
+   multiselect = [false];
+
+   field AttribNumber {
+      label = "Order";
+   }
+
+   lov AttributeRef with ReferenceTechnicalAttribSelector {
+      search = Attribute, Summary;
+      size = Small;
+   }
+   field TechnicalAttribStdRef.AttribDesc {
+      size = Large;
+      label = "Description";
+   }
+   field ValueText {
+      size = Small;
+   }
+   field TechnicalUnit {
+      size = Small;
+   }
+   field ValueNo;
+   field LowerLimit;
+   field UpperLimit;
+   field Info {
+      size = Large;
+   }
+}
+
+--------------------------------- COMMANDS ----------------------------------
+command AfterTechnicalSearchResultCommand for TechnicalCriteriaNumeric {
+   enabled = [true];
+   execute {
+      call  RefreshSearchResult(TechnicalSearchNo);
+   }
+}
+command AfterTechnicalSearchResultCommand for TechnicalSearchCriteria {
+   enabled = [true];
+   execute {
+      call  RefreshSearchResult(TechnicalSearchNo);
+   }
+}
+
+command ViewTechnicalSpecification for TechnicalSearchResult {
+
+   mode = SelectedRecords;
+   enabled = [true];
+   execute {
+      assistant  TechnicalSpecificationAssistant(LuName, TechnicalObjKeys, TechnicalSpecNo) {
+         when OK {
+            exit OK;
+         }
+      }
+   }
+}
+command ObjectDetail for TechnicalSearchResult {
+   icon = "popup";
+   label = "Object Details";
+   variable PageUrl;
+   execute {
+      homepage(LuName, TechnicalObjKeyRef) into PageUrl;
+      if [PageUrl = ""] {
+         info("No homepage defined for ${LuName}");
+      }
+      else {
+         navigate "${PageUrl}";
+      }
+   }
+}
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+entityset TechnicalClasses for TechnicalClassVirtual;
+
+virtual TechnicalClassVirtual {
+   attribute TechnicalClass Text;
+   attribute SelectionCount Number;
+   attribute LuName Text;
+   attribute KeyRef Text;
+   attribute ReturnOptionEnable Boolean;
+   attribute TechnicalSearchNo Number;
+   attribute TechnicalSpecNo Number;
+   attribute SelectionParameters Enumeration(SelectionAttribTypeEnum) {
+      fetch = "'Both'";
+      insertable = [false];
+      updatable = [false];
+   }
+   reference TechnicalClassRef(TechnicalClass) to TechnicalClass(TechnicalClass);
+
+   array TechnicalSearchAlphanumArray(TechnicalClass, TechnicalSearchNo) to TechnicalSearchCriteria(TechnicalClass, TechnicalSearchNo);
+   array TechnicalSearchNumArray(TechnicalClass, TechnicalSearchNo) to TechnicalCriteriaNumeric(TechnicalClass, TechnicalSearchNo);
+   array TechnicalSearchResultArray(TechnicalSearchNo) to TechnicalSearchResult(TechnicalSearchNo);
+   array TechnicalSpecBothArray(TechnicalClass, TechnicalSpecNo) to TechnicalSpecificationSearch(TechnicalClass, TechnicalSpecNo);
+
+   action GetSelectedRecord {
+      parameter Selection Text;
+   }
+
+}
+
+@Override
+entity TechnicalSearchCriteria {
+   crud = Read, Update;
+   ludependencies = TechnicalClassVirtual;
+
+   keys = Attribute, TechnicalSearchNo, TechnicalClass;
+   where = "SEARCH_TYPE = '1'";
+
+   attribute Attribute Text {
+      editable = [false];
+   }
+   attribute TechnicalSearchNo Number {
+      editable = [false];
+   }
+   attribute SearchType Text {
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute TechnicalClass Text {
+      editable = [false];
+   }
+   reference TechnicalAttribStdRef(Attribute) to TechnicalAttribStd(Attribute);
+   reference ValueTextRef(TechnicalClass, Attribute, ValueText) to TechnicalAttribText(TechnicalClass, Attribute, ValueText) {
+      label = "Value Text";
+   }
+}
+
+@Override
+entity TechnicalCriteriaNumeric using TechnicalSearchCriteria {
+   crud = Read, Update;
+   from = "technical_search_criteria";
+   where = "SEARCH_TYPE = '2'";
+   attribute Attribute Text {
+      label = "Attribute";
+      maxlength = 15;
+      editable = [false];
+      format = uppercase;
+   }
+   attribute ValueNo Number {
+      label = "Value No";
+   }
+   attribute Unit Text {
+      fetch = "Technical_Attrib_Numeric_API.Get_Technical_Unit_(TECHNICAL_CLASS,ATTRIBUTE)";
+      label = "Unit";
+      maxlength = 10;
+      editable = [false];
+   }
+   attribute WhereText Text {
+      label = "Where";
+      maxlength = 2000;
+   }
+   attribute TechnicalSearchNo Number {
+      label = "Technical Search No";
+      editable = [false];
+   }
+   attribute SearchType Text {
+      label = "Search Type";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute TechnicalClass Text {
+      label = "Technical Class";
+      maxlength = 10;
+      editable = [false];
+      format = uppercase;
+   }
+   reference TechnicalAttribStdRef(Attribute) to TechnicalAttribStd(Attribute);
+}
+
+@Override
+entity TechnicalSearchResult {
+   crud = Read;
+   where = "SILENT = 0";
+
+   attribute ObjectDescription Text {
+      fetch = "Technical_Object_Reference_API.Get_Object_Description(TECHNICAL_SPEC_NO)";
+      label = "Object Description";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute HitRatio Number {
+      editable = [false];
+      fetch = "ROUND( HIT_RATIO, 4)";
+      format = decimal;
+   }
+   attribute TechnicalSearchNo Number {
+      label = "Technical Search No";
+      editable = [false];
+   }
+   attribute TechnicalSpecNo Number {
+      label = "Technical Spec No";
+      editable = [false];
+   }
+   attribute LuName Text {
+      fetch = "Technical_Object_Reference_API.Get_Lu_Name(TECHNICAL_SPEC_NO)";
+   }
+   attribute TechnicalObjKeys Text {
+      fetch = "Technical_Object_Reference_API.Get_Object_Keys(TECHNICAL_SPEC_NO)";
+   }
+   attribute TechnicalObjKeyRef Text {
+      fetch = "Technical_Object_Reference_API.Get_Key_Ref(TECHNICAL_SPEC_NO)";
+   }
+
+   reference TechnicalObjectReferenceRef(TechnicalSpecNo) to TechnicalObjectReference(TechnicalSpecNo);
+}
+
+---------------------------------- QUERIES ----------------------------------
+
+query TechnicalSpecificationSearch {
+   from = "technical_specification_both";
+   lu = TechnicalSpecification;
+   keys = TechnicalSpecNo, Attribute, TechnicalClass;
+
+   attribute AttribNumber Number;
+
+   attribute TechnicalUnit Text {
+      fetch = "TECHNICAL_ATTRIB_NUMERIC_API.Get_Technical_Unit_(TECHNICAL_CLASS,ATTRIBUTE)";
+      label = "UoM";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TechnicalClass Text {
+      fetch = "technical_class";
+      label = "Technical Class";
+      maxlength = 10;
+      editable = [ETag = null];
+      format = uppercase;
+      implementationtype = "VARCHAR2(10)";
+   }
+   attribute ValueNo Number;
+   attribute Attribute Text;
+   attribute LowerLimit Number;
+   attribute UpperLimit Number;
+   attribute Info Text;
+   attribute TechnicalSpecNo Number;
+   attribute ValueText Text;
+   attribute ObjType Text {
+      fetch = "row_type";
+   }
+
+   reference TechnicalAttribStdRef(Attribute) to TechnicalAttribStd(Attribute);
+   reference AttributeRef(Attribute) to TechnicalAttrib(Attribute) {
+      label = "Attribute";
+   }
+}
+
+---------------------------------- ACTIONS ----------------------------------
+action TechSpecNo Number {
+   initialcheck none;
+   parameter TechSpecRecord Text;
+}
+action RefreshSearchResult {
+   initialcheck none;
+   ludependencies = TechnicalSearchResult;
+   parameter TechnicalSearchNo Number;
+}
+action CopyAttribToCriteria Number {
+   initialcheck none;
+   parameter TechnicalClass Text;
+   parameter TechnicalSearchNo Number;
+}
+action CreateAndExecuteSearch {
+   initialcheck none;
+   parameter TechnicalSearchNo Number;
+   parameter TechnicalClass Text;
+}
+action CalculateHitRatio {
+   initialcheck none;
+   parameter TechnicalSearchNo Number;
+}
+action DeleteSearchResult {
+   initialcheck none;
+   parameter TechnicalSearchNo Number;
+}
+action DeleteSearchCriteria {
+   initialcheck none;
+   parameter TechnicalSearchNo Number;
+}
+--------------------------------- FUNCTIONS ---------------------------------
+//for step 1 and 2
+function SelectCount Number {
+   parameter TechnicalClass Text;
+}
+//for step 3 and step 4
+function CountSelection Number {
+   parameter TechnicalSearchNo Number;
+}

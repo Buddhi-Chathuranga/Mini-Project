@@ -1,0 +1,127 @@
+-------------------------------------------------------------------------------------------- 
+-- Export file for Task CLEANUP_CUSTOMER_ORDER_API.CLEANUP_ROUTINE__.
+-- 
+--  Date    Sign    History
+--  ------  ------  -----------------------------------------------------------
+--  100710  SudJlk  Bug 91834, Added log_user to Upgrade_Background_Job to set the correct
+--  100710		     user on converted scheduled tasks
+--  091020  AmPalk  Bug 85956, Added BEFORE_DATE to the parameter list.
+--  060131  IFSAPP  Export file for task CLEANUP_CUSTOMER_ORDER_API.CLEANUP_ROUTINE__.
+-------------------------------------------------------------------------------------------- 
+
+PROMPT Register Batch Schedule Method "CLEANUP_CUSTOMER_ORDER_API.CLEANUP_ROUTINE__"
+DECLARE
+   schedule_method_id_ NUMBER          := NULL;
+   seq_no_             NUMBER          := NULL;
+   info_msg_           VARCHAR2(32000) := NULL;
+BEGIN
+-- Construct Main Message
+   info_msg_    := Message_SYS.Construct('');
+   Message_SYS.Add_Attribute(info_msg_, 'METHOD_NAME', 'CLEANUP_CUSTOMER_ORDER_API.CLEANUP_ROUTINE__');
+   Message_SYS.Add_Attribute(info_msg_, 'DESCRIPTION', 'Cleanup of Customer Orders');
+   Message_SYS.Add_Attribute(info_msg_, 'MODULE', 'ORDER');
+   Message_SYS.Add_Attribute(info_msg_, 'SINGLE_EXECUTION_DB', 'FALSE');
+   Message_SYS.Add_Attribute(info_msg_, 'ARGUMENT_TYPE_DB', 'MESSAGE');
+   Message_SYS.Add_Attribute(info_msg_, 'VALIDATION_METHOD', 'CLEANUP_CUSTOMER_ORDER_API.VALIDATE_PARAMS');
+-- Register Batch Schedule Method
+   Batch_SYS.Register_Batch_Schedule_Method(schedule_method_id_, info_msg_);
+-- Adding parameters
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'CLEAR_HEADER_HISTORY', '0', 'FALSE', NULL);
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'CLEAR_CANCELLED_HEADERS', '0', 'FALSE', NULL);
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'CLEAR_INVOICED_HEADERS', '0', 'FALSE', NULL);
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'CLEAR_LINE_HISTORY', '0', 'FALSE', NULL);
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'CLEAR_CANCELLED_LINES', '0', 'FALSE', NULL);
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'CLEAR_INVOICED_LINES', '0', 'FALSE', NULL);
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'CLEAR_RESERVATIONS', '0', 'FALSE', NULL);
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'CLEAR_DELIVERIES', '0', 'FALSE', NULL);
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'SITE', TO_CHAR(NULL), 'FALSE', 'User_Allowed_Site_API.Get_Default_Site');
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'NUMBER_OF_DAYS', 365, 'FALSE', NULL);
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'CANCEL_REASON', '%', 'FALSE', NULL);
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'BEFORE_DATE', SYSDATE, 'FALSE', NULL);
+END;
+/
+
+------------------------------------------------------------------------------------------
+-- (Upgraded from background jobs)
+------------------------------------------------------------------------------------------
+DECLARE   
+   PROCEDURE Upgrade_Background_Job (
+      method_name_ IN VARCHAR2,
+      schedule_name_  IN VARCHAR2)
+   IS
+      parameters_          VARCHAR2(4000);
+      execution_plan_      VARCHAR2(4000);
+      param_start_         NUMBER;
+      param_stop_          NUMBER;
+      next_execution_date_ DATE;
+      start_date_          DATE := sysdate;
+      
+      seq_no_              NUMBER;
+      schedule_id_         NUMBER;
+      values_              Message_SYS.line_table;
+      count_               INTEGER;
+      names_               Message_SYS.name_table;
+      CURSOR get_jobs IS
+         SELECT what, interval, log_user
+         FROM   user_jobs
+         WHERE  UPPER(what) like '%'||method_name_||'%';
+
+   BEGIN
+      FOR rec IN get_jobs LOOP
+         execution_plan_ := rec.interval;
+         param_start_ := instr(execution_plan_, '(');
+         param_stop_  := instr(execution_plan_, ')');
+         execution_plan_ := substr(execution_plan_, param_start_ + 2, param_stop_ - param_start_- 3);
+
+         Batch_SYS.New_Batch_Schedule(schedule_id_, next_execution_date_, start_date_, NULL, schedule_name_, method_name_, 'TRUE', execution_plan_);
+         -- Update batch schedule with correct user name 
+         UPDATE batch_schedule_tab SET username = rec.log_user WHERE schedule_id = schedule_id_; 
+         parameters_ := rec.what;
+         param_start_ := instr(parameters_, '(''');
+         param_stop_  := instr(parameters_, ''')');
+         parameters_  := substr(parameters_, param_start_ + 3, param_stop_ - param_start_- 4);
+
+         IF Message_SYS.Is_Message(parameters_ ) THEN
+         -- Get attributes from message.
+            Message_SYS.Get_Attributes(parameters_, count_, names_, values_);
+            FOR i in 1..count_ LOOP
+               IF NOT (names_(i) = 'SITE' OR names_(i) = 'NUMBER_OF_DAYS') THEN
+                  values_(i):=REPLACE(REPLACE(values_(i), 'TRUE', 1), 'FALSE', 0);
+               END IF;
+               Batch_SYS.New_Batch_Schedule_Param(seq_no_, schedule_id_, names_(i), values_(i));
+            END LOOP;
+         END IF;       
+      END LOOP;
+   END Upgrade_Background_Job;
+   
+   PROCEDURE Remove_Server_Process (
+      method_name_ IN VARCHAR2 )
+   IS
+      job_   NUMBER;
+      CURSOR get_job IS
+         SELECT job
+         FROM   user_jobs
+         WHERE  UPPER(what) like '%'||method_name_||'%';
+   BEGIN
+      FOR rec_ IN get_job LOOP
+         dbms_job.remove(rec_.job);
+      END LOOP;
+   EXCEPTION
+      WHEN OTHERS THEN
+         NULL;
+   END Remove_Server_Process;
+
+BEGIN
+   ------------------------------------------------------------------------------------------
+   -- Upgrading Background Jobs to Scheduled Tasks
+   ------------------------------------------------------------------------------------------
+   
+   Upgrade_Background_Job('CLEANUP_CUSTOMER_ORDER_API.CLEANUP_ROUTINE__', 'Cleanup of Customer Order');   
+   Remove_Server_Process('CLEANUP_CUSTOMER_ORDER_API.CLEANUP_ROUTINE__');
+END;
+/
+
+COMMIT
+/
+
+

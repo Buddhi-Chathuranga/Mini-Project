@@ -1,0 +1,127 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: SourceLinesAvailableForShipmentsHandling
+--  Component:    SHPMNT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  2021-10-18 ErRalk  SC21R2-3011, Modified Add_Source_Lines_To_Shipment___ to support receiver type supplier.
+--  2021-06-16 Hahalk  SCZ-15018(158204), Removed Add_Source_Lines_To_Shipment_Initial_Check___() to prevent from 
+--  2021-06-16         showing strage error and replaced that method call from user allowed site check in Add_Source_Lines_To_Shipment___.
+--  2019-11-07 MeAblk  SCSPRING20-937, Modified Add_Source_Lines_To_Shipment___() to support shipment order lines.
+--  2018-07-11 RoJalk  SCUXXW4-4939, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+PROCEDURE Add_Source_Line_To_Shipment___ (
+   new_shipment_id_        OUT NUMBER,
+   new_shipment_line_no_   OUT NUMBER,
+   source_ref1_            IN  VARCHAR2,
+   source_ref2_            IN  VARCHAR2,
+   source_ref3_            IN  VARCHAR2,
+   source_ref4_            IN  VARCHAR2,
+   source_ref_type_db_     IN  VARCHAR2,
+   receiver_type_db_       IN  VARCHAR2 ) 
+IS
+BEGIN
+   Shipment_Handling_Utility_API.Add_Source_Line_To_Shipment__(shipment_id_              => new_shipment_id_,
+                                                               source_ref1_              => source_ref1_,
+                                                               source_ref2_              => source_ref2_,
+                                                               source_ref3_              => source_ref3_,
+                                                               source_ref4_              => source_ref4_,
+                                                               source_ref_type_db_       => source_ref_type_db_,
+                                                               receiver_type_db_         => receiver_type_db_,
+                                                               ignore_existing_shipment_ => 'FALSE');
+                                                               
+   new_shipment_line_no_ := Shipment_Line_API.Fetch_Ship_Line_No_By_Source(shipment_id_        => new_shipment_id_,
+                                                                           source_ref1_        => source_ref1_,
+                                                                           source_ref2_        => source_ref2_,
+                                                                           source_ref3_        => source_ref3_,
+                                                                           source_ref4_        => source_ref4_,
+                                                                           source_ref_type_db_ => source_ref_type_db_);                                                         
+END Add_Source_Line_To_Shipment___;
+
+FUNCTION Add_Source_Lines_To_Shipment___ (
+   selection_   IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   selection_in_           VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_      VARCHAR2(32000);
+   source_ref1_            VARCHAR2(50); 
+   source_ref2_            VARCHAR2(50);
+   source_ref3_            VARCHAR2(50);
+   source_ref4_            VARCHAR2(50);
+   source_ref2_key_        VARCHAR2(50);
+   source_ref3_key_        VARCHAR2(50);
+   source_ref4_key_        VARCHAR2(50);
+   source_ref_type_db_     VARCHAR2(20);
+   receiver_type_db_       VARCHAR2(20);
+   new_shipment_id_        NUMBER;
+   new_shipment_line_no_   NUMBER;
+   stmt_                   VARCHAR2(8000);
+   contract_               VARCHAR2(5);
+  
+BEGIN
+   WHILE (INSTR(selection_in_, ';') > 0) LOOP
+      current_selection_  := substr(selection_in_, 0, INSTR(selection_in_, ';'));
+      
+      source_ref1_        := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SOURCE_REF1');
+      source_ref2_key_    := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SOURCE_REF2_KEY');
+      source_ref3_key_    := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SOURCE_REF3_KEY');
+      source_ref4_key_    := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SOURCE_REF4_KEY');
+      source_ref_type_db_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SOURCE_REF_TYPE_DB');
+      contract_           := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT');
+      
+      IF (source_ref2_key_ = '*') THEN
+         source_ref2_ := NULL;
+      ELSE
+         source_ref2_ := source_ref2_key_;
+      END IF;
+      
+      IF (source_ref3_key_ = '*') THEN
+         source_ref3_ := NULL;
+      ELSE
+         source_ref3_ := source_ref3_key_;
+      END IF;
+      
+      IF (source_ref4_key_ = '*') THEN
+         source_ref4_ := NULL;
+      ELSE
+         source_ref4_ := source_ref4_key_;
+      END IF;
+       
+      IF (source_ref_type_db_ IN (Logistics_Source_Ref_Type_API.DB_CUSTOMER_ORDER, Logistics_Source_Ref_Type_API.DB_PROJECT_DELIVERABLES)) THEN
+         receiver_type_db_ := Sender_Receiver_Type_API.DB_CUSTOMER; 
+      ELSIF (source_ref_type_db_ = Logistics_Source_Ref_Type_API.DB_SHIPMENT_ORDER) THEN
+         $IF Component_Shipod_SYS.INSTALLED $THEN
+            receiver_type_db_ :=  Shipment_Order_API.Get_Receiver_Type_Db(source_ref1_);
+         $ELSE 
+            NULL;
+         $END
+      ELSIF (source_ref_type_db_ = Logistics_Source_Ref_Type_API.DB_PURCH_RECEIPT_RETURN)THEN 
+         receiver_type_db_ := Sender_Receiver_Type_API.DB_SUPPLIER;
+      END IF;   
+
+      IF (NOT (User_Allowed_Site_API.Is_Authorized(contract_) = 1)) THEN
+         Error_SYS.Appl_Failure(lu_name_, err_source_ => 'User_Allowed_Site_API.Is_Authorized(contract_) = 1');
+      END IF;
+      
+      Add_Source_Line_To_Shipment___(new_shipment_id_, new_shipment_line_no_, source_ref1_, source_ref2_, 
+                                     source_ref3_, source_ref4_, source_ref_type_db_, receiver_type_db_);
+      
+      IF (new_shipment_id_ IS NOT NULL) THEN
+         IF (stmt_ IS NULL) THEN
+            stmt_ := '(ShipmentId eq ' ||''||new_shipment_id_ ||''|| ' and ShipmentLineNo eq '|| ''||new_shipment_line_no_||')';
+         ELSE
+            stmt_ := stmt_ || ' or (ShipmentId eq ' ||''||new_shipment_id_ ||''|| ' and ShipmentLineNo eq '|| ''||new_shipment_line_no_||')';
+         END IF; 
+      END IF;   
+                        
+      selection_in_ := substr(selection_in_, INSTR(selection_in_, ';') + 1);
+      
+   END LOOP;   
+   
+   RETURN stmt_;
+END Add_Source_Lines_To_Shipment___;

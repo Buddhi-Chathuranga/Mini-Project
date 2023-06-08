@@ -1,0 +1,769 @@
+-----------------------------------------------------------------------------------------------------
+-- Date        Sign     History
+-- ----------  ------   -----------------------------------------------------------------------------
+-- 2021-11-02  DigPlk   SC21R2-5151, Replaced the functionality of IdentifySerialsInLocAssistant with IdentifySerialsInLocRepeatAssistant.
+-- 2021-09-21  ErRalk   SC21R2-2820, Added Dynamic Dependency for SenderType in SourceInfoStructure.
+-- 2020-09-03  ErRalk   SC2020R1-7302, Modified the attribute type of SenderType into enumeration.
+-- 2020-08-02  ErRalk   SC2020R1-1033, Modified PickByChoiceAssistant , PickPartByChoiceVirtual and SourceInfoStructure by adding SenderType and SenderId.
+-- 2020-03-11  RasDlk   SCSPRING20-689, Passed "SITE" for SenderType and Contract for SenderId parameters for MovePartsIntoShipmentInventoryDialog.
+-- 2020-01-29  RasDlk   SCSPRING20-689, Replaced the function name CheckDialogThree with CheckReportPicking.
+-- 2019-07-01  SucPlk   SCUXXW4-20576, Modified if condition of validatecommand for Input UoM to merge corrections from support bug SCZ-3466.
+-- 2019-05-30  RasDlk   SCUXXW4-18285, Implemented the code related to InputUoM.
+-- 2019-05-21  RasDlk   SCUXXW4-21353, Removed the fragment MovePartsIntoShipmentInventoryDialog.
+-- 2019-05-20  DaZase   SCUXXW4-19682, Added initialcheck to all unbounded actions.
+-- 2019-03-27  KHVESE   SCUXXW4-5659, Converted from dlgPickByChoice using MTG Version: 1.34
+-----------------------------------------------------------------------------------------------------
+
+
+fragment PickPartByChoiceAssistant;
+component INVENT;
+layer Core;
+description "Use this API to pick a part by choice, i.e. to report picking of parts in a more flexible way.";
+
+include fragment InventoryPartInStockLov28Selector;
+include fragment IdentifySerialsInLocationAssistant;
+include fragment InputUnitOfMeasure;
+include fragment EnterInputUomParametersAssistant;
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+
+assistant PickByChoiceAssistant using PickPartByChoiceSet {
+   label = "Pick Part by Choice";
+   input(Component, PickListNo, SourceRef1, SourceRef2, SourceRef3, SourceRef4, OrderSupplyDemandType, Contract, PartNo, ConfigurationId,
+   LocationNo, LotBatchNo, SerialNo, WaivDevRejNo, EngChgLevel, ActivitySeq, HandlingUnitId, ShipmentId, QtyToPick);
+   steps {
+      step {
+         group PickByChoiceGeneralGroup;
+         group PickByChoiceReferenceGroup;
+         list InventoryPartInStockList(InventoryPartInStockArray);
+      }
+      final step {
+         label = "";
+      }
+      cancelled step {
+      }
+   }
+   finish command {
+      label = "Report Picking";
+      enabled = [component.InventoryPartInStockList.RowCount > 0];
+      variable ShipInvLocationNoVar {
+         type = Text;
+      }
+      execute {
+         call PickPartByChoiceUsesShipInv(PickListNo) into UsesShipmentInventoryVar;
+         @DynamicComponentDependency SHPMNT
+         if [UsesShipmentInventoryVar] {
+            call CheckReportPicking(Contract, PickListNo, PickListType) into ShipmentInvLocVar;
+            if [ShipmentInvLocVar.ShowDialog = "TRUE"] {
+               dialog MovePartsIntoShipmentInventoryDialog(ShipmentInvLocVar.LocationNo, Contract, SenderType, SenderId) into(ShipInvLocationNoVar) {
+                  when CANCEL {
+                     exit CANCEL;
+                  }
+               }
+            }
+         }
+         call PickPartByChoice(Objkey, ShipInvLocationNoVar) {
+            when SUCCESS {
+               exit OK;
+            }
+            when FAIL {
+               if [not(error.Message = null)] {
+                  error("${error.Message}");
+               }
+               exit CANCEL;
+            }
+         }
+      }
+   }
+   cancel command {
+      execute {
+         exit CANCEL;
+      }
+   }
+   restart command {
+      visible = [false];
+   }
+}
+
+--------------------------------- COMMANDS ----------------------------------
+
+command BeforeSaveCommand {
+   variable ActivitySeqVar Number;
+   variable SessionSelection Text;
+   execute {
+      if [parent.ReceiptIssueSerialTrack = "TRUE" and SerialNo = "*" and QtyToPick > 0] {
+         set ActivitySeqVar = ActivitySeq;
+         call GetRecordsWithSessionId(Contract, PartNo, ConfigurationId, LocationNo, LotBatchNo, EngChgLevel, WaivDevRejNo, ActivitySeqVar, HandlingUnitId, QtyToPick, CatchQtyToPick, NULL, NULL, SessionIdNum) into IdentifySerialsRecStructure;
+         assistant IdentifySerialsInLocRepeatAssistant(IdentifySerialsRecStructure.RemainingSelection, IdentifySerialsRecStructure.Total, null, null) into(SessionSelection) {
+            when OK {
+               set PartTrackingSessionId = IdentifySerialsRecStructure.SessionId;
+            }
+            when CANCEL {
+               exit CANCEL;
+            }
+         }
+      }
+      if [QtyToPick <= 0] {
+         error("The quantity must be greater than zero.");
+         exit CANCEL;
+      }
+   }
+}
+
+command InvPartInStockKeyValidationCommand {
+   execute {
+      call InvPartInStockKeyValidation(Contract, LocationNo, HandlingUnitId, ActivitySeq) into HandlingUnitStructureVar;
+      set HandlingUnitTypeId = HandlingUnitStructureVar.HandlingUnitTypeId;
+      set HandlingUnitTypeDesc = HandlingUnitStructureVar.HandlingUnitTypeDesc;
+      set Sscc = HandlingUnitStructureVar.Sscc;
+      set AltHandlingUnitLabelId = HandlingUnitStructureVar.AltHandlingUnitLabelId;
+      set LocationDesc = HandlingUnitStructureVar.LocationDesc;
+      @DynamicComponentDependency PROJ
+      set ActivityId = HandlingUnitStructureVar.ActivityId;
+      @DynamicComponentDependency PROJ
+      set ActivityDesc = HandlingUnitStructureVar.ActivityDesc;
+   }
+}
+
+
+--------------------------------- SELECTORS ---------------------------------
+
+@Override
+selector ReferenceInventoryPartInStockLov28Selector for InventoryPartInStockLov28 {
+   label = "";
+   static LocationNo;
+   static HandlingUnitId;
+   static LotBatchNo;
+   static SerialNo;
+   static EngChgLevel;
+   static WaivDevRejNo;
+}
+
+@Override
+selector ReferenceInputUnitMeasSelector for InputUnitMeas {
+   static UnitCode {
+      label = "";
+   }
+   static CustUsageAllowed {
+      visible = [false];
+   }
+   static InputUnitMeasType {
+      visible = [false];
+   }
+   static DefaultInputUom {
+      visible = [false];
+   }
+}
+
+---------------------------------- GROUPS -----------------------------------
+
+group PickByChoiceGeneralGroup for PickPartByChoiceVirtual {
+   label = "";
+   field PickListNo {
+      size = Small;
+   }
+   field SourceRef1 {
+      size = Small;
+   }
+   field SourceRef2 {
+      size = Small;
+   }
+   field SourceRef3 {
+      size = Small;
+   }
+   field SourceRef4 {
+      size = Small;
+   }
+   field OrderSupplyDemandType {
+      size = Small;
+   }
+   field SourceRefStatus {
+      size = Small;
+   }
+   field Contract {
+      size = Small;
+   }
+   field ShipmentId {
+      size = Small;
+      visible = [ShipmentIdVisible and ShipmentId != 0];
+   }
+   field Close {
+      size = Small;
+      editable = [CloseEditable];
+   }
+}
+
+
+group PickByChoiceReferenceGroup for PickPartByChoiceVirtual {
+   label = "Part Requirement";
+   lov PartNoRef with ReferenceInventoryPartSelector {
+      description = PartNoRef.PartDescription;
+   }
+   field ConfigurationId {
+      visible = [ConfigurationId != "*"];
+   }
+   lov ConditionCodeRef with ReferenceConditionCodeSelector {
+      visible = [ConditionCode != null];
+      description = ConditionCodeDesc;
+   }
+   field PartOwnership {
+      visible = [PartOwnership != null];
+   }
+   field Owner {
+      visible = [Owner != null];
+   }
+   field OwnerName {
+      visible = [OwnerName != null];
+   }
+   @DynamicComponentDependency PROJ
+   lov ProjectIdRef with ReferenceProjectSelector {
+      description = ProjectName;
+      visible = [ProjectId != null];
+   }
+   field ActivitySeq {
+      size = Small;
+      visible = [ActivitySeq != 0];
+   }
+   field QtyToPick {
+      size = Small;
+   }
+   computedfield PickByChoiceQty {
+      value = "#{InventoryPartInStockArray.sum(QtyToPick)}";
+      type = Number;
+      size = Small;
+   }
+   field PartNoRef.UnitMeas {
+      label = "UoM";
+      size = Small;
+   }
+   field PartNoRef.CatchUnitMeas {
+      label = "Catch UoM";
+      size = Small;
+      visible = [PartNoRef.CatchUnitMeas != null];
+   }
+   field InputUnitMeas {
+      size = Small;
+      visible = [InputUnitMeasVisible];
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+
+list InventoryPartInStockList for InventoryPartInStockVirtual {
+   label = "";
+   crudactions {
+      before command BeforeSaveCommand;
+   }
+   field QtyToPick {
+      size = Small;
+      validate command {
+         execute {
+            if [QtyToPick != null and QtyToPick <= 0] {
+               warning("The quantity must be greater than zero.");
+            }
+            if [original.QtyToPick != QtyToPick] {
+               set InputUom = null;
+               set InputQty = null;
+               set InputConversion = null;
+               set InputValue = null;
+            }
+         }
+      }
+   }
+   field CatchQtyToPick {
+      size = Small;
+      columnvisible = [parent.PartNoRef.CatchUnitMeas != null];
+   }
+   lov LocationNoRef with ReferenceInventoryPartInStockLov28Selector  using InventoryPartInStockLov(parent.Objkey) {
+      label = "Location No";
+      validate command InvPartInStockKeyValidationCommand;
+   }
+   field LocationDesc;
+   lov HandlingUnitIdRef with ReferenceInventoryPartInStockLov28Selector using InventoryPartInStockLov(parent.Objkey) {
+      label = "Handling Unit ID";
+      validate command InvPartInStockKeyValidationCommand;
+   }
+   lov LotBatchNoRef with ReferenceInventoryPartInStockLov28Selector using InventoryPartInStockLov(parent.Objkey) {
+      label = "Lot/Batch No";
+      validate command InvPartInStockKeyValidationCommand;
+   }
+   lov SerialNoRef with ReferenceInventoryPartInStockLov28Selector using InventoryPartInStockLov(parent.Objkey) {
+      label = "Serial No";
+      validate command InvPartInStockKeyValidationCommand;
+   }
+   lov EngChgLevelRef with ReferenceInventoryPartInStockLov28Selector using InventoryPartInStockLov(parent.Objkey) {
+      label = "Revision No";
+      validate command InvPartInStockKeyValidationCommand;
+   }
+   lov WaivDevRejNoRef with ReferenceInventoryPartInStockLov28Selector using InventoryPartInStockLov(parent.Objkey) {
+      label = "W/D/R No";
+      validate command InvPartInStockKeyValidationCommand;
+   }
+   lov ActivitySeqRef with ReferenceInventoryPartInStockLov28Selector using InventoryPartInStockLov(parent.Objkey) {
+      label = "Activity sequence";
+      validate command InvPartInStockKeyValidationCommand;
+   }
+   @DynamicComponentDependency PROJ
+   field ActivityDesc;
+   field HandlingUnitTypeId;
+   field HandlingUnitTypeDesc;
+   field Sscc;
+   field AltHandlingUnitLabelId;
+   @DynamicComponentDependency PROJ
+   field ActivityId;
+   lov InputUomRef with ReferenceInputUnitMeasSelector using GetUomValues(parent.InputUnitMeasGroupId, "ORDER") {
+      size = Small;
+      columnvisible = [parent.InputUnitMeas];
+      editable = [parent.InputUnitMeasGroupId != null];
+      validate command {
+         variable ShowUomDialog {
+            type = Text;
+         }
+         variable ConversionFactor {
+            type = Number;
+         }
+         variable InputUomInfoVar {
+            type = Structure(InputUomInfoStructure);
+         }
+         execute {
+            call ShowInputUomDialog(parent.InputUnitMeasGroupId, InputUom) into ShowUomDialog;
+            if [ShowUomDialog = "TRUE"] {
+               assistant EnterInputUnitParamAssistant(parent.InputUnitMeasGroupId, InputValue, null, null, InputUom, InputConversion, "ORDER") into(InputValue, QtyToPick, InputQty, InputUom, InputConversion) {
+                  when CANCEL {
+                     exit CANCEL;
+                  }
+               }
+            }
+            else {
+               call GetConversionFactor(parent.InputUnitMeasGroupId, InputUom) into ConversionFactor;
+               set InputConversion = ConversionFactor;
+               if [InputQty != null] {
+                  call GetDirectOutputQty(InputQty, InputUom, parent.InputUnitMeasGroupId, InputConversion) into InputUomInfoVar;
+
+                  if [InputUomInfoVar.OutputQty > InputUomInfoVar.OutputQtyWithPrecision] {
+                     info("Rounded quantity is greater than the corresponding input quantity. Please review the rounded quantity again.");
+                  }
+
+                  set QtyToPick = InputUomInfoVar.OutputQty;
+               }
+            }
+         }
+      }
+   }
+   field InputQty {
+      size = Small;
+      columnvisible = [parent.InputUnitMeas];
+      editable = [parent.InputUnitMeasGroupId != null];
+      validate command {
+         variable InputUomInfoVar {
+            type = Structure(InputUomInfoStructure);
+         }
+         execute {
+            call GetDirectOutputQty(InputQty, InputUom, parent.InputUnitMeasGroupId, InputConversion) into InputUomInfoVar;
+
+            if [InputUomInfoVar.OutputQty != InputUomInfoVar.OutputQtyWithPrecision] {
+               info("Rounded quantity is greater than the corresponding input quantity. Please review the rounded quantity again.");
+            }
+            set QtyToPick = InputUomInfoVar.OutputQty;
+            set InputValue = InputUomInfoVar.InputValueString;
+         }
+      }
+   }
+   field InputConversion {
+      size = Small;
+      columnvisible = [parent.InputUnitMeas];
+   }
+   field InputValue {
+      size = Small;
+      columnvisible = [parent.InputUnitMeas];
+   }
+}
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+
+
+entityset PickPartByChoiceSet for PickPartByChoiceVirtual;
+
+------------------------------ ENTITY DETAILS -------------------------------
+
+@Override
+entity InventoryPart {
+   attribute PartDescription Text {
+      fetch = "Inventory_Part_API.Get_Description(contract, part_no)";
+      label = "Part Description";
+   }
+}
+
+--------------------------------- VIRTUALS ----------------------------------
+
+virtual PickPartByChoiceVirtual {
+   attribute PickListNo Text {
+      label = "Pick List No";
+      editable = [false];
+   }
+   attribute SourceRef1 Text {
+      label = "Source Ref 1";
+      editable = [false];
+      format = uppercase;
+   }
+   attribute SourceRef2 Text {
+      label = "Source Ref 2";
+      editable = [false];
+      format = uppercase;
+   }
+   attribute SourceRef3 Text {
+      label = "Source Ref 3";
+      editable = [false];
+      format = uppercase;
+   }
+   attribute SourceRef4 Text {
+      label = "Source Ref 4";
+      editable = [false];
+   }
+   attribute OrderSupplyDemandType Text {
+      label = "Source Ref Type";
+      editable = [false];
+   }
+   attribute PartNo Text {
+      label = "Part No";
+      editable = [false];
+      format = uppercase;
+   }
+   attribute PartDescription Text {
+      label = "Part Description";
+      editable = [false];
+   }
+   attribute ConfigurationId Text {
+      label = "Configuration ID";
+      editable = [false];
+   }
+   attribute SourceRefStatus Text {
+      editable = [false];
+   }
+   attribute Contract Text {
+      label = "Site";
+      editable = [false];
+      format = uppercase;
+   }
+   attribute LocationNo Text {
+      editable = [false];
+      format = uppercase;
+      implementationtype = "VARCHAR2(35)";
+   }
+   attribute LotBatchNo Text {
+      editable = [false];
+      implementationtype = "VARCHAR2(20)";
+   }
+   attribute SerialNo Text {
+      editable = [false];
+      implementationtype = "VARCHAR2(50)";
+   }
+   attribute EngChgLevel Text {
+      editable = [false];
+      implementationtype = "VARCHAR2(6)";
+   }
+   attribute WaivDevRejNo Text {
+      editable = [false];
+      implementationtype = "VARCHAR2(15)";
+   }
+   attribute ActivitySeq Number {
+      editable = [false];
+      implementationtype = "NUMBER";
+   }
+   attribute HandlingUnitId Number {
+      editable = [false];
+      implementationtype = "NUMBER";
+   }
+   attribute ConditionCode Text {
+      label = "Condition Code";
+      editable = [false];
+      format = uppercase;
+   }
+   attribute ConditionCodeDesc Text {
+      label = "Condition Code Description";
+      editable = [false];
+   }
+   attribute QtyToPick Number {
+      label = "Qty to Pick";
+      editable = [false];
+   }
+   attribute UnitMeas Text {
+      label = "UoM";
+      editable = [false];
+   }
+   attribute PartOwnership Enumeration(PartOwnership) {
+      label = "Ownership";
+      editable = [false];
+   }
+   attribute Owner Text {
+      label = "Owner";
+      editable = [false];
+      format = uppercase;
+   }
+   attribute OwnerName Text {
+      label = "Owner Name";
+      editable = [false];
+   }
+   attribute CatchUnitMeas Text {
+      editable = [false];
+   }
+   attribute ProjectId Text {
+      label = "Project ID";
+      editable = [false];
+      format = uppercase;
+   }
+   attribute ProjectName Text {
+      label = "Project Name";
+      editable = [false];
+   }
+   attribute ShipmentId Number {
+      label = "Shipment ID";
+      editable = [false];
+   }
+   attribute ShipmentIdVisible Boolean {
+      editable = [false];
+      required = [true];
+      default = "true";
+   }
+   attribute InputUnitMeasGroupId Text {
+      label = "Input UoM Group ID";
+      editable = [false];
+   }
+   attribute InputUnitMeas Boolean {
+      label = "Input UoM";
+      editable = [false];
+      required = [true];
+   }
+   attribute InputUnitMeasVisible Boolean {
+      editable = [false];
+      required = [true];
+   }
+   attribute Close Boolean {
+      label = "Close";
+      required = [true];
+   }
+   attribute CloseEditable Boolean {
+      label = "Close Editable";
+      required = [true];
+   }
+   attribute ReceiptIssueSerialTrack Text;
+   attribute IsSerialTrackedInInv Text;
+   attribute Component Text;
+   attribute RentalDb Text;
+   attribute SupplyCodeDb Text;
+   attribute PickListType Text;
+   attribute SenderId Text;
+   @DynamicComponentDependency DISCOM
+   attribute SenderType Enumeration(SenderReceiverType.SenderReceiver);
+   reference PartNoRef(Contract, PartNo) to InventoryPart(Contract, PartNo) {
+      label = "Part";
+   }
+   @DynamicComponentDependency PROJ
+   reference ProjectIdRef(ProjectId) to Project(ProjectId) {
+      label = "Project";
+   }
+   reference ConditionCodeRef(ConditionCode) to ConditionCode(ConditionCode) {
+      label = "Condition";
+   }
+   array InventoryPartInStockArray(Contract, PartNo, ConfigurationId) to InventoryPartInStockVirtual(Contract, PartNo, ConfigurationId);
+}
+
+virtual InventoryPartInStockVirtual {
+   attribute Contract Text {
+      label = "Site";
+      editable = [false];
+      format = uppercase;
+      implementationtype = "VARCHAR2(5)";
+   }
+   attribute PartNo Text {
+      editable = [false];
+      format = uppercase;
+      implementationtype = "VARCHAR2(25)";
+   }
+   attribute ConfigurationId Text {
+      label = "Configuration ID";
+      editable = [false];
+      format = uppercase;
+      implementationtype = "VARCHAR2(50)";
+   }
+   attribute QtyToPick Number {
+      label = "Qty to Pick";
+      required = [true];
+      editable = [true];
+   }
+   attribute CatchQtyToPick Number {
+      label = "Catch Qty to Pick";
+      editable = [true];
+   }
+   attribute LocationNo Text {
+      maxlength = 35;
+      required = [true];
+      editable = [ETag = null];
+      format = uppercase;
+      implementationtype = "VARCHAR2(35)";
+   }
+   attribute LocationDesc Text {
+      label = "Location Description";
+      editable = [false];
+      format = uppercase;
+   }
+   attribute LotBatchNo Text {
+      maxlength = 20;
+      required = [true];
+      editable = [ETag = null];
+      implementationtype = "VARCHAR2(20)";
+   }
+   attribute SerialNo Text {
+      maxlength = 50;
+      required = [true];
+      editable = [ETag = null];
+      implementationtype = "VARCHAR2(50)";
+   }
+   attribute EngChgLevel Text {
+      label = "Revision No";
+      maxlength = 6;
+      required = [true];
+      editable = [ETag = null];
+      implementationtype = "VARCHAR2(6)";
+   }
+   attribute WaivDevRejNo Text {
+      label = "W/D/R No";
+      maxlength = 15;
+      required = [true];
+      editable = [ETag = null];
+      implementationtype = "VARCHAR2(15)";
+   }
+   attribute ActivitySeq Number {
+      label = "Activity Sequence";
+      required = [true];
+      editable = [ETag = null];
+      implementationtype = "NUMBER";
+   }
+   @DynamicComponentDependency PROJ
+   attribute ActivityDesc Text {
+      fetch = "Activity_API.Get_Description(activity_seq)";
+      label = "Activity Description";
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ActivityId Text {
+      fetch = "Activity_API.Get_Activity_No(activity_seq)";
+      label = "Activity ID";
+      editable = [false];
+   }
+   attribute HandlingUnitId Number {
+      fetch = "handling_unit_id";
+      label = "Handling Unit ID";
+      required = [true];
+      editable = [ETag = null];
+      implementationtype = "NUMBER";
+   }
+   attribute HandlingUnitTypeId Text {
+      label = "Handling Unit Type ID";
+      editable = [false];
+   }
+   attribute HandlingUnitTypeDesc Text {
+      label = "Handling Unit Type Description";
+      editable = [false];
+   }
+   attribute Sscc Text {
+      fetch = "null";
+      label = "SSCC";
+      editable = [false];
+   }
+   attribute AltHandlingUnitLabelId Text {
+      fetch = "null";
+      label = "Alt Handling Unit Label ID";
+      editable = [false];
+   }
+   attribute InputUom Text {
+      fetch = "null";
+      label = "Input UoM";
+      editable = [true];
+   }
+   attribute InputQty Number {
+      fetch = "null";
+      label = "Input Qty";
+      editable = [true];
+   }
+   attribute InputConversion Number {
+      fetch = "null";
+      label = "Input Conversion";
+      editable = [true];
+   }
+   attribute InputValue Text {
+      fetch = "null";
+      label = "Input Value";
+      editable = [true];
+   }
+
+   attribute PartTrackingSessionId Number;
+   reference InputUomRef(InputUom) to InputUnitMeas(UnitCode) {
+      label = "Input UoM";
+   }
+   reference LocationNoRef(Contract, PartNo, ConfigurationId, HandlingUnitId, LotBatchNo, SerialNo, WaivDevRejNo, EngChgLevel, ActivitySeq, LocationNo) to InventoryPartInStockLov28(Contract, PartNo, ConfigurationId, HandlingUnitId, LotBatchNo, SerialNo, WaivDevRejNo, EngChgLevel, ActivitySeq, LocationNo);
+   reference HandlingUnitIdRef(Contract, PartNo, ConfigurationId, LocationNo, LotBatchNo, SerialNo, WaivDevRejNo, EngChgLevel, ActivitySeq, HandlingUnitId) to InventoryPartInStockLov28(Contract, PartNo, ConfigurationId, LocationNo, LotBatchNo, SerialNo, WaivDevRejNo, EngChgLevel, ActivitySeq, HandlingUnitId);
+   reference LotBatchNoRef(Contract, PartNo, ConfigurationId, LocationNo, HandlingUnitId, SerialNo, WaivDevRejNo, EngChgLevel, ActivitySeq, LotBatchNo) to InventoryPartInStockLov28(Contract, PartNo, ConfigurationId, LocationNo, HandlingUnitId, SerialNo, WaivDevRejNo, EngChgLevel, ActivitySeq, LotBatchNo);
+   reference SerialNoRef(Contract, PartNo, ConfigurationId, LocationNo, HandlingUnitId, LotBatchNo, WaivDevRejNo, EngChgLevel, ActivitySeq, SerialNo) to InventoryPartInStockLov28(Contract, PartNo, ConfigurationId, LocationNo, HandlingUnitId, LotBatchNo, WaivDevRejNo, EngChgLevel, ActivitySeq, SerialNo);
+   reference WaivDevRejNoRef(Contract, PartNo, ConfigurationId, LocationNo, HandlingUnitId, LotBatchNo, SerialNo, EngChgLevel, ActivitySeq, WaivDevRejNo) to InventoryPartInStockLov28(Contract, PartNo, ConfigurationId, LocationNo, HandlingUnitId, LotBatchNo, SerialNo, EngChgLevel, ActivitySeq, WaivDevRejNo);
+   reference EngChgLevelRef(Contract, PartNo, ConfigurationId, LocationNo, HandlingUnitId, LotBatchNo, SerialNo, WaivDevRejNo, ActivitySeq, EngChgLevel) to InventoryPartInStockLov28(Contract, PartNo, ConfigurationId, LocationNo, HandlingUnitId, LotBatchNo, SerialNo, WaivDevRejNo, ActivitySeq, EngChgLevel);
+   reference ActivitySeqRef(Contract, PartNo, ConfigurationId, LocationNo, HandlingUnitId, LotBatchNo, SerialNo, WaivDevRejNo, EngChgLevel, ActivitySeq) to InventoryPartInStockLov28(Contract, PartNo, ConfigurationId, LocationNo, HandlingUnitId, LotBatchNo, SerialNo, WaivDevRejNo, EngChgLevel, ActivitySeq);
+}
+
+--------------------------------- FUNCTIONS ---------------------------------
+
+function InventoryPartInStockLov List < Entity(InventoryPartInStockLov28) > {
+   parameter HeaderObjkey  Text;
+}
+
+function InvPartInStockKeyValidation Structure(InvPartInStockKeyValidationStructure) {
+   parameter Contract Text;
+   parameter LocationNo Text;
+   parameter HandlingUnitId Number;
+   parameter ActivitySeq Number;
+}
+
+function PickPartByChoiceUsesShipInv Boolean {
+   parameter PickListNo Text;
+}
+
+---------------------------------- ACTIONS ----------------------------------
+
+action PickPartByChoice {
+   initialcheck implementation;
+   parameter Objkey Text;
+   parameter ShipInvLocationNo Text;
+}
+
+-------------------------------- STRUCTURES ---------------------------------
+structure SourceInfoStructure {
+   attribute SourceRefStatus        Text;
+   attribute ConditionCode          Text;
+   attribute ConditionCodeDesc      Text;
+   attribute PartOwnership          Text;
+   attribute Owner                  Text;
+   attribute OwnerName              Text;
+   attribute ProjectId              Text;
+   attribute ProjectName            Text;
+   attribute ActivitySequence       Number;
+   attribute ShipmentIdVisible      Boolean;
+   attribute InputUnitMeasVisible   Boolean;
+   attribute SupplyCodeDb           Text;
+   attribute RentalDb               Text;
+   attribute PickListType           Text;
+   attribute Close                  Boolean;
+   attribute CloseEditable          Boolean;
+   attribute SenderId               Text;
+   @DynamicComponentDependency DISCOM
+   attribute SenderType             Enumeration(SenderReceiverType.SenderReceiver);
+}
+
+structure InvPartInStockKeyValidationStructure {
+   attribute HandlingUnitTypeId     Text;
+   attribute HandlingUnitTypeDesc   Text;
+   attribute Sscc                   Text;
+   attribute AltHandlingUnitLabelId Text;
+   attribute LocationDesc           Text;
+   attribute ActivityDesc           Text;
+   attribute ActivityId             Text;
+}

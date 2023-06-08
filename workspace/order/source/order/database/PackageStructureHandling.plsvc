@@ -1,0 +1,339 @@
+--------------------------------------------------------------------------------------------------------------------
+--
+--  Logical unit: PackageStructureHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date        Sign    History
+--  ----------  ------  --------------------------------------------------------------------------------------------
+--  2019-09-10  JeLise  SCFALL19-73, Added call to Customer_Order_Line_API.Get_Send_Change_Msg_For_Supp in Validate_Quantity___ to handle replication 
+--  2019-19-10          and removed earlier correction done.
+--  2018-12-21  HaPulk  SCUXXW4-9285, Added methods CRUD_Default___, Validate_Catalog_No___, Validate_Quantity___,
+--  2018-12-21          Validate_Supplier___ and Calculate_Prices___ required logic for PackageStructureHandling.
+--------------------------------------------------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Get_Purchase_Order___ (
+   order_no_     IN VARCHAR2,
+   line_no_      IN VARCHAR2,
+   rel_no_       IN VARCHAR2,
+   line_item_no_ IN NUMBER ) RETURN Purchase_Order_Structure_Rec
+IS
+   purchase_order_structure_rec_ Purchase_Order_Structure_Rec;
+   purchase_type_                VARCHAR2(2000);
+BEGIN
+   Customer_Order_Pur_Order_API.Get_Purord_For_Custord(purchase_order_structure_rec_.po_order_no, purchase_order_structure_rec_.po_line_no, purchase_order_structure_rec_.po_rel_no, purchase_type_,
+                                                       order_no_, line_no_, rel_no_, line_item_no_);
+   purchase_order_structure_rec_.purchase_type := Purchase_Type_API.Encode (purchase_type_);
+   RETURN purchase_order_structure_rec_;
+END Get_Purchase_Order___;
+
+
+FUNCTION Get_Shop_Order___ (
+   order_no_     IN VARCHAR2,
+   line_no_      IN VARCHAR2,
+   rel_no_       IN VARCHAR2,
+   line_item_no_ IN NUMBER ) RETURN Shop_Order_Structure_Rec
+IS
+   shop_order_structure_rec_ Shop_Order_Structure_Rec;
+BEGIN
+   Customer_Order_Shop_Order_API.Get_Shop_Order(shop_order_structure_rec_.so_order_no, shop_order_structure_rec_.so_release_no, shop_order_structure_rec_.so_sequence_no,
+                                                order_no_, line_no_, rel_no_, line_item_no_);
+   RETURN shop_order_structure_rec_;
+END Get_Shop_Order___;
+
+
+@Override
+PROCEDURE CRUD_Default___ (
+   key_      IN Customer_Order_Line_Key,
+   attr_ IN OUT VARCHAR2,
+   info_    OUT VARCHAR2 )
+IS
+   order_no_     customer_order_line_tab.order_no%TYPE;
+   line_no_      customer_order_line_tab.line_no%TYPE;
+   rel_no_       customer_order_line_tab.rel_no%TYPE;
+   line_item_no_ customer_order_line_tab.line_item_no%TYPE;   
+   
+   CURSOR Get_Package_Info IS
+      SELECT contract, planned_delivery_date, planned_due_date, promised_delivery_date, wanted_delivery_date, currency_rate
+        FROM customer_order_line_tab
+       WHERE order_no = order_no_
+         AND line_no = line_no_
+         AND rel_no = rel_no_
+         AND line_item_no = -1;
+         
+   package_info_rec_ Get_Package_Info%ROWTYPE;   
+BEGIN
+   order_no_     := Client_SYS.Get_Item_Value('ORDER_NO', attr_);
+   line_no_      := Client_SYS.Get_Item_Value('LINE_NO', attr_);
+   rel_no_       := Client_SYS.Get_Item_Value('REL_NO', attr_);
+   Customer_Order_Line_API.Get_Next_Line_Item_No (line_item_no_, order_no_, line_no_, rel_no_);    
+      
+   OPEN Get_Package_Info;
+   FETCH Get_Package_Info INTO package_info_rec_;
+   CLOSE Get_Package_Info;
+   
+   super(key_, attr_, info_);
+   
+   Client_SYS.Add_To_Attr('LINE_ITEM_NO', line_item_no_, attr_);  
+   Client_SYS.Add_To_Attr('NEW_COMP_AFTER_DELIVERY', 'FALSE', attr_);        
+   Client_SYS.Add_To_Attr('CONTRACT', package_info_rec_.contract, attr_);
+   Client_SYS.Add_To_Attr('BUY_QTY_DUE', 0, attr_);
+   Client_SYS.Add_To_Attr('BASE_SALE_UNIT_PRICE', 0, attr_);
+   Client_SYS.Add_To_Attr('BASE_UNIT_PRICE_INCL_TAX', 0, attr_);      
+   Client_SYS.Add_To_Attr('QTY_INVOICED', 0, attr_);
+   Client_SYS.Add_To_Attr('QTY_ASSIGNED', 0, attr_); 
+   Client_SYS.Add_To_Attr('QTY_SHIPPED', 0, attr_);  
+   Client_SYS.Add_To_Attr('REVISED_QTY_DUE', 0, attr_);  
+   Client_SYS.Add_To_Attr('CONV_FACTOR', 0, attr_);
+   Client_SYS.Add_To_Attr('INVERTED_CONV_FACTOR', 0, attr_); 
+   Client_SYS.Add_To_Attr('COST', 0, attr_);
+   
+   Client_SYS.Add_To_Attr('PLANNED_DELIVERY_DATE', package_info_rec_.planned_delivery_date, attr_);
+   Client_SYS.Add_To_Attr('PLANNED_DUE_DATE', package_info_rec_.planned_due_date, attr_);
+   Client_SYS.Add_To_Attr('PROMISED_DELIVERY_DATE', package_info_rec_.promised_delivery_date, attr_);
+   Client_SYS.Add_To_Attr('WANTED_DELIVERY_DATE', package_info_rec_.wanted_delivery_date, attr_);   
+   
+   Client_SYS.Add_To_Attr('SALE_UNIT_PRICE', 0, attr_); 
+   Client_SYS.Add_To_Attr('UNIT_PRICE_INCL_TAX', 0, attr_);      
+   Client_SYS.Add_To_Attr('CURRENCY_RATE', package_info_rec_.currency_rate, attr_);               
+END CRUD_Default___;
+
+
+FUNCTION Validate_Catalog_No___ (
+   catalog_no_        IN VARCHAR2,
+   order_no_          IN VARCHAR2,
+   buy_qty_due_       IN NUMBER,
+   line_item_no_      IN NUMBER,
+   activity_seq_      IN NUMBER,
+   price_conv_factor_ IN NUMBER,
+   info$_            OUT VARCHAR2 ) RETURN Validate_Catalog_No_Structure_Rec
+IS
+   catalog_no_temp_                   customer_order_line_tab.catalog_no%TYPE;
+   validate_catalog_no_structure_rec_ Validate_Catalog_No_Structure_Rec;
+   info_                              VARCHAR2(32000);
+   attr_                              VARCHAR2(32000);
+BEGIN
+   catalog_no_temp_ := catalog_no_;
+   Client_SYS.Add_To_Attr('BUY_QTY_DUE', buy_qty_due_, attr_);
+   Client_SYS.Add_To_Attr('LINE_ITEM_NO', line_item_no_, attr_);
+   Client_SYS.Add_To_Attr('ACTIVITY_SEQ', activity_seq_, attr_);
+
+   Customer_Order_Line_API.Get_Line_Defaults__(info_, attr_, catalog_no_temp_, order_no_);       
+   validate_catalog_no_structure_rec_.catalog_no                 := catalog_no_temp_;   
+   validate_catalog_no_structure_rec_.catalog_desc               := Client_SYS.Get_Item_Value('CATALOG_DESC', attr_);
+   validate_catalog_no_structure_rec_.currency_rate              := Client_SYS.Get_Item_Value('CURRENCY_RATE', attr_);
+   validate_catalog_no_structure_rec_.conv_factor                := Client_SYS.Get_Item_Value('CONV_FACTOR', attr_);
+   validate_catalog_no_structure_rec_.inverted_conv_factor       := Client_SYS.Get_Item_Value('INVERTED_CONV_FACTOR', attr_);      
+   validate_catalog_no_structure_rec_.base_sale_unit_price       := Client_SYS.Get_Item_Value('BASE_SALE_UNIT_PRICE', attr_);
+   validate_catalog_no_structure_rec_.base_unit_price_incl_tax   := Client_SYS.Get_Item_Value('BASE_UNIT_PRICE_INCL_TAX', attr_);
+   validate_catalog_no_structure_rec_.discount                   := Client_SYS.Get_Item_Value('DISCOUNT', attr_);
+   validate_catalog_no_structure_rec_.cost                       := Client_SYS.Get_Item_Value('COST', attr_);
+   validate_catalog_no_structure_rec_.part_no                    := Client_SYS.Get_Item_Value('PART_NO', attr_);   
+   validate_catalog_no_structure_rec_.supply_code                := Order_Supply_Type_API.Encode(Client_SYS.Get_Item_Value('SUPPLY_CODE', attr_));
+   validate_catalog_no_structure_rec_.catalog_type               := Sales_Part_Type_API.Encode(Client_SYS.Get_Item_Value('CATALOG_TYPE', attr_));
+   validate_catalog_no_structure_rec_.vendor_no                  := Client_SYS.Get_Item_Value('VENDOR_NO', attr_);   
+   validate_catalog_no_structure_rec_.consignment_stock          := Client_SYS.Get_Item_Value('CONSIGNMENT_STOCK_DB', attr_);     
+   validate_catalog_no_structure_rec_.close_tolerance            := Client_SYS.Get_Item_Value('CLOSE_TOLERANCE', attr_);      
+   validate_catalog_no_structure_rec_.create_sm_object_option_db := Client_SYS.Get_Item_Value('CREATE_SM_OBJECT_OPTION_DB', attr_);      
+   validate_catalog_no_structure_rec_.purchase_part_no           := Client_SYS.Get_Item_Value('PURCHASE_PART_NO', attr_);
+   validate_catalog_no_structure_rec_.part_price                 := Client_SYS.Get_Item_Value('PART_PRICE', attr_);
+   validate_catalog_no_structure_rec_.price_source               := Pricing_Source_API.Encode(Client_SYS.Get_Item_Value('PRICE_SOURCE', attr_));
+   validate_catalog_no_structure_rec_.sales_unit_meas            := Client_SYS.Get_Item_Value('SALES_UNIT_MEAS', attr_); 
+   validate_catalog_no_structure_rec_.dop_connection             := Client_SYS.Get_Item_Value('DOP_CONNECTION', attr_);
+   validate_catalog_no_structure_rec_.price_qty_due              := buy_qty_due_ * price_conv_factor_;      
+
+   info$_ := info_;
+   RETURN validate_catalog_no_structure_rec_;   
+END Validate_Catalog_No___;
+
+
+FUNCTION Validate_Quantity___ (       
+   revised_qty_due_        IN NUMBER, 
+   qty_assigned_           IN NUMBER,
+   qty_shipped_            IN NUMBER,
+   state_parent_           IN VARCHAR2,      
+   buy_qty_due_parent_     IN NUMBER,
+   qty_per_assembly_       IN NUMBER,
+   qty_delivered_parent_   IN NUMBER,
+   desired_qty_            IN NUMBER,      
+   catalog_no_             IN VARCHAR2,
+   order_no_               IN VARCHAR2,
+   line_no_                IN VARCHAR2,
+   rel_no_                 IN VARCHAR2,
+   line_item_no_           IN NUMBER,
+   supply_code_            IN VARCHAR2,
+   price_effectivity_date_ IN DATE,
+   price_conv_factor_      IN NUMBER,
+   row_new_                IN BOOLEAN,
+   info$_                 OUT VARCHAR2 ) RETURN Validate_Quantity_Structure_Rec
+IS
+   info_                            VARCHAR2(32000);
+   attr_                            VARCHAR2(32000);
+   catalog_no_temp_                 customer_order_line_tab.catalog_no%TYPE;
+   conv_factor_                     customer_order_line_tab.conv_factor%TYPE;
+   inverted_conv_factor_            customer_order_line_tab.inverted_conv_factor%TYPE;
+   validate_quantity_structure_rec_ Validate_Quantity_Structure_Rec;
+BEGIN   
+   IF ((revised_qty_due_ = (qty_assigned_ + qty_shipped_)) AND ((qty_assigned_ + qty_shipped_) != 0)) THEN
+      IF ((state_parent_ != 'Planned') AND (state_parent_ != 'Released')) THEN
+         validate_quantity_structure_rec_.check_quantity_changed := FALSE;
+      ELSE
+         validate_quantity_structure_rec_.check_quantity_changed := TRUE;
+      END IF;
+   END IF;
+         
+   IF row_new_ THEN      
+      validate_quantity_structure_rec_.buy_qty_due := (buy_qty_due_parent_ - (qty_delivered_parent_ - qty_shipped_)) * qty_per_assembly_;
+   ELSE           
+      validate_quantity_structure_rec_.buy_qty_due := buy_qty_due_parent_ * qty_per_assembly_;
+   END IF;
+   
+   IF desired_qty_ IS NULL THEN
+      validate_quantity_structure_rec_.desired_qty := validate_quantity_structure_rec_.buy_qty_due;
+   ELSE
+      validate_quantity_structure_rec_.desired_qty := desired_qty_;
+   END IF;
+   
+   catalog_no_temp_ := catalog_no_;
+   Client_SYS.Add_To_Attr('BUY_QTY_DUE', buy_qty_due_parent_, attr_);
+   Client_SYS.Add_To_Attr('SUPPLY_CODE_DB', supply_code_, attr_);
+   Client_SYS.Add_To_Attr('PRICE_EFFECTIVITY_DATE', price_effectivity_date_, attr_);
+
+   Customer_Order_Line_API.Get_Line_Defaults__(info_, attr_, catalog_no_temp_, order_no_);
+   validate_quantity_structure_rec_.currency_rate        := Client_SYS.Get_Item_Value('CURRENCY_RATE', attr_); 
+   conv_factor_                                          := Client_SYS.Get_Item_Value('CONV_FACTOR', attr_);
+   validate_quantity_structure_rec_.conv_factor          := conv_factor_;
+   inverted_conv_factor_                                 := Client_SYS.Get_Item_Value('INVERTED_CONV_FACTOR', attr_);
+   validate_quantity_structure_rec_.inverted_conv_factor := inverted_conv_factor_;
+   validate_quantity_structure_rec_.discount             := Client_SYS.Get_Item_Value('DISCOUNT', attr_); 
+   validate_quantity_structure_rec_.cost                 := Client_SYS.Get_Item_Value('COST', attr_);   
+   validate_quantity_structure_rec_.part_price           := Client_SYS.Get_Item_Value('PART_PRICE', attr_); 
+   validate_quantity_structure_rec_.price_source         := Pricing_Source_API.Encode(Client_SYS.Get_Item_Value('PRICE_SOURCE', attr_));
+   validate_quantity_structure_rec_.price_list_no        := Client_SYS.Get_Item_Value('PRICE_LIST_NO', attr_); 
+   
+   IF (validate_quantity_structure_rec_.buy_qty_due < (qty_shipped_ + qty_assigned_) / conv_factor_ * inverted_conv_factor_) THEN
+      validate_quantity_structure_rec_.check_quantity_less_than_picked := TRUE;
+   ELSE
+      validate_quantity_structure_rec_.check_quantity_less_than_picked := FALSE;
+   END IF;
+      
+   validate_quantity_structure_rec_.revised_qty_due := validate_quantity_structure_rec_.buy_qty_due * conv_factor_ / inverted_conv_factor_;
+   validate_quantity_structure_rec_.price_qty_due   := validate_quantity_structure_rec_.buy_qty_due * price_conv_factor_;
+
+   info$_ := info_;
+   
+   RETURN validate_quantity_structure_rec_;
+END Validate_Quantity___;
+
+
+FUNCTION Validate_Supplier___(
+   supply_code_      IN VARCHAR2,
+   contract_         IN VARCHAR2,
+   purchase_part_no_ IN VARCHAR2 ) RETURN Validate_Supplier_Structure_Rec
+IS
+   vendor_no_	    customer_order_line_tab.vendor_no%TYPE;  
+   validate_supplier_structure_rec_ Validate_Supplier_Structure_Rec;
+BEGIN 
+   vendor_no_ := Customer_Order_Line_API.Retrieve_Default_Vendor__(contract_, purchase_part_no_, supply_code_, 'FALSE');   
+   IF vendor_no_ IS NOT NULL THEN
+      Customer_Order_Line_API.Validate_Vendor_No__(vendor_no_, supply_code_);
+   END IF;
+   $IF (Component_Purch_SYS.INSTALLED) $THEN
+      validate_supplier_structure_rec_.supply_site := Supplier_API.Get_Acquisition_Site(vendor_no_);
+   $END
+   validate_supplier_structure_rec_.vendor_no := vendor_no_;
+   RETURN validate_supplier_structure_rec_;
+END Validate_Supplier___;
+
+
+FUNCTION Get_Supply_Site_Reserve_Type___(
+   supply_site_ IN VARCHAR2,
+   contract_    IN VARCHAR2 ) RETURN Supply_Site_Reserve_Type_Structure_Rec
+IS  
+   rec_ Supply_Site_Reserve_Type_Structure_Rec;
+BEGIN
+   rec_.supply_site_reserve_type := NVL(Site_To_Site_Reserve_Setup_API.Get_Supply_Site_Reserve_Typ_Db(supply_site_, contract_), 'NOTALLOWED');
+   RETURN rec_;
+END Get_Supply_Site_Reserve_Type___;
+
+
+FUNCTION Calculate_Prices___ (
+   sale_unit_price_     IN NUMBER,
+   unit_price_incl_tax_ IN NUMBER,
+   contract_            IN VARCHAR2,
+   order_no_            IN VARCHAR2,
+   line_no_             IN VARCHAR2,
+   rel_no_              IN VARCHAR2) RETURN Calculate_Prices_Structure_Rec
+IS
+   base_sale_unit_price_     NUMBER;
+   base_unit_price_incl_tax_ NUMBER;
+   sale_unit_price_temp_     NUMBER;
+   unit_price_incl_tax_temp_ NUMBER;
+   calculate_prices_structure_rec_ Calculate_Prices_Structure_Rec;
+BEGIN
+   sale_unit_price_temp_ := sale_unit_price_;
+   unit_price_incl_tax_temp_ := unit_price_incl_tax_;
+   Tax_Handling_Order_Util_API.Get_Prices(base_sale_unit_price_, base_unit_price_incl_tax_, sale_unit_price_temp_, unit_price_incl_tax_temp_,
+                                          Site_API.Get_Company(contract_), 'ORDER_QUOTATION_LINE',                                                                          
+                                          order_no_, line_no_, rel_no_, -1, '*', null);
+                                          --ifs_curr_rounding_);
+                                                                          
+   calculate_prices_structure_rec_.base_sale_unit_price := base_sale_unit_price_;
+   calculate_prices_structure_rec_.base_unit_price_incl_tax := base_unit_price_incl_tax_;   
+   calculate_prices_structure_rec_.sale_unit_price := sale_unit_price_temp_;
+   calculate_prices_structure_rec_.unit_price_incl_tax := unit_price_incl_tax_temp_;
+   
+   calculate_prices_structure_rec_.price_source := 'MANUAL';
+   RETURN calculate_prices_structure_rec_;
+END Calculate_Prices___;
+
+
+FUNCTION Get_Configurable_Db___ (
+  contract_   IN VARCHAR2, 
+  catalog_no_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+BEGIN
+   RETURN Sales_Part_API.Get_Configurable_Db(contract_, catalog_no_);
+END Get_Configurable_Db___;
+
+
+FUNCTION Get_Reason_Description___ (
+  cancel_reason_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+BEGIN
+   RETURN Order_Cancel_Reason_API.GET_REASON_DESCRIPTION(cancel_reason_);
+END Get_Reason_Description___;
+
+
+FUNCTION Connected_Po_Found___ (
+	order_no_     IN VARCHAR2,
+	line_no_      IN VARCHAR2,
+	rel_no_       IN VARCHAR2,
+	line_item_no_ IN NUMBER ) RETURN BOOLEAN
+IS
+BEGIN
+   IF Customer_Order_Pur_Order_API.Connected_Orders_Found(order_no_, line_no_, rel_no_, line_item_no_) = 1 THEN
+      RETURN TRUE;
+   ELSE
+      RETURN FALSE;
+   END IF;
+END Connected_Po_Found___;
+
+
+FUNCTION Connected_So_Found___ (
+	order_no_     IN VARCHAR2,
+	line_no_      IN VARCHAR2,
+	rel_no_       IN VARCHAR2,
+	line_item_no_ IN NUMBER ) RETURN BOOLEAN
+IS
+BEGIN
+	IF Customer_Order_Shop_Order_API.Connected_Orders_Found(order_no_, line_no_, rel_no_, line_item_no_) = 'TRUE' THEN
+      RETURN TRUE;
+   ELSE
+      RETURN FALSE;
+   END IF;
+END Connected_So_Found___;
+

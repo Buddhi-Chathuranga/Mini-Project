@@ -1,0 +1,931 @@
+<project name="Database" default="build" basedir=".">
+    <!-- Top build script -->
+
+    <property file="private.build.properties"/>
+    <property file="build.properties"/>
+    <property file="fndrpl.properties"/>
+
+    <property name="odata.fw.src"   value="source/fndbas/framework/odp" />
+
+    <condition property="compile">
+        <not>
+            <isset property="delivery"/>
+        </not>
+    </condition>
+
+    <condition property="compile">
+        <and>
+            <isset property="delivery"/>
+            <resourcecount when="greater" count="0">
+                <fileset dir="${delivery}">
+                    <include name="source/*/database/"/>
+                    <include name="source/*/replication/"/>
+                    <include name="ifsinstaller/lib/databaseInstaller/"/>
+                    <include name="source/fndbas/framework/database/"/>
+                    <include name="${odata.fw.src}/"/>
+                    <include name="source/*/projection/"/>
+                    <include name="source/fndbas/apps/"/>
+                    <include name="build/"/>
+                </fileset>
+            </resourcecount>
+        </and>
+    </condition>
+    <condition property="compile">
+        <resourcecount when="greater" count="0">
+            <fileset dir="${delivery}/model" excludes="*/*.overview */*.report */*.dimension */*.bizapi */*.fact */*.filter */*.javaclient */*.rec */*.test */*.transformers */*.webservice */*.clientpackage */*.serverpackage" erroronmissingdir="false"/>
+        </resourcecount>
+    </condition>
+
+    <condition property="generate.force" value="true">
+        <and>
+            <isset property="delivery"/>
+            <available file="${delivery}/build/IfsBuildTasks/developer.studio.libs" type="dir"/>
+        </and>
+    </condition>
+	
+    <condition property="solutionset">
+	    <or>
+            <available file="${delivery}/solutionset.yaml"/>			
+		</or>			
+    </condition>
+	<condition property="compile">
+	    <or>
+            <available file="${delivery}/solutionset.yaml"/>			
+		</or>
+    </condition>
+
+    <!-- ============================================================== -->
+    <!--  Tasks                                                         -->
+    <!-- ============================================================== -->
+
+    <taskdef resource="net/sf/antcontrib/antlib.xml"/>
+
+    <!-- ============================================================== -->
+    <!--  Targets                                                       -->
+    <!-- ============================================================== -->
+
+    <target name="build">
+        <antcall target="generate"/>
+    </target>
+
+
+	
+    <target name="generate" if="compile">
+        <antcall target="do-generate"/>
+    </target>
+
+    <target name="do-generate"   depends="declare,init,generateDB,generateREPL,odata-build-projections,odata-copy-third-party-jars,bpa-build-bpa-delegates,copy-fnd-odp-internal-libs,copy-to-delivery,odata-check-for-failed-java-impl,create-build-home-index"/>
+
+    <target name="clean-build" depends="clean, build"/>
+
+    <target name="declare">
+
+        <!-- Create a timestamp property-->
+        <tstamp>
+            <format property="delivery.time" pattern="yyyy-MM-dd_kkmmssSSS"
+                    offset="-2" unit="second"/>
+        </tstamp>
+
+        <if>
+            <available file="../../fndbas/model/fndbas" type="dir"/>
+            <then>
+                <echo message="Development Build..."/>
+                <property name="development"       value="TRUE"/>
+                <property name="server-home"       value="../../../server"/>
+                <property name="build.root"        value="${basedir}/../.."/>
+                <property name="dev.root"          value="../../"/>
+            </then>
+            <else>
+                <echo message="Installation Build..."/>
+                <property name="development"       value="FALSE"/>
+                <property name="dev.root"          value="./"/>
+                <property name="build.root"        value="${basedir}/.."/>
+                <property name="server-home"       value="${build.root}/server"/>
+            </else>
+        </if>
+
+        <property name="generate.root"          value="${dev.root}/.."/>
+        <property name="framework.libs"         value="${build.root}/source/fndbas/framework/thirdparty" />
+        <property name="odata.api.libs"         value="${build.root}/source/fndbas/framework/odata-api" />
+        <property name="odata.third.party.libs" value="${build.root}/source/fndbas/framework/odp-thirdparty-libs" />
+        <property name="server.main.dist"       value="${server-home}/apps/main" />
+        <property name="server.int.dist"        value="${server-home}/apps/int" />
+        <property name="odata.fw"               value="${build.root}/${odata.fw.src}" />
+        <property name="projection.build"       value="${build.root}/build/classes/projection" />
+        <property name="projections.gen.src"    value="${build.root}/build/gen/projection" />
+        <property name="bpa.api.lib"            value="${build.root}/source/fndbas/framework/bpa" />
+        <property name="bpa.gen.src"            value="${build.root}/build/gen/bpa" />
+        <property name="failed.java.impl.log"   value="${build.root}/failed_java_impls.log" />
+
+        <pathconvert property="build.home">
+            <path path="${basedir}/.."/>
+        </pathconvert>
+    </target>
+
+    <target name="clean" depends="declare">
+        <echo message="generate_db clean called"/>
+        <delete includeemptydirs="true" quiet="true">
+            <fileset dir="${build.root}/database">
+                <exclude name="*.ini"/>
+                <exclude name="*.ini_autogenerated"/>
+            </fileset>
+        </delete>
+        <delete file="${build.root}/database/install.ini"/>
+        <delete file="${build.root}/model_codegen_version_index.dat"/>
+        <delete dir="${generate.root}/build/gen/db"/>
+        <property name="compile"             value="true"/>
+        <property name="generate.force"      value="true"/>
+
+        <antcall target="odata-clean"/>
+    </target>
+
+
+    <target name="init">
+
+        <antcall target="copy2database"/>
+        <antcall target="solutionset-files"/>
+
+    </target>
+
+    <target name="generateDBLinuxDelivery">
+        <taskdef name="generateDB" classname="ifs.dev.buildtasks.ifsapp20.GenerateDatabaseFilesTaskIfsApp">
+            <classpath>
+                <fileset dir="${developer.studio.libs}">
+                    <include name="ifs-dev-buildtasks.jar"/>
+                </fileset>
+            </classpath>
+        </taskdef>
+
+        <!-- default generate.force="false" if not set for new generator or in target clean -->
+        <property name="generate.force"      value="false"/>
+        <!-- If there are no code generation changes in an update, a new code generator jar will not be delivered. Therefore the target version for the previous delivered code generator jar should be used. -->
+        <!-- For example, if 10-UPDATE2 does not contain any code generation changes compared to 10-UPDATE1, the code generation jar for 10 Update1 should be used, and targetVersion should say 10-UPDATE1. -->
+
+        <generateDB component="*"
+                    delivery="${delivery}"
+                    targetVersion="${target.version}"
+                    buildFolder="${build.root}"
+                    generateFolder="${generate.root}"
+                    development="${development}"
+                    detailLogs="${detail.logs}"
+                    force="${generate.force}"
+                    generateClientBaseFiles="${gen.client.temp.files}"
+                    generateTranslationDb="${gen.translation.db}"
+                    generateTranslationWeb="${gen.translation.web}"
+                    improveGeneration = "${improve.generation}"
+                    useParallelCodeGeneration="${gen.parallel}"/>
+    </target>
+    <target name="generateDB">
+        <taskdef name="generateDB" classname="ifs.dev.buildtasks.ifsapp20.GenerateDatabaseFilesTaskIfsApp">
+            <classpath>
+                <fileset dir="${developer.studio.libs}">
+                    <include name="ifs-dev-buildtasks.jar"/>
+                </fileset>
+            </classpath>
+        </taskdef>
+
+        <!-- default generate.force="false" if not set for new generator or in target clean -->
+        <property name="generate.force"      value="false"/>
+        <!-- If there are no code generation changes in an update, a new code generator jar will not be delivered. Therefore the target version for the previous delivered code generator jar should be used. -->
+        <!-- For example, if 10-UPDATE2 does not contain any code generation changes compared to 10-UPDATE1, the code generation jar for 10 Update1 should be used, and targetVersion should say 10-UPDATE1. -->
+
+        <generateDB component="*"
+                    targetVersion="${target.version}"
+                    buildFolder="${build.root}"
+                    generateFolder="${generate.root}"
+                    development="${development}"
+                    detailLogs="${detail.logs}"
+                    force="${generate.force}"
+                    generateClientBaseFiles="${gen.client.temp.files}"
+                    generateTranslationDb="${gen.translation.db}"
+                    generateTranslationWeb="${gen.translation.web}"
+                    improveGeneration = "${improve.generation}"
+                    useParallelCodeGeneration="${gen.parallel}"/>
+    </target>
+
+    <target name="generateREPL" if="${generate.repl.code}">
+        <taskdef name="generateREPL" classname="ifs.dev.buildtasks.apps10.GenerateReplicationFilesTask">
+            <classpath>
+                <fileset dir="${developer.studio.libs}">
+                    <include name="ifs-dev-buildtasks.jar"/>
+                </fileset>
+            </classpath>
+        </taskdef>
+
+        <generateREPL component="*"
+                      targetVersion="${target.version}"
+                      buildFolder="${build.root}"
+                      generateFolder="${generate.root}"
+                      development="${development}"
+                      detailLogs="${detail.logs}"
+                      force="${generate.force}"/>
+    </target>
+
+    <target name="copy-fnd-odp-internal-libs">
+
+	    <mkdir dir="${build.home}/server/lob/fndbas/fnd-odp-internal-libs/"/>
+
+	    <copy file="${framework.libs}/javaee-api-7.0.jar"
+		  failonerror="false"
+		  todir="${build.home}/server/lob/fndbas/fnd-odp-internal-libs/"/>
+
+	    <copy file="${odata.api.libs}/odata-provider-api.jar"
+		  failonerror="false"
+		  todir="${build.home}/server/lob/fndbas/fnd-odp-internal-libs/"/>
+
+	    <copy todir="${build.home}/server/lob/fndbas/fnd-odp-internal-libs/"
+		  failonerror="false">
+
+		    <fileset dir="${odata.third.party.libs}">
+			    <include name="**/*.jar"/>
+		    </fileset>
+
+	    </copy>
+
+    </target>	
+
+    <target name="copy-to-delivery" if="delivery">
+
+        <echo>*** Copying files changed after: ${delivery.time}</echo>
+        <echo>*** from ${build.home}</echo>
+
+        <parallel>
+            <!-- database -->
+            <copy todir="${delivery}" overwrite="true" preservelastmodified="true" failonerror="true">
+                <fileset dir="${build.home}" includes="database/**">
+                    <and>
+                        <type type="file"/>
+                        <date datetime="${delivery.time}" pattern="yyyy-MM-dd_kkmmssSSS" when="after"/>
+                    </and>
+                </fileset>
+            </copy>
+            <!-- server lob -->
+            <copy todir="${delivery}" overwrite="true" preservelastmodified="true" failonerror="true">
+                <fileset dir="${build.home}" includes="server/lob/**">
+                    <and>
+                        <type type="file"/>
+                        <date datetime="${delivery.time}" pattern="yyyy-MM-dd_kkmmssSSS" when="after"/>
+                    </and>
+                </fileset>
+            </copy>
+			<!-- solutionset file -->
+            <copy todir="${delivery}" overwrite="true" preservelastmodified="true" failonerror="true">
+                <fileset dir="${build.home}" includes="ifsinstaller/solutionset.yaml">
+                    <and>
+                        <type type="file"/>
+                        <date datetime="${delivery.time}" pattern="yyyy-MM-dd_kkmmssSSS" when="after"/>
+                    </and>
+                </fileset>
+            </copy>				
+        </parallel>
+
+        <available file="${delivery}/database/_utils" type="dir"           property="deliver._utils-files"/>
+        <antcall target="deliver-_utils-files"/>
+
+    </target>
+
+    <target name="deliver-_utils-files" if="deliver._utils-files">
+        <echo message="Copy needed database/_utils files..."/>
+        <copy todir="${delivery}/database/_utils" preservelastmodified="true">
+            <fileset dir="${build.home}/database/_utils"/>
+        </copy>
+    </target>
+
+    <target name="copy2database">
+
+        <!-- _utils -->
+        <copy todir="${build.home}">
+            <fileset dir="../source/fndbas/framework">
+                <include name="database/**"/>
+            </fileset>
+        </copy>
+
+        <!-- source/*/database -->
+        <foreach param="database.component"  target="copy-database-component" inheritall="true">
+            <path>
+                <dirset dir="${build.home}/source/" includes="*/database"/>
+            </path>
+        </foreach>
+    </target>
+
+    <target name="copy-database-component">
+
+        <pathconvert property="component">
+            <path path="${database.component}"/>
+            <chainedmapper>
+                <globmapper from="${build.home}${file.separator}source${file.separator}*" to="*" />
+                <globmapper from="*${file.separator}database" to="*" />
+            </chainedmapper>
+        </pathconvert>
+
+        <!--echo>component=${component}</echo-->
+
+        <copy todir="${build.home}/database/${component}">
+            <fileset dir="${build.home}/source/${component}/database">
+                <exclude name="*.plsql"/>
+                <exclude name="*.plsvc"/>
+                <exclude name="*.views"/>
+                <exclude name="*.storage"/>
+                <exclude name="*.offline"/>
+            </fileset>
+        </copy>
+
+    </target>
+
+    <target name="copy-CreateInstallTem-files-to-build" if="delivery">
+        <copy todir="${buildhomePath}" preservelastmodified="true" failonerror="false">
+            <fileset dir="${deliveryPath}" includes="*" erroronmissingdir="false"/>
+        </copy>
+
+    </target>
+	
+    <target name="odata-clean" depends="odata-declare">
+        <delete dir="${projection.build}"/>
+        <delete dir="${projections.gen.src}" deleteonexit="true"/>
+        <delete file="${odata.api.libs}/odata-provider-api.jar"/>
+        <delete>
+            <fileset dir="${build.root}/source" includes="*/projection/lib/fragment/*"/>
+            <fileset dir="${build.root}/source" includes="*/projection/lib/utils/*"/>
+            <fileset dir="${build.root}/source" includes="**/fragment.projection"/>
+        </delete>
+    </target>
+
+    <target name="odata-declare" depends="declare">
+        <condition property="new.odata.provider" value="true">
+            <or>
+                <available file="${delivery}/${odata.fw.src}/ifs-odata-provider.zip" type="file"/>
+                <not>
+                    <available file="${odata.api.libs}/odata-provider-api.jar" type="file"/>
+                </not>
+            </or>
+        </condition>
+
+        <condition property="should.compile.projections">
+            <or>
+                <available file="${delivery}/solutionset.yaml"/>
+                <isset property="new.odata.provider"/>
+                <and>
+                    <isset property="delivery"/>
+                    <resourcecount when="greater" count="0">
+                        <fileset dir="${delivery}">
+                            <include name="source/**/projection/**/com/ifsworld/**/*"/>
+                        </fileset>
+                    </resourcecount>
+                </and>
+            </or>
+        </condition>
+        <delete file="${failed.java.impl.log}" failonerror="false"/>
+        <touch file="${failed.java.impl.log}"/>
+
+        <java jar="${build.root}/build/odp_build_utils/get_active_modules.jar" outputproperty="output.property" fork="true" failonerror="true">
+            <arg value="${delivery}/solutionset.yaml"/>
+            <arg value="${build.home}/solutionset.yaml"/>
+        </java>
+
+        <condition property="solutionset.found">
+            <not>
+                <contains string="${output.property}" substring="Error: " casesensitive="false"/>
+            </not>
+        </condition>
+
+        <if>
+            <equals arg1="${solutionset.found}" arg2="true"/>
+            <then>
+                <property name="active.modules" value="${output.property}"/>
+            </then>
+            <else>
+                <property name="active.modules" value="ALL"/>
+                <echo message="Solutionset not found. Assuming all modules active"/>
+            </else>
+        </if>
+    </target>
+
+    <target name="odata-copy-api" if="should.compile.projections">
+        <if>
+            <available file="${odata.fw}/ifs-odata-provider.zip" type="file"/>
+            <then>
+                <unzip src="${odata.fw}/ifs-odata-provider.zip" dest="${odata.api.libs}">
+                    <patternset>
+                        <include name="odata-provider-api-*.jar"/>
+                    </patternset>
+                    <mapper type="glob" from="odata-provider-api-*.jar" to="odata-provider-api.jar"/>
+                </unzip>
+            </then>
+        </if>
+    </target>
+
+    <target name="odata-build-projections" depends="odata-declare,odata-copy-api,odata-remove-fragment-identification"
+            if="should.compile.projections">
+        <mkdir dir="${projections.gen.src}/com/ifsworld/projection"/>
+        <foreach target="odata-copy-java-impl-files" param="java.impl.file">
+            <path>
+                <fileset dir="${build.root}/source" erroronmissingdir="false">
+                    <or>
+                        <filename name="**/*ActionsImpl.java"/>
+                        <filename name="**/*FunctionsImpl.java"/>
+                        <filename name="**/*StreamAttributesHandlerImpl.java"/>
+                    </or>
+                </fileset>
+            </path>
+        </foreach>
+
+        <foreach target="odata-create-utill-jar" param="util.src" inheritall="true">
+            <path>
+                <dirset dir="${build.root}/source" erroronmissingdir="false">
+                    <include name="**/projection/packages/utils/*"/>
+                </dirset>
+            </path>
+        </foreach>
+
+        <loadfile property="odata.fragment.file" srcfile="${build.root}/fragments_in_buildhome.dat"/>
+
+        <foreach list="${odata.fragment.file}" trim="yes" param="projection-impl" target="odata-copy-fragment-jar" delimiter="${line.separator}" inheritall="true"/>
+
+        <foreach target="odata-create-jar-per-projection" param="projection-impl" inheritall="true">
+            <path>
+                <dirset dir="${build.root}/source" erroronmissingdir="false">
+                    <include name="**/projection/packages/*"/>
+                    <exclude name="**/projection/packages/utils"/>
+                </dirset>
+            </path>
+        </foreach>
+
+        <foreach target="odata-copy-java-impl-util-lib" param="third-party-lib" inheritall="true">
+            <path>
+                <fileset dir="${build.root}/source" erroronmissingdir="false">
+                    <include name="**/projection/lib/utils/*.jar"/>
+                </fileset>
+            </path>
+        </foreach>
+    </target>
+
+    <target name="odata-create-utill-jar">
+        <basename property="module.name" file="${util.src}/../../../../"/>
+        <property name="util.target" value="${projections.gen.src}/java-impl/${module.name}/utils"/>
+        <property name="util.jar.location" value="${util.src}/../../../lib/utils"/>
+        <mkdir dir="${util.target}"/>
+        <mkdir dir="${util.jar.location}"/>
+        <javac includeantruntime="false" debug="true" debuglevel="lines,vars,source"
+               destdir="${util.target}" optimize="true" source="1.8" target="1.8" deprecation="on" failonerror="false" errorproperty="compile.failed">
+            <src path="${util.src}"/>
+            <classpath>
+                <pathelement location="${framework.libs}/javaee-api-7.0.jar"/>
+                <pathelement location="${odata.api.libs}/odata-provider-api.jar"/>
+                <fileset dir="${build.root}/source" erroronmissingdir="false">
+                    <include name="**/projection/lib/*.jar"/>
+                </fileset>
+                <fileset dir="${odata.third.party.libs}" erroronmissingdir="false">
+                    <include name="*.jar"/>
+                </fileset>
+            </classpath>
+        </javac>
+
+        <if>
+            <isset property="compile.failed" />
+            <then>
+                <echo message="ERROR: Projection util compilation failed for module '${module.name}'"/>
+                <echo file="${failed.java.impl.log}" append="true" message="Type: UTIL - Module: '${module.name}'${line.separator}"/>
+            </then>
+            <else>
+                <jar destfile="${util.jar.location}/${module.name}-util.jar"
+                     basedir="${util.target}"/>
+            </else>
+        </if>
+    </target>
+
+    <target name="odata-projection-exist">
+        <condition property="projection.exists" value="true">
+            <and>
+                <available file="${projection-impl}" type="dir"/>
+                <not>
+                    <available file="${projection-impl}/fragment.projection"/>
+                </not>
+            </and>
+        </condition>
+    </target>
+
+    <target name="odata-copy-fragment-jar" depends="odata-create-jar-per-projection" if="projection.exists">
+        <basename property="module.name" file="${projection-impl}/../../../"/>
+        <basename property="projection.name" file="${projection-impl}"/>
+        <property name="java.impl.target" value="${projections.gen.src}/java-impl/${module.name}/${projection.name}/target" />
+
+        <mkdir dir="${projection-impl}/../../lib/fragment"/>
+        <copy toDir="${projection-impl}/../../lib/fragment" flatten="true" failonerror="false">
+            <file file="${build.home}/server/lob/${module.name}/javaimpl/${projection.name}/${projection.name}.jar"/>
+        </copy>
+        <touch file="${projection-impl}/fragment.projection"/>
+    </target>
+
+    <target name="odata-check-skip">
+        <condition property="skip.projection" value="true">
+            <available file="${projection-impl}/fragment.projection"/>
+        </condition>
+    </target>
+
+    <target name="odata-create-jar-per-projection" depends="odata-projection-exist" if="projection.exists">
+        <basename property="module.name" file="${projection-impl}/../../../"/>
+        <basename property="projection.name" file="${projection-impl}"/>
+        <property name="java.impl.source" value="${projections.gen.src}/java-impl/${module.name}/${projection.name}/source/com/ifsworld/projection"/>
+        <property name="java.impl.target" value="${projections.gen.src}/java-impl/${module.name}/${projection.name}/target"/>
+
+        <mkdir dir="${java.impl.source}"/>
+        <mkdir dir="${java.impl.target}"/>
+
+        <condition property="should.build.projection">
+            <and>
+                <or>
+                    <!-- If no solution set found active.modules= ALL and ',' is the delimiter-->
+                    <equals arg1="${active.modules}" arg2="ALL" casesensitive="false" trim="true"/>
+                    <contains string="${active.modules}" substring=",${module.name}," casesensitive="false"/>
+                </or>
+                <resourcecount when="greater" count="0">
+                    <fileset dir="${projections.gen.src}/com/ifsworld/projection" erroronmissingdir="false">
+                        <include name="**/${projection.name}Functions.java"/>
+                        <include name="**/${projection.name}FunctionsFragmentsWrapper.java"/>
+                        <include name="**/${projection.name}Actions.java"/>
+                        <include name="**/${projection.name}ActionsFragmentsWrapper.java"/>
+                        <include name="**/${projection.name}StreamAttributesHandler.java"/>
+                        <include name="**/${projection.name}StreamAttributesHandlerFragmentsWrapper.java"/>
+                    </fileset>
+                </resourcecount>
+            </and>
+        </condition>
+
+        <if>
+            <equals arg1="${should.build.projection}" arg2="true"/>
+            <then>
+                <copy todir="${java.impl.source}" flatten="true">
+                    <fileset dir="${projections.gen.src}/com/ifsworld/projection" erroronmissingdir="false">
+                        <include name="**/${projection.name}Functions.java"/>
+                        <include name="**/${projection.name}FunctionsFragmentsWrapper.java"/>
+                        <include name="**/${projection.name}Actions.java"/>
+                        <include name="**/${projection.name}ActionsFragmentsWrapper.java"/>
+                        <include name="**/${projection.name}StreamAttributesHandler.java"/>
+                        <include name="**/${projection.name}StreamAttributesHandlerFragmentsWrapper.java"/>
+                    </fileset>
+                </copy>
+                <copy toDir="${java.impl.source}" flatten="true">
+                    <fileset dir="${projection-impl}/com/ifsworld/projection" erroronmissingdir="false">
+                        <include name="*.java"/>
+                    </fileset>
+                </copy>
+                <!--        Since we need to support fragment on fragment functionality we need to add fragment.jar to class path in both projection and fragment build-->
+                <javac includeantruntime="false" debug="true" debuglevel="lines,vars,source"
+                       destdir="${java.impl.target}" optimize="true" source="1.8" target="1.8"
+                       deprecation="on" failonerror="false" errorproperty="compile.failed">
+                    <src path="${java.impl.source}"/>
+                    <classpath>
+                        <pathelement location="${framework.libs}/javaee-api-7.0.jar"/>
+                        <pathelement location="${odata.api.libs}/odata-provider-api.jar"/>
+                        <fileset dir="${build.root}/source" erroronmissingdir="false">
+                            <include name="**/projection/lib/**/*.jar"/>
+                        </fileset>
+                        <fileset dir="${odata.third.party.libs}" erroronmissingdir="false">
+                            <include name="*.jar"/>
+                        </fileset>
+                    </classpath>
+                </javac>
+
+                <if>
+                    <isset property="compile.failed"/>
+                    <then>
+                        <echo message="ERROR: Java Impl Compilation failed for projection '${projection.name}'"/>
+                        <echo file="${failed.java.impl.log}" append="true"
+                              message="Type: Projection - ProjectionName: '${projection.name}'${line.separator}"/>
+                    </then>
+                    <else>
+                        <jar destfile="${build.home}/server/lob/${module.name}/javaimpl/${projection.name}/${projection.name}.jar"
+                             basedir="${java.impl.target}"/>
+                    </else>
+                </if>
+            </then>
+            <else>
+                <echo message="INFO: Projection '${projection.name}' is missing necessary java interfaces. Skipping compilation."/>
+            </else>
+        </if>
+    </target>
+
+    <target name="odata-copy-java-impl-files" depends="declare">
+        <var name="impl.file.name" unset="true"/>
+        <basename property="impl.file.name" file="${java.impl.file}"/>
+        <propertyregex
+                property="current.java.impl.interface.file"
+                input="${impl.file.name}"
+                regexp="Impl.java"
+                replace=".java"
+                casesensitive="false"/>
+        <if>
+            <available file="${projections.gen.src}/com/ifsworld/projection/${current.java.impl.interface.file}"
+                       type="file"/>
+            <then>
+                <copy file="${java.impl.file}" todir="${projections.gen.src}/com/ifsworld/projection"
+                      flatten="true" preservelastmodified="true"/>
+            </then>
+        </if>
+    </target>
+
+    <target name="odata-copy-third-party-jars">
+        <foreach target="odata-copy-java-impl-third-party-lib" param="third-party-lib" inheritall="true">
+            <path>
+                <fileset dir="${build.root}/source" erroronmissingdir="false">
+                    <include name="**/projection/lib/*.jar"/>
+                </fileset>
+            </path>
+        </foreach>
+    </target>
+
+    <target name="odata-copy-java-impl-third-party-lib">
+        <basename property="module.name" file="${third-party-lib}/../../../"/>
+        <mkdir dir="${build.home}/server/lob/${module.name}/javaimpl-lib/"/>
+        <copy file="${third-party-lib}" todir="${build.home}/server/lob/${module.name}/javaimpl-lib/" flatten="true"/>
+    </target>
+
+    <target name="odata-copy-java-impl-util-lib">
+        <basename property="module.name" file="${third-party-lib}/../../../../"/>
+        <mkdir dir="${build.home}/server/lob/${module.name}/javaimpl-lib/"/>
+        <copy file="${third-party-lib}" todir="${build.home}/server/lob/${module.name}/javaimpl-lib/" flatten="true"/>
+    </target>
+
+    <target name="odata-remove-fragment-identification">
+        <delete>
+            <fileset dir="${build.root}/source" includes="**/fragment.projection"/>
+        </delete>
+    </target>
+
+    <target name="bpa-clean">
+        <delete dir="${bpa.gen.src}" includeemptydirs="true"/>
+        <mkdir dir="${bpa.gen.src}"/>
+    </target>
+
+    <target name="bpa-build-bpa-delegates" depends="bpa-clean">
+        <foreach target="bpa-copy-bpmn-files" param="bpmn.file" inheritall="true">
+            <path>
+                <fileset dir="${build.root}/source" erroronmissingdir="false">
+                    <include name="**/bpmn/*.bpmn"/>
+                </fileset>
+            </path>
+        </foreach>
+        <foreach target="bpa-build-delegates-per-module" param="bpa.module" inheritall="true">
+            <path>
+                <dirset dir="${build.root}/source" erroronmissingdir="false">
+                    <include name="**/workflow/delegates/*"/>
+                </dirset>
+            </path>
+        </foreach>
+    </target>
+
+    <target name="bpa-copy-bpmn-files">
+        <basename property="module.name" file="${bpmn.file}/../../../"/>
+        <copy toDir="${build.home}/server/lob/${module.name}/bpmn/" flatten="true" failonerror="false">
+            <file file="${bpmn.file}"/>
+        </copy>
+    </target>
+
+    <target name="bpa-build-delegates-per-module">
+        <basename property="module.name" file="${bpa.module}/../../../"/>
+        <property name="source.dir" value="${bpa.module}/../"/>
+        <property name="class.dest" value="${bpa.gen.src}/${module.name}"/>
+        <property name="server.dest" value="${build.home}/server/lob/${module.name}/"/>
+
+        <mkdir dir="${class.dest}"/>
+        <mkdir dir="${server.dest}/bpa-impl"/>
+
+        <javac includeantruntime="false" debug="true" debuglevel="lines,vars,source"
+               destdir="${class.dest}" optimize="true" source="1.8" target="1.8" deprecation="on" failonerror="false" errorproperty="compile.failed">
+            <src path="${source.dir}"/>
+            <classpath>
+                <pathelement location="${bpa.api.lib}/bpa-api.jar"/>
+                <pathelement location="${bpa.api.lib}/camunda-engine-7.11.0.jar"/>
+                <fileset dir="${build.root}/source" erroronmissingdir="false">
+                    <include name="/**/workflow/lib/**/*.jar"/>
+                </fileset>
+                <fileset dir="${odata.third.party.libs}" erroronmissingdir="false">
+                    <include name="*.jar"/>
+                </fileset>
+            </classpath>
+        </javac>
+
+        <if>
+            <isset property="compile.failed" />
+            <then>
+                <echo message="ERROR: BPA delegate compilation failed for module '${module.name}'"/>
+                <echo file="${failed.java.impl.log}" append="true" message="Type: BPA - Module: '${module.name}'${line.separator}"/>
+            </then>
+            <else>
+                <jar destfile="${server.dest}/bpa-impl/${module.name}.jar"
+                     basedir="${class.dest}"/>
+            </else>
+        </if>
+
+        <copy toDir="${server.dest}/bpa-lib" flatten="true" failonerror="false">
+            <fileset dir="${source.dir}/../" includes="**/lib/*.jar"/>
+        </copy>
+    </target>
+
+    <target name="odata-check-for-failed-java-impl">
+        <property name="file" value="${failed.java.impl.log}" />
+        <condition property="java.impl.fail.log.is.empty">
+            <length file="${file}" when="equal" length="0" />
+        </condition>
+        <antcall target="odata-fail-build-on-java-impl" inheritall="true"/>
+    </target>
+
+    <target name="odata-fail-build-on-java-impl" unless="java.impl.fail.log.is.empty">
+        <fail message="One or more java implementations has compilation errors. Please refer ${failed.java.impl.log} for more information." />
+    </target>
+	
+	<target name="solutionset-files" if="solutionset">
+	    <echo> solutionset exists in delivery: ${delivery}!</echo>
+
+<!-- fileset with all ../database/*.svc, *.cpi, *.apn, *.odb, *OfflineMetaData.ins -->
+        <delete quiet="true">
+            <fileset dir="${build.root}/database/">
+			  <include name="**/*.svc"/>
+			  <include name="**/*.cpi"/>
+			  <include name="**/*.apn"/>
+			  <include name="**/*.obd"/>			  
+			  <include name="**/*OfflineMetaData.ins"/>			  
+           </fileset>
+        </delete>
+
+<!-- fileset with all ../database/*.ini -->
+		<path id="ini.files">
+			<fileset dir="${build.home}/database/">
+			<include name="*.ini"/>
+			<exclude name="Install.ini"/>
+			</fileset>
+		</path>
+		<pathconvert property="ini.files" refid="ini.files"/>
+		<!--echo> ini.files=${ini.files}</echo-->
+
+<!-- foreach ../database/*.ini -->
+		<foreach list="${ini.files}" param="ini.file" target="ini-file" delimiter="${path.separator}" inheritall="true"/>
+    </target>
+	
+	<target name="ini-file" >
+		<!--echo message="inifile=${ini.file}" /-->
+		
+		<pathconvert property="component">
+			<path path="${ini.file}"/>
+				<chainedmapper>
+					<flattenmapper/>
+					<globmapper from="*.ini" to="*"/>
+<!-- regex engine cant do lower and we avoid the javascript! -->
+					<filtermapper>
+						<replacestring from="A" to="a"/>
+						<replacestring from="B" to="b"/>
+						<replacestring from="C" to="c"/>
+						<replacestring from="D" to="d"/>
+						<replacestring from="E" to="e"/>
+						<replacestring from="F" to="f"/>
+						<replacestring from="G" to="g"/>
+						<replacestring from="H" to="h"/>
+						<replacestring from="I" to="i"/>
+						<replacestring from="J" to="j"/>
+						<replacestring from="K" to="k"/>
+						<replacestring from="L" to="l"/>
+						<replacestring from="M" to="m"/>
+						<replacestring from="N" to="n"/>
+						<replacestring from="O" to="o"/>
+						<replacestring from="P" to="p"/>
+						<replacestring from="Q" to="q"/>
+						<replacestring from="R" to="r"/>
+						<replacestring from="S" to="s"/>
+						<replacestring from="T" to="t"/>
+						<replacestring from="U" to="u"/>
+						<replacestring from="V" to="v"/>
+						<replacestring from="X" to="x"/>
+						<replacestring from="Y" to="y"/>
+						<replacestring from="Z" to="z"/>	
+					</filtermapper>
+				</chainedmapper>
+		</pathconvert>
+		
+		<!--echo message="component=${component}" level="info"/-->
+
+<!--script language="javascript"> 
+  <![CDATA[
+  myValue = project.getProperty("component");  
+  valueLower = myValue.toLowerCase();  
+  project.setProperty("component",valueLower); 
+   ]]> 
+</script-->
+
+		<if>
+		  <or>
+			<isfileselected file="${ini.file}"> <containsregexp expression="^\[PostInstallationObject]"  casesensitive="false"/> </isfileselected>
+			<isfileselected file="${ini.file}"> <containsregexp expression="^\[PostInstallationDataSeq]" casesensitive="false"/> </isfileselected>
+			<isfileselected file="${ini.file}"> <containsregexp expression="^\[PostInstallationData]"    casesensitive="false"/> </isfileselected>
+         </or>
+		<then>
+			<antcall target="ini-file-section"/>
+		</then>
+		</if>	
+	</target>
+  
+	<target name="ini-file-section">
+		<!--echo message="component=${component}" level="info"/-->
+		<!--echo message="inifile with sections=${ini.file}" /-->		
+<!-- ini file content in string format with @ as empty line -->
+		<loadfile property="ini-file-as-string" srcfile="${ini.file}">
+		<filterchain>
+				<replaceregex pattern="(^(\r\n|\n|\r)$)|(^(\r\n|\n|\r))|^\s*$" replace="@" flags="g"/>
+				<containsregex pattern="^[^0-9]+.*" flags="i"/>
+				<containsregex pattern="(^\[PostInstallationObject]|^\[PostInstallationDataSeq]|^\[PostInstallationData]|@|File[0-9]+.*)" flags="ig"/>
+				<replaceregex pattern="(\{.*?)(?:\})" replace=" " flags="g"/>
+				<replaceregex pattern="(File[0-9]*=)" replace=" " flags="g"/>
+				<striplinebreaks/>
+				<tabstospaces/>
+		</filterchain>
+		</loadfile>
+
+<!-- Need @ as EOF -->	
+		<property name="ini-file-string" value="${ini-file-as-string}@"/>
+		<!--echo message="ini-file-string=${ini-file-string}" level="info"/-->
+
+		
+<!-- create sections as properties -->
+		<propertyregex
+			property="${component}.PostInstallationObject"
+			global="true"
+			casesensitive="false"
+			input="${ini-file-string}"
+			regexp="(\[PostInstallationObject\].*?)(?:@)"
+			select="\1"/>
+		
+		<propertyregex
+			property="${component}.PostInstallationDataSeq"
+			global="true"
+			casesensitive="false"
+			input="${ini-file-string}"
+			regexp="(\[PostInstallationDataSeq\].*?)(?:@)"
+			select="\1"/>
+		
+		<propertyregex
+			property="${component}.PostInstallationData"
+			global="true"
+			casesensitive="false"
+			input="${ini-file-string}"
+			regexp="(\[PostInstallationData\].*?)(?:@)"
+			select="\1"/>
+	
+		<!--echoproperties prefix="${component}"/-->
+
+<!-- for each section do.. -->
+		<propertyselector 
+			property="component.sections"
+						 override="true"
+                         delimiter=","
+			match="(${component}.*)"
+                         select="\0"
+                         casesensitive="false" />
+
+		<!--echo message="component.sections=${component.sections}" level="info"/-->
+
+		<foreach list="${component.sections}"
+                inheritall="true"
+				delimiter=","
+			target="ini-files-section"
+			param="component.section" />
+    </target>
+	
+	  
+	<target name="ini-files-section" if="${component.section}">
+		<!--echo message="component.section=${component.section}" level="info"/-->
+<!-- get the property value -->
+		<propertycopy property="component.string" from="${component.section}" />
+		<!--echo message="component.string=${component.string}" level="info"/-->
+
+<propertyregex
+			property="component.files"
+			global="true"
+			casesensitive="false"
+			input="${component.string}"
+			regexp="(\[.*\] )"
+			replace=""/>
+		
+		<!--echo message="component.files=${component.files}" level="info"/-->
+	  
+<!-- for each file do.. -->
+		<for list="${component.files}" param="component.file" delimiter=" ">
+			<sequential>
+				<!--echo>File=@{component.file}</echo-->
+				<!--echo message="component=${component}" level="info"/-->
+				<if>
+					<available file="${build.home}/database/${component}/@{component.file}"/>
+				<then>
+					<touch file="${build.home}/database/${component}/@{component.file}"/>
+					<!--echo message="File exists and touched=${build.home}/database/${component}/@{component.file}" level="info"/-->
+				</then>
+				</if>
+			</sequential>
+		</for>
+    </target>
+	
+	<target name="create-build-home-index">
+		<ant antfile="build.xml" target="create-build-home-index"/>
+    </target>
+
+	
+
+</project>

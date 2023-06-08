@@ -1,0 +1,326 @@
+------------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  -------------------------------------------------------------------
+-- 2018-07-23  SeJalk  SCUXXW4-8522, created from dlgOrderQuotationWon using MTG Version: 1.23
+------------------------------------------------------------------------------------------
+client CreateOrderFromQuotation;
+component ORDER;
+layer Core;
+projection CreateOrderFromQuotation;
+
+include fragment OrderCancelReasonLovSelector;
+include fragment NonRentalSalesPartLovSelector;
+@DynamicComponentDependency RMCOM
+include fragment BusinessRepresentativeLovSelector;
+include fragment LoseWinReasonLovSelector;
+warningsenabled = CreateOrder;
+
+-------------------------------- MAIN PAGES ---------------------------------
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+
+-------------------------------- MAIN PAGES ---------------------------------
+
+-------------------------------- ASSISTANTS ---------------------------------
+assistant Assistant using OrderQuotationWonSet {
+   label = "Create Order from Quotation";
+   savemode = OnLostFocus;
+   setup SetupSourceInfo {
+      variable QuotationNoStr {
+         type = Text;
+      }
+      variable LineNoStr {
+         type = Text;
+      }
+      variable RelNoStr {
+         type = Text;
+      }
+      variable LineItemNoStr {
+         type = Text;
+      }
+      variable LoseWinNoteStr {
+         type = Text;
+      }
+      variable ReasonIdStr {
+         type = Text;
+      }
+      variable ContractStr {
+         type = Text;
+      }
+      execute {
+         set QuotationNo = QuotationNoStr;
+         set LineNoArr = LineNoStr;
+         set RelNoArr = RelNoStr;
+         set LineItemNoArr = LineItemNoStr;
+         set LoseWinNote = LoseWinNoteStr;
+         set ReasonId = ReasonIdStr;
+         set ChangedNote = false;
+         set Contract = ContractStr;
+      }
+   }
+   steps {
+      step {
+         group OrderQuotationWonGroup;
+         group WonGroup;
+         list PriceBreakedLinesList(PriceBreakedLinesArray);
+      }
+      final step {
+
+      }
+      cancelled step {
+
+      }
+   }
+   finish command {
+      enabled = [WantedDeliveryDate != null and ValidQuantity = true and OrderId != null];
+      variable ValidateInfoVar {
+         type = ValidateStruct;
+      }
+      variable CreatedOrderInfoVar {
+         type = CreatedOrderInfoStruct;
+      }
+      variable SourceIdentifierVar Text;
+      execute {
+         call ValidateFields(CustomerNo, CustomerPoNo, MainRepresentative) into ValidateInfoVar;
+         if [ValidateInfoVar.PoExist] {
+            confirm("Customer's purchase order number ${CustomerPoNo} already exists for this customer. Do you want to save the customer order?") {
+               when CANCEL {
+                  exit CANCEL;
+               }
+            }
+         }
+         if [WantedDeliveryDateOrg != WantedDeliveryDate and WantedDeliveryDateOrg != null] {
+            confirm("Delivery Date has been changed. Do you want to change the delivery dates on all converted lines?") {
+               when OK {
+                  set ChangeLineDeliveryDate = "YES";
+               }
+               when CANCEL {
+                  set ChangeLineDeliveryDate = "NO";
+               }
+            }
+         }
+         else
+            {
+            set ChangeLineDeliveryDate = "NO";
+         }
+         call UpdateGradPriceLine();
+         if [ValidateInfoVar.EligibleRep != null] {
+            alert("${ValidateInfoVar.EligibleRep} will be added as Main Representative");
+         }
+
+         call CreateOrder() into CreatedOrderInfoVar;
+         if [PrePostings and CreatedOrderInfoVar.OrderNo != null]
+            {
+
+            set SourceIdentifierVar = "for Customer Order ${CreatedOrderInfoVar.OrderNo}" {
+               translatable = true;
+            }
+            assistant PrepostingWithSource.PrePostingWithSourceAssistant("M103", CreatedOrderInfoVar.PreAccountingId, Contract, false, SourceIdentifierVar, "CUSTOMER ORDER") {
+               when OK {
+                  call CreatePrePosting(CreatedOrderInfoVar.OrderNo) {
+                     when FAIL {
+                        error("${error.Message}");
+                     }
+                  }
+               }
+            }
+         }
+
+         if [CreatedOrderInfoVar.OrderNo != null] {
+            messagebox("", question, "Customer Order ${CreatedOrderInfoVar.OrderNo} has been created. Do you want to view?") {
+               when "Yes" {
+                  navigate "page/CustomerOrder/Form?$filter=OrderNo eq $[CreatedOrderInfoVar.OrderNo]";
+               }
+               when "No" {
+                  navigate back;
+               }
+            }
+         }
+      }
+   }
+   cancel command {
+      execute {
+         navigate back;
+      }
+   }
+   restart command {
+      visible = [false];
+   }
+}
+
+--------------------------------- COMMANDS ----------------------------------
+
+--------------------------------- SELECTORS ---------------------------------
+
+---------------------------------- GROUPS -----------------------------------
+group OrderQuotationWonGroup for OrderQuotationWonVirtual {
+   label = "";
+   field QuotationNo {
+      size = Small;
+   }
+   field OrderIdRef {
+      size = Small;
+   }
+   field WantedDeliveryDate;
+   field CustomerPoNo {
+      size = Small;
+   }
+   field Status {
+      size = Small;
+   }
+   field LimitSalesToAssortments {
+      size = Small;
+      editable = [OverruleLimitSaleToAssort];
+   }
+   field PrePostings {
+      size = Small;
+   }
+   field CopyContacts {
+      size = Small;
+   }
+   @DynamicComponentDependency CRM
+   field AllRep {
+      size = Small;
+   }
+   @DynamicComponentDependency CRM
+   lov MainRepresentativeRef with ReferenceBusinessRepresentativeLovSelector {
+      validate command {
+         execute {
+            set MainRepresentativeName = MainRepresentativeRef.Name;
+         }
+      }
+      description = MainRepresentativeName;
+   }
+}
+
+group WonGroup for OrderQuotationWonVirtual {
+   label = "Won";
+   lov ReasonIdRef with ReferenceLoseWinReasonLovSelector using GetWonReasons {
+      description = ReasonIdRef.ReasonDescription;
+      validate command {
+         execute {
+            if [ReasonId != null]
+               {
+               set ChangedNote = true;
+            }
+            else
+               {
+               set ChangedNote = false;
+            }
+         }
+      }
+   }
+   field UpdateWon {
+      editable = [ChangedNote = true];
+   }
+   field LoseWinNote {
+      editable = [ReasonId != null];
+      multiline = true;
+      validate command {
+         execute {
+            set ChangedNote = true;
+         }
+      }
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+list PriceBreakedLinesList for OrderQuotationLineVirtual {
+   label = "Lines with price breaks";
+   orderby = LineNo, RelNo;
+   editmode = SingleCellEdit;
+
+   field RentalDb {
+      size = Small;
+   }
+   field LineNo {
+      size = Small;
+   }
+   field RelNo {
+      size = Small;
+   }
+   lov CatalogNoRef with ReferenceNonRentalSalesPartLovSelector {
+      size = Small;
+   }
+   field SalesPartDescription {
+      size = Small;
+   }
+   field BuyQtyDue {
+      validate command {
+         variable  PricesVar {
+            type = CalcPriceStruct;
+         }
+         execute {
+            call CalculatePrice(QuotationNo, LineNo, RelNo, LineItemNo, BuyQtyDue, MinDuration) into PricesVar;
+            set SaleUnitPrice = PricesVar.SalesPrice;
+            set UnitPriceInclTax = PricesVar.SalesPriceInclTax;
+            if [not PricesVar.PriceFoundFlag] {
+               alert("The entered sales quantity must be within the limits of the price breaks.");
+               set BuyQtyDue = 0;
+            }
+         }
+      }
+   }
+   field MinDuration;
+   field SaleUnitPrice {
+      editable = [not UsePriceInclTax];
+      validate command {
+         variable  PricesVar {
+            type = SalesPriceStruct;
+         }
+         execute {
+            if [TaxLiabilityTypeDb = "TAX"] {
+               call GetSalesPrices(SaleUnitPrice, UnitPriceInclTax, QuotationNo, LineNo, RelNo, LineItemNo, Contract) into PricesVar;
+               set SaleUnitPrice = PricesVar.SalesPrice;
+               set UnitPriceInclTax = PricesVar.SalesPriceInclTax;
+            }
+            else
+               {
+               set UnitPriceInclTax = SaleUnitPrice;
+            }
+
+         }
+
+      }
+   }
+   field UnitPriceInclTax {
+      editable = [UsePriceInclTax];
+      validate command {
+         variable  PricesVar {
+            type = SalesPriceStruct;
+         }
+         execute {
+            if [TaxLiabilityTypeDb = "TAX"] {
+               call GetSalesPrices(SaleUnitPrice, UnitPriceInclTax, QuotationNo, LineNo, RelNo, LineItemNo, Contract) into PricesVar;
+               set SaleUnitPrice = PricesVar.SalesPrice;
+               set UnitPriceInclTax = PricesVar.SalesPriceInclTax;
+            }
+            else
+               {
+               set UnitPriceInclTax = SaleUnitPrice;
+            }
+         }
+      }
+   }
+   field SalesUnitMeasureRef {
+      size = Small;
+   }
+}
+
+----------------------------------- CARDS -----------------------------------
+
+---------------------------------- DIALOGS ----------------------------------
+
+---------------------------------- CHARTS -----------------------------------
+
+--------------------------------- CALENDARS ---------------------------------
+
+---------------------------------- SHEETS -----------------------------------
+
+----------------------------- STATE INDICATORS ------------------------------
+
+----------------------------------- TREES -----------------------------------
+
+---------------------------------- PLUGINS ----------------------------------
+
+------------------------------- IMAGE VIEWERS -------------------------------

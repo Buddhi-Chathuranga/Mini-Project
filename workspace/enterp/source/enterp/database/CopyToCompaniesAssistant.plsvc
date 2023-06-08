@@ -1,0 +1,224 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     CopyToCompaniesAssistant
+--  Component:    ENTERP
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  220127  Uppalk  Bug 162199, Increased VARCHAR buffer of few variables in Copy_To_Companies_For_Svc method from 4000 to 32000
+-----------------------------------------------------------------------------
+
+layer Core;
+
+
+PROCEDURE Do_Populate_Copy_To_Company_Records___ (
+   company_       IN VARCHAR2,
+   lu_            IN VARCHAR2,
+   parent_objkey_ IN VARCHAR2 ) 
+IS
+   target_company_virtual_rec_ Target_Company_Virtual_Rec;
+   $IF Component_Accrul_SYS.INSTALLED $THEN
+      CURSOR get_copy_to_company IS
+         SELECT source_company,
+                target_company,
+                Company_Basic_Data_Window_API.Get_Include(source_company, target_company, lu_) include,
+                Company_Basic_Data_Window_API.Get_Update_Method_Type_Db(source_company, target_company, lu_) update_method_type
+         FROM   target_company_union
+         WHERE  (source_company = company_ OR (source_company IS NULL AND target_company NOT IN (SELECT target_company
+                                                                                                 FROM   target_company
+                                                                                                 WHERE  source_company = company_)))
+         AND    EXISTS (SELECT 1
+                        FROM   user_finance_auth_pub
+                        WHERE  company = target_company_union.target_company)
+         AND    (target_company != company_);
+   $END
+BEGIN
+   $IF Component_Accrul_SYS.INSTALLED $THEN
+      FOR rec_ IN get_copy_to_company LOOP
+         target_company_virtual_rec_.source_company := rec_.source_company;
+         target_company_virtual_rec_.target_company := rec_.target_company;
+         IF (rec_.include = 'TRUE') THEN
+            target_company_virtual_rec_.include := TRUE;
+         ELSE
+            target_company_virtual_rec_.include := FALSE;-- := FALSE;
+         END IF;
+         target_company_virtual_rec_.update_method_type_manual := NVL(rec_.update_method_type, 'NO_UPDATE');
+         target_company_virtual_rec_.objkey := sys_guid();
+         target_company_virtual_rec_.parent_objkey := parent_objkey_;
+         CRUD_Create___(target_company_virtual_rec_);
+      END LOOP;
+   $ELSE
+      NULL;
+   $END
+END Do_Populate_Copy_To_Company_Records___;
+
+
+TYPE KEY_LIST IS RECORD
+(
+    value VARCHAR2(32000)
+);
+
+
+TYPE KEY_LIST_TAB IS TABLE OF KEY_LIST INDEX BY VARCHAR2(30);
+
+
+TYPE KEY_REF_PAIR IS RECORD
+(
+   NAME VARCHAR2(200),
+   VALUE VARCHAR2(200)
+);
+
+
+TYPE KEY_REF IS TABLE OF KEY_REF_PAIR INDEX BY BINARY_INTEGER;
+
+
+PROCEDURE Tokenize_Key_Ref___ (
+   key_ref_           IN  VARCHAR2,
+   tokenized_key_ref_ OUT KEY_REF,
+   num_keys_          OUT NUMBER )
+IS
+   keys_                  Utility_SYS.STRING_TABLE;
+   key_value_             Utility_SYS.STRING_TABLE;
+   sanitized_key_value_   VARCHAR2(1000);
+   substitute_            VARCHAR2(40) := '___sep_' || TO_CHAR(SYSDATE, Client_SYS.date_format_) || '___';
+   equals_pos_            NUMBER;
+   length_                NUMBER;
+   count_                 NUMBER;
+BEGIN
+   Utility_SYS.Tokenize(key_ref_, Client_SYS.text_separator_, keys_, num_keys_);
+   FOR pair_counter_ IN 1..num_keys_ LOOP
+      -- We ensure that all leading '=' characters are encoded to another token, so as to allow '=' in key values.
+      length_ := LENGTH(keys_(pair_counter_));
+      equals_pos_ := INSTR(keys_(pair_counter_),'='); -- The first occurence of '=' within the name value pair.
+      -- The new sanitized key value pair will have the substitute token as a separator instead of the first '='.
+      sanitized_key_value_ := SUBSTR(keys_(pair_counter_), 1, equals_pos_ - 1) ||
+                              substitute_ ||
+                              SUBSTR(keys_(pair_counter_), equals_pos_ + 1, length_);
+      Utility_SYS.Tokenize(sanitized_key_value_ , substitute_, key_value_, count_);
+      IF (count_ = 2) THEN
+         tokenized_key_ref_(pair_counter_).NAME  := key_value_(1);
+         tokenized_key_ref_(pair_counter_).VALUE := key_value_(2);
+      ELSIF (count_ = 1) THEN 
+         tokenized_key_ref_(pair_counter_).NAME  := key_value_(1);
+         tokenized_key_ref_(pair_counter_).VALUE := NULL;
+      END IF;   
+   END LOOP;
+END Tokenize_Key_Ref___;
+
+
+FUNCTION Extract_Key_List_Into_Seperate_Lists___ (
+   key_list_      IN VARCHAR2 ) RETURN KEY_LIST_TAB
+IS  
+   key_list_tab_    KEY_LIST_TAB;
+   name_            VARCHAR2(30);
+   list_name_       VARCHAR2(30);
+   rows_            Utility_SYS.STRING_TABLE;
+   count_           NUMBER;
+   tok_key_ref_     KEY_REF;
+   n_keys_          NUMBER;
+BEGIN
+   Utility_SYS.Tokenize(key_list_ , ';', rows_, count_);
+   FOR i_ IN 1..count_ LOOP
+      Tokenize_Key_Ref___(rows_(i_), tok_key_ref_, n_keys_);
+      FOR k_ IN 1..n_keys_ LOOP
+         name_ := tok_key_ref_(k_).name;
+         IF (name_ = 'COMPANY') THEN
+            NULL;
+         ELSE
+            list_name_ := name_ ||'_LIST';
+            IF (key_list_tab_.EXISTS(list_name_)) THEN
+               key_list_tab_(list_name_).value := key_list_tab_(list_name_).value|| tok_key_ref_(k_).value ||Client_SYS.field_separator_;
+            ELSE
+               key_list_tab_(list_name_).value := tok_key_ref_(k_).value ||Client_SYS.field_separator_;
+            END IF;
+         END IF;
+      END LOOP;      
+   END LOOP;
+   RETURN key_list_tab_;
+END Extract_Key_List_Into_Seperate_Lists___;
+
+
+FUNCTION Do_Copy_To_Companies___ (
+   key_ IN Copy_To_Company_Virtual_Key ) RETURN Copy_To_Company_Result_Structure_Rec
+IS
+   key_list_attr_                VARCHAR2(32000);
+   copy_to_company_virtual_rec_  Copy_To_Company_Virtual_Rec;
+   target_company_list_          VARCHAR2(32000);
+   update_method_list_           VARCHAR2(32000);
+   new_key_list_                 VARCHAR2(32000);
+   stmt_                         VARCHAR2(32000);
+   key_list_tab_                 KEY_LIST_TAB;
+   log_id_                       NUMBER;
+   copy_basic_data_status_       VARCHAR2(200);
+   basic_data_window_            VARCHAR2(2000);
+   copy_to_company_result_rec_   Copy_To_Company_Result_Structure_Rec;
+BEGIN
+   copy_to_company_virtual_rec_ := Get_Record___(key_);
+   Client_SYS.Add_To_Attr('SOURCE_COMPANY', copy_to_company_virtual_rec_.company, key_list_attr_);
+   FOR rec_ IN Get_Target_Company_Virtual_Array___ (key_) LOOP
+      IF (rec_.include = 1) THEN
+         target_company_list_ := target_company_list_ || rec_.target_company || Client_SYS.field_separator_;
+         update_method_list_  := update_method_list_  || rec_.update_method_type_manual || Client_SYS.field_separator_;
+      END IF;
+   END LOOP;
+   IF (target_company_list_ IS NULL) THEN
+      copy_to_company_result_rec_.executed := FALSE;
+      RETURN copy_to_company_result_rec_;
+   END IF;
+   Client_SYS.Add_To_Attr('TARGET_COMPANY_LIST', target_company_list_, key_list_attr_);
+   Client_SYS.Add_To_Attr('UPDATE_METHOD_LIST',  update_method_list_,  key_list_attr_);
+   key_list_tab_ := Extract_Key_List_Into_Seperate_Lists___(copy_to_company_virtual_rec_.key_list);
+   new_key_list_ := key_list_tab_.FIRST;
+   WHILE (new_key_list_ IS NOT NULL) LOOP
+      Client_SYS.Add_To_Attr(new_key_list_, key_list_tab_(new_key_list_).value,key_list_attr_);
+      new_key_list_ := key_list_tab_.NEXT(new_key_list_);
+   END LOOP;
+   Client_SYS.Add_To_Attr('ATTR', copy_to_company_virtual_rec_.update_attr_string, key_list_attr_);
+   Assert_SYS.Assert_Is_Package_Method(copy_to_company_virtual_rec_.Package, 'Copy_To_Companies_For_Svc');
+   IF (copy_to_company_virtual_rec_.run_in_background) THEN
+      Client_SYS.Add_To_Attr('COPY_TYPE', copy_to_company_virtual_rec_.Type, key_list_attr_);
+      stmt_ := 'BEGIN ' || copy_to_company_virtual_rec_.Package||'.Copy_To_Companies_For_Svc(:key_list_attr_, :run_in_background); END;';
+      @ApproveDynamicStatement(2018-02-14,maaylk)
+      EXECUTE IMMEDIATE stmt_ USING IN key_list_attr_,copy_to_company_virtual_rec_.run_in_background;
+      copy_to_company_result_rec_.executed := TRUE;
+      RETURN copy_to_company_result_rec_;
+   ELSE
+      Copy_Basic_Data_Log_API.Create_New_Record(log_id_, copy_to_company_virtual_rec_.company, copy_to_company_virtual_rec_.type, copy_to_company_virtual_rec_.lu);
+      stmt_ := 'BEGIN ' || copy_to_company_virtual_rec_.Package||'.Copy_To_Companies_For_Svc(:key_list_attr_, :run_in_background, :log_id_); END;';
+      @ApproveDynamicStatement(2018-02-14,maaylk)
+      EXECUTE IMMEDIATE stmt_ USING IN key_list_attr_,copy_to_company_virtual_rec_.run_in_background, log_id_;
+      Copy_Basic_Data_Log_API.Update_Status(log_id_);
+      copy_basic_data_status_ := Copy_Basic_Data_Log_API.Get_Status_Db(log_id_);
+      basic_data_window_ := Basic_Data_Window_API.Get_Window(copy_to_company_virtual_rec_.lu);
+      copy_to_company_virtual_rec_.log_id := log_id_;
+      copy_to_company_virtual_rec_.status := copy_basic_data_status_;
+      copy_to_company_virtual_rec_.window := basic_data_window_;
+      CRUD_update___(Get_Record___(key_), copy_to_company_virtual_rec_);
+      copy_to_company_result_rec_.log_id := log_id_;
+      copy_to_company_result_rec_.status := copy_basic_data_status_;
+      copy_to_company_result_rec_.window := basic_data_window_;
+      copy_to_company_result_rec_.executed := TRUE;
+      RETURN copy_to_company_result_rec_;
+   END IF;
+END Do_Copy_To_Companies___;
+
+
+@Override
+PROCEDURE CRUD_Create___ (
+   rec_ IN Copy_To_Company_Virtual_Rec )
+IS
+BEGIN
+   super(rec_);
+   Do_Populate_Copy_To_Company_Records___(rec_.company, rec_.lu, rec_.objkey);
+END CRUD_Create___;
+
+
+FUNCTION Is_Active_Lu_Exist___ (
+   company_ IN VARCHAR2,
+   lu_name_ IN VARCHAR2 )  RETURN VARCHAR2
+IS  
+BEGIN
+   RETURN Company_Basic_Data_Window_API.Is_Active_Lu_Exist(company_, lu_name_);
+END Is_Active_Lu_Exist___;

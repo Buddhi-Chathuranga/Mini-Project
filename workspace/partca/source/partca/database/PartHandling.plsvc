@@ -1,0 +1,221 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: PartHandling
+--  Component:    PARTCA
+--
+--  IFS Developer Studio Template Version 3.0
+--
+-- Date        Sign    History
+-- ----------  ------  ---------------------------------------------------------------
+-- 2021-10-04  Aabalk  SC21R2-3154, Added keyword constant for multitrack and unit code warning messages in Crud_Update___ for translations.
+-- 2021-05-07  GRGALK  Bug 159270(SCZ-14725), Modified CRUD_Create___() method by adding dynamic dependency for CFGCHR component to avoid compilation errors when CFGCHR not installed
+-- 2021-02-25  GRGALK  Bug 158049(SCZ-13733), Added overridden CRUD_Create___ PROCEDURE in order to fix Config Family not getting saved when creating master part in Aurena
+--                     by calling Set_Config_Family PROCEDURE and toggle enable for allow changes to created DOP structure not getting saved by calling  
+--                     Set_Allow_Struct_Change PROCEDURE of Config_Part_Catalog_API 
+-- 2018-12-09  SAGELK  SCUXXW4-1684, Added New_Gtin___ action.
+-- 2018-09-07  SURBLK  SCUXXW4-1719, Created.
+--------------------------------------------------------------------------------------
+
+layer Core;
+
+@Override
+@DynamicComponentDependency MPCCOM
+PROCEDURE CRUD_Update___ (
+   etag_   IN OUT VARCHAR2,
+   key_    IN OUT Part_Catalog_Key,
+   attr_   IN OUT VARCHAR2,
+   info_   OUT VARCHAR2,
+   action_ IN  VARCHAR2 )
+IS
+   part_rec_  Part_Catalog_API.Public_Rec;
+   receipt_issue_serial_tracking_   PART_CATALOG_TAB.receipt_issue_serial_track%TYPE;
+   lot_tracking_code_               PART_CATALOG_TAB.lot_tracking_code%TYPE;
+BEGIN
+   part_rec_ := Part_Catalog_API.Get(key_.Part_No);
+   
+   
+   IF Client_SYS.Item_Exist('UNIT_CODE', attr_) THEN 
+      Client_SYS.Add_Warning(lu_name_, 'EDITUNITCODE: Changing Unit Code may effect the existing structures. Do you want to continue?');
+   END IF; 
+  
+   IF Client_SYS.Item_Exist('MULTILEVEL_TRACKING_DB', attr_) THEN
+      IF (Client_SYS.Get_Item_Value('MULTILEVEL_TRACKING_DB', attr_) = Multilevel_Tracking_API.DB_TRACKING_OFF) THEN 
+         Client_SYS.Add_Warning(lu_name_, 'MULTITRACKDISABLE: Disabling multilevel tracking will remove some restrictions for processing shop orders for this part and you will not be allowed to re-enable it while open orders for this part have receipts.
+Do you want to continue?');  
+      END IF;
+      
+      receipt_issue_serial_tracking_ := NVL(Client_SYS.Get_Item_Value('RECEIPT_ISSUE_SERIAL_TRACK_DB', attr_), part_rec_.receipt_issue_serial_track );
+      lot_tracking_code_ := NVL(Client_SYS.Get_Item_Value('LOT_TRACKING_CODE', attr_), part_rec_.lot_tracking_code );
+      
+      IF (Client_SYS.Get_Item_Value('MULTILEVEL_TRACKING_DB', attr_) = Multilevel_Tracking_API.DB_TRACKING_OFF AND receipt_issue_serial_tracking_ = 'TRUE' AND  lot_tracking_code_ != Part_Lot_Tracking_API.DB_NOT_LOT_TRACKING) THEN 
+         Client_SYS.Add_Warning(lu_name_, 'MULTITRACKENABLE: Enabling multilevel tracking will introduce restrictions for processing shop orders for this part. Do you want to continue?');
+      END IF;
+   END IF;
+   
+   super(etag_, key_, attr_, info_, action_);
+   
+   $IF Component_Cfgchr_SYS.INSTALLED $THEN
+   IF Client_SYS.Item_Exist('ALLOW_STRUCT_CHANGE_DB', attr_) THEN 
+      Config_Part_Catalog_API.Set_Allow_Struct_Change(key_.Part_No, Client_SYS.Get_Item_Value('ALLOW_STRUCT_CHANGE_DB', attr_));
+   END IF; 
+   
+   IF Client_SYS.Item_Exist('CONFIG_FAMILY_ID', attr_) THEN 
+      Config_Part_Catalog_API.Set_Config_Family(key_.Part_No, Client_SYS.Get_Item_Value('CONFIG_FAMILY_ID', attr_), NVL(Client_SYS.Get_Item_Value('COPY_FAMILY', attr_), 'NOCOPY') );
+   END IF;
+   $END
+      
+   
+END CRUD_Update___;
+
+@Override
+PROCEDURE CRUD_Update___ (
+   etag_   IN OUT VARCHAR2,
+   key_    IN OUT Part_Catalog_Alternative_Key,
+   attr_   IN OUT VARCHAR2,
+   info_   OUT VARCHAR2,
+   action_ IN  VARCHAR2 )
+IS
+BEGIN
+   IF Client_SYS.Item_Exist('MUTUAL', attr_) AND Client_SYS.Get_Item_Value('MUTUAL', attr_) = 'FALSE' THEN
+      Remove_Mutual_Part___(key_.Alternative_Part_No, key_.Part_No);
+   END IF;
+   super(etag_, key_, attr_, info_, action_);
+   --Add post-processing code here
+END CRUD_Update___;
+
+
+PROCEDURE Remove_Mutual_Part___ (
+   part_no_             IN VARCHAR2,
+   alternative_part_no_ IN VARCHAR2 ) 
+IS
+   
+BEGIN
+   Part_Catalog_Alternative_API.Remove_Mutual_Part(part_no_, alternative_part_no_);
+END Remove_Mutual_Part___;
+   
+   
+PROCEDURE Remove_Mutual_Property___ (
+   part_no_             IN VARCHAR2,
+   alternative_part_no_ IN VARCHAR2 ) 
+IS
+BEGIN
+   Part_Catalog_Alternative_API.Remove_Mutual_Property(part_no_, alternative_part_no_);
+END Remove_Mutual_Property___;
+
+
+FUNCTION Validate_Alternative_Part_No___(
+   alternative_part_no_ IN VARCHAR2 )  RETURN Part_Details_Set_Rec
+IS
+   rec_   Part_Details_Set_Rec;
+BEGIN
+     rec_.Part_Description := Part_Catalog_API.Get_Description(alternative_part_no_);
+     rec_.Standard_Name := Standard_Names_API.Get_Std_Name(Part_Catalog_API.Get_Std_Name_Id(alternative_part_no_));
+   RETURN rec_;
+END Validate_Alternative_Part_No___;
+
+PROCEDURE Set_Default_Gtin___ (
+   part_no_ IN VARCHAR2,
+   gtin_no_ IN VARCHAR2 ) 
+IS
+   
+BEGIN
+   Part_Gtin_API.Set_Default_Gtin__( part_no_, gtin_no_);
+END Set_Default_Gtin___;
+
+FUNCTION Create_Substitute_Parts___(
+   contract_          IN VARCHAR2,
+   site_cluster_      IN VARCHAR2,
+   site_cluster_node_ IN VARCHAR2,
+   selection_         IN VARCHAR2 )  RETURN NUMBER
+IS
+   selection_list_      VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_   VARCHAR2(32000);
+   attr_                VARCHAR2(2000);
+   registered_          NUMBER := 0;
+   $IF Component_Mpccom_SYS.INSTALLED $THEN
+   site_tab_            Site_Cluster_Node_API.site_table;
+   $END
+BEGIN
+   $IF Component_Order_SYS.INSTALLED $THEN
+      -- Security checks
+      IF (contract_ IS NOT NULL) THEN
+         User_Allowed_Site_API.Is_Authorized(contract_);   
+      END IF;   
+      $IF Component_Mpccom_SYS.INSTALLED $THEN
+      IF ((site_cluster_ IS NOT NULL) AND (site_cluster_node_ IS NOT NULL)) THEN
+          site_tab_ := Site_Cluster_Node_API.Get_Connected_Sites(site_cluster_, site_cluster_node_);     
+      END IF;
+      IF site_tab_.COUNT > 0 THEN
+         FOR i IN site_tab_.FIRST..site_tab_.LAST LOOP
+            User_Allowed_Site_API.Is_Authorized(site_tab_(i).contract);   
+         END LOOP;   
+      END IF;
+      $END
+      
+      Client_SYS.Clear_Attr(attr_);
+      WHILE (INSTR(selection_list_, ';') > 0) LOOP
+         current_selection_ := SUBSTR(selection_list_, 0, INSTR(selection_list_, ';'));
+         Client_SYS.Add_To_Attr('CATALOG_NO', Client_SYS.Get_Key_Reference_Value(current_selection_, 'PART_NO'), attr_); 
+         Client_SYS.Add_To_Attr('SUBSTITUTE_SALES_PART', Client_SYS.Get_Key_Reference_Value(current_selection_, 'ALTERNATIVE_PART_NO'), attr_); 
+         Client_SYS.Add_To_Attr('END_OF_LINE', 'END', attr_); 
+         selection_list_ := SUBSTR(selection_list_, INSTR(selection_list_, ';') + 1); 
+      END LOOP;
+      Substitute_Sales_Part_API.Create_Substitute_Parts(registered_, contract_, site_cluster_, site_cluster_node_, attr_);
+   $END 
+   RETURN NVL(registered_, 0);
+END Create_Substitute_Parts___;
+
+PROCEDURE New_Gtin___ (
+   part_no_           IN VARCHAR2,
+   gtin_no_           IN VARCHAR2,
+   gtin_series_       IN VARCHAR2,
+   used_for_identification_db_ IN BOOLEAN ) 
+IS
+   used_for_identification_db_var_ VARCHAR2(6);
+BEGIN
+
+   IF used_for_identification_db_ THEN
+      used_for_identification_db_var_ := Fnd_Boolean_API.db_true;
+   ELSE
+      used_for_identification_db_var_ := Fnd_Boolean_API.db_false;
+   END IF;
+
+   Part_Gtin_API.New(part_no_, gtin_no_, gtin_series_, used_for_identification_db_var_, 'TRUE', 'FALSE');
+
+END New_Gtin___;
+
+@Override
+@DynamicComponentDependency CFGCHR
+PROCEDURE CRUD_Create___ (
+   etag_   IN OUT NOCOPY VARCHAR2,
+   key_    IN OUT NOCOPY Part_Catalog_Key,
+   attr_   IN OUT NOCOPY VARCHAR2,
+   info_   OUT           VARCHAR2,
+   action_ IN            VARCHAR2 )
+IS
+   $IF Component_Cfgchr_SYS.INSTALLED $THEN
+      part_no_             VARCHAR2(25);
+      config_family_id_    VARCHAR2(24);
+      allow_struct_change_ VARCHAR2(5);
+   $END
+BEGIN 
+   
+   $IF Component_Cfgchr_SYS.INSTALLED $THEN
+      part_no_             := Client_SYS.Get_Item_Value('PART_NO', attr_);
+      config_family_id_    := Client_SYS.Get_Item_Value('CONFIG_FAMILY_ID', attr_);
+      allow_struct_change_ := Client_SYS.Get_Item_Value('ALLOW_STRUCT_CHANGE_DB', attr_);
+   $END
+   
+   super(etag_, key_, attr_, info_, action_);
+   
+   $IF Component_Cfgchr_SYS.INSTALLED $THEN
+      IF action_ = 'DO' THEN
+         IF allow_struct_change_ = Fnd_Boolean_API.DB_TRUE  THEN 
+            Config_Part_Catalog_API.Set_Allow_Struct_Change(part_no_, allow_struct_change_);
+         END IF;
+         IF config_family_id_ IS NOT NULL THEN 
+            Config_Part_Catalog_API.Set_Config_Family(part_no_, config_family_id_, NVL(Client_SYS.Get_Item_Value('COPY_FAMILY', attr_), 'NOCOPY'));  
+         END IF;
+      END IF;
+   $END
+END CRUD_Create___;

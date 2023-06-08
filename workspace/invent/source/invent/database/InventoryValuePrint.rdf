@@ -1,0 +1,1013 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: InventoryValue
+--
+--  File:         INVVALUE.RDF
+--
+--  Date    Sign    History
+--  ------  ----    ---------------------------------------------------------
+--  181211  LEPESE  SCUXXW4-5539, Setting '%' as default for local variable in_contract_.
+--  160808  Erfelk  Bug 127037, Modified the way how SUM_TOTAL, TOTAL_VALUE, TOTAL_VALUE_LEVEL and TOTAL_VALUE_DETAIL is calculated when the respective quantity is 0.
+--  141124  DaZase  PRSC-4337, Replaced calls to Company_Address_Deliv_Info_API.Get_Address_Name with Site_API.Get_Company_Address_Name.
+--  140716  TiRalk  Bug 117850, Modified report method to print company name properly.
+--  131002  GayDLK  Bug 112769, Modified &REP1METHOD ( Report_Printout ) by replacing Site_API.Exist() with
+--  131002          User_Allowed_Site_Api.Exist_With_Wildcard() check to allow querying when wildcard '%' is used.    
+--  130805  MaRalk  TIBE-890, Removed global LU constant last_char_ and added inside Report_Printout method.
+--  120731  SBalLK  Bug 101597, Modified &REP1METHOD ( Report_Printout ) to get location specific document phrase id table and for enhance code readability.
+--  120618  SBallk  Bug 103080, Modified to print document phrases in line level.
+--  100924  Asawlk  Bug 93186, Disallowed usage of wildcards in query columns Q_STAT_YEAR_NO and Q_STAT_PERIOD_NO in
+--  100924          INVENTORY_VALUE_PRINT_REP. Also suffixed the text of query attributes with a colon in the same view.   
+--  090930  ChFolk  Removed unused variables in the package.
+------------------------------------ 14.0.0 ---------------------------------
+--  070619  WaJalk  Bug 65135, Replaced UNISTR with new functions in Database_SYS.
+--  070601  ShVese  CID 143134- Added LOV View Reference for stat_year_no and stat_period_no in REP1VIEW.
+--  070529  ChBalk  Moved Xml_Record_Writer_SYS.Create_Report_Header after all the Error_SYSs 
+--  070529          to avoid report preview error.
+--  070528  ChBalk  Added Site_API.Exist to validate user entered contract.
+--  061102  LEPESE  Major redesign of the business logic because of the new key column
+--  061102          location_group in table inventory_value_part_tab. Location Group is also
+--  061102          added as a new report order parameter. It should be possible to order this
+--  061102          report for all location groups (%) or with a search string using wildcards.
+--  060720  RoJalk  Centralized Part Desc - Use Inventory_Part_API.Get_Description.
+--  060602  MiErlk  Enlarge Description - Changed Variables .
+--  060601  RoJalk  Enlarge Part Description - Changed view comments.
+------------------------------------13.4.0-----------------------------------
+--  051216  SuJalk  Changed the parameter VIEW_RPV to TABLE in Define_Report_.
+--  051207  DaZase  Added cost level and cost detail fields (not handled in the Qrp version at the moment). 
+--                  Added new Q_query value (Q_DETAIL_LEVEL) in the view.
+--  051122  LEPESE  Changes to cursor get_part_line because of new table
+--  051122          invent_part_value_detail_tab and new keys in inventory_value_part_tab.
+--  050921  NiDalk  Removed unused variables.
+--  050829  NiDalk  Changed to Report Designer Layout.
+--  040603  NaWilk  Bug 44975, Modified FROM clause in view INVENTORY_VALUE_PRINT_REP. 
+--  040209  NaWalk  Converted CHR(255) to UNISTR for Unicode Modification.
+--  031016  PrJalk  Bug fix 106237, Added procedure Init.
+--  030609  KiSalk  GEDI206NJ-1 Owner Codes: Added ROW_NO to REP1VIEW. 
+--  021113  SaRalk  Bug 33337, Added code which enables to add different logos for different companies. 
+--  020821  ShFelk  Bug 30398, Changed the queryable from the field Q_CONTRACT to the field CONTRACT in the view.
+--  020821          Changed the code in report method to collect value for in_contract_ either from CONTRACT or Q_CONTRACT
+--  001114  JOHW    Increased variable curr_unit_meas_ to VARCHAR2(10).
+--  000928  JOHW    Changed prompt from Configuration Id to Configuration ID.
+--  000922  JOHW    Added configuration_id.
+--  000413  ANLASE  Added validation for in_contract_, in_stat_year_no and in_stat_period_no.
+--  990525  DAZA    Changed querytext Contract to Site for Q_CONTRACT.
+--  990406  JOHW    Added new columns Qty_In_Transit and Qty_At_Customer.
+--  990311  JOHW    Removed i.total_value != 0 in cursor get_part_line.
+--  990211  JOHW    Changed to LU InventoryValuePart.
+--  990210  JOHW    Added columns Qty_Waiv_Dev_Rej and Cost per part and removed functionality
+--                  to choose if the part should be written.
+--  980420  ANHO    SID 3360. Mixed case in Yes/No field results in blank report.
+--  971124  GOPE    Added Report_SYS.refresh
+--  970908  JOMC    Changed Unit of Measure handling to conform to UoM handling 
+--                  in Application Services
+--  970904  JOMC    Converted the RDF to use the report table INVENT_INFO_SERVICES_RPT
+--  970606  GOPE    Made partno, commodity, site uppercase
+--  970529  GOPE    Added nvl(min_sec_, ' ') in cursor get_contract
+--  970428  NAVE    Changed order of query parameters (moved q_sum_or_detail to the end)
+--  961214  AnAr    Changed Calls to dbms_output to Trace_SYS.
+--  961214  JICE    Corrected cursor get_contract in REP1METHOD.
+--  961015  JOHNI   Removed / at wrong places.
+--  960902  MAOR    Created.
+--
+---------------------------------------------------------------------------
+
+define MODULE       = INVENT
+define LU           = InventoryValuePart
+define PKG          = INVENTORY_VALUE_RPI
+
+define TABLE      = INVENT_INFO_SERVICES_RPT 
+define REP1VIEW   = INVENTORY_VALUE_PRINT_REP
+DEFINE VIEW_RPV   = INVENT_INFO_SERVICES_RPV
+define REP1METHOD = Report_Printout
+
+define RECORD_TYPE             = N1
+define CONTRACT                = S1
+define CONTRACT_DESC           = S2
+define DOCUMENT_PHRASE         = S3
+define PART_NO                 = S4
+define PART_DESCRIPTION        = S5
+define UNIT_MEAS               = S6
+define CONFIGURATION_ID        = S7
+define QUANTITY                = N2
+define TOTAL_VALUE             = N3
+define QTY_WAIV_DEV_REJ        = N4
+define TOTAL_STANDARD          = N5
+define SUM_TOTAL               = N6
+define QTY_IN_TRANSIT          = N7
+define QTY_AT_CUSTOMER         = N8
+define SERIAL_NO               = S8
+define LOT_BATCH_NO            = S9
+define CONDITION_CODE          = S10
+define TOTAL_STANDARD_LEVEL    = N9
+define QTY_WAIV_DEV_REJ_LEVEL  = N10
+define QUANTITY_LEVEL          = N11
+define QTY_IN_TRANSIT_LEVEL    = N12
+define QTY_AT_CUSTOMER_LEVEL   = N13
+define TOTAL_VALUE_LEVEL       = N14
+define POSTING_COST_GROUP      = S11
+define COST_SOURCE             = S12
+define TOTAL_STANDARD_DETAIL   = N15
+define TOTAL_VALUE_DETAIL      = N16
+
+
+PROMPT Creating reports for logical unit &LU
+
+-----------------------------------------------------------------------------
+-- PACKAGE SPECIFICATION:    INVENTORY_VALUE_RPI
+-----------------------------------------------------------------------------
+
+PROMPT Creating &PKG specification
+
+CREATE OR REPLACE PACKAGE &PKG IS
+
+module_ CONSTANT VARCHAR2(6)   := '&MODULE';
+lu_name_ CONSTANT VARCHAR2(25) := '&LU';
+
+PROCEDURE &REP1METHOD (
+   report_attr_    IN VARCHAR2,
+   parameter_attr_ IN VARCHAR2 );
+
+PROCEDURE Default_Level__ (
+   default_level_ OUT VARCHAR2 );
+
+PROCEDURE Init;
+
+END &PKG;
+/
+SHOW ERROR
+
+-----------------------------------------------------------------------------
+-- VIEWS                      
+-----------------------------------------------------------------------------
+
+-----------------------------------------------------------------------------
+-- Report:     Inventory Value Printout
+-- Type:       PLSQL1.2
+-- Objects:    TABLES = INVENTORY_VALUE_HEADER_RPT,
+--                      INVENTORY_VALUE_DETAIL_RPT,
+--             VIEW   = INVENTORY_VALUE_PRINT_REP
+--             METHOD = INVENTORY_VALUE_RPI.Report_Printout
+-----------------------------------------------------------------------------
+
+PROMPT Creating report view &REP1VIEW
+
+-- Drop the view before recreating it to make sure the view is created
+-- from scratch again
+
+CREATE OR REPLACE VIEW &REP1VIEW AS
+SELECT   
+  M.RESULT_KEY                      RESULT_KEY,
+  M.ROW_NO                          ROW_NO,
+  M.&CONTRACT                       CONTRACT,
+  M.&CONTRACT_DESC                  CONTRACT_DESC,
+  D.&DOCUMENT_PHRASE                DOCUMENT_PHRASE,
+  D.&PART_NO                        PART_NO,
+  D.&PART_DESCRIPTION               PART_DESCRIPTION,
+  D.&CONFIGURATION_ID               CONFIGURATION_ID,
+  D.&QTY_WAIV_DEV_REJ               QTY_WAIV_DEV_REJ,
+  D.&UNIT_MEAS                      UNIT_MEAS,
+  D.&QUANTITY                       QUANTITY,
+  D.&QTY_IN_TRANSIT                 QTY_IN_TRANSIT,
+  D.&QTY_AT_CUSTOMER                QTY_AT_CUSTOMER,
+  D.&TOTAL_STANDARD                 TOTAL_STANDARD,
+  D.&TOTAL_VALUE                    TOTAL_VALUE,
+  D.&SUM_TOTAL                      SUM_TOTAL,
+-- cost level values
+  D.&SERIAL_NO                      SERIAL_NO,
+  D.&LOT_BATCH_NO                   LOT_BATCH_NO,
+  D.&CONDITION_CODE                 CONDITION_CODE,
+  D.&TOTAL_STANDARD_LEVEL           TOTAL_STANDARD_LEVEL,
+  D.&QTY_WAIV_DEV_REJ_LEVEL         QTY_WAIV_DEV_REJ_LEVEL,
+  D.&QUANTITY_LEVEL                 QUANTITY_LEVEL,
+  D.&QTY_IN_TRANSIT_LEVEL           QTY_IN_TRANSIT_LEVEL,
+  D.&QTY_AT_CUSTOMER_LEVEL          QTY_AT_CUSTOMER_LEVEL,
+  D.&TOTAL_VALUE_LEVEL              TOTAL_VALUE_LEVEL,
+-- cost detail values
+  D.&POSTING_COST_GROUP             POSTING_COST_GROUP,
+  D.&COST_SOURCE                    COST_SOURCE,
+  D.&TOTAL_STANDARD_DETAIL          TOTAL_STANDARD_DETAIL,
+  D.&TOTAL_VALUE_DETAIL             TOTAL_VALUE_DETAIL,
+-- report inparams/queries
+  NULL                              Q_CONTRACT,
+  0                                 Q_STAT_YEAR_NO,
+  0                                 Q_STAT_PERIOD_NO,
+  NULL                              Q_FROM_PART_NO,
+  NULL                              Q_TO_PART_NO,
+  NULL                              Q_DETAIL_LEVEL,
+  NULL                              LOCATION_GROUP
+FROM &VIEW_RPV M, &VIEW_RPV D
+WHERE M.&RECORD_TYPE = 1
+AND   D.&RECORD_TYPE(+) = 2
+AND   M.RESULT_KEY = D.RESULT_KEY(+)
+AND   M.ROW_NO     = D.PARENT_ROW_NO(+)
+WITH read only;
+
+COMMENT ON TABLE &REP1VIEW IS
+   'MODULE=&MODULE^LU=&LU^PROMPT=Inventory Values^';
+
+COMMENT ON COLUMN &REP1VIEW..RESULT_KEY IS
+   'FLAGS=M----^';
+COMMENT ON COLUMN &REP1VIEW..ROW_NO IS
+   'FLAGS=M----^DATATYPE=NUMBER^';
+COMMENT ON COLUMN &REP1VIEW..CONTRACT IS
+   'FLAGS=A----^DATATYPE=STRING(5)/UPPERCASE^TITLE=Site^ITEM_NAME=iContract^QUERY=Which Site:^REF=UserAllowedSiteLov^QFLAGS=MCS-L^';
+COMMENT ON COLUMN &REP1VIEW..CONTRACT_DESC IS
+   'FLAGS=A----^DATATYPE=STRING(35)/UPPERCASE^TITLE=Site Description^ITEM_NAME=iContractDesc^';
+COMMENT ON COLUMN &REP1VIEW..DOCUMENT_PHRASE
+   IS 'FLAGS=A----^DATATYPE=STRING(2000)^TITLE=Document Phrase^ITEM_NAME=iDocumentPhrase^';
+COMMENT ON COLUMN &REP1VIEW..PART_NO IS
+   'FLAGS=A----^DATATYPE=STRING(25)/UPPERCASE^TITLE=Part No^ITEM_NAME=iPartNo^';
+COMMENT ON COLUMN &REP1VIEW..PART_DESCRIPTION IS
+   'FLAGS=A----^DATATYPE=STRING(200)^TITLE=Description^ITEM_NAME=iPartDescription^';
+COMMENT ON COLUMN &REP1VIEW..CONFIGURATION_ID IS
+   'FLAGS=A----^DATATYPE=STRING(50)^TITLE=Configuration ID^ITEM_NAME=iConfigurationId^';
+COMMENT ON COLUMN &REP1VIEW..QTY_WAIV_DEV_REJ IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Qty Waiv Dev Rej^ITEM_NAME=iQtyWaivDevRej^';
+COMMENT ON COLUMN &REP1VIEW..UNIT_MEAS IS
+   'FLAGS=A----^DATATYPE=STRING(10)^TITLE=U/M^ITEM_NAME=iUnitMeas^';
+COMMENT ON COLUMN &REP1VIEW..QUANTITY IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Quantity^ITEM_NAME=iQuantity^';
+COMMENT ON COLUMN &REP1VIEW..QTY_IN_TRANSIT IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Qty in Transit^ITEM_NAME=iQtyInTransit^';
+COMMENT ON COLUMN &REP1VIEW..QTY_AT_CUSTOMER IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Qty at Customer^ITEM_NAME=iQtyAtCustomer^';
+COMMENT ON COLUMN &REP1VIEW..TOTAL_STANDARD IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Cost Per Part^ITEM_NAME=iTotalStandard^';
+COMMENT ON COLUMN &REP1VIEW..TOTAL_VALUE IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Value^ITEM_NAME=iTotalValue^';
+COMMENT ON COLUMN &REP1VIEW..SUM_TOTAL IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Total Value To Sum^ITEM_NAME=iSumTotal^';
+
+-- cost level values
+COMMENT ON COLUMN &REP1VIEW..SERIAL_NO IS
+   'FLAGS=A----^DATATYPE=STRING(50)/UPPERCASE^TITLE=Serial No^ITEM_NAME=iSerialId^';
+COMMENT ON COLUMN &REP1VIEW..LOT_BATCH_NO IS
+   'FLAGS=A----^DATATYPE=STRING(20)/UPPERCASE^TITLE=Lot Batch No^ITEM_NAME=iLotBatchNo^';
+COMMENT ON COLUMN &REP1VIEW..CONDITION_CODE IS
+   'FLAGS=A----^DATATYPE=STRING(10)/UPPERCASE^TITLE=Condition Code^ITEM_NAME=iConditionCode^';
+COMMENT ON COLUMN &REP1VIEW..TOTAL_STANDARD_LEVEL IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Level Cost per Part^ITEM_NAME=iTotalStandardLevel^';
+COMMENT ON COLUMN &REP1VIEW..QTY_WAIV_DEV_REJ_LEVEL IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Qty W/D/R^ITEM_NAME=iQtyWaivDevRejLevel^';
+COMMENT ON COLUMN &REP1VIEW..QUANTITY_LEVEL IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Quantity^ITEM_NAME=iQuantityLevel^';
+COMMENT ON COLUMN &REP1VIEW..QTY_IN_TRANSIT_LEVEL IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Qty in Transit^ITEM_NAME=iQtyInTransitLevel^';
+COMMENT ON COLUMN &REP1VIEW..QTY_AT_CUSTOMER_LEVEL IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Qty at Customer^ITEM_NAME=iQtyAtCustomerLevel^';
+COMMENT ON COLUMN &REP1VIEW..TOTAL_VALUE_LEVEL IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Total Level Cost^ITEM_NAME=iTotalValueLevel^';
+-- cost detail values
+COMMENT ON COLUMN &REP1VIEW..POSTING_COST_GROUP IS
+   'FLAGS=A----^DATATYPE=STRING(20)/UPPERCASE^TITLE=Posting Cost Group^ITEM_NAME=iPostingCostGroup^';
+COMMENT ON COLUMN &REP1VIEW..COST_SOURCE IS
+   'FLAGS=A----^DATATYPE=STRING(20)/UPPERCASE^TITLE=Cost Source^ITEM_NAME=iCostSource^';
+COMMENT ON COLUMN &REP1VIEW..TOTAL_STANDARD_DETAIL IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Detail Cost per U/M^ITEM_NAME=iTotalStandardDetail^'; 
+COMMENT ON COLUMN &REP1VIEW..TOTAL_VALUE_DETAIL IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Total Cost per Detail^ITEM_NAME=iTotalValueDetail^';
+-- report inparams/queries
+COMMENT ON COLUMN &REP1VIEW..Q_CONTRACT IS
+   'FLAGS=A----^DATATYPE=STRING(5)/UPPERCASE^';
+COMMENT ON COLUMN &REP1VIEW..Q_STAT_YEAR_NO IS
+   'FLAGS=A----^DATATYPE=NUMBER^QUERY=What Year:^REF=StatisticPeriod2^QFLAGS=MCS--^';
+COMMENT ON COLUMN &REP1VIEW..Q_STAT_PERIOD_NO IS
+   'FLAGS=A----^DATATYPE=NUMBER^QUERY=Which Statistics Period:^REF=StatisticPeriod3^QFLAGS=MCS--^';
+COMMENT ON COLUMN &REP1VIEW..Q_FROM_PART_NO IS
+   'FLAGS=A----^DATATYPE=STRING(25)/UPPERCASE^QUERY=From Part Number:^REF=InventoryPartLov(CONTRACT)^QFLAGS=-CS-L^QVALUE=%^';
+COMMENT ON COLUMN &REP1VIEW..Q_TO_PART_NO IS
+   'FLAGS=A----^DATATYPE=STRING(25)/UPPERCASE^QUERY=To Part Number:^REF=InventoryPartLov(CONTRACT)^QFLAGS=-CS-L^QVALUE=%^';
+COMMENT ON COLUMN &REP1VIEW..Q_DETAIL_LEVEL IS
+   'FLAGS=A----^DATATYPE=STRING(200)^QUERY=Level Of Detail:^ENUMERATE=Inv_Value_Rep_Detail_Level_API.Enumerate^QFLAGS=MCS--^QVALUE=:&PKG..Default_Level__^';
+COMMENT ON COLUMN &REP1VIEW..LOCATION_GROUP IS
+   'FLAGS=A----^DATATYPE=STRING(20)^QUERY=Location Group:^REF=INVENTORY_LOCATION_GROUP_C83^QFLAGS=-CS-L^QVALUE=%^';
+
+
+
+BEGIN
+   Report_SYS.Define_Report_( '&REP1VIEW', '&MODULE', '&LU', 'Inventory Values', '&TABLE', '&PKG..&REP1METHOD', 8,'','','','PLSQL1.2','TRUE','Warehouse Management','Financial Control');
+   Report_SYS.Refresh_('&REP1VIEW');
+END;   
+/
+-----------------------------------------------------------------------------
+-- PACKAGE IMPLEMENTATION     INVENTORY_VALUE_RPI
+-----------------------------------------------------------------------------
+
+PROMPT Creating &PKG implementation
+
+CREATE OR REPLACE PACKAGE BODY &PKG IS
+
+-----------------------------------------------------------------------------
+-- Report_Printout:
+--
+-- Purpose: Extracts information needed for a printout report of
+--          inventory value. The parameters are contract, stat_year_no,
+--          stat_period_no, str_code, cost_set, from_sec_comm,to_sec_comm
+--          from_part_no, to_part_no, detail_sum and are included in 
+--          parameter_attr_. 
+--          Detail_Sum tells if the report should be printed with details
+--          or only with summary.
+--          (Created from invalsum.rex and invaldet.rex).
+-----------------------------------------------------------------------------
+PROCEDURE &REP1METHOD (
+   report_attr_    IN VARCHAR2,
+   parameter_attr_ IN VARCHAR2 )
+IS
+--
+  result_key_               NUMBER;
+  row_no_                   NUMBER := 0;
+  phrase_text_              VARCHAR2(2000);
+  curr_contract_            VARCHAR2(5);
+  curr_contract_ref_        VARCHAR2(20);
+  curr_part_no_             VARCHAR2(25);
+  curr_configuration_id_    VARCHAR2(50);
+  curr_qty_wdr_             NUMBER;
+  curr_unit_meas_           VARCHAR2(10);
+  curr_tot_quantity_        NUMBER;
+  curr_tot_qty_in_transit_  NUMBER;
+  curr_tot_qty_at_customer_ NUMBER;
+  curr_tot_standard_        NUMBER;
+  curr_total_value_         NUMBER;
+  parent_row_no_            NUMBER;
+  in_contract_              VARCHAR2(5)  := '%';
+  in_stat_year_no_          NUMBER;
+  in_stat_period_no_        NUMBER;
+  in_location_group_        VARCHAR2(20) := '%';
+  from_part_no_             VARCHAR2(25);
+  to_part_no_               VARCHAR2(25);
+  max_part_no_              VARCHAR2(25);
+  min_part_no_              VARCHAR2(25);
+  total_quantity_           NUMBER;
+  total_value_              NUMBER;
+  locgrp_total_quantity_    NUMBER;
+
+   to_                      NUMBER;
+   site_found_              BOOLEAN; 
+   logotype_                VARCHAR2(100);  
+   company_                 VARCHAR2(20);
+   company_name_            VARCHAR2(100);
+
+   do_xml_                  BOOLEAN := Report_SYS.Should_Generate_Xml('&REP1VIEW');
+   do_rs_                   BOOLEAN := Report_SYS.Should_Generate_Result_Set('&REP1VIEW');
+   xml_                     CLOB;
+   package_name_            VARCHAR2(100) := 'INVENTORY_VALUE_PRINT_REP';
+
+   inventory_part_rec_      Inventory_Part_API.Public_Rec;
+   part_description_        &REP1VIEW..PART_DESCRIPTION%TYPE;  
+   detail_level_db_         VARCHAR2(50);
+   language_code_           VARCHAR2(4);
+   phrase_on_document_tab_  Phrase_On_Document_API.Phrase_Id_Tab;
+
+   last_char_               CONSTANT VARCHAR2(10) := Database_SYS.Get_Last_Character;
+   
+  CURSOR get_contract IS
+   SELECT distinct i.contract, c.description contract_ref
+   FROM   inventory_value_part i, 
+          inventory_part p, 
+          site c
+   WHERE  i.contract    like in_contract_
+   AND    i.stat_year_no   = in_stat_year_no_
+   AND    i.stat_period_no = in_stat_period_no_
+   AND    i.part_no  BETWEEN nvl(min_part_no_,' ')
+                     AND     nvl(max_part_no_,last_char_)
+   AND    i.part_no       =  p.part_no
+   AND    i.contract      =  p.contract
+   AND    c.contract      =  i.contract
+   AND    i.contract      =  user_allowed_site_api.Authorized(i.contract)
+   ORDER BY i.contract;
+--
+   CURSOR get_config_locgrp_quantities IS
+      SELECT part_no                               part_no,
+             configuration_id                      configuration_id,
+             SUM(qty_waiv_dev_rej)                 qty_waiv_dev_rej,
+             SUM(quantity)                         quantity,
+             SUM(qty_in_transit)                   qty_in_transit,
+             SUM(qty_at_customer)                  qty_at_customer
+        FROM inventory_value_part_tab
+       WHERE stat_year_no      = in_stat_year_no_
+         AND contract          = curr_contract_
+         AND stat_period_no    = in_stat_period_no_
+         AND location_group LIKE in_location_group_
+         AND (part_no  BETWEEN nvl(min_part_no_,' ') AND nvl(max_part_no_,last_char_))
+       GROUP BY part_no, configuration_id
+       ORDER BY part_no;
+
+   CURSOR get_config_total_quantity (stat_year_no_     IN NUMBER,
+                                     stat_period_no_   IN NUMBER,
+                                     contract_         IN VARCHAR2,
+                                     part_no_          IN VARCHAR2,
+                                     configuration_id_ IN VARCHAR2) IS
+      SELECT SUM(quantity + qty_waiv_dev_rej + qty_in_transit + qty_at_customer) total_quantity
+        FROM inventory_value_part_tab
+       WHERE stat_year_no     = stat_year_no_
+         AND stat_period_no   = stat_period_no_
+         AND contract         = contract_
+         AND part_no          = part_no_
+         AND configuration_id = configuration_id_;
+
+   CURSOR get_config_total_value (stat_year_no_     IN NUMBER,
+                                  stat_period_no_   IN NUMBER,
+                                  contract_         IN VARCHAR2,
+                                  part_no_          IN VARCHAR2,
+                                  configuration_id_ IN VARCHAR2) IS
+      SELECT NVL(SUM(total_value),0) total_value
+        FROM invent_value_part_detail_tab
+       WHERE stat_year_no     = stat_year_no_
+         AND stat_period_no   = stat_period_no_
+         AND contract         = contract_
+         AND part_no          = part_no_
+         AND configuration_id = configuration_id_;
+
+   CURSOR get_level_locgrp_quantities (stat_year_no_     IN NUMBER,
+                                       stat_period_no_   IN NUMBER,
+                                       contract_         IN VARCHAR2,
+                                       part_no_          IN VARCHAR2,
+                                       configuration_id_ IN VARCHAR2,
+                                       location_group_   IN VARCHAR2)IS
+      SELECT serial_no              serial_no,
+             lot_batch_no           lot_batch_no,
+             condition_code         condition_code,
+             SUM(qty_waiv_dev_rej)  qty_waiv_dev_rej,
+             SUM(quantity)          quantity,
+             SUM(qty_in_transit)    qty_in_transit,
+             SUM(qty_at_customer)   qty_at_customer
+        FROM inventory_value_part_tab
+       WHERE stat_year_no      = stat_year_no_
+         AND contract          = contract_
+         AND stat_period_no    = stat_period_no_
+         AND part_no           = part_no_
+         AND configuration_id  = configuration_id_
+         AND location_group LIKE location_group_
+         GROUP BY serial_no, lot_batch_no, condition_code
+         ORDER BY serial_no, lot_batch_no, condition_code;
+
+   CURSOR get_level_total_quantity (stat_year_no_     IN NUMBER,
+                                    stat_period_no_   IN NUMBER,
+                                    contract_         IN VARCHAR2,
+                                    part_no_          IN VARCHAR2,
+                                    configuration_id_ IN VARCHAR2,
+                                    condition_code_   IN VARCHAR2,
+                                    lot_batch_no_     IN VARCHAR2,
+                                    serial_no_        IN VARCHAR2) IS
+      SELECT SUM(quantity + qty_waiv_dev_rej + qty_in_transit + qty_at_customer) total_quantity
+        FROM inventory_value_part_tab
+       WHERE stat_year_no     = stat_year_no_
+         AND stat_period_no   = stat_period_no_
+         AND contract         = contract_
+         AND part_no          = part_no_
+         AND configuration_id = configuration_id_
+         AND condition_code   = condition_code_
+         AND lot_batch_no     = lot_batch_no_
+         AND serial_no        = serial_no_;
+
+   CURSOR get_level_total_value (stat_year_no_     IN NUMBER,
+                                 stat_period_no_   IN NUMBER,
+                                 contract_         IN VARCHAR2,
+                                 part_no_          IN VARCHAR2,
+                                 configuration_id_ IN VARCHAR2,
+                                 condition_code_   IN VARCHAR2,
+                                 lot_batch_no_     IN VARCHAR2,
+                                 serial_no_        IN VARCHAR2) IS
+      SELECT NVL(SUM(total_value),0) total_value
+        FROM invent_value_part_detail_tab
+       WHERE stat_year_no     = stat_year_no_
+         AND stat_period_no   = stat_period_no_
+         AND contract         = contract_
+         AND part_no          = part_no_
+         AND configuration_id = configuration_id_
+         AND condition_code   = condition_code_
+         AND lot_batch_no     = lot_batch_no_
+         AND serial_no        = serial_no_;
+
+   CURSOR get_detail_total_value (stat_year_no_     IN NUMBER,
+                                  stat_period_no_   IN NUMBER,
+                                  contract_         IN VARCHAR2,
+                                  part_no_          IN VARCHAR2,
+                                  configuration_id_ IN VARCHAR2,
+                                  condition_code_   IN VARCHAR2,
+                                  lot_batch_no_     IN VARCHAR2,
+                                  serial_no_        IN VARCHAR2) IS
+      SELECT bucket_posting_group_id, cost_source_id, SUM(total_value) total_value
+        FROM invent_value_part_detail_tab
+       WHERE stat_year_no     = stat_year_no_
+         AND stat_period_no   = stat_period_no_
+         AND contract         = contract_
+         AND part_no          = part_no_
+         AND configuration_id = configuration_id_
+         AND condition_code   = condition_code_
+         AND lot_batch_no     = lot_batch_no_
+         AND serial_no        = serial_no_
+       GROUP BY bucket_posting_group_id, cost_source_id                    
+       ORDER BY bucket_posting_group_id, cost_source_id;
+--
+  CURSOR get_min_part_no IS
+   SELECT min(i.part_no)
+   FROM   inventory_value_part i
+   WHERE  i.contract    like in_contract_
+   AND    i.stat_year_no   = in_stat_year_no_
+   AND    i.stat_period_no = in_stat_period_no_;
+--
+  CURSOR get_max_part_no IS
+   SELECT max(i.part_no)
+   FROM   inventory_value_part i
+   WHERE  i.contract    like in_contract_
+   AND    i.stat_year_no   = in_stat_year_no_
+   AND    i.stat_period_no = in_stat_period_no_;
+--
+BEGIN
+--
+   parent_row_no_ := 0;
+   General_SYS.Init_Method(lu_name_, '&PKG', '&REP1METHOD');
+   result_key_    := to_number(Client_SYS.Get_Item_Value('RESULT_KEY',report_attr_));
+
+   IF (Client_SYS.Get_Item_Value('Q_CONTRACT', parameter_attr_) IS NOT NULL) THEN
+      in_contract_ := Client_SYS.Get_Item_Value('Q_CONTRACT', parameter_attr_);
+   END IF;
+   IF (Client_SYS.Get_Item_Value('CONTRACT', parameter_attr_) IS NOT NULL) THEN
+      in_contract_ := Client_SYS.Get_Item_Value('CONTRACT', parameter_attr_);
+   END IF;
+   IF (Client_SYS.Get_Item_Value('LOCATION_GROUP', parameter_attr_) IS NOT NULL) THEN
+      in_location_group_ := Client_SYS.Get_Item_Value('LOCATION_GROUP', parameter_attr_);
+   END IF;
+   
+   User_Allowed_Site_Api.Exist_With_Wildcard(in_contract_);
+
+   in_stat_year_no_   := Client_SYS.Get_Item_Value('Q_STAT_YEAR_NO', parameter_attr_);
+   in_stat_period_no_ := Client_SYS.Get_Item_Value('Q_STAT_PERIOD_NO', parameter_attr_);
+   from_part_no_      := Client_SYS.Get_Item_Value('Q_FROM_PART_NO', parameter_attr_);
+   to_part_no_        := Client_SYS.Get_Item_Value('Q_TO_PART_NO', parameter_attr_);
+   detail_level_db_   := Inv_Value_Rep_Detail_Level_API.Encode(Client_SYS.Get_Item_Value('Q_DETAIL_LEVEL', parameter_attr_));
+
+-- Stop executing if in_stat_year_no_ or in_stat_period_no_ is NULL
+   IF (in_stat_year_no_ IS NULL) THEN
+      Error_SYS.Record_General(lu_name_,'YEARNULL: Statistic year has to be entered.');
+   END IF;
+   
+   IF (in_stat_period_no_ IS NULL) THEN
+      Error_SYS.Record_General(lu_name_,'PERIODNULL: Statistic period has to be entered.');
+   END IF;
+
+-- Get max and min for second commodity.
+   IF from_part_no_ = ''
+      OR from_part_no_ = '%'
+      OR from_part_no_ IS NULL THEN
+
+      OPEN  get_min_part_no;
+      FETCH get_min_part_no INTO min_part_no_;
+      CLOSE get_min_part_no;
+   ELSE
+      min_part_no_ := from_part_no_;
+   END IF;
+
+   IF    to_part_no_ = ''
+      OR to_part_no_ = '%'
+      OR to_part_no_ IS NULL THEN
+
+      OPEN  get_max_part_no;
+      FETCH get_max_part_no INTO max_part_no_;
+      CLOSE get_max_part_no;
+   ELSE
+      max_part_no_ := to_part_no_;
+   END IF;
+
+   curr_contract_     := null;
+   curr_contract_ref_ := null;
+
+   site_found_        := FALSE;
+   
+   IF (do_xml_) THEN
+      Xml_Record_Writer_SYS.Create_Report_Header(xml_,'&REP1VIEW',package_name_);
+      Xml_Record_Writer_SYS.Start_Element(xml_, 'SITE_ITEMS');
+   END IF;
+
+-- Loop for all contracts
+   FOR contract_rec IN get_contract LOOP
+
+       curr_contract_      := contract_rec.contract;
+       curr_contract_ref_  := contract_rec.contract_ref;
+
+      IF (site_found_ = FALSE) THEN
+         company_      := Site_API.Get_Company(curr_contract_);
+         logotype_     := Company_API.Get_Logotype(company_);  
+         company_name_ := Site_API.Get_Company_Address_Name(curr_contract_);
+
+         IF (logotype_ IS NOT NULL ) THEN
+            Archive_Variable_API.Set_Object(result_key_, 'rhSysLogo', logotype_);
+            Archive_Variable_API.Set_Variable(result_key_, 'companyName', company_name_);
+            site_found_ := TRUE;
+         END IF;
+      END IF;            
+
+      IF (do_xml_) THEN
+         Xml_Record_Writer_SYS.Start_Element(xml_, 'SITE_ITEM');
+         Xml_Record_Writer_SYS.Add_Element(xml_,'CONTRACT', curr_contract_);
+         Xml_Record_Writer_SYS.Add_Element(xml_,'CONTRACT_DESC', curr_contract_ref_);
+      END IF;
+
+      IF (do_rs_) THEN
+         IF (parent_row_no_ = 0) THEN
+             INSERT INTO &TABLE (
+               RESULT_KEY          ,
+               ROW_NO              ,
+               PARENT_ROW_NO,
+               &RECORD_TYPE,
+               &CONTRACT            ,
+               &CONTRACT_DESC       )
+             VALUES (
+               result_key_,
+               row_no_,
+               0,
+               1,
+               curr_contract_, 
+               curr_contract_ref_ );
+         ELSE
+             INSERT INTO &TABLE (
+               RESULT_KEY          ,
+               ROW_NO              ,
+               PARENT_ROW_NO,
+               &RECORD_TYPE,
+               &CONTRACT            ,
+               &CONTRACT_DESC       )
+             VALUES (
+               result_key_,
+               row_no_,
+               0,
+               1,
+               curr_contract_, 
+               curr_contract_ref_ );
+         END IF;
+      END IF;
+
+      parent_row_no_ := row_no_;
+      row_no_        := row_no_ + 1;
+--
+--    
+      IF (do_xml_) THEN
+         Xml_Record_Writer_SYS.Start_Element(xml_, 'VALUE_ITEMS');
+      END IF;
+
+      FOR part_rec_ IN get_config_locgrp_quantities LOOP
+         inventory_part_rec_ := Inventory_Part_API.Get(curr_contract_, part_rec_.part_no);
+         part_description_   := Inventory_Part_API.Get_Description(curr_contract_, part_rec_.part_no); 
+
+         curr_part_no_             := part_rec_.part_no;
+         curr_configuration_id_    := part_rec_.configuration_id;
+         curr_qty_wdr_             := part_rec_.qty_waiv_dev_rej;
+         curr_unit_meas_           := inventory_part_rec_.unit_meas;
+         curr_tot_quantity_        := part_rec_.quantity;
+         curr_tot_qty_in_transit_  := part_rec_.qty_in_transit;
+         curr_tot_qty_at_customer_ := part_rec_.qty_at_customer;
+
+         OPEN get_config_total_quantity(in_stat_year_no_,
+                                        in_stat_period_no_,
+                                        curr_contract_,
+                                        part_rec_.part_no,
+                                        part_rec_.configuration_id);
+         FETCH get_config_total_quantity INTO total_quantity_;
+         CLOSE get_config_total_quantity;
+
+         OPEN get_config_total_value(in_stat_year_no_,
+                                     in_stat_period_no_,
+                                     curr_contract_,
+                                     part_rec_.part_no,
+                                     part_rec_.configuration_id);
+         FETCH get_config_total_value INTO total_value_;
+         CLOSE get_config_total_value;
+
+         IF (total_quantity_ = 0) THEN
+            curr_tot_standard_ := total_value_;            
+            curr_total_value_  := curr_tot_standard_;            
+         ELSE
+            curr_tot_standard_ := (total_value_ / total_quantity_);            
+            curr_total_value_  := (curr_tot_standard_ * (curr_qty_wdr_ +
+                                                         curr_tot_quantity_ +
+                                                         curr_tot_qty_in_transit_ +
+                                                         curr_tot_qty_at_customer_));
+         END IF;
+
+-- Insert detail row into table
+         IF (do_xml_) THEN
+            Xml_Record_Writer_SYS.Start_Element(xml_, 'VALUE_ITEM');
+            Xml_Record_Writer_SYS.Add_Element(xml_,'PART_NO', curr_part_no_);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'PART_DESCRIPTION', part_description_);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'CONFIGURATION_ID', curr_configuration_id_);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'QTY_WAIV_DEV_REJ', curr_qty_wdr_);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'UNIT_MEAS', curr_unit_meas_);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'QUANTITY', curr_tot_quantity_);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'QTY_IN_TRANSIT', curr_tot_qty_in_transit_);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'QTY_AT_CUSTOMER', curr_tot_qty_at_customer_);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'TOTAL_STANDARD', curr_tot_standard_);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'TOTAL_VALUE', curr_total_value_);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'SUM_TOTAL', curr_total_value_);
+         END IF;
+
+         IF (do_rs_) THEN    
+         -- note that the new cost level/detail columns have not been added to the Qrp solution at the moment 
+         -- (it will probably have to be another solution than the xml solution used at the moment)
+            INSERT INTO &TABLE (
+                    RESULT_KEY          ,
+                    ROW_NO              ,
+                    PARENT_ROW_NO       ,
+                    &RECORD_TYPE        ,
+                    &PART_NO            ,
+                    &PART_DESCRIPTION   ,
+                    &CONFIGURATION_ID   ,
+                    &QTY_WAIV_DEV_REJ   ,
+                    &UNIT_MEAS          ,
+                    &QUANTITY           ,
+                    &QTY_IN_TRANSIT     ,
+                    &QTY_AT_CUSTOMER    ,
+                    &TOTAL_STANDARD     ,
+                    &TOTAL_VALUE        ,
+                    &SUM_TOTAL          )
+             VALUES (
+                     result_key_,
+                     row_no_,
+                     parent_row_no_,
+                     2,
+                     curr_part_no_,
+                     part_description_,
+                     curr_configuration_id_,
+                     curr_qty_wdr_,
+                     curr_unit_meas_,
+                     curr_tot_quantity_,
+                     curr_tot_qty_in_transit_,
+                     curr_tot_qty_at_customer_,
+                     curr_tot_standard_,
+                     curr_total_value_,
+                     curr_total_value_);
+         END IF;
+
+         curr_total_value_ := 0;
+         row_no_ := row_no_ + 1;
+
+         -- use cost level or cost detail
+         IF (detail_level_db_ IN ('PRINT_VALUES_PER_COST_LEVEL','PRINT_VALUES_PER_COST_DETAIL')) THEN
+            IF (do_xml_) THEN
+              Xml_Record_Writer_SYS.Start_Element(xml_, 'COST_LEVEL_ITEMS');
+            END IF;
+   
+            FOR level_rec_ IN get_level_locgrp_quantities(in_stat_year_no_,      
+                                                          in_stat_period_no_,    
+                                                          curr_contract_,        
+                                                          part_rec_.part_no,
+                                                          part_rec_.configuration_id,
+                                                          in_location_group_) LOOP
+
+               OPEN get_level_total_quantity(in_stat_year_no_,
+                                             in_stat_period_no_,
+                                             curr_contract_,
+                                             part_rec_.part_no,
+                                             part_rec_.configuration_id,
+                                             level_rec_.condition_code,
+                                             level_rec_.lot_batch_no,
+                                             level_rec_.serial_no);
+               FETCH get_level_total_quantity INTO total_quantity_;
+               CLOSE get_level_total_quantity;
+
+               OPEN get_level_total_value(in_stat_year_no_,
+                                          in_stat_period_no_,
+                                          curr_contract_,
+                                          part_rec_.part_no,
+                                          part_rec_.configuration_id,
+                                          level_rec_.condition_code,
+                                          level_rec_.lot_batch_no,
+                                          level_rec_.serial_no);
+               FETCH get_level_total_value INTO total_value_;
+               CLOSE get_level_total_value;               
+
+               locgrp_total_quantity_ := (level_rec_.qty_waiv_dev_rej +  
+                                          level_rec_.quantity +          
+                                          level_rec_.qty_in_transit +    
+                                          level_rec_.qty_at_customer);
+
+               IF (total_quantity_ = 0) THEN
+                  curr_tot_standard_ := total_value_;
+                  curr_total_value_  := curr_tot_standard_;                  
+               ELSE
+                  curr_tot_standard_ := (total_value_ / total_quantity_);                  
+                  curr_total_value_ := (curr_tot_standard_ * locgrp_total_quantity_);                  
+               END IF;
+
+               IF (do_xml_) THEN
+                  Xml_Record_Writer_SYS.Start_Element(xml_, 'COST_LEVEL_ITEM');                  
+                  Xml_Record_Writer_SYS.Add_Element(xml_,'SERIAL_NO', level_rec_.serial_no);
+                  Xml_Record_Writer_SYS.Add_Element(xml_,'LOT_BATCH_NO', level_rec_.lot_batch_no);
+                  Xml_Record_Writer_SYS.Add_Element(xml_,'CONDITION_CODE', level_rec_.condition_code);
+                  Xml_Record_Writer_SYS.Add_Element(xml_,'TOTAL_STANDARD_LEVEL', curr_tot_standard_);
+                  Xml_Record_Writer_SYS.Add_Element(xml_,'QTY_WAIV_DEV_REJ_LEVEL', level_rec_.qty_waiv_dev_rej);
+                  Xml_Record_Writer_SYS.Add_Element(xml_,'QUANTITY_LEVEL', level_rec_.quantity);
+                  Xml_Record_Writer_SYS.Add_Element(xml_,'QTY_IN_TRANSIT_LEVEL', level_rec_.qty_in_transit);
+                  Xml_Record_Writer_SYS.Add_Element(xml_,'QTY_AT_CUSTOMER_LEVEL', level_rec_.qty_at_customer);
+                  Xml_Record_Writer_SYS.Add_Element(xml_,'TOTAL_VALUE_LEVEL', curr_total_value_);
+               END IF;
+   
+               -- use cost detail
+               IF (detail_level_db_ = 'PRINT_VALUES_PER_COST_DETAIL') THEN
+   
+                  IF (do_xml_) THEN
+                     Xml_Record_Writer_SYS.Start_Element(xml_, 'COST_DETAIL_ITEMS');
+                  END IF;
+      
+                  FOR detail_rec_ IN get_detail_total_value(in_stat_year_no_,
+                                                            in_stat_period_no_,
+                                                            curr_contract_,
+                                                            part_rec_.part_no,
+                                                            part_rec_.configuration_id,
+                                                            level_rec_.condition_code,
+                                                            level_rec_.lot_batch_no,
+                                                            level_rec_.serial_no) LOOP
+                     IF (total_quantity_ = 0) THEN
+                        curr_tot_standard_ := detail_rec_.total_value;                        
+                        curr_total_value_  := curr_tot_standard_;                        
+                     ELSE
+                        curr_tot_standard_ := (detail_rec_.total_value / total_quantity_);                        
+                        curr_total_value_  := (curr_tot_standard_ * locgrp_total_quantity_);                        
+                     END IF;
+
+                     IF (do_xml_) THEN
+                        Xml_Record_Writer_SYS.Start_Element(xml_, 'COST_DETAIL_ITEM');
+                        Xml_Record_Writer_SYS.Add_Element(xml_,'POSTING_COST_GROUP', detail_rec_.bucket_posting_group_id);
+                        Xml_Record_Writer_SYS.Add_Element(xml_,'COST_SOURCE', detail_rec_.cost_source_id);
+                        Xml_Record_Writer_SYS.Add_Element(xml_,'TOTAL_STANDARD_DETAIL', curr_tot_standard_);
+                        Xml_Record_Writer_SYS.Add_Element(xml_,'TOTAL_VALUE_DETAIL', curr_total_value_);
+                        Xml_Record_Writer_SYS.End_Element(xml_, 'COST_DETAIL_ITEM');
+                     END IF;
+                  END LOOP;
+      
+                  IF (do_xml_) THEN
+                     Xml_Record_Writer_SYS.End_Element(xml_, 'COST_DETAIL_ITEMS');
+                  END IF;
+               END IF;   -- cost detail
+
+               IF (do_xml_) THEN
+                  Xml_Record_Writer_SYS.End_Element(xml_, 'COST_LEVEL_ITEM');
+               END IF;
+            END LOOP;
+   
+            IF (do_xml_) THEN
+               Xml_Record_Writer_SYS.End_Element(xml_, 'COST_LEVEL_ITEMS');
+            END IF;
+         END IF;  -- cost level
+
+         IF (do_xml_) THEN
+            Xml_Record_Writer_SYS.End_Element(xml_, 'VALUE_ITEM');
+         END IF;
+      END LOOP; /* get_part_line loop ends */
+
+      IF (do_xml_) THEN
+         Xml_Record_Writer_SYS.End_Element(xml_, 'VALUE_ITEMS');
+      END IF;
+
+      --
+      -- Check for notes
+      -- document_code  = 12 for invaldet/invalsum printout
+      --
+      language_code_ := Language_SYS.Get_Language;
+      IF language_code_ IS NOT NULL THEN
+         IF (do_xml_) THEN
+            Xml_Record_Writer_SYS.Start_Element(xml_, 'DOC_PHRASES');
+         END IF;
+         
+         phrase_on_document_tab_ := Phrase_On_Document_API.Get_Phrase_Id_Tab( 'INVVALUES', NULL, curr_contract_);
+         
+         IF (phrase_on_document_tab_.COUNT > 0) THEN
+            FOR n IN phrase_on_document_tab_.FIRST..phrase_on_document_tab_.LAST LOOP
+               phrase_text_ := Mpccom_Phrase_Text_API.Get_Phrase_Text( phrase_on_document_tab_(n), language_code_);
+               IF (phrase_text_ IS NOT NULL) THEN
+                  IF (do_xml_) THEN
+                     Xml_Record_Writer_SYS.Start_Element(xml_, 'DOC_PHRASE');
+                     Xml_Record_Writer_SYS.Add_Element(xml_, 'DOCUMENT_PHRASE', phrase_text_);
+                     Xml_Record_Writer_SYS.End_Element(xml_, 'DOC_PHRASE');
+                  END IF;
+                  IF (do_rs_) THEN
+                     INSERT INTO &TABLE (
+                                         result_key, row_no, parent_row_no, &DOCUMENT_PHRASE)
+                     VALUES (
+                             result_key_, row_no_, parent_row_no_, phrase_text_);
+                  END IF;
+                  row_no_ := row_no_ + 1;
+               END IF;
+            END LOOP;
+         END IF;
+
+         IF (do_xml_) THEN
+            Xml_Record_Writer_SYS.End_Element(xml_, 'DOC_PHRASES');
+         END IF;
+      END IF;
+
+      parent_row_no_     := row_no_;
+
+      curr_contract_     := null;
+      curr_contract_ref_ := null;
+
+      IF (do_xml_) THEN
+         Xml_Record_Writer_SYS.End_Element(xml_, 'SITE_ITEM');
+      END IF;
+
+   END LOOP; /* for contract_rec in get_contract loop ends */
+   
+   IF (do_xml_) THEN
+      Xml_Record_Writer_SYS.End_Element(xml_, 'SITE_ITEMS');
+      Xml_Record_Writer_SYS.End_Element(xml_,'&REP1VIEW');
+      Report_SYS.Finish_Xml_Report('&REP1VIEW',result_key_,xml_);
+   END IF;
+
+   IF site_found_ = FALSE THEN  
+      to_ := instr(in_contract_, ';', 1);
+      IF (to_ = 0) AND (in_contract_  <> '%') THEN    
+         company_      := Site_API.Get_Company(in_contract_);
+         logotype_     := Company_API.Get_Logotype(company_);  
+         company_name_ := Site_API.Get_Company_Address_Name(in_contract_);
+
+         IF (logotype_ IS NOT NULL ) THEN
+            Archive_Variable_API.Set_Object(result_key_, 'rhSysLogo', logotype_);
+            Archive_Variable_API.Set_Variable(result_key_, 'companyName', company_name_);
+         END IF;
+      END IF;
+   END IF;
+
+END &REP1METHOD;
+
+PROCEDURE Default_Level__ (
+   default_level_ OUT VARCHAR2 )
+IS
+BEGIN
+   General_SYS.Init_Method('&LU', '&PKG', 'Default_Level__');
+   default_level_ := Inv_Value_Rep_Detail_Level_API.Decode('PRINT_VALUES_PER_PART'); 
+END Default_Level__;
+
+-----------------------------------------------------------------------------
+-------------------- FOUNDATION1 METHODS ------------------------------------
+-----------------------------------------------------------------------------
+-- Init
+--   Dummy procedure that can be called at database startup to ensure that
+--   this package is loaded into memory for performance reasons only.
+-----------------------------------------------------------------------------
+
+PROCEDURE Init
+IS
+BEGIN
+   NULL;
+END Init;
+
+END &PKG;
+/
+SHOW ERROR
+-----------------------------------------------------------------------------
+-- REPORT TEXTS
+-----------------------------------------------------------------------------
+BEGIN
+    Report_SYS.Define_Report_Text_('&REP1VIEW', 'titleTotal', 'Total');
+END;
+/
+COMMIT
+/
+
+
+
+----------------------------------------------------------
+-- <UNDEFINE_SECTION>
+----------------------------------------------------------
+-- This section is reserved for undefine statements
+-- nothing should be manually written below because
+-- that would be overwritten everytime the IFS / Undefine
+-- tool is run.  
+-- Also do NOT make any changes to the above tag because
+-- this will result in duplicated code
+----------------------------------------------------------
+UNDEFINE MODULE
+UNDEFINE LU
+UNDEFINE PKG
+UNDEFINE TABLE
+UNDEFINE REP1VIEW
+UNDEFINE VIEW_RPV
+UNDEFINE REP1METHOD
+UNDEFINE RECORD_TYPE
+UNDEFINE CONTRACT
+UNDEFINE CONTRACT_DESC
+UNDEFINE DOCUMENT_PHRASE
+UNDEFINE PART_NO
+UNDEFINE PART_DESCRIPTION
+UNDEFINE UNIT_MEAS
+UNDEFINE CONFIGURATION_ID
+UNDEFINE QUANTITY
+UNDEFINE TOTAL_VALUE
+UNDEFINE QTY_WAIV_DEV_REJ
+UNDEFINE TOTAL_STANDARD
+UNDEFINE SUM_TOTAL
+UNDEFINE QTY_IN_TRANSIT
+UNDEFINE QTY_AT_CUSTOMER
+UNDEFINE SERIAL_NO
+UNDEFINE LOT_BATCH_NO
+UNDEFINE CONDITION_CODE
+UNDEFINE TOTAL_STANDARD_LEVEL
+UNDEFINE QTY_WAIV_DEV_REJ_LEVEL
+UNDEFINE QUANTITY_LEVEL
+UNDEFINE QTY_IN_TRANSIT_LEVEL
+UNDEFINE QTY_AT_CUSTOMER_LEVEL
+UNDEFINE TOTAL_VALUE_LEVEL
+UNDEFINE POSTING_COST_GROUP
+UNDEFINE COST_SOURCE
+UNDEFINE TOTAL_STANDARD_DETAIL
+UNDEFINE TOTAL_VALUE_DETAIL

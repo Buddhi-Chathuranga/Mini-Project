@@ -1,0 +1,460 @@
+------------------------------------------------------------------------------------------------------
+-- Date        Sign       History
+-- ----------  ------   ------------------------------------------------------------------------------
+-- 2019-05-17  fgusse   SCUXXW4-20685, Added field DocumentText
+-- 2018-11-20  HaPulk   SCUXXW4-9345, Converted from frmQuotePackageStructure using MTG Version:  1.33
+------------------------------------------------------------------------------------------------------
+
+client QuotePackageStructure;
+component ORDER;
+layer Core;
+projection QuotePackageStructureHandling;
+include fragment NonRentalSalesPartLovSelector;
+include fragment SalesPartPkgCompLovSelector;
+@DynamicComponentDependency PURCH
+include fragment PurchasePartSupplierLovSelector;
+-- For DocumentTexts
+include fragment DocumentText;
+include fragment OutputTypeLovSelector;
+include fragment MpccomPhraseTextLovSelector;
+include fragment CoChargeJoinSelector;
+include fragment IntorderPartLov;
+include fragment QuotationsPerSiteLovSelector;
+include fragment SalesInterimOrderCommands;
+include fragment SalesPartLovSelector;
+
+warningsenabled = ValidateCatalogNo;
+
+-------------------------------- MAIN PAGES ---------------------------------
+page Form using OrderQuotationLineSet {
+   label = "Package Part Structure";
+   selector OrderQuotationLineMasterSelector;
+   group QuotePackageStructureGroup;
+   list PackStructureList(PackStructureArray);
+}
+
+--------------------------------- COMMANDS ----------------------------------
+command ReleaseQuotationLineCommand for OrderQuotationLine {
+   label = "Release Quotation Line";
+   mode = SingleRecord;
+   enabled = [Objstate in("Planned", "Rejected", "Revised")];
+
+   execute {
+      confirm("The component line will be released.") {
+         when OK {
+            call Release();
+            refresh;
+         }
+         when CANCEL {
+            exit CANCEL;
+         }
+      }
+   }
+}
+command CancelQuotationLineCommand for OrderQuotationLine {
+   label = "Cancel Quotation Line";
+   mode = SingleRecord;
+   enabled = [Objstate in("Planned", "Released", "Rejected", "Revised")];
+
+   execute {
+      confirm("The component line will be cancelled.") {
+         when OK {
+            call Cancel();
+            refresh;
+         }
+         when CANCEL {
+            exit CANCEL;
+         }
+      }
+   }
+}
+command ConfigurationViewCommand for OrderQuotationLine {
+   --menuItem__View_Execute/this.tblPackStructure_colsConfigurationId.View("PACKSQ");
+   label = "View";
+   enabled = [(CatalogNo != null) and(ConfigurationId != "*")];
+   variable Usage {
+      type = Text;
+   }
+
+   execute {
+      set Usage = "SalesQuotation";
+      navigate "assistant/PartConfigurationAssistant/EditConfiguration?$action=InitConfiguration{  VarUsage:$[Usage],
+                                                                                                   VarMode:'View',
+                                                                                                   VarIdentity1:$[QuotationNo],
+                                                                                                   VarIdentity2:$[LineNo],
+                                                                                                   VarIdentity3:$[RelNo],
+                                                                                                   VarIdentity4:$[LineItemNo]}";
+   }
+}
+command ConfigurationEditCommand for OrderQuotationLine {
+   -- menuItem__Edit_Execute/tblPackStructure_colsConfigurationId.Edit("PACKSQ");
+   label = "Edit";
+   enabled = [(Configurable = true) and(CatalogNo != null) and(ConfigurationId != "*") and(Objstate = "Planned" or Objstate = "Released" or Objstate = "Revised")];
+   variable Usage {
+      type = Text;
+   }
+   execute {
+      set Usage = "SalesQuotation";
+      navigate "assistant/PartConfigurationAssistant/EditConfiguration?$action=InitConfiguration{  VarUsage:$[Usage],
+                                                                                                   VarMode:'Edit',
+                                                                                                   VarIdentity1:$[QuotationNo],
+                                                                                                   VarIdentity2:$[LineNo],
+                                                                                                   VarIdentity3:$[RelNo],
+                                                                                                   VarIdentity4:$[LineItemNo]}";
+   }
+}
+command ConfigurationCreateCommand for OrderQuotationLine {
+   -- menuItem__Create_Execute/tblPackStructure_colsConfigurationId.Create("PACKSQ")
+   label = "Create";
+   enabled = [(Configurable = true) and(CatalogNo != null) and(ConfigurationId = "*") and(Objstate = "Planned" or Objstate = "Released" or Objstate = "Revised")];
+   variable Usage {
+      type = Text;
+   }
+   execute {
+      set Usage = "SalesQuotation";
+      navigate "assistant/PartConfigurationAssistant/EditConfiguration?$action=InitConfiguration{  VarUsage:$[Usage],
+                                                                                                   VarMode:'Create',
+                                                                                                   VarIdentity1:$[QuotationNo],
+                                                                                                   VarIdentity2:$[LineNo],
+                                                                                                   VarIdentity3:$[RelNo],
+                                                                                                   VarIdentity4:$[LineItemNo]}";
+   }
+}
+command ConfigurationCopyFromCommand for OrderQuotationLine {
+   -- menuItem_Copy_Execute/tblPackStructure_colsConfigurationId.CopyFrom
+   label = "Copy From";
+   variable SourceVar {
+      type = Text;
+   }
+   enabled = [(Configurable = true) and(CatalogNo != null) and(ConfigurationId = "*") and(Objstate = "Planned" or Objstate = "Released" or Objstate = "Revised")];
+   execute {
+      set SourceVar = "OrderQuotationLine";
+      assistant CopyConfigurationForSales.CopyConfigurationForSalesAssistant(SourceVar, QuotationNo, LineNo, RelNo, LineItemNo, ConfiguredLinePriceId, PartNo, CatalogNo, CatalogDesc, Contract, CustomerNo, PlannedDeliveryDate) {
+         when CANCEL {
+            exit;
+         }
+         when OK {
+            call RefreshOrderQuotationLineAfterCrud();
+            exit;
+         }
+      }
+   }
+}
+command InventoryPartAvailabilityPlaCommand for OrderQuotationLine {
+   label = "Inventory Part Availability Planning";
+   enabled = [true];
+   mode = SelectedRecords;
+   variable ProjectIdVar {
+      type = Text;
+   }
+
+   bulkexecute {
+      call GetProjectId(parent.Contract) into ProjectIdVar;
+      bulkset ProjectIdVar = ProjectIdVar;
+      bulknavigate "page/InventoryPartAvailabilityPlanning/Form?$filter=PartNo eq $[PartNo] and Contract eq $[Contract] and  ConfigurationId eq $[ConfigurationId] and  ProjectId eq $[ProjectIdVar]";
+   }
+}
+command OrderLineHistoryCommand for OrderQuotationLine {
+   label = "Quotation Line History";
+   mode = SelectedRecords;
+   enabled = [true];
+
+   execute {
+      navigate "page/SalesQuotationLineHistory/Form?$filter=QuotationNo eq $[QuotationNo] and  LineNo eq $[LineNo] and  RelNo eq $[RelNo] and  LineItemNo eq $[LineItemNo]";
+   }
+}
+
+command CustomerWarrantyCommand for OrderQuotationLine {
+   label = "Customer Warranty";
+   mode = SingleRecord;
+   variable SelectMethodVar {
+      type = Boolean;
+   }
+   enabled = [not((Objstate != "Released" and Objstate != "Planned" and Objstate != "Revised") and not CustomerWarranty)];
+   execute {
+      set SelectMethodVar = false;
+      if [Objstate = "Released" or Objstate = "Planned" or Objstate = "Revised"] {
+         set SelectMethodVar = true;
+      }
+      assistant CustomerWarranty.CustomerWarrantyAssistant(CatalogNo, null, CustWarrantyId, SelectMethodVar) into(CustWarrantyId) {
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+command DocumentTextCommand for OrderQuotationLine {
+   label = "Document Text";
+   mode = SingleRecord;
+   enabled = [NoteId != null];
+
+   execute {
+      set LabelTextVar = "for Sales Quotation - ${QuotationNo}, ${CatalogNo}" {
+         translatable = true;
+      }
+      assistant DocumentText(NoteId, LabelTextVar) {
+         when OK {
+            exit OK;
+         }
+      }
+   }
+
+}
+
+--------------------------------- SELECTORS ---------------------------------
+@Override
+selector OrderQuotationLineMasterSelector for OrderQuotationLineMaster {
+   label = "${QuotationNo}";
+   static QuotationNo;
+   static LineNo;
+   static RelNo;
+   static CatalogNo;
+
+   exclude LineItemNo;
+}
+
+---------------------------------- GROUPS -----------------------------------
+group QuotePackageStructureGroup for OrderQuotationLineMaster {
+   label = "";
+
+   field QuotationNoRef {
+      size = Small;
+      searchable = false;
+   }
+   field LineNo {
+      size = Small;
+      searchable = false;
+   }
+   field RelNo {
+      size = Small;
+      searchable = false;
+   }
+   field ContractRef {
+      size = Small;
+      searchable = false;
+   }
+   badge Objstate {
+      label = "Status";
+      size = Small;
+      searchable = false;
+      emphasis Progress1 = [Objstate = "Planned"];
+      emphasis Progress3 = [Objstate = "Released"];
+      emphasis Progress5 = [Objstate = "Revised"];
+      emphasis Progress9 = [Objstate = "Won"];
+      emphasis Progress12 = [Objstate = "COCreated"];
+      emphasis Progress12 = [Objstate = "Lost"];
+      emphasis StateBlocked = [Objstate = "Rejected"];
+      emphasis StateCancelled = [Objstate = "Cancelled"];
+      style = TextOnly;
+   }
+
+   lov CatalogNoRef with ReferenceNonRentalSalesPartLovSelector {
+      searchable = false;
+      preview = NonRentalSalesPartLovCard;
+      description = CatalogDesc;
+   }
+   field BuyQtyDue {
+      size = Small;
+      searchable = false;
+   }
+
+}
+
+----------------------------------- LISTS -----------------------------------
+list PackStructureList for OrderQuotationLine {
+   label = "Component Parts";
+   orderby = LineItemNo;
+   editmode = SingleRowEdit;
+   multiselect = [true];
+   crudactions {
+      duplicate {
+         enabled = [false];
+      }
+   }
+   field LineItemNo {
+      size = Small;
+   }
+
+   lov CatalogNoRef with ReferenceSalesPartLovSelector {
+      validate command {
+         variable ValidateCatalogNoStructureVar {
+            type = ValidateCatalogNoStructure;
+         }
+
+         execute {
+            call ValidateCatalogNo(CatalogNo, QuotationNo, PriceConvFactor) into ValidateCatalogNoStructureVar;
+            set CatalogNo = ValidateCatalogNoStructureVar.CatalogNo;
+            set CatalogDesc = ValidateCatalogNoStructureVar.CatalogDesc;
+            set BuyQtyDue = ValidateCatalogNoStructureVar.BuyQtyDue;
+            set CurrencyRate = ValidateCatalogNoStructureVar.CurrencyRate;
+            set ConvFactor = ValidateCatalogNoStructureVar.ConvFactor;
+            set InvertedConvFactor = ValidateCatalogNoStructureVar.InvertedConvFactor;
+            set PartPrice = ValidateCatalogNoStructureVar.PartPrice;
+            set PriceSource = ValidateCatalogNoStructureVar.PriceSource;
+            set Discount = ValidateCatalogNoStructureVar.Discount;
+            set Cost = ValidateCatalogNoStructureVar.Cost;
+            set PartNo = ValidateCatalogNoStructureVar.PartNo;
+            set OrderSupplyType = ValidateCatalogNoStructureVar.OrderSupplyType;
+            set VendorNo = ValidateCatalogNoStructureVar.VendorNo;
+            set CatalogType = ValidateCatalogNoStructureVar.CatalogType;
+            set SalesUnitMeasure = ValidateCatalogNoStructureVar.SalesUnitMeasure;
+            set PriceQtyDue = ValidateCatalogNoStructureVar.PriceQtyDue;
+         }
+      }
+   }
+
+   field CatalogDesc;
+   field Configurable;
+   field ConfigurationId;
+   field QtyPerPkg {
+      validate command {
+         variable ValidateQuantityStructureVar {
+            type = ValidateQuantityStructure;
+         }
+         execute {
+            call ValidateQuantity(QuotationNo, LineNo, RelNo, QtyPerPkg, OrderSupplyType, CatalogNo, PriceConvFactor) into ValidateQuantityStructureVar;
+            set BuyQtyDue = ValidateQuantityStructureVar.BuyQtyDue;
+            if [DesiredQty = null] {
+               set DesiredQty = BuyQtyDue;
+            }
+            set PlannedDueDate = parent.PlannedDueDate;
+
+            set CurrencyRate = ValidateQuantityStructureVar.CurrencyRate;
+            set ConvFactor = ValidateQuantityStructureVar.ConvFactor;
+            set InvertedConvFactor = ValidateQuantityStructureVar.InvertedConvFactor;
+            set PartPrice = ValidateQuantityStructureVar.PartPrice;
+            set PriceSource = ValidateQuantityStructureVar.PriceSource;
+            set Discount = ValidateQuantityStructureVar.Discount;
+            set Cost = ValidateQuantityStructureVar.Cost;
+            set PriceListNo = ValidateQuantityStructureVar.PriceListNo;
+
+            set RevisedQtyDue = ValidateQuantityStructureVar.RevisedQtyDue;
+            set PriceQtyDue = ValidateQuantityStructureVar.PriceQtyDue;
+         }
+      }
+   }
+
+   field BuyQtyDue;
+   field DesiredQty;
+   field SalesUnitMeasureRef {
+      editable = [ETag = null];
+   }
+   field InterimOrder;
+
+   field OrderSupplyType {
+
+      validate command {
+         execute {
+            set VendorNo = null;
+         }
+      }
+   }
+   field VendorNo {
+      contactwidget {
+         enabled = [VendorNo != null];
+         source = Supplier;
+      }
+      editable = [OrderSupplyType = "PurchOrderTrans" or OrderSupplyType = "PurchOrderDir" or OrderSupplyType = "IntPurchTrans" or OrderSupplyType = "IntPurchDir"];
+
+      lovswitch {
+         when [OrderSupplyType = "PurchOrderTrans" or OrderSupplyType = "PurchOrderDir"] {
+            @DynamicComponentDependency PURCH
+            lov VendorNoRef with ReferencePurchasePartSupplierLovSelector using GetVendorCategoryType("E");
+         }
+         when [OrderSupplyType = "IntPurchTrans" or OrderSupplyType = "IntPurchDir"] {
+            @DynamicComponentDependency PURCH
+            lov VendorNoRef with ReferencePurchasePartSupplierLovSelector using GetVendorCategoryType("I");
+         }
+      }
+   }
+
+   @DynamicComponentDependency PURCH
+   field SupplierRef.AcquisitionSite {
+      label = "Supply Site";
+   }
+
+   badge Objstate {
+      label = "Status";
+      emphasis Progress1 = [Objstate = "Planned"];
+      emphasis Progress3 = [Objstate = "Released"];
+      emphasis Progress5 = [Objstate = "Revised"];
+      emphasis Progress9 = [Objstate = "Won"];
+      emphasis Progress12 = [Objstate = "COCreated"];
+      emphasis Progress12 = [Objstate = "Lost"];
+      emphasis StateBlocked = [Objstate = "Rejected"];
+      emphasis StateCancelled = [Objstate = "Cancelled"];
+      style = TextOnly;
+   }
+
+   field CustomerWarranty;
+   field CalcCharPrice;
+   field CharPrice;
+   field PriceQtyDue;
+
+   field SaleUnitPrice {
+      validate command {
+         variable CalculatePricesStructureVar {
+            type = CalculatePricesStructure;
+         }
+         execute {
+            call CalculatePrices(SaleUnitPrice, UnitPriceInclTax, Contract, QuotationNo, LineNo, RelNo) into CalculatePricesStructureVar;
+            set SaleUnitPrice = CalculatePricesStructureVar.SaleUnitPrice;
+            set UnitPriceInclTax = CalculatePricesStructureVar.UnitPriceInclTax;
+            set BaseSaleUnitPrice = CalculatePricesStructureVar.BaseSaleUnitPrice;
+            set BaseUnitPriceInclTax = CalculatePricesStructureVar.BaseUnitPriceInclTax;
+         }
+      }
+   }
+
+   field UnitPriceInclTax {
+      editable = [parent.UsePriceInclTax = "TRUE"];
+      validate command {
+         variable CalculatePricesStructureVar {
+            type = CalculatePricesStructure;
+         }
+         execute {
+            call CalculatePrices(SaleUnitPrice, UnitPriceInclTax, Contract, QuotationNo, LineNo, RelNo) into CalculatePricesStructureVar;
+            set SaleUnitPrice = CalculatePricesStructureVar.SaleUnitPrice;
+            set UnitPriceInclTax = CalculatePricesStructureVar.UnitPriceInclTax;
+            set BaseSaleUnitPrice = CalculatePricesStructureVar.BaseSaleUnitPrice;
+            set BaseUnitPriceInclTax = CalculatePricesStructureVar.BaseUnitPriceInclTax;
+         }
+      }
+   }
+   field DocumentText;
+   fieldranking LineItemNo, CatalogNoRef, ConfigurationId, OrderSupplyType, BuyQtyDue;
+
+   commandgroup StatusL1CmdGroup {
+
+      commandgroup StatusCmdGroup {
+         label = "Status";
+         command ReleaseQuotationLineCommand;
+         command CancelQuotationLineCommand;
+      }
+   }
+   commandgroup ConfigurationL1CmdGroup {
+
+      commandgroup ConfigurationCmdGroup {
+         label = "Configuration";
+         command ConfigurationViewCommand;
+         command ConfigurationEditCommand;
+         command ConfigurationCreateCommand;
+         command ConfigurationCopyFromCommand;
+         commandgroup InterimOrderCmdGroup {
+            label = "Interim Order";
+            @DynamicComponentDependency ORDSTR
+            command ConfigurationInterimOrderCreateCommand;
+            @DynamicComponentDependency ORDSTR
+            command ConfigurationInterimOrderViewEditCommand;
+            @DynamicComponentDependency ORDSTR
+            command ConfigurationInterimOrderRecalculateCostCommand;
+            @DynamicComponentDependency ORDSTR
+            command ConfigurationInterimOrderDeleteCommand;
+         }
+      }
+   }
+   command CustomerWarrantyCommand;
+   command OrderLineHistoryCommand;
+   command InventoryPartAvailabilityPlaCommand;
+   command DocumentTextCommand;
+}

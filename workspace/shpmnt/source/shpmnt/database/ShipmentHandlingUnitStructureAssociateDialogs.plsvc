@@ -1,0 +1,556 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     ShipmentHandlingUnitStructureAssociateDialogs
+--  Component:    SHPMNT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  210907  AsZelk  Bug SC21R2-2386, Added CRUD_Upload___() for clob attribute support.
+--  210818  RasDlk  SC21R2-2234, Modified Start_Attach_Parts_To_Handling_Unit___ to set a value for new_qty_to_attach_ when attach_full_qty is true
+--  210818          before the New_Or_Add_To_Existing method call.
+--  200515  ChFolk  Bug 153521 (SCZ-9877), Modified Copy_Details_To_Virtual___ to set values for the new attributes attach_full_qty and remaining_qty.
+--  200515          Modified Start_Attach_Parts_To_Handling_Unit___ to pass new parameter value for the method call New_Or_Add_To_Existing
+--  190521  SBalLK  SCUXXW4-21173, Modified Create_Shipment_Source_Reservation_Details___() method to consider Project Deliverables. 
+-----------------------------------------------------------------------------
+
+layer Core;
+
+-- dlgReassignHandlingUnit - Reassign Handling Unit
+FUNCTION Start_Reassign_Handling_Unit___ (
+   handling_unit_id_        IN  NUMBER,
+   source_shipment_id_      IN  NUMBER,
+   shipment_method_         IN  VARCHAR2,
+   destination_shipment_id_ IN  NUMBER,
+   release_reservations_    IN  VARCHAR2,
+   info$_                   OUT VARCHAR2 ) RETURN VARCHAR2
+IS
+   shipment_id_   NUMBER := destination_shipment_id_;
+BEGIN
+   Shipment_Initial_Check___(source_shipment_id_);
+   Handling_Unit_Extended_Initial_Check___(handling_unit_id_);
+   Reassign_Shipment_Utility_API.Reassign_Hu_Structure( info$_,
+                                                        shipment_id_,
+                                                        source_shipment_id_,
+                                                        handling_unit_id_,
+                                                        release_reservations_,
+                                                        shipment_method_ );
+   RETURN shipment_id_;
+END Start_Reassign_Handling_Unit___;
+
+FUNCTION Check_Auto_Connection_Blocked___ (
+   destination_shipment_id_ IN NUMBER) RETURN BOOLEAN
+IS
+   auto_connection_blocked_ BOOLEAN := FALSE;
+BEGIN
+   IF Shipment_API.Get_Auto_Connection_Blocked_Db(destination_shipment_id_) = Fnd_Boolean_API.DB_TRUE THEN
+      auto_connection_blocked_ := TRUE;
+   END IF;
+   RETURN auto_connection_blocked_;
+END Check_Auto_Connection_Blocked___;
+
+-- dlgAddExistingHandlingUnits - Add Existing Handling Unit
+PROCEDURE Start_Adding_Existing_Handling_Units___ (
+   key_   IN  Shipment_Handling_Units_Virtual_Key,
+   info$_ OUT VARCHAR2)
+IS
+   shpmnt_hndl_unit_rec_      Shipment_Handling_Units_Virtual_Rec;
+   shipment_id_               NUMBER := NULL;
+   parent_handling_unit_id_   NUMBER := NULL;
+BEGIN
+   shpmnt_hndl_unit_rec_ := Get_Record___(key_);
+   IF shpmnt_hndl_unit_rec_.shipment_id IS NOT NULL AND shpmnt_hndl_unit_rec_.shipment_id != 0 THEN
+      shipment_id_ := shpmnt_hndl_unit_rec_.shipment_id;
+   END IF;
+   IF shpmnt_hndl_unit_rec_.parent_handling_unit_id IS NOT NULL AND shpmnt_hndl_unit_rec_.parent_handling_unit_id != 0 THEN
+      parent_handling_unit_id_ := shpmnt_hndl_unit_rec_.parent_handling_unit_id;
+   END IF;
+   FOR rec_ IN Get_Handling_Units_Array___(key_) LOOP
+      Shipment_Handling_Utility_API.Add_Hu_To_Shipment(rec_.handling_unit_id, shipment_id_, parent_handling_unit_id_);
+   END LOOP;
+   
+   IF parent_handling_unit_id_ IS NOT NULL AND parent_handling_unit_id_ != 0 THEN
+      info$_ := Handling_Unit_API.Get_Max_Capacity_Exceeded_Info(parent_handling_unit_id_);
+   END IF;
+END Start_Adding_Existing_Handling_Units___;
+
+FUNCTION Fetch_Handling_Unit_Data___ (
+   handling_unit_id_ IN NUMBER) RETURN Existing_Handling_Unit_Structure_Rec
+IS
+   handling_unit_rec_      Handling_Unit_API.Public_Rec;
+   handling_unit_type_rec_ Handling_Unit_Type_API.Public_Rec;
+   existing_unit_rec_      Existing_Handling_Unit_Structure_Rec;
+BEGIN
+   handling_unit_rec_      := Handling_Unit_API.Get(handling_unit_id_);
+   handling_unit_type_rec_ := Handling_Unit_Type_API.Get(handling_unit_rec_.handling_unit_type_id);
+   
+   existing_unit_rec_.handling_unit_id           := handling_unit_id_;
+   existing_unit_rec_.sscc                       := handling_unit_rec_.sscc;
+   existing_unit_rec_.alt_handling_unit_label_id := handling_unit_rec_.alt_handling_unit_label_id;
+   existing_unit_rec_.handling_unit_type_id      := handling_unit_rec_.handling_unit_type_id;
+   existing_unit_rec_.shipment_id                := handling_unit_rec_.shipment_id;
+   existing_unit_rec_.source_ref_type            := handling_unit_rec_.source_ref_type;
+   existing_unit_rec_.has_stock_reservation      := handling_unit_rec_.has_stock_reservation;
+   existing_unit_rec_.handling_unit_category_id  := handling_unit_type_rec_.handling_unit_category_id;
+   
+   RETURN existing_unit_rec_;
+END Fetch_Handling_Unit_Data___;
+
+FUNCTION Fetch_Handling_Unit_Id_From_Sscc___ (
+   sscc_id_ IN VARCHAR2) RETURN NUMBER
+IS
+BEGIN
+	RETURN Handling_Unit_API.Get_Handling_Unit_From_Sscc(sscc_id_);
+END Fetch_Handling_Unit_Id_From_Sscc___;
+
+
+FUNCTION Fetch_Handling_Unit_Id_From_Alt_Label___ (
+   alt_handling_unit_label_id_ IN VARCHAR2) RETURN NUMBER
+IS
+BEGIN
+	RETURN Handling_Unit_API.Get_Handling_Unit_From_Alt_Id(alt_handling_unit_label_id_);
+END Fetch_Handling_Unit_Id_From_Alt_Label___;
+
+
+-- dlgIdentifyPartsToHandlingUnit - Attach Reservations
+@Override
+PROCEDURE CRUD_Create___(
+   newrec_ IN Shipment_Source_Virtual_Rec )
+IS
+BEGIN
+   super(newrec_);
+   Create_Shipment_Source_Line_Details___(newrec_);
+END CRUD_Create___;
+
+
+PROCEDURE Create_Shipment_Source_Line_Details___(
+   master_rec_ IN Shipment_Source_Virtual_Rec)
+IS
+   line_list_           json_array_t := json_array_t.parse(master_rec_.shipment_line_array);
+   current_selection_   VARCHAR2(4000);
+   shipmnet_line_no_    NUMBER;
+   quantity_            NUMBER;
+   newrec_              Shipment_Source_Line_Virtual_Rec;
+   default_newrec_      Shipment_Source_Line_Virtual_Rec;
+   master_key_          Shipment_Source_Virtual_Key;
+   ship_line_rec_       Shipment_Line_API.Public_Rec;
+BEGIN
+   master_key_.objkey                  := master_rec_.objkey;
+   default_newrec_.shipment_id         := master_rec_.shipment_id;
+   default_newrec_.attached_state      := 'NOT_ATTACHED';
+   default_newrec_.total_qty_attached  := 0;
+   newrec_                             := default_newrec_;
+   
+   FOR count_ IN 0 .. line_list_.get_size - 1  LOOP 
+      current_selection_ := line_list_.get_string(count_);
+      
+      shipmnet_line_no_  := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'SHIPMENT_LINE_NO'));
+      quantity_          := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'QUANTITY'));
+      IF shipmnet_line_no_ IS NOT NULL THEN
+         newrec_.shipment_line_no := shipmnet_line_no_;
+         ship_line_rec_           := Shipment_Line_API.Get(master_rec_.shipment_id, newrec_.shipment_line_no);
+         newrec_.inventory_uom    := Inventory_Part_API.Get_Unit_Meas(Shipment_API.Get_Contract(master_rec_.shipment_id), ship_line_rec_.inventory_part_no);
+         
+         IF master_rec_.origin = 'UnattachedShipmentLinesOnHandlingUnit' THEN
+            newrec_.sales_qty_to_attach     := quantity_;
+            newrec_.inventory_qty_to_attach := quantity_ * ship_line_rec_.conv_factor / ship_line_rec_.inverted_conv_factor;
+         ELSE
+            newrec_.sales_qty_to_attach     := quantity_ / ship_line_rec_.conv_factor * ship_line_rec_.inverted_conv_factor;
+            newrec_.inventory_qty_to_attach := quantity_;
+         END IF;
+         New_Detail___(master_key_, newrec_);
+         newrec_ := default_newrec_;
+      END IF;
+      
+   END LOOP;
+END Create_Shipment_Source_Line_Details___;
+
+@Override
+PROCEDURE New_Detail___ (
+   master_ IN Shipment_Source_Virtual_Key,
+   detail_ IN OUT Shipment_Source_Line_Virtual_Rec )
+IS
+BEGIN
+   super(master_, detail_);
+   Create_Shipment_Source_Reservation_Details___(detail_);
+END New_Detail___;
+
+PROCEDURE Create_Shipment_Source_Reservation_Details___(
+   master_rec_ IN Shipment_Source_Line_Virtual_Rec )
+IS
+   master_key_          Shipment_Source_Line_Virtual_Key;
+   shipment_line_rec_   Shipment_Line_API.Public_Rec;
+   newrec_              Shipment_Source_Reservation_Stock_Virtual_Rec;
+
+   CURSOR get_reservation_lines( shipment_id_        IN NUMBER,
+                                 source_ref1_        IN VARCHAR2,
+                                 source_ref2_        IN VARCHAR2,
+                                 source_ref3_        IN VARCHAR2,
+                                 source_ref4_        IN VARCHAR2,
+                                 source_ref_type_db_ IN VARCHAR2) IS
+      SELECT *
+      FROM  ship_source_reservation_stock
+      WHERE source_ref1           = source_ref1_
+      AND   NVL(source_ref2, '*') = NVL(source_ref2_, '*')
+      AND   NVL(source_ref3, '*') = NVL(source_ref3_, '*')
+      AND   NVL(source_ref4, '*') = NVL(source_ref4_, '*')
+      AND   source_ref_type_db    = source_ref_type_db_
+      AND   shipment_id           = shipment_id_
+      AND   ( QTY_ASSIGNED - NVL(Shipment_Reserv_Handl_Unit_API.Get_Quantity_On_Shipment(SOURCE_REF1,          NVL(SOURCE_REF2,'*'), NVL(SOURCE_REF3,'*'), NVL(SOURCE_REF4,'*'),
+                                                                                         SOURCE_REF_TYPE_DB,   CONTRACT,             PART_NO,              LOCATION_NO,          
+                                                                                         LOT_BATCH_NO,         SERIAL_NO,            ENG_CHG_LEVEL,        WAIV_DEV_REJ_NO, 
+                                                                                         ACTIVITY_SEQ,         HANDLING_UNIT_ID,     CONFIGURATION_ID,     PICK_LIST_NO, 
+                                                                                         SHIPMENT_ID), 0)) > 0;
+BEGIN
+   shipment_line_rec_ := Shipment_Line_API.Get(master_rec_.shipment_id, master_rec_.shipment_line_no);
+   master_key_.objkey := master_rec_.objkey;
+   FOR rec_ IN get_reservation_lines( shipment_line_rec_.shipment_id,
+                                      shipment_line_rec_.source_ref1, 
+                                      NVL(shipment_line_rec_.source_ref2, '*'),
+                                      NVL(shipment_line_rec_.source_ref3, '*'),
+                                      NVL(shipment_line_rec_.source_ref4, '*'),
+                                      shipment_line_rec_.source_ref_type ) LOOP
+      newrec_.source_ref1         := rec_.source_ref1;
+      newrec_.source_ref2         := rec_.source_ref2;
+      newrec_.source_ref3         := rec_.source_ref3;
+      newrec_.source_ref4         := rec_.source_ref4;
+      newrec_.shipment_id         := rec_.shipment_id;
+      newrec_.contract            := rec_.contract;
+      newrec_.part_no             := rec_.part_no;
+      newrec_.location_no         := rec_.location_no;
+      newrec_.lot_batch_no        := rec_.lot_batch_no;
+      newrec_.serial_no           := rec_.serial_no;
+      newrec_.eng_chg_level       := rec_.eng_chg_level;
+      newrec_.waiv_dev_rej_no     := rec_.waiv_dev_rej_no;
+      newrec_.activity_seq        := rec_.activity_seq;
+      newrec_.handling_unit_id    := rec_.handling_unit_id;
+      newrec_.configuration_id    := rec_.configuration_id;
+      newrec_.pick_list_no        := rec_.pick_list_no;
+      newrec_.attach              := FALSE;
+      newrec_.qty_assigned        := rec_.qty_assigned;
+      newrec_.warehouse           := rec_.warehouse;
+      newrec_.bay_no              := rec_.bay_no;
+      newrec_.row_no              := rec_.row_no;
+      newrec_.tier_no             := rec_.tier_no;
+      newrec_.bin_no              := rec_.bin_no;
+      newrec_.source_ref_type_db  := rec_.source_ref_type_db;
+      newrec_.inventory_uom       := Inventory_Part_API.Get_Unit_Meas(rec_.contract, rec_.part_no);
+      newrec_.remaining_qty_to_attach := Shipment_Reserv_Handl_Unit_API.Get_Qty_To_Attach_On_Res(rec_.source_ref1, NVL(rec_.source_ref2,'*'), NVL(rec_.source_ref3,'*'), NVL(rec_.source_ref4,'*'), rec_.source_ref_type_db, 
+                                                                                                 rec_.contract, rec_.part_no, rec_.location_no, rec_.lot_batch_no, rec_.serial_no, rec_.eng_chg_level, rec_.waiv_dev_rej_no, rec_.activity_seq, rec_.handling_unit_id, rec_.configuration_id, rec_.pick_list_no, rec_.shipment_id);
+      New_Detail___(master_key_, newrec_);
+   END LOOP;
+END Create_Shipment_Source_Reservation_Details___;
+
+@Override
+PROCEDURE CRUD_Update___(
+   old_ IN Shipment_Source_Line_Virtual_Rec,
+   new_ IN Shipment_Source_Line_Virtual_Rec )
+IS
+   newrec_ Shipment_Source_Line_Virtual_Rec := new_;
+BEGIN
+   IF newrec_.total_qty_attached != 0 AND newrec_.total_qty_attached != old_.total_qty_attached THEN
+      IF newrec_.total_qty_attached >= newrec_.inventory_qty_to_attach THEN
+         newrec_.attached_state := 'ATTACHED';
+      ELSE
+         newrec_.attached_state := 'PARTIALLY_ATTACHED';
+      END IF;
+   ELSE
+      newrec_.attached_state := 'NOT_ATTACHED';
+   END IF;
+   super(old_, newrec_);
+END CRUD_Update___;
+
+@Override
+PROCEDURE CRUD_Update___(
+   old_ IN Shipment_Source_Reservation_Stock_Virtual_Rec,
+   new_ IN Shipment_Source_Reservation_Stock_Virtual_Rec )
+IS
+BEGIN
+   super(old_, new_);
+   Calculate_Attached_Qty___(new_);
+END CRUD_Update___;
+
+PROCEDURE Calculate_Attached_Qty___(
+   line_rec_ IN Shipment_Source_Reservation_Stock_Virtual_Rec )
+IS
+   parent_oldrec_       Shipment_Source_Line_Virtual_Rec;
+   parent_newrec_       Shipment_Source_Line_Virtual_Rec;
+   parent_key_          Shipment_Source_Line_Virtual_Key;
+   total_qty_attached_  NUMBER := 0;
+BEGIN
+   parent_key_.objkey := line_rec_.parent_objkey;
+   parent_oldrec_     := Get_Record___ (parent_key_);
+   parent_newrec_     := parent_oldrec_;
+   
+   FOR rec_ IN Get_Reservation_Stock_Array___(parent_key_) LOOP
+      IF rec_.attach = 'TRUE' THEN
+         total_qty_attached_ := total_qty_attached_ + rec_.qty_to_attach;
+      END IF;
+   END LOOP;
+   parent_newrec_.total_qty_attached := total_qty_attached_;
+   
+   IF parent_oldrec_.total_qty_attached != parent_newrec_.total_qty_attached THEN
+      CRUD_Update___(parent_oldrec_, parent_newrec_);
+   END IF;
+END Calculate_Attached_Qty___;
+
+PROCEDURE Attach_Connected_Reservation___ (
+	key_ IN Shipment_Source_Line_Virtual_Key)
+IS
+   line_rec_         Shipment_Source_Line_Virtual_Rec;
+   oldrec_           Shipment_Source_Reservation_Stock_Virtual_Rec;
+   newrec_           Shipment_Source_Reservation_Stock_Virtual_Rec;
+   reservation_key_  Shipment_Source_Reservation_Stock_Virtual_Key;
+   
+   TYPE Objkey_Rec IS RECORD(objkey VARCHAR2(50));
+   TYPE Objkey_Tab IS TABLE OF Objkey_Rec INDEX BY PLS_INTEGER;
+   objkey_list_       Objkey_Tab;
+BEGIN
+   line_rec_ := Get_Record___(key_);
+   FOR reservation_rec_ IN Get_Reservation_Stock_Array___(key_) LOOP
+      IF reservation_rec_.attach = 'FALSE' THEN
+         objkey_list_(objkey_list_.count +1).objkey :=  reservation_rec_.objkey;
+      END IF;
+   END LOOP;
+   
+   IF objkey_list_.count >0 THEN
+      FOR count_ IN objkey_list_.FIRST..objkey_list_.LAST LOOP
+         reservation_key_.objkey := objkey_list_(count_).objkey;
+         oldrec_ := Get_Record___(reservation_key_);
+         newrec_ := oldrec_;
+         IF NOT newrec_.attach AND (line_rec_.inventory_qty_to_attach - line_rec_.total_qty_attached ) > 0 THEN
+            newrec_.attach := TRUE;
+            IF (line_rec_.inventory_qty_to_attach - line_rec_.total_qty_attached )  < newrec_.remaining_qty_to_attach THEN
+               newrec_.qty_to_attach := line_rec_.inventory_qty_to_attach - line_rec_.total_qty_attached ;
+            ELSE
+               newrec_.qty_to_attach := newrec_.remaining_qty_to_attach;
+            END IF;
+               
+            CRUD_Update___(oldrec_, newrec_);
+            line_rec_ := Get_Record___(key_);
+         END IF;
+      END LOOP;
+   END IF;
+END Attach_Connected_Reservation___;
+
+PROCEDURE Start_Identify_Parts_To_Handling_Unit___ (
+	key_ IN Shipment_Source_Virtual_Key)
+IS
+   master_rec_                Shipment_Source_Virtual_Rec;
+   line_key_                  Shipment_Source_Line_Virtual_Key;
+   shipment_location_no_      VARCHAR2(35);
+   handling_unit_loaction_no_ VARCHAR2(35);
+BEGIN
+   master_rec_ := Get_Record___(key_);
+   FOR line_rec_ IN Get_Shipment_Source_Line_Array___(key_) LOOP
+      line_key_.objkey := line_rec_.objkey;
+      shipment_location_no_ := NULL;
+      handling_unit_loaction_no_ := NULL;
+      IF line_rec_.total_qty_attached > line_rec_.inventory_qty_to_attach THEN
+         Error_SYS.Record_General(lu_name_, 'ATTACHQTYLARGE: The quantity attached :P1 cannot exceed the quantity to attach :P2 for this reservation line :P3.', line_rec_.total_qty_attached, line_rec_.inventory_qty_to_attach, line_rec_.shipment_line_no);
+      END IF;
+      FOR reservation_stock_rec_ IN Get_Reservation_Stock_Array___(line_key_) LOOP
+         IF reservation_stock_rec_.qty_to_attach > reservation_stock_rec_.remaining_qty_to_attach AND reservation_stock_rec_.attach = 'TRUE'THEN
+            Error_SYS.Record_General(lu_name_, 'QTYEXCEEDED: The quantity to attach :P1 cannot exceed the remaining qty to attach :P2 for this reservation line.', reservation_stock_rec_.qty_to_attach, reservation_stock_rec_.remaining_qty_to_attach);
+         END IF;
+         
+         IF ( reservation_stock_rec_.qty_to_attach > 0 AND Inventory_Location_API.Get_Location_Type_Db(reservation_stock_rec_.contract, reservation_stock_rec_.location_no) = Inventory_Location_Type_API.DB_SHIPMENT ) THEN
+            handling_unit_loaction_no_ := Handling_Unit_API.Get_Location_No(master_rec_.handling_unit_id);
+            -- If the reservation is on a shipment location it needs to be on the same location as the Handling Unit (if it has a location)
+            IF (handling_unit_loaction_no_ IS NOT NULL AND handling_unit_loaction_no_ != reservation_stock_rec_.location_no ) THEN
+               Error_SYS.Record_General(lu_name_, 'ATTACHONHULOCATION: Cannot attach a reservation on shipment location :P1 to a Handling Unit in shipment location :P2.', reservation_stock_rec_.location_no, handling_unit_loaction_no_);
+               -- If there are several reservations on shipment locations we can only allow attaching reservations from the same shipment location.
+            ELSIF (shipment_location_no_ IS NOT NULL AND shipment_location_no_ != reservation_stock_rec_.location_no ) THEN
+               Error_SYS.Record_General(lu_name_, 'ATTACHDIFFLOCATION: Cannot attach reservations from different Shipment Locations to the same Handling Unit.');
+            END IF;
+            shipment_location_no_ := reservation_stock_rec_.location_no;
+         END IF;
+         -- Start attach reservations.
+         IF reservation_stock_rec_.attach = 'TRUE' THEN
+            
+            Shipment_Initial_Check___(master_rec_.shipment_id);
+            User_Allowed_SIte_API.Is_Authorized(reservation_stock_rec_.contract);
+            
+            Shipment_Reserv_Handl_Unit_API.New_Or_Add_To_Existing(reservation_stock_rec_.source_ref1,
+                                                                  NVL(reservation_stock_rec_.source_ref2, '*'),
+                                                                  NVL(reservation_stock_rec_.source_ref3, '*'),
+                                                                  NVL(reservation_stock_rec_.source_ref4, '*'),
+                                                                  reservation_stock_rec_.contract,
+                                                                  reservation_stock_rec_.part_no,
+                                                                  reservation_stock_rec_.location_no,
+                                                                  reservation_stock_rec_.lot_batch_no,
+                                                                  reservation_stock_rec_.serial_no,
+                                                                  reservation_stock_rec_.eng_chg_level,
+                                                                  reservation_stock_rec_.waiv_dev_rej_no,
+                                                                  reservation_stock_rec_.activity_seq,
+                                                                  reservation_stock_rec_.handling_unit_id,
+                                                                  reservation_stock_rec_.configuration_id,
+                                                                  reservation_stock_rec_.pick_list_no,
+                                                                  master_rec_.shipment_id,
+                                                                  line_rec_.shipment_line_no,
+                                                                  master_rec_.handling_unit_id,
+                                                                  reservation_stock_rec_.qty_to_attach,
+                                                                  reservation_stock_rec_.catch_qty_to_attach );
+         END IF;
+      END LOOP;
+   END LOOP;
+END Start_Identify_Parts_To_Handling_Unit___;
+
+
+-- Connect Parts to Handling Unit.
+@Override
+PROCEDURE CRUD_Upload___ (
+   objkey_                                  IN VARCHAR2,
+   shipment_line_no_list##                  IN CLOB,
+   connect_parts_to_handling_unit_virtual## IN VARCHAR2 )
+IS
+   parent_rec_    Connect_Parts_To_Handling_Unit_Virtual_Rec; 
+   parent_key_    Connect_Parts_To_Handling_Unit_Virtual_Key;
+BEGIN
+   super(objkey_, shipment_line_no_list##, connect_parts_to_handling_unit_virtual##);
+   parent_key_.objkey   := objkey_;   
+   parent_rec_          := Get_Record___(parent_key_);
+   Copy_Details_To_Virtual___(parent_rec_, shipment_line_no_list##);
+END CRUD_Upload___;
+
+PROCEDURE Copy_Details_To_Virtual___(
+   master_rec_                IN Connect_Parts_To_Handling_Unit_Virtual_Rec,
+   shipment_line_no_list##    IN CLOB)
+IS
+   line_list_                json_array_t := json_array_t.parse(shipment_line_no_list##);
+   current_selection_        VARCHAR2(32000);
+   master_key_               Connect_Parts_To_Handling_Unit_Virtual_Key;
+   detail_                   Parts_For_Handling_Unit_Virtual_Rec;
+   shipmnet_line_rec_        Shipment_Line_API.Public_Rec;
+   shipmnet_line_no_         NUMBER;
+BEGIN
+   master_key_.objkey := master_rec_.objkey;
+   FOR count_ IN 0 .. line_list_.get_size - 1  LOOP 
+      current_selection_ := line_list_.get_string(count_);
+      
+      shipmnet_line_no_        := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'SHIPMENT_LINE_NO'));
+      shipmnet_line_rec_       := Shipment_Line_API.Get(master_rec_.shipment_id, shipmnet_line_no_);
+      
+      detail_.shipment_id      := master_rec_.shipment_id;
+      detail_.shipment_line_no := shipmnet_line_no_;
+      detail_.qty_to_attach    := Shipment_Handling_Utility_API.Get_Remaining_Qty_To_Attach( master_rec_.shipment_id,
+                                                                                             shipmnet_line_rec_.source_ref1,
+                                                                                             shipmnet_line_rec_.source_ref2,
+                                                                                             shipmnet_line_rec_.source_ref3,
+                                                                                             shipmnet_line_rec_.source_ref4, 
+                                                                                             shipmnet_line_rec_.source_ref_type );
+      detail_.remaining_qty    := detail_.qty_to_attach;
+      detail_.attach_full_qty  := TRUE;
+      New_Detail___(master_key_, detail_);
+   END LOOP;
+END Copy_Details_To_Virtual___;
+
+
+FUNCTION Start_Attach_Parts_To_Handling_Unit___ (
+	key_     IN  Connect_Parts_To_Handling_Unit_Virtual_Key,
+	info$_   OUT VARCHAR2 ) RETURN CLOB
+IS
+   parent_rec_        Connect_Parts_To_Handling_Unit_Virtual_Rec;
+   line_rec_          Parts_For_Handling_Unit_Virtual_Rec;
+   line_key_          Parts_For_Handling_Unit_Virtual_Key;
+   quantity_array_    VARCHAR2(32000) := NULL;
+   attach_full_qty_   VARCHAR2(5);
+   new_qty_to_attach_ NUMBER;
+   shipment_line_rec_ Shipment_Line_API.Public_Rec;
+BEGIN
+   parent_rec_ := Get_Record___(key_);
+   Client_SYS.Clear_Attr(quantity_array_);
+	FOR virtual_list_rec_ IN Get_Parts_For_Handling_Unit_Array___(key_) LOOP
+      line_key_.objkey := virtual_list_rec_.objkey;
+      line_rec_        := Get_Record___(line_key_);
+      IF (line_rec_.attach_full_qty) THEN
+         attach_full_qty_ := 'TRUE';
+      ELSE   
+         attach_full_qty_ := 'FALSE';
+      END IF;   
+      IF (line_rec_.attach_full_qty) THEN
+         shipment_line_rec_ := Shipment_Line_API.Get(parent_rec_.shipment_id, line_rec_.shipment_line_no);
+         new_qty_to_attach_ := Shipment_Handling_Utility_API.Get_Remaining_Qty_To_Attach(parent_rec_.shipment_id,
+                                                                                         shipment_line_rec_.source_ref1,
+                                                                                         shipment_line_rec_.source_ref2,
+                                                                                         shipment_line_rec_.source_ref3,
+                                                                                         shipment_line_rec_.source_ref4,
+                                                                                         shipment_line_rec_.source_ref_type);
+      END IF;
+      IF line_rec_.qty_to_attach > 0 THEN
+         Shipment_Line_Handl_Unit_API.New_Or_Add_To_Existing( parent_rec_.shipment_id,
+                                                              line_rec_.shipment_line_no, 
+                                                              parent_rec_.handling_unit_id, 
+                                                              line_rec_.qty_to_attach,
+                                                              NULL,
+                                                              FALSE,
+                                                              NULL,
+                                                              attach_full_qty_);
+         IF NOT line_rec_.attach_full_qty THEN
+            new_qty_to_attach_ := line_rec_.qty_to_attach;
+         END IF;   
+         quantity_array_ := CONCAT(quantity_array_, REPLACE(REPLACE('"SHIPMENT_LINE_NO=:P1^QUANTITY=:P2^",', ':P1', line_rec_.shipment_line_no), ':P2', new_qty_to_attach_));
+      END IF;
+   END LOOP;
+   info$_ := Handling_Unit_API.Get_Max_Capacity_Exceeded_Info(parent_rec_.handling_unit_id);
+   RETURN TO_CLOB(CONCAT(CONCAT('[', SUBSTR(quantity_array_, 1, LENGTH(quantity_array_) -1 )), ']'));
+END Start_Attach_Parts_To_Handling_Unit___;
+
+
+-- Attach Reservation Warnnings
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Attach_Reservation_Warnning_Virtual_Rec )
+IS
+BEGIN
+   super(rec_);
+   Create_Attach_Reservation_Warnning_Lines___(rec_);
+END CRUD_Create___;
+
+PROCEDURE Create_Attach_Reservation_Warnning_Lines___(
+   master_rec_ IN Attach_Reservation_Warnning_Virtual_Rec )
+IS
+   line_list_           json_array_t := json_array_t.parse(master_rec_.shipment_line_array);
+   current_selection_   VARCHAR2(32000);
+   shipmnet_line_no_    NUMBER;
+   quantity_            NUMBER;
+   
+   
+   master_key_        Attach_Reservation_Warnning_Virtual_Key;
+   defualt_rec_       Attach_Reservation_Warnning_Line_Virtual_Rec;
+   newrec_           Attach_Reservation_Warnning_Line_Virtual_Rec;
+BEGIN
+   master_key_.objkey       := master_rec_.objkey;
+   defualt_rec_.shipment_id := master_rec_.shipment_id;
+   defualt_rec_.result      := Fnd_Yes_No_API.DB_NO;
+   newrec_                  := defualt_rec_;
+   
+   FOR count_ IN 0 .. line_list_.get_size - 1  LOOP 
+      current_selection_ := line_list_.get_string(count_);
+      
+      shipmnet_line_no_  := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'SHIPMENT_LINE_NO'));
+      quantity_          := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'QUANTITY'));
+
+      IF shipmnet_line_no_ IS NOT NULL THEN
+         newrec_.shipment_line_no := shipmnet_line_no_;
+         newrec_.quantity         := quantity_;
+         
+         New_Detail___(master_key_, newrec_);
+         newrec_ := defualt_rec_;
+      END IF;
+   END LOOP;
+END Create_Attach_Reservation_Warnning_Lines___;
+
+FUNCTION Get_Shipment_Lines_Array_To_Reduce___ (
+	key_ IN Attach_Reservation_Warnning_Virtual_Key) RETURN VARCHAR2
+IS
+   attr_ VARCHAR2(32000) := NULL;
+BEGIN
+   FOR rec_ IN Get_Reservation_Warnning_Array___(key_) LOOP
+      IF rec_.result = Fnd_Yes_No_API.DB_NO THEN
+         attr_ := CONCAT(attr_, REPLACE(REPLACE('"SHIPMENT_LINE_NO=:P1^QUANTITY=:P2^",', ':P1', rec_.shipment_line_no), ':P2', rec_.quantity));
+      END IF;
+   END LOOP;
+   RETURN CONCAT(CONCAT('[', SUBSTR(attr_, 1, LENGTH(attr_) -1 )), ']');
+END Get_Shipment_Lines_Array_To_Reduce___;

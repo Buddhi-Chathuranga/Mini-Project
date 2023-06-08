@@ -1,0 +1,516 @@
+--------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  ---------------------------------------------------------------
+-- 2021-10-28  DigPlk  SC21R2-2882, Added 'GetSessionIdSelection' function to support IdentifySerialsInLocRepeatAssistant.
+-- 2020-07-08  DIJWLK  SCXTEND-4338, Added 'insertable = [false]' flag to exclude fields when duplicating
+-- 2019-07-10  ChFolk  SCUXXW4-22798, Modified Project information by adding get methods to increase performance.
+-- 2019-06-11  DaZase  SCUXXW4-12778, Added function SetLovUserWhereForPart.
+-- 2019-06-11  JaThlk  SCUXXW4-14147, Added a dummy attribute, CostDetailId in the entity, InventoryPartInStock.
+-- 2019-04-26  DaZase  SCUXXW4-19619, Added initialcheck on unbound action.
+-- 2019-04-04  SWiclk  SCUXXW4-12331, Implemented Define Cost Structure functionality.
+-- 2019-04-01  ShKolk  SCUXXW4-17948, Added actions UpdateCountingResult and CreateCountingResult to avoid overtaking crud methods in plsvc
+-- 2018-06-13  SWiclk  SCUXXW4-6059, Converted from frmCountPart using MTG Version: 1.17
+--------------------------------------------------------------------------------------
+projection CountPerInventoryPart;
+component INVENT;
+layer Core;
+description "Use this API to display the inventory part for which you want to enter the count.";
+category Users;
+include fragment InventoryPartLov4Selector;
+
+include fragment HandlingUnitLov9Selector;
+include fragment InventoryLocation8Selector;
+include fragment UserAllowedSiteLovSelector;
+include fragment InventoryPartLovSelector;
+// Everything needed for the IdentifySerialsInLocationAssistant
+include fragment IdentifySerialsInLocationAssistant;
+include fragment TemporaryPartTrackingSerialSelector;
+include fragment SequenceGeneratorAssistant;
+include fragment IdentifySerialsByBarcodeDynamicAssistant;
+include fragment DefineCostStructureAssistant;
+
+----------------------------- MAIN ENTRY POINTS -----------------------------
+entityset InventoryPartConfigurations for InventoryPartConfiguration;
+
+------------------------------ ENTITY DETAILS -------------------------------
+
+@Override
+entity ConditionCode {
+   attribute ConditionCodeTypeDb Boolean("DEF_COND_CODE", "NOT_DEF_COND_CODE") {
+      fetch = "CONDITION_CODE_TYPE_DB";
+      label = "Default Condition Code";
+   }
+
+}
+
+@Override
+entity InventoryPartConfiguration using InventoryPartConfig {
+   crud = Read;
+
+   from = "inventory_part_config_count";
+
+   keys = PartNo, Contract, ConfigurationId {
+      where = "PART_NO = :PartNo and CONTRACT = :Contract and CONFIGURATION_ID = :ConfigurationId";
+   }
+   attribute PartNo Text {
+      maxlength = 100;
+   }
+   attribute Contract Text {
+      editable = [false];
+   }
+   attribute ConfigurationId Text {
+      editable = [false];
+   }
+   attribute OnHandQty Number {
+      fetch = "Inventory_Part_In_Stock_API.Get_Inventory_Qty_Onhand(contract, part_no,configuration_id)";
+      label = "On Hand Qty";
+      editable = [false];
+   }
+   attribute InTransitQty Number {
+      fetch = "Inventory_Part_In_Stock_API.Get_Total_Qty_In_Transit(contract, part_no,configuration_id,NULL,NULL)";
+      label = "In Transit Qty";
+      editable = [false];
+   }
+   attribute ReservedQty Number {
+      fetch = "Inventory_Part_In_Stock_API.Get_Inventory_Qty_Reserved(contract, part_no,configuration_id)";
+      label = "Reserved Qty";
+      editable = [false];
+   }
+   attribute InOrderTransitQty Number {
+      fetch = "Inventory_Part_In_Transit_API.Get_Total_Qty_In_Order_Transit(contract, part_no, configuration_id)";
+      label = "In Order Transit Qty";
+      editable = [false];
+   }
+   attribute ShortageExist Number {
+      fetch = "Shortage_Demand_API.Shortage_Exists(CONTRACT, PART_NO)";
+      editable = [false];
+   }
+   attribute InventoryUoM Text {
+      fetch = "Inventory_Part_API.Get_Unit_Meas(CONTRACT,PART_NO)";
+   }
+   attribute CatchUoM Text {
+      fetch = "Inventory_Part_API.Get_Enabled_Catch_Unit_Meas(CONTRACT,PART_NO)";
+      label = "Catch UoM";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute SystemParameterShortageFlag Text {
+      fetch = "Mpccom_System_Parameter_API.Get_Parameter_Value1('SHORTAGE_HANDLING')";
+      editable = [false];
+   }
+   attribute PartShortageFlagDb Text {
+      fetch = "Inventory_Part_API.Get_Shortage_Flag_Db(CONTRACT,PART_NO)";
+      editable = [false];
+   }
+   attribute NumberOfShortageDemands Text {
+      fetch = "Shortage_Demand_API.Shortage_Exists(CONTRACT,PART_NO)";
+      editable = [false];
+   }
+   attribute ZeroCostFlagDb Text {
+      fetch = "Inventory_Part_API.Get_Zero_Cost_Flag_Db(CONTRACT, PART_NO)";
+      editable = [false];
+   }
+   attribute InventoryValuationMethodDb Text {
+      fetch = "Inventory_Part_API.Get_Inventory_Valuation_Met_Db(CONTRACT, PART_NO)";
+      editable = [false];
+   }
+   attribute CatchUnitEnabled Boolean("TRUE", "FALSE") {
+      fetch = "Part_Catalog_API.Get_Catch_Unit_Enabled_Db(PART_NO)";
+   }
+
+   reference InventoryPartRef(Contract, PartNo) to InventoryPart(Contract, PartNo) {
+      label = "Part No";
+   }
+   reference ContractRef(Contract) to UserAllowedSiteLov(Contract) {
+      label = "Site";
+   }
+   array CountPartArray(PartNo, Contract, ConfigurationId) to InventoryPartInStock(PartNo, Contract, ConfigurationId);
+}
+
+@Override
+entity InventoryPartInStock {
+   from = "inventory_part_pick_ship_stock";
+   ludependencies = InventoryPartInStock;
+   where = "location_type_db IN ('PICKING','F','MANUFACTURING')";
+   use attributes = QtyOnhand, CatchQtyOnhand;
+
+   attribute PartNo Text {
+      label = "PartNo";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute Contract Text {
+      label = "Contract";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute ConfigurationId Text {
+      editable = [false];
+   }
+   attribute LotBatchNo Text {
+      label = "Lot/Batch No";
+   }
+   attribute SerialNo Text {
+      format = uppercase;
+   }
+   attribute EngChgLevel Text {
+      label = "Revision No";
+      format = uppercase;
+   }
+   attribute WaivDevRejNo Text {
+      format = uppercase;
+   }
+   attribute ActivitySeq Number {
+      maxlength = 10;
+      label = "Activity Sequence";
+   }
+   attribute CountedQty Number {
+      fetch = "NULL";
+      required = [true];
+   }
+   attribute CountedCatchQty Number {
+      fetch = "NULL";
+      required = [false];
+   }
+   attribute QtyOnhand Number {
+      label = "On Hand Qty";
+      editable = [false];
+      insertable = [false];
+   }
+   attribute CatchQtyOnhand Number {
+      label = "On Hand Catch Qty";
+      editable = [false];
+   }
+   attribute TypeDescription Text {
+      fetch = "Handling_Unit_Type_API.Get_Description(Handling_Unit_API.Get_Handling_Unit_Type_Id(HANDLING_UNIT_ID))";
+      label = "Type Description";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute ExpirationDate Date {
+      fetch = "TRUNC(EXPIRATION_DATE)";
+      editable = [false];
+      insertable = [false];
+   }
+   attribute ConditionCode Text {
+      fetch = "CONDITION_CODE_MANAGER_API.Get_Condition_Code(PART_NO,SERIAL_NO,LOT_BATCH_NO )";
+      label = "Condition Code";
+      maxlength = 10;
+      editable = [ETag = null];
+      format = uppercase;
+   }
+   attribute ConditionCodeDescription Text {
+      fetch = "Condition_Code_API.Get_Description(CONDITION_CODE_MANAGER_API.Get_Condition_Code(PART_NO,SERIAL_NO,LOT_BATCH_NO ))";
+      label = "Condition Code Description";
+      maxlength = 35;
+      editable = [false];
+   }
+   attribute InventoryValue Number {
+      fetch = "Inventory_Part_In_Stock_API.Get_Company_Owned_Unit_Cost(CONTRACT, PART_NO, CONFIGURATION_ID, LOCATION_NO, LOT_BATCH_NO, SERIAL_NO, ENG_CHG_LEVEL, WAIV_DEV_REJ_NO, ACTIVITY_SEQ, HANDLING_UNIT_ID)";
+      label = "Inventory Value";
+      maxlength = 2000;
+      editable = [false];
+      insertable = [false];
+      format = ifscurrency;
+   }
+   attribute DefineCost Boolean("TRUE", "FALSE") {
+      fetch = "'FALSE'";
+      label = "Define Cost";
+      required = [true];
+   }
+   attribute AvailabilityControlId Text {
+      label = "Availability Control ID";
+      fetch = "INVENTORY_PART_IN_STOCK_API.Get_Availability_Control_Id(contract,part_no,'*',location_no,lot_batch_no,serial_no,eng_chg_level,WAIV_DEV_REJ_NO,ACTIVITY_SEQ, HANDLING_UNIT_ID)";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute AvailabilityControlDescription Text {
+      fetch = "Part_Availability_Control_API.Get_Description(INVENTORY_PART_IN_STOCK_API.Get_Availability_Control_Id(contract,part_no,'*',location_no,lot_batch_no,serial_no,eng_chg_level,WAIV_DEV_REJ_NO,ACTIVITY_SEQ, HANDLING_UNIT_ID))";
+      label = "Availability Control Description";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute LastCountDate Date {
+      editable = [false];
+      insertable = [false];
+   }
+   // Since this is read only attribute the Enumeration is removed so that Decode works fine.
+   attribute PartOwnership Text {
+      fetch = "DECODE((Qty_Onhand - Qty_In_Transit), 0, NULL, Part_Ownership_API.Decode(PART_OWNERSHIP_DB))";
+      label = "Ownership";
+      editable = [false];
+      insertable = [false];
+   }
+   attribute Owner Text {
+      fetch = "NVL(OWNING_CUSTOMER_NO,OWNING_VENDOR_NO)";
+      label = "Owner";
+      maxlength = 100;
+      editable = [false];
+      format = uppercase;
+   }
+   attribute OwnerName Text {
+      fetch = "Inventory_Part_In_Stock_API.Get_Owner_Name(CONTRACT,PART_NO, CONFIGURATION_ID, LOCATION_NO, LOT_BATCH_NO, SERIAL_NO, ENG_CHG_LEVEL, WAIV_DEV_REJ_NO, ACTIVITY_SEQ, HANDLING_UNIT_ID)";
+      label = "Owner Name";
+      maxlength = 2000;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ProgramId Text {
+      fetch = "Project_API.Get_Program_Id(PROJECT_ID)";
+      label = "Program ID";
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ProgramDescription Text {
+      fetch = "Project_Program_Global_API.Get_Description(Project_API.Get_Program_Id(PROJECT_ID))";
+      label = "Program Description";
+      editable = [false];
+   }
+   attribute ProjectId Text {
+      format = uppercase;
+   }
+   @DynamicComponentDependency PROJ
+   attribute ProjectName Text {
+      fetch = "Project_API.Get_Name(PROJECT_ID)";
+      label = "Project Name";
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute SubProjectId Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, null, Activity_API.Get_Sub_Project_Id(ACTIVITY_SEQ))";
+      label = "Sub Project Id";
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute SubProjectDescription Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, null, Activity_API.Get_Sub_Project_Description(ACTIVITY_SEQ))";
+      label = "Sub Project Description";
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ActivityNo Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, null, Activity_API.Get_Activity_No(ACTIVITY_SEQ))";
+      label = "Activity No";
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ActivityDescription Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, null, Activity_API.Get_Description(ACTIVITY_SEQ))";
+      label = "Activity Description";
+      editable = [false];
+   }
+   attribute TopParentHandlingUnitID Number {
+      fetch = "Handling_Unit_API.Get_Top_Parent_Handl_Unit_Id(HANDLING_UNIT_ID)";
+      label = "Top Parent Handling Unit ID";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TopParentHandlingUnitType Text {
+      fetch = "Handling_Unit_API.Get_Top_Parent_Hu_Type_Id(HANDLING_UNIT_ID)";
+      label = "Top Parent Handling Unit Type";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TopParentTypeDescription Text {
+      fetch = "Handling_Unit_Type_API.Get_Description(Handling_Unit_API.Get_Top_Parent_Hu_Type_Id(HANDLING_UNIT_ID))";
+      label = "Top Parent Type Description";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TopParentSSCC Text {
+      fetch = "Handling_Unit_API.Get_Top_Parent_Sscc(HANDLING_UNIT_ID)";
+      label = "Top Parent SSCC";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TopParentAltHandlingUnitLabelID Text {
+      fetch = "Handling_Unit_API.Get_Top_Parent_Alt_Hu_Label_Id(HANDLING_UNIT_ID)";
+      label = "Top Parent Alt Handling Unit Label ID";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute PartOwnershipDb Text {
+      fetch = "PART_OWNERSHIP_DB";
+      label = "Part Ownership DB";
+      maxlength = 20;
+      editable = [false];
+      insertable = [false];
+   }
+   attribute QtyInTransit Number {
+      editable = [false];
+      insertable = [false];
+   }
+   attribute LocationType Text {
+      required = [false];
+      insertable = [false];
+   }
+   attribute RotablePartPoolId Text {
+      fetch = "NULL";
+      required = [false];
+      editable = [false];
+   }
+   attribute CreateDate Date {
+      fetch = "NULL";
+      required = [false];
+      editable = [false];
+   }
+   attribute Note Text {
+      fetch = "NULL";
+      required = [false];
+      editable = [true];
+   }
+   attribute SSCC Text {
+      fetch = "Handling_Unit_API.Get_Sscc(HANDLING_UNIT_ID)";
+      label = "SSCC";
+      required = [false];
+      editable = [false];
+   }
+   attribute AltHandlingUnitLabelID Text {
+      fetch = "Handling_Unit_API.Get_Alt_Handling_Unit_Label_Id(HANDLING_UNIT_ID)";
+      label = "Alt Handling Unit Label ID";
+      required = [false];
+      editable = [false];
+   }
+   attribute RcptIssuePartTrackingDb Text {
+      fetch = "Part_Catalog_API.Get_Rcpt_Issue_Serial_Track_Db(PART_NO)";
+      required = [false];
+      editable = [false];
+      insertable = [false];
+   }
+   attribute InvSerialTrackingDb Text {
+      fetch = "Part_Catalog_API.Get_Serial_Tracking_Code_Db(PART_NO)";
+      required = [false];
+      editable = [false];
+      insertable = [false];
+   }
+   attribute PartTrackingSessionId Number {
+      fetch = "NULL";
+      required = [false];
+      editable = [true];
+   }
+   attribute CostDetailId Number {
+      fetch = "NULL";
+   }
+
+   reference HandlingUnitRef(HandlingUnitId) to HandlingUnit(HandlingUnitId);
+   @DynamicComponentDependency PROJ
+   reference ProjectIdRef(ProjectId) to Project(ProjectId);
+   @DynamicComponentDependency PROJ
+   reference ProgramIdRef(ProgramId) to ProjectProgramGlobal(ProgramId);
+   @DynamicComponentDependency PROJ
+   reference SubProjectIdRef(ProjectId, SubProjectId) to SubProject(ProjectId, SubProjectId);
+   @DynamicComponentDependency PROJ
+   reference ActivityNoRef(ActivitySeq, ActivityNo) to Activity(ActivitySeq, ActivityNo);
+   reference LocationNoRef(Contract, LocationNo) to InventoryLocation8(Contract, LocationNo) {
+      label = "Location No";
+   }
+   reference SSCCRef(SSCC) to HandlingUnitLov9(HandlingUnitId) {
+      label = "SSCC";
+   }
+   reference AltHandlingUnitLabelIDRef(AltHandlingUnitLabelID) to HandlingUnitLov9(HandlingUnitId) {
+      label = "Alt Handling Unit Label ID";
+   }
+   reference ConditionCodeRef(ConditionCode) to ConditionCode(ConditionCode) {
+      label = "Condition Code";
+   }
+   @DynamicComponentDependency MFGSTD
+   reference EngChgLevelRef(Contract, PartNo, EngChgLevel) to PartRevision(Contract, PartNo, EngChgLevel) {
+      label = "Revision No";
+   }
+   reference ContractRef(Contract) to UserAllowedSiteLov(Contract) {
+      label = "Contract";
+   }
+
+   action UpdateCountingResult {
+      ludependencies = InventoryPartInStock;
+      parameter CountedQty Number;
+      parameter CountedCatchQty Number;
+      parameter ConditionCode Text;
+      parameter Note Text;
+      parameter CostDetailId Number;
+      parameter PartTrackingSessionId Number;
+      supportwarnings = [true];
+   }
+}
+
+action CreateCountingResult {
+   initialcheck UserAllowedSite(Contract);
+   parameter PartNo Text;
+   parameter Contract Text;
+   parameter LocationNo Text;
+   parameter ConfigurationId Text;
+   parameter LotBatchNo Text;
+   parameter SerialNo Text;
+   parameter EngChgLevel Text;
+   parameter WaivDevRejNo Text;
+   parameter ActivitySeq Number;
+   parameter HandlingUnitId Number;
+   parameter CountedQty Number;
+   parameter CountedCatchQty Number;
+   parameter ConditionCode Text;
+   parameter Note Text;
+   parameter CostDetailId Number;
+   parameter PartTrackingSessionId Number;
+   parameter DefineCost Boolean;
+   ludependencies = InventoryPartInStock;
+   supportwarnings = [true];
+}
+
+--------------------------------- FUNCTIONS ---------------------------------
+function GetSessionIdSelection Structure(IdentifySerialsRecStructure) {
+   parameter Contract Text;
+   parameter PartNo Text;
+   parameter ConfigurationId Text;
+   parameter LocationNo Text;
+   parameter LotBatchNo Text;
+   parameter EngChgLevel Text;
+   parameter WaivDevRejNo Text;
+   parameter ActivitySeq Number;
+   parameter HandlingUnitId Number;
+   parameter QtyNum Text;
+   parameter CatchQtyNum Number;
+   parameter AssistantTitle Text;
+   parameter AssistantContext Text;
+   parameter SessionId Number;
+}
+
+function GetHandlingUnitTypeDescription Text {
+   parameter HandlingUnitId Number;
+}
+
+-- Fetching Location No, HandlingUnitTypeId, HadlingUnitTypeDescription, Sscc, AltHandlingUnitLabelId from Handling Unit ID
+function GetDetailsByHandlingUnitId Structure(HandlingUnitStructure) {
+   parameter HandlingUnitId Number;
+}
+
+structure HandlingUnitStructure {
+   attribute LocationNo Text;
+   attribute HandlingUnitTypeId Text;
+   attribute HadlingUnitTypeDescription Text;
+   attribute Sscc Text;
+   attribute AltHandlingUnitLabelId Text;
+}
+
+function SetLovWhereForHandlingUnit List<Entity(HandlingUnitLov9)> {
+   parameter LocationNo Text;
+   parameter Contract Text;
+   where = "(TOP_LOCATION_NO IS NULL OR (TOP_LOCATION_NO = :LocationNo AND TOP_CONTRACT = :Contract)) AND SHIPMENT_ID IS NULL ";
+}
+
+function CheckDefaultCostExist Boolean {
+   parameter Contract Text;
+   parameter PartNo Text;
+   parameter ConfigurationId Text;
+   parameter LotBatchNo Text;
+   parameter SerialNo Text;
+   parameter ConditionCode Text;
+}
+
+function SetLovUserWhereForPart List<Entity(InventoryPartLov)> {
+   where = " EXISTS (SELECT 1 FROM inventory_part_planning ipp
+    	   WHERE inventory_part_lov.contract = ipp.contract
+	 	   AND inventory_part_lov.part_no = ipp.part_no
+	 	   AND ipp.planning_method NOT IN ('K','O','T'))";
+}
+
+-------------------------------- STRUCTURES ---------------------------------

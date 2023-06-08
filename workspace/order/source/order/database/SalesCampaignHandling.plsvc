@@ -1,0 +1,345 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: SalesCampaignHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign    History
+--  ------     ------  ---------------------------------------------------------
+-- 2020-03-25  NiDalk  SCXTEND-4090, Overriden CRUD_Default___ set default currency code.
+-- 2020-01-22  MalLlk  SCXTEND-2210, Handled the duplicate functinality by overriding CRUD_Default_Copy___.
+-- 2019-08-15  KHVESE  SCUXXW4-23789, Modified method Get_Site_Cluster_Ids___ to handle NULL value when no site cluster id is found.
+-- 2019-05-02  MaEelk  SCUXXW4-20101, Changed the RETURN type of Get_Use_Price_Incl_Tax___ to a Boolean
+-- 2018-03-11  ERRALK  SCUXXW4-17218, Added Dependency Annotation for Validate_Supplier___. 
+-- 2018-08-06  MAHPLK  SCUXXW4-9682, Added Validate_Catalog_No___ and Validate_Supplier___.
+-- 2018-07-13  MAHPLK  SCUXXW4-8162, Added Add_Customers___.
+-- 2018-07-13  MAHPLK  SCUXXW4-8327, Added Create_Supplier_Blanket___.
+-- 2018-06-29  MAHPLK  SCUXXW4-8957, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Activate_Allowed___(
+   campaign_id_ IN NUMBER ) RETURN BOOLEAN
+IS 
+   allow_activate_   NUMBER := 0;
+BEGIN
+   allow_activate_ := Campaign_API.Activate_Allowed(campaign_id_);
+   RETURN (allow_activate_ = 1);
+END Activate_Allowed___;
+
+FUNCTION Get_Use_Price_Incl_Tax___(
+   reference_site_ IN VARCHAR2 ) RETURN BOOLEAN
+IS 
+BEGIN
+   RETURN (Site_Discom_Info_API.Get_Use_Price_Incl_Tax_Ord_Db(reference_site_) = 'TRUE');
+END Get_Use_Price_Incl_Tax___;
+   
+
+FUNCTION Check_Deal_Per_Assort_Exist___(
+   campaign_id_ IN NUMBER ) RETURN VARCHAR2
+IS 
+BEGIN
+   RETURN Campaign_API.Get_Id_In_Assortment(campaign_id_);   
+END Check_Deal_Per_Assort_Exist___;
+
+FUNCTION Validate_Catalog_No___(
+   contract_         IN VARCHAR2,
+   catalog_no_       IN VARCHAR2,
+   supply_contract_  IN VARCHAR2) RETURN Validate_Catalog_No_Structure_Rec
+IS
+   return_rec_             Validate_Catalog_No_Structure_Rec;
+   validate_supplier_rec_  Validate_Supplier_Structure_Rec;
+   sales_part_rec_         Sales_Part_API.Public_Rec;
+   purchase_part_no_       VARCHAR2(25) := NULL;
+BEGIN
+   IF supply_contract_ IS NOT NULL THEN
+      sales_part_rec_ := Sales_Part_API.Get(contract_, catalog_no_);
+      IF sales_part_rec_.part_no IS NOT NULL THEN 
+         purchase_part_no_:= Inventory_Part_API.Check_If_Purchased(supply_contract_, sales_part_rec_.part_no);         
+      ELSIF sales_part_rec_.catalog_type = 'NON' THEN 
+         $IF (Component_Purch_SYS.INSTALLED) $THEN
+         IF (Purchase_Part_API.Check_Exist(supply_contract_, sales_part_rec_.purchase_part_no) = 1) THEN 
+            purchase_part_no_ := sales_part_rec_.purchase_part_no;
+         END IF;
+         $ELSE
+         NULL;
+         $END
+      END IF;
+
+      $IF (Component_Purch_SYS.INSTALLED) $THEN
+         return_rec_.supplier_id       := Purchase_Part_Supplier_API.Get_Primary_Supplier_No( supply_contract_,  purchase_part_no_);
+      $END      
+      return_rec_.purchase_part_no  := purchase_part_no_;
+      return_rec_.sales_price_uom   := sales_part_rec_.price_unit_meas;      
+
+      IF return_rec_.supplier_id IS NULL THEN
+         return_rec_.purchase_price_currency := NULL;
+         return_rec_.purchase_price_uom      := NULL;
+      ELSE
+         $IF (Component_Purch_SYS.INSTALLED) $THEN
+            validate_supplier_rec_ := Validate_Supplier___(return_rec_.supplier_id, return_rec_.purchase_part_no, supply_contract_);
+            return_rec_.purchase_price_currency := validate_supplier_rec_.purchase_price_currency;
+            return_rec_.purchase_price_uom      := validate_supplier_rec_.purchase_price_uom;
+         $ELSE
+            NULL;
+         $END
+      END IF;
+   END IF;
+   RETURN return_rec_;
+END Validate_Catalog_No___;
+ 
+@DynamicComponentDependency PURCH
+FUNCTION Validate_Supplier___(
+   supplier_id_      IN VARCHAR2,
+   purchase_part_no_ IN VARCHAR2,
+   supply_contract_  IN VARCHAR2 ) RETURN Validate_Supplier_Structure_Rec
+IS
+   return_rec_          Validate_Supplier_Structure_Rec;  
+   part_supp_rec_       Purchase_Part_Supplier_API.Public_Rec;
+  
+BEGIN   
+   part_supp_rec_ := Purchase_Part_Supplier_API.Get(supply_contract_, purchase_part_no_, supplier_id_);
+   return_rec_.purchase_price_currency := part_supp_rec_.currency_code;
+   return_rec_.purchase_price_uom :=  part_supp_rec_.price_unit_meas;
+   RETURN return_rec_;
+END Validate_Supplier___;
+
+
+FUNCTION Calculate_Purch_Price___(
+   company_                 IN VARCHAR2,
+   tax_code_                IN VARCHAR2,
+   purchase_price_incl_tax_ IN NUMBER ) RETURN NUMBER
+IS
+   tax_percentage_   NUMBER;
+   purchase_price_   NUMBER;
+BEGIN
+   IF purchase_price_incl_tax_ IS NOT NULL THEN
+      tax_percentage_ := Statutory_Fee_API.Get_Fee_Rate(company_, tax_code_);
+      purchase_price_ := purchase_price_incl_tax_ / ((NVL(tax_percentage_, 0)/100) +1);
+   ELSE
+      purchase_price_ := NULL;
+   END IF;
+   RETURN purchase_price_;
+END Calculate_Purch_Price___;
+
+
+FUNCTION Calc_Purch_Price_Incl_Tax___(
+   company_                 IN VARCHAR2,
+   tax_code_                IN VARCHAR2,
+   purchase_price_          IN NUMBER ) RETURN NUMBER
+IS
+   tax_percentage_   NUMBER;
+   purchase_price_incl_tax_   NUMBER;
+BEGIN
+   IF purchase_price_ IS NOT NULL THEN
+      tax_percentage_ := Statutory_Fee_API.Get_Fee_Rate(company_, tax_code_);
+      purchase_price_incl_tax_ := purchase_price_ * ((NVL(tax_percentage_,0)/100) +1);
+   ELSE
+      purchase_price_incl_tax_ := NULL;
+   END IF;
+   RETURN purchase_price_incl_tax_;
+END Calc_Purch_Price_Incl_Tax___;
+
+FUNCTION Calculate_Prices___(
+   sales_price_          IN NUMBER,
+   sales_price_incl_tax_ IN NUMBER,
+   contract_             IN VARCHAR2,
+   catalog_no_           IN VARCHAR2,
+   tax_calc_base_        IN VARCHAR2 ) RETURN Campaign_Price_Structure_Rec
+IS
+   return_rec_ Campaign_Price_Structure_Rec;
+   -- TODO: need to get client rounding value form user profile.
+   ifs_curr_rounding_   NUMBER := 16;
+BEGIN
+   return_rec_.value_excl_tax   := sales_price_;
+   return_rec_.value_incl_tax   := sales_price_incl_tax_;
+   Tax_Handling_Order_Util_API.Calc_Price_Source_Prices(return_rec_.value_excl_tax , 
+                                                        return_rec_.value_incl_tax, 
+                                                        contract_, 
+                                                        catalog_no_, 
+                                                        tax_calc_base_, 
+                                                        ifs_curr_rounding_);
+   
+   RETURN return_rec_;
+END Calculate_Prices___;
+
+FUNCTION Get_Site_Cluster_Ids___(
+   full_selection_ IN VARCHAR2 ) RETURN VARCHAR2
+IS 
+   selection_            VARCHAR2(32000) := CONCAT(full_selection_, ';');
+   current_selection_    VARCHAR2(200);   
+   contract_             VARCHAR2(50);
+   site_cluser_id_msg_   VARCHAR2(32000);
+   count_                NUMBER;
+   name_arr_             Message_SYS.name_table;
+   value_arr_            Message_SYS.line_table;
+   site_cluster_ids_     VARCHAR2(32000) := NULL;
+BEGIN
+   WHILE (INSTR(selection_, ';') > 0) LOOP
+      current_selection_    := substr(selection_, 0, INSTR(selection_, ';'));
+      contract_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT');      
+      site_cluser_id_msg_ := Site_Cluster_Node_API.Get_Connected_Clusters(contract_);
+      
+      IF site_cluser_id_msg_ IS NOT NULL THEN
+         IF Message_SYS.Get_Name(site_cluser_id_msg_) = 'SITE_CLUSTERS' THEN
+            Message_SYS.Get_Attributes(site_cluser_id_msg_, count_, name_arr_, value_arr_);
+            FOR n_ IN 1..count_ LOOP
+               IF (name_arr_(n_) = 'SITE_CLUSTER_ID') THEN
+                  IF site_cluster_ids_ IS NULL THEN
+                     site_cluster_ids_ := 'SiteClusterId'||' '||'eq'||' '||''''||value_arr_(n_)||'''' || ' '||'or';
+                  ELSE
+                     IF INSTR(site_cluster_ids_, value_arr_(n_)) = 0 THEN
+                        site_cluster_ids_ := site_cluster_ids_||' '|| 'SiteClusterId'||' '||'eq'||' '||''''||value_arr_(n_)||'''' || ' '||'or';
+                     END IF;
+                  END IF;
+               END IF;
+            END LOOP;            
+         END IF;
+      END IF;
+      selection_ := substr(selection_, INSTR(selection_, ';')+1);
+   END LOOP;
+   
+   IF site_cluster_ids_ IS NULL THEN 
+      site_cluster_ids_ := 'SiteClusterId eq ''''';
+   END IF ;
+   
+   RETURN RTRIM(site_cluster_ids_, 'or');   
+   
+END Get_Site_Cluster_Ids___;
+
+FUNCTION Calculate_Sales_Promotion_Prices___(
+   value_excl_tax_          IN NUMBER,
+   value_incl_tax_          IN NUMBER,
+   tax_calc_base_           IN VARCHAR2,
+   contract_                IN VARCHAR2,
+   tax_code_                IN VARCHAR2  ) RETURN Campaign_Price_Structure_Rec
+IS
+   return_rec_ Campaign_Price_Structure_Rec;
+   -- TODO: need to get client rounding value form user profile.
+   ifs_curr_rounding_   NUMBER := 16;
+BEGIN
+   return_rec_.value_excl_tax    := value_excl_tax_;
+   return_rec_.value_incl_tax    := value_incl_tax_;
+   Sales_Promotion_Deal_API.Calc_Promotion_Prices(return_rec_.value_excl_tax , 
+                                                  return_rec_.value_incl_tax,
+                                                  tax_calc_base_,
+                                                  contract_, 
+                                                  tax_code_,
+                                                  ifs_curr_rounding_);
+   
+   RETURN return_rec_;
+END Calculate_Sales_Promotion_Prices___;
+
+FUNCTION Get_Price_Unit_Meas___(
+   contract_   IN VARCHAR2,
+   catalog_no_ IN VARCHAR2 )  RETURN VARCHAR2
+IS
+BEGIN
+   RETURN Sales_Part_Api.Get_Price_Unit_Meas(contract_, catalog_no_);
+END Get_Price_Unit_Meas___;
+
+
+
+PROCEDURE Sales_Promotion_Deal_After_Crud___
+IS
+BEGIN
+   -- Dummy method to refresh SalesPromotionDealBuy, SalesPromotionDealGet
+   NULL;
+END Sales_Promotion_Deal_After_Crud___;
+
+PROCEDURE Create_Allocation___ (
+	key_ IN Campaign_Key,
+	supply_site_ IN VARCHAR2,
+	sales_start_date_ IN DATE,
+	coordinator_ IN VARCHAR2)
+IS
+BEGIN
+	Campaign_API.Create_Allocation(key_.campaign_id, supply_site_, sales_start_date_, coordinator_);
+END Create_Allocation___;
+
+PROCEDURE Copy_Buy_To_Get___ (
+	key_ IN Sales_Promotion_Deal_Key)
+IS
+BEGIN
+	Sales_Promotion_Deal_API.Copy_Buy_To_Get(key_.campaign_id, key_.deal_id);
+END Copy_Buy_To_Get___;
+
+@DynamicComponentDependency PURCH
+PROCEDURE Create_Supplier_Blanket___ (
+	key_ IN Campaign_Key,
+	supplier_agreement_type_selection_ IN VARCHAR2,
+	info$_ OUT VARCHAR2)
+IS
+   info_             VARCHAR2(32000);
+   agreement_type_   VARCHAR2(50);
+   index_            NUMBER;        
+BEGIN
+   IF (supplier_agreement_type_selection_ = 'AGREEMENT') THEN
+      index_ := 0;
+   ELSIF (supplier_agreement_type_selection_ = 'ORDER') THEN
+      index_ := 1;
+   ELSE
+      RETURN;
+   END IF;
+   
+   $IF (Component_Purch_SYS.INSTALLED) $THEN 
+      agreement_type_ := Purchase_Blanket_Order_API.Get_Client_Value(index_);
+   $END
+   Campaign_API.Create_Supplier_Blanket(info_, key_.campaign_id, agreement_type_);
+   info$_ := info_;
+END Create_Supplier_Blanket___;
+
+PROCEDURE Add_Sites___ (
+	key_ IN Campaign_Key,
+	site_cluster_id_ IN VARCHAR2,
+	site_cluster_node_id_ IN VARCHAR2)
+IS
+BEGIN
+	Campaign_Site_API.Insert_Site_Cluster__(key_.campaign_id, site_cluster_id_, site_cluster_node_id_);
+END Add_Sites___;
+
+PROCEDURE Add_Customers___ (
+	key_ IN Campaign_Key,
+	hierarchy_id_ IN VARCHAR2,
+	customer_level_ IN NUMBER)
+IS
+BEGIN
+	Campaign_Customer_API.Insert_Cust_From_Hierarchy__(key_.campaign_id, hierarchy_id_, customer_level_);
+END Add_Customers___;
+
+@Override
+PROCEDURE CRUD_Default_Copy___ (
+   rec_  IN OUT Campaign_Rec )
+IS
+BEGIN
+    super(rec_);
+    rec_.supp_agreement_created  := false;
+    rec_.dist_allocation_created := false;
+END CRUD_Default_Copy___;
+
+@Override
+PROCEDURE CRUD_Default_Copy___ (
+   rec_ IN OUT Campaign_Assortment_Rec )
+IS
+BEGIN   
+   super(rec_);
+   rec_.assortment_id := Campaign_API.Get_Assortment_Id(rec_.campaign_id);
+END CRUD_Default_Copy___;
+
+@Override
+PROCEDURE CRUD_Default___ (
+   key_  IN  Campaign_Key,
+   attr_ IN OUT VARCHAR2,
+   info_ OUT VARCHAR2 )
+IS
+   currency_code_    CAMPAIGN_TAB.currency_code%TYPE; 
+   company_          CAMPAIGN_TAB.company%TYPE;
+BEGIN
+   company_ := Client_SYS.Get_Item_Value('COMPANY', attr_);
+   currency_code_ := Company_Finance_API.Get_Currency_Code(company_);
+ 
+   super(key_, attr_, info_);
+   Client_SYS.Set_Item_Value('CURRENCY_CODE', currency_code_ ,attr_ );
+END CRUD_Default___;

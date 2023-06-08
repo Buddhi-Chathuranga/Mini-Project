@@ -1,0 +1,565 @@
+-------------------------------------------------------------------------------------------------------
+--  Date        Sign    History
+--  ----------  ------  --------------------------------------------------------------------------------
+--  2022-08-12  Avwilk  SCDEV-13214, Bugfix, Changed 'CatchQtyToReturn' attribute into editable as true in the ReturnInventoryPartsLineVirtual.
+--  2022-06-23  Aabalk  SCDEV-9149, Added DemandCode to ReturnMultipleToStockList. Modified ChangeReturnLocationsCommand enable condition to
+--  2022-06-23          check Purchase Receipt demand code.
+--  2022-06-22  AvWilk  SCDEV-8633, Changed 'GetAndSetOriginalPickLocation' from bulkcall to single call.
+--  2022-06-20  Aabalk  SCDEV-9149, Modified LocationTypeFilter to include Arrival and QA locations for Shipment Order to support Purchase Receipt flow.
+--  2022-05-09  AvWilk  SCDEV-9414, Changed 'LocationTypeFilter' function conditions.
+--  2022-05-02  Avwilk  SCDEV-8633, Added 'ToOriginalPickingLocation' command and added sourcereftype, fields to the ReturnInventoryPartsLineVirtual and added GetAndSetOriginalPickLocation.
+--  2022-04-25  Avwilk  SCDEV-8625, Added 'ChangeReturnLocationsCommand' command.
+--  2022-04-18  Avwilk  SCDEV-8617, Added 'Note' field, removed 'ReturnLine' and changed 'ReturnSelectedPartsFromShpmntInvent' into an Action.
+--  2022-04-11  Avwilk  SCDEV-8609, Removed InventoryLocation5Selector and Included InventoryLocation17Selector, added LocationTypeFilter.
+--  2022-04-05  Avwilk  SCDEV-8609, Added Lov to Location_no in ReturnInventoryPartsLineVirtual and Included InventoryLocation5Selector.
+--  2022-03-30  Avwilk  SCDEV-8601, Created.
+--------------------------------------------------------------------------------------------------------
+fragment ReturnPartsFromShipmentInventoryAssistant;
+component SHPMNT;
+layer Core;
+description "This fragment is used to Return multiple parts from Inventory Parts in Shipment Inventory";
+
+--------------------------------- FRAGMENTS ---------------------------------
+include fragment InventoryLocation5Selector;
+include fragment InventoryLocation17Selector;
+----------------------------- CLIENT FRAGMENTS ------------------------------
+
+-------------------------------- ASSISTANTS ---------------------------------
+assistant ReturnMultipleShipmentInventoryAssistant using ReturnShipmentInventorySet {
+   label = "Return Parts From Shipment Inventory";
+   savemode = OnLostFocus;
+   input(SelectionVar);
+   init command {
+      execute {
+         set SelectLinesExist = false;
+      }
+   }
+   steps {
+      step {
+         list ReturnMultipleToStockList(DetailReturnToStock);
+      }
+      final step {
+      }
+      cancelled step {
+      }
+   }
+   finish command {
+      enabled = [component.ReturnMultipleToStockList.RowCount > 0];
+      execute {
+         call ReturnSelectedPartsFromShpmntInvent(Objkey);
+         exit OK;
+      }
+   }
+   cancel command {
+      execute {
+         exit CANCEL;
+      }
+   }
+   restart command {
+      visible = [false];
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+list ReturnMultipleToStockList for ReturnInventoryPartsLineVirtual {
+   label = "";
+   editmode = SingleCellEdit;
+   multiselect = [true];
+   field ReturnQty {
+      validate command {
+         execute {
+            if [ReturnQty < 0] {
+               error("The quantity entered may not be negative.");
+               set ReturnQty = QtyPicked;
+            }
+            if [ReturnQty > QtyPicked] {
+               error("The quantity entered may not be greater than Picked Quantity.");
+               set ReturnQty = QtyPicked;
+            }
+            if [ReturnQty = QtyPicked] {
+               set CatchQtyToReturn = CatchQtyPicked;
+            }
+            else {
+               set CatchQtyToReturn = null;
+            }
+         }
+      }
+   }
+   field CatchQtyToReturn {
+      size = Small;
+      editable = [CatchUom != null];
+      validate command {
+         execute {
+            if [CatchQtyOnhand != null] {
+               if [CatchQtyToReturn <= 0] {
+                  error("The catch quantity to return must be greater than 0.");
+               }
+               if [ReturnQty = null] {
+                  error("The quantity to return must have a value.");
+               }
+            }
+         }
+      }
+   }
+   field CatchQtyOnhand;
+   field CatchUom;
+   lov LocationNoRef with ReferenceInventoryLocation17Selector using LocationTypeFilter(SourceRefType, DemandCode) {
+      size = Small;
+   }
+   field Note;
+   field SourceRef1;
+   field SourceRef2;
+   field SourceRef3;
+   field SourceRef4;
+   field SourceRefTypeDb {
+      columnexclude = [true];
+   }
+   field SourceRefType;
+   field DemandCode;
+   field SourcePartNo;
+   field SourcePartDescription;
+   field PartNo;
+   field PartDescription;
+   field ShipmentId;
+   field ShipmentLineNo;
+   field Contract;
+   field SenderId;
+   field SenderName;
+   field SenderType;
+   field ReceiverId;
+   field ReceiverName;
+   field ReceiverType;
+   field LocationNo;
+   field Warehouse;
+   field BayNo;
+   field RowNo;
+   field TierNo;
+   field BinNo;
+   field LotBatchNo;
+   field SerialNo;
+   field EngChgLevel;
+   field WaivDevRejNo;
+   field ConfigurationId;
+   @DynamicComponentDependency PROJ
+   field ProjectId;
+   field ActivitySeq;
+   field HandlingUnitId;
+   field HandlingUnitTypeId;
+   field Sscc;
+   field AltHandlingUnitLabelId;
+   field PickListNo;
+   field QtyPicked;
+   field CatchQtyPicked;
+   field TotalQtyToReturn;
+
+   command ChangeReturnLocationsCommand;
+   command ToOriginalPickingLocation;
+}
+
+--------------------------------- COMMANDS ----------------------------------
+
+command ChangeReturnLocationsCommand for ReturnInventoryPartsLineVirtual {
+   label = "Change Location";
+   mode = SelectedRecords;
+   enabled = [not((count(*, SourceRefType = "PurchReceiptReturn") > 0 and count(*, SourceRefType != "PurchReceiptReturn") > 0) or
+   (count(*, SourceRefType = "ShipmentOrder") > 0 and count(*, DemandCode = "PurchaseReceipt") > 0  and count(*, DemandCode != "PurchaseReceipt") > 0) or
+   count(Contract) > 1)];
+
+   variable SelectedRecordDetailsVar Structure(SelectedRecordDetailsStructure);
+
+   variable SelectionVar {
+      type = LongText;
+   }
+   variable ReturnLocationVar {
+      type = Text;
+   }
+   bulkexecute {
+      stringify(records, "SOURCE_REF_TYPE_DB=${SourceRefType}^DEMAND_CODE=${DemandCode}^SITE=${Contract}^", JSON) into SelectionVar;
+      call GetSelectedRecordDetails(SelectionVar) into SelectedRecordDetailsVar;
+      dialog ChangeReturnLocationsDialog(SelectedRecordDetailsVar.SourceRefTypeDb, SelectedRecordDetailsVar.DemandCode, SelectedRecordDetailsVar.Contract) into(ReturnLocationVar) {
+         when OK {
+            bulkset ToLocationNo = ReturnLocationVar;
+         }
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+
+command ToOriginalPickingLocation for ReturnInventoryPartsLineVirtual {
+   label = "To Original Picking Location";
+   mode = SelectedRecords;
+   enabled = [true];
+   variable PickedLocationVar {
+      type = Text;
+   }
+   bulkexecute {
+      call GetAndSetOriginalPickLocation(Selection) {
+         when SUCCESS {
+            refresh;
+            exit;
+         }
+         when FAIL {
+            error("${error.Message}");
+         }
+      }
+   }
+}
+---------------------------------- GROUPS -----------------------------------
+
+group ChangeReturnLocationsGroup for ChangeReturnLocationsStructure {
+   label = "";
+   lov LocationNoRef with ReferenceInventoryLocation17Selector using LocationTypeFilter(SourceRefTypeDb, DemandCode) {
+      label = "To location";
+      maxlength = 35;
+      description = LocationNoRef.LocationName;
+   }
+}
+
+---------------------------------- DIALOGS ----------------------------------
+
+dialog ChangeReturnLocationsDialog for ChangeReturnLocationsStructure {
+   label = "Return Location";
+   input(SourceRefTypeDb, DemandCode, Contract);
+   output(ToLocationNo);
+   group ChangeReturnLocationsGroup;
+   command Ok {
+      execute {
+         exit OK;
+      }
+   }
+   command Cancel;
+}
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+
+----------------------------- MAIN ENTRY POINTS -----------------------------
+entityset ReturnShipmentInventorySet for ReturnMultiShpmntInvntHeaderVirtual;
+
+--------------------------------- VIRTUALS ----------------------------------
+virtual ReturnMultiShpmntInvntHeaderVirtual {
+   attribute SelectionVar  LongText {
+      inlined = [true];
+   }
+   attribute SelectLinesExist Boolean("TRUE", "FALSE");
+   attribute SourceRef1 Text;
+   attribute SourceRef2 Text;
+   attribute SourceRef3 Text;
+   attribute SourceRef4 Text;
+   attribute SourceRefType Text;
+   attribute ShipmentId Number;
+   attribute PartNo Text;
+   attribute PickListNo Text;
+   attribute Contract Text;
+   attribute LotBatchNo Text;
+   attribute SerialNo Text;
+   attribute HandlingUnitId Number;
+   attribute LocationNo Text;
+   attribute EngChgLevel Text;
+   attribute WaivDevRejNo Text;
+   attribute ConfigurationId Text;
+   attribute ActivitySeq Number;
+
+   array DetailReturnToStock(SourceRef1, SourceRef2, SourceRef3, SourceRef4, SourceRefType, PartNo, Contract, ConfigurationId, LotBatchNo, SerialNo, EngChgLevel, WaivDevRejNo, ActivitySeq) to ReturnInventoryPartsLineVirtual(SourceRef1, SourceRef2, SourceRef3, SourceRef4, SourceRefType, PartNo, Contract, ConfigurationId, LotBatchNo, SerialNo, EngChgLevel, WaivDevRejNo, ActivitySeq);
+}
+
+virtual ReturnInventoryPartsLineVirtual {
+   crud = Read, Update;
+
+   attribute ReturnQty Number {
+      label = "Qty to Return";
+   }
+   attribute CatchUom Text {
+      fetch = "Inventory_Part_API.Get_Enabled_Catch_Unit_Meas(CONTRACT,PART_NO)";
+      label = "Catch UoM";
+      editable = [false];
+   }
+   attribute ToLocationNo Text {
+      label = "To Location No";
+      format = uppercase;
+      maxlength = 35;
+   }
+   attribute SourceRefType Enumeration(LogisticsSourceRefType.Shipment) {
+      label = "Source Ref Type";
+      editable = [false];
+   }
+   attribute SourceRefTypeDb Text {
+      label = "Source Ref Type Db";
+      editable = [false];
+   }
+   attribute SourceRef1 Text {
+      label = "Source Ref 1";
+      editable = [false];
+      format = uppercase;
+      maxlength = 50;
+   }
+   attribute SourceRef2 Text {
+      label = "Source Ref 2";
+      editable = [false];
+      format = uppercase;
+      maxlength = 50;
+   }
+   attribute SourceRef3 Text {
+      label = "Source Ref 3";
+      editable = [false];
+      format = uppercase;
+      maxlength = 50;
+   }
+   attribute SourceRef4 Text {
+      label = "Source Ref 4";
+      editable = [false];
+      format = uppercase;
+      maxlength = 50;
+   }
+   attribute SourcePartNo Text {
+      label = "Source Part No";
+      editable = [false];
+      format = uppercase;
+      maxlength = 25;
+   }
+   attribute SourcePartDescription Text {
+      label = "Source Part Description";
+      editable = [false];
+      maxlength = 4000;
+   }
+   attribute PartNo Text {
+      label = "Part No";
+      editable = [false];
+      format = uppercase;
+      maxlength = 25;
+   }
+   attribute PartDescription Text {
+      label = "Part Description";
+      editable = [false];
+      maxlength = 4000;
+   }
+   attribute ShipmentId Number {
+      label = "Shipment ID";
+      editable = [false];
+   }
+   attribute ShipmentLineNo Number {
+      label = "Line No";
+      editable = [false];
+   }
+   attribute Contract Text {
+      label = "Site";
+      editable = [false];
+      format = uppercase;
+      maxlength = 5;
+   }
+   attribute SenderId Text {
+      label = "Sender ID";
+      editable = [false];
+      format = uppercase;
+      maxlength = 50;
+   }
+   attribute SenderName Text {
+      label = "Sender Description";
+      editable = [false];
+      maxlength = 4000;
+   }
+   attribute SenderType Text {
+      label = "Sender Type";
+      editable = [false];
+      maxlength = 4000;
+   }
+   attribute ReceiverId Text {
+      label = "Receiver ID";
+      editable = [false];
+      format = uppercase;
+      maxlength = 50;
+   }
+   attribute ReceiverName Text {
+      label = "Receiver Description";
+      editable = [false];
+      maxlength = 4000;
+   }
+   attribute ReceiverType Text {
+      label = "Receiver Type";
+      editable = [false];
+      maxlength = 4000;
+   }
+   attribute DemandCode Enumeration(OrderSupplyType) {
+      editable = [false];
+   }
+   attribute LocationNo Text {
+      label = "Location No";
+      editable = [false];
+      format = uppercase;
+      maxlength = 35;
+   }
+   attribute Warehouse Text {
+      label = "Warehouse ID";
+      editable = [false];
+      format = uppercase;
+      maxlength = 15;
+   }
+   attribute BayNo Text {
+      label = "Bay ID";
+      editable = [false];
+      format = uppercase;
+      maxlength = 5;
+   }
+   attribute RowNo Text {
+      label = "Row ID";
+      editable = [false];
+      format = uppercase;
+      maxlength = 5;
+   }
+   attribute TierNo Text {
+      label = "Tier ID";
+      editable = [false];
+      format = uppercase;
+      maxlength = 5;
+   }
+   attribute BinNo Text {
+      label = "Bin ID";
+      editable = [false];
+      format = uppercase;
+      maxlength = 5;
+   }
+   attribute LotBatchNo Text {
+      label = "Lot/Batch No";
+      editable = [false];
+      format = uppercase;
+      maxlength = 20;
+   }
+   attribute SerialNo Text {
+      label = "Serial No";
+      editable = [false];
+      format = uppercase;
+      maxlength = 50;
+   }
+   attribute EngChgLevel Text {
+      label = "Rev No";
+      editable = [false];
+      format = uppercase;
+      maxlength = 6;
+   }
+   attribute WaivDevRejNo Text {
+      label = "W/D/R No";
+      editable = [false];
+      format = uppercase;
+      maxlength = 15;
+   }
+   attribute ConfigurationId Text {
+      label = "Configuration ID";
+      editable = [false];
+      format = uppercase;
+      maxlength = 50;
+   }
+   @DynamicComponentDependency PROJ
+   attribute ProjectId Text {
+      label = "Project ID";
+      fetch = "Activity_API.Get_Project_Id(ACTIVITY_SEQ)";
+      editable = [false];
+      format = uppercase;
+   }
+   attribute ActivitySeq Number {
+      label = "Activity Sequence";
+      editable = [false];
+   }
+   attribute HandlingUnitId Number {
+      label = "Handling Unit ID";
+      editable = [false];
+      implementationtype = "NUMBER";
+   }
+   attribute HandlingUnitTypeId Text {
+      label = "Handling Unit Type";
+      editable = [false];
+      format = uppercase;
+      maxlength = 4000;
+   }
+   attribute Sscc Text {
+      label = "SSCC";
+      editable = [false];
+      format = uppercase;
+      maxlength = 4000;
+   }
+   attribute AltHandlingUnitLabelId Text {
+      label = "Alt Handling Unit Label ID";
+      editable = [false];
+      format = uppercase;
+      maxlength = 4000;
+   }
+   attribute PickListNo Text {
+      label = "Pick List No";
+      editable = [false];
+      format = uppercase;
+      maxlength = 40;
+   }
+   attribute QtyPicked Number {
+      label = "Picked Qty";
+      editable = [false];
+   }
+   attribute CatchQtyPicked Number {
+      label = "Picked Catch Qty";
+      editable = [false];
+   }
+   attribute TotalQtyToReturn Number {
+      label = "Total Qty to Return";
+      editable = [false];
+   }
+   attribute CatchQtyToReturn Number {
+      label = "Catch Qty To Return";
+      editable = [true];
+   }
+   attribute Note Text {
+      label = "Note";
+      updatable = [true];
+   }
+   attribute CatchQtyOnhand Number {
+      label = "On Hand Catch Qty";
+      editable = [false];
+   }
+   reference LocationNoRef(Contract, ToLocationNo) to InventoryLocation17(Contract, LocationNo) {
+      label = "To Location No";
+   }
+}
+
+--------------------------------- FUNCTIONS ---------------------------------
+function LocationTypeFilter List < Entity(InventoryLocation17) > {
+   parameter SourceRefTypeDb Enumeration(LogisticsSourceRefType.Shipment);
+   parameter DemandCode Enumeration(OrderSupplyType);
+   where = "((:SourceRefTypeDb = 'PURCH_RECEIPT_RETURN' AND LOCATION_TYPE_DB IN ('PICKING', 'QA', 'ARRIVAL')) OR
+             (:SourceRefTypeDb = 'SHIPMENT_ORDER' AND :DemandCode IS NOT NULL AND :DemandCode = 'PR' AND LOCATION_TYPE_DB IN ('QA', 'ARRIVAL')) OR
+             ((:SourceRefTypeDb <> 'PURCH_RECEIPT_RETURN') AND
+               NOT(:SourceRefTypeDb = 'SHIPMENT_ORDER' AND (:DemandCode IS NOT NULL AND :DemandCode = 'PR')) AND LOCATION_TYPE_DB = 'PICKING')
+   )";
+}
+
+
+action GetSelectedRecordDetails Structure(SelectedRecordDetailsStructure) {
+   initialcheck implementation;
+   parameter Selection LongText;
+}
+---------------------------------- ACTIONS ----------------------------------
+action ReturnSelectedPartsFromShpmntInvent {
+   initialcheck implementation;
+   supportwarnings = [true];
+   parameter ParentObjkey Text;
+}
+
+action GetAndSetOriginalPickLocation {
+   initialcheck implementation;
+   ludependencies = ReturnInventoryPartsLineVirtual;
+   parameter Selection                       Text;
+}
+-------------------------------- STRUCTURES ---------------------------------
+
+structure ChangeReturnLocationsStructure {
+   attribute Contract Text;
+   attribute ToLocationNo Text;
+   attribute SourceRefTypeDb Enumeration(LogisticsSourceRefType.Shipment);
+   attribute DemandCode Enumeration(OrderSupplyType);
+   reference LocationNoRef(Contract, ToLocationNo) to InventoryLocation17(Contract, LocationNo) {
+      label = "To Location No";
+   }
+}
+
+structure SelectedRecordDetailsStructure {
+   attribute SourceRefTypeDb Text;
+   attribute DemandCode Text;
+   attribute Contract Text;
+}

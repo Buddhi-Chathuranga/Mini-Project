@@ -1,0 +1,1340 @@
+-------------------------------------------------------------------------------------------------
+-- Date        Sign     History
+-- ----------  ------   -------------------------------------------------------------------------
+-- 2021-11-16  ErRalk   Bug 161388(SC21R2-5865), Modified the reference of Sscc and AltHandlingUnitLabelId to fetch values to the LoVs of Add Existing Handling Unit command.
+-- 2021-09-07  AsZelk   Bug SC21R2-2386, ShipmentLineNoList, ConnectedQtyList changed to LongText.
+-- 2021-02-17  Aabalk   SC2020R1-12449, Modified PartsInHandlingUnitArray in ConnectPartsToHandlingUnitVirtual and passed Shipment ID to return the correctly filtered array.
+-- 2020-11-02  Aabalk   SC2020R1-6921, Modified editmode in ShipmentSourceReservationStockList and PartsForHandlingUnitList to SingleCellEdit.
+-- 2020-05-15  ChFolk   Bug 153521 (SCZ-9877), Added new attributes AttachFullQty and RemainingQty into PartsForHandlingUnitVirtual and used in PartsForHandlingUnitList.
+-- 2020-05-15           They are used to avoid getting client value for the QtyToAttach instead server value is considered to avoid conversion issues.
+-- 2019-11-25  Aabalk   SCSPRING20-830, Added sender type, id and receiver type to GetDestinationShipmentIdLovUserWhere where clause.
+-- 2019-08-22  RoJalk   SCUXXW4-23976, Removed the titles of messagebox.
+-- 2019-06-13  SBalLK   SCUXXW4-22332, Changed the edit mode and disabled OK button when user edit the data.
+-- 2019-05-24  fgusse   SCUXXW4-21039, Added ID for all labels for Warehouse/Bay/Row/Tier/Bin.
+-- 2019-05-13  SBalLK   SCUXXW4-20652, Update ludependancy for StartIdentifyPartsToHandlingUnit method to refresh connected objects when action completed.
+-- 2019-05-09  SBalLK   SCUXXW4-20506, Implemented to close dialog when function successfully completed.
+-- 2019-04-29  SBalLK   SCUXXW4-19250, Changed LOV select for Handling Unit Id in AddExistingHandlingUnitsAssistant.
+-- 2019-04-26  SBalLK   SCUXXW4-4654, Created.
+-------------------------------------------------------------------------------------------------
+
+fragment ShipmentHandlingUnitStructureAssociateDialogs;
+component SHPMNT;
+layer Core;
+description "Put some useful description here ...";
+include fragment ShipmentInitialCheck;
+include fragment HandlingUnitExtendedInitialCheck;
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+
+--------------------------------- START : dlgReassignHandlingUnit - Reassign Handling Unit -----------------
+-------------------------------- ASSISTANTS ---------------------------------
+dialog ReassignHandlingUnitDialog for ReassignHandlingUnitStructure {
+   label = "Reassign Handling Unit";
+   input(CategoryId, HandlingUnitTypeId, HandlingUnitId, SourceShipmentId, SourceShipmentAddrFlag, SourceShipmentReceiverAddress);
+
+   group ReassignHandlingUnitGroup;
+   group ReassignHandlingUnitDestinationGroup;
+
+   command Ok;
+   command Cancel;
+}
+
+--------------------------------- COMMANDS ----------------------------------
+command Ok for ReassignHandlingUnitStructure {
+   enabled = [true];
+   variable ShipmentMethodVar {
+      type = Text;
+   }
+   variable DestinationShipmentIdVar {
+      type = Number;
+   }
+   variable AutoConnectionBlokedVar {
+      type = Boolean;
+   }
+   variable ReleaseReservationsVar {
+      type = Text;
+   }
+   variable TempVariableVar {
+      type = Text;
+   }
+   execute {
+      if [ShipmentMethod = "ExistingShipment"] {
+         set DestinationShipmentIdVar = DestinationShipmentId;
+         set ShipmentMethodVar = "ADD_TO_EXIST_SHIPMENT";
+         call CheckAutoConnectionBlocked(DestinationShipmentIdVar) into AutoConnectionBlokedVar;
+         if[AutoConnectionBlokedVar] {
+            messagebox("", question, "The shipment ${DestinationShipmentIdVar} is blocked for automatic connection of more source lines. Do you still want to connect more lines manually?") {
+               when YES {
+                  -- SBalLK<ISSUE>: Pending Issue TEUXX-16030.
+                  set TempVariableVar = "";
+               }
+               when NO {
+                  exit;
+               }
+            }
+         }
+      }
+      else {
+         set ShipmentMethodVar = "CREATE_NEW_SHIPMENT";
+      }
+      if [ReleaseReservations] {
+         set ReleaseReservationsVar = "TRUE";
+      }
+      else {
+         set ReleaseReservationsVar = "FALSE";
+      }
+      call StartReassignHandlingUnit(HandlingUnitId, SourceShipmentId, ShipmentMethodVar, DestinationShipmentIdVar, ReleaseReservationsVar) into DestinationShipmentIdVar {
+         when SUCCESS {
+            if [ShipmentMethod = "NewShipment"] {
+               alert("The shipment ID ${DestinationShipmentIdVar} is created.");
+            }
+            exit OK;
+         }
+      }
+   }
+}
+
+---------------------------------- GROUPS -----------------------------------
+group ReassignHandlingUnitGroup for ReassignHandlingUnitStructure {
+   label = "";
+   field HandlingUnitId;
+   lov HandlingUnitTypeRef with HandlingUnitTypeSelector {
+      description = HandlingUnitTypeRef.Description;
+   }
+   lov HandlingUnitCategoryRef with HandlingUnitCategorySelector {
+      description = HandlingUnitCategoryRef.Description;
+   }
+   field HandlingUnitHistoryShpmntRef.Sscc {
+      editable = [false];
+   }
+   field HandlingUnitHistoryShpmntRef.AltHandlingUnitLabelId {
+      editable = [false];
+   }
+   field HandlingUnitHistoryShpmntRef.ParentHandlingUnitId {
+      editable = [false];
+   }
+   field HandlingUnitHistoryShpmntRef.TopParentHandlingUnitId {
+      editable = [false];
+   }
+   field HandlingUnitHistoryShpmntRef.Composition {
+      editable = [false];
+   }
+   field HandlingUnitHistoryShpmntRef;
+   field HandlingUnitHistoryShpmntRef.LocationNo {
+      editable = [false];
+   }
+   field HandlingUnitHistoryShpmntRef.LocationType {
+      editable = [false];
+   }
+   field HandlingUnitHistoryShpmntRef.AccessoryExist {
+      editable = [false];
+   }
+}
+
+group ReassignHandlingUnitDestinationGroup for ReassignHandlingUnitStructure {
+   label = "Destination";
+   radiogroup ShipmentMethod;
+   lov DestinationShipmentIdRef with ReferenceShipmentToReassinLovSelector  using GetDestinationShipmentIdLovUserWhere(SourceShipmentId, SourceShipmentAddrFlag, SourceShipmentReceiverAddress) {
+      visible = [ShipmentMethod = "ExistingShipment"];
+   }
+   field ReleaseReservations {
+      size = Small;
+   }
+}
+--------------------------------- END : dlgReassignHandlingUnit - Reassign Handling Unit -------------------
+
+
+--------------------------------- START : dlgAddExistingHandlingUnits - Add Existing Handling Unit -----------------
+-------------------------------- ASSISTANTS ---------------------------------
+assistant AddExistingHandlingUnitsAssistant using ShipmentHandlingUnitsVirtualSet {
+   label = "Add Existing Handling Unit";
+   input(ShipmentId, ParentHandlingUnitId);
+   steps {
+      step {
+         list ExistingHandlingUnitsVirtualList(HandlingUnitsArray);
+      }
+      final step {
+      }
+      cancelled step {
+      }
+   }
+   finish command {
+      execute {
+         call StartAddingExistingHandlingUnits();
+         exit OK;
+      }
+   }
+   cancel command {
+      execute {
+         exit CANCEL;
+      }
+   }
+   restart command {
+      visible = [false];
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+list ExistingHandlingUnitsVirtualList for ExistingHandlingUnitVirtual {
+   label = "";
+   lov HandlingUnitIdRef with ReferenceHandlingUnitNoOrderLovSelector using GetHandlingUnitLovUserWhere {
+      validate command ValidateHandlingUnitCommand;
+   }
+   lov SsccRef with ReferenceHandlingUnitLov10Selector {
+      validate command ValidateSsccCommand;
+   }
+   lov AltHandlingUnitLabelIdRef with ReferenceHandlingUnitLov11Selector {
+      validate command ValidateAltHandlingUnitLabelCommand;
+   }
+   lov HandlingUnitTypeIdRef with HandlingUnitTypeSelector {
+      description = HandlingUnitTypeIdRef.Description;
+   }
+   lov HandlingUnitCategoryIdRef with HandlingUnitCategorySelector {
+      description = HandlingUnitCategoryIdRef.Description;
+   }
+}
+
+   --------------------------------- COMMANDS ----------------------------------
+command ValidateHandlingUnitBaseCommand for ExistingHandlingUnitVirtual {
+   variable HandlingUnitVar {
+      type = ExistingHandlingUnitStructure;
+   }
+   execute {
+      call FetchHandlingUnitData(HandlingUnitId) into HandlingUnitVar;
+
+      set HandlingUnitId = HandlingUnitVar.HandlingUnitId;
+      set Sscc = HandlingUnitVar.Sscc;
+      set AltHandlingUnitLabelId = HandlingUnitVar.AltHandlingUnitLabelId;
+      set HandlingUnitTypeId = HandlingUnitVar.HandlingUnitTypeId;
+      set HandlingUnitCategoryId = HandlingUnitVar.HandlingUnitCategoryId;
+   }
+}
+
+command ValidateHandlingUnitCommand clone ValidateHandlingUnitBaseCommand {
+   execute {
+      super;
+      if[parent.ShipmentId != null] {
+         if[HandlingUnitVar.ShipmentId != null or HandlingUnitVar.HasStockReservation != "FALSE" or HandlingUnitVar.SourceRefType != null] {
+            error("The Handling Unit ${HandlingUnitId} is in use and cannot be added to the Shipment.");
+            set HandlingUnitId = null;
+            super;
+         }
+      }
+   }
+}
+
+command ValidateSsccCommand clone ValidateHandlingUnitCommand {
+   execute {
+      call FetchHandlingUnitIdFromSscc(Sscc) into HandlingUnitId;
+      super;
+   }
+}
+
+command ValidateAltHandlingUnitLabelCommand clone ValidateHandlingUnitCommand {
+   execute {
+      call FetchHandlingUnitIdFromAltLabel(AltHandlingUnitLabelId) into HandlingUnitId;
+      super;
+   }
+}
+--------------------------------- END : dlgAddExistingHandlingUnits - Add Existing Handling Unit -------------------
+
+
+--------------------------------- START : dlgIdentifyPartsToHandlingUnit - Attach Reservations -----------------
+-------------------------------- ASSISTANTS ---------------------------------
+assistant IdentifyPartsToHandlingUnitAssistant using ShipmentSourceVirtualSet {
+   label = "Attach Reservations";
+   input(ShipmentId, HandlingUnitId, Origin, ShipmentLineArray);
+   steps {
+      step {
+         group ShipmentSourceList;
+         list ShipmentSourceLineList(ShipmentSourceLineArray);
+         list ShipmentSourceReservationStockList(ReservationStockArray) bind ShipmentSourceLineList {
+            display = Nested;
+         }
+      }
+      final step {
+      }
+      cancelled step {
+      }
+   }
+   finish command {
+      enabled = [not component.IdentifyPartsToHandlingUnitAssistant.IsActiveStepDirty];
+      execute {
+         call StartIdentifyPartsToHandlingUnit() {
+            when SUCCESS {
+               exit OK;
+            }
+         }
+      }
+   }
+   cancel command {
+      execute {
+         exit CANCEL;
+      }
+   }
+   restart command {
+      visible = [false];
+   }
+}
+
+--------------------------------- COMMANDS ----------------------------------
+command AttachAllReservation for ShipmentSourceLineVirtual {
+   label = "Attach All Reservations";
+   mode = SingleRecord;
+   enabled = [AttachedState != "Attached"];
+   execute {
+      call AttachConnectedReservation();
+   }
+}
+
+---------------------------------- GROUPS -----------------------------------
+group ShipmentSourceList for ShipmentSourceVirtual {
+   label = "";
+   field ShipmentId;
+   field HandlingUnitRef.HandlingUnitTypeId;
+   field HandlingUnitId;
+}
+
+----------------------------------- LISTS -----------------------------------
+list ShipmentSourceLineList for ShipmentSourceLineVirtual {
+   label = "";
+   multiselect = [false];
+   badge AttachedState {
+      style = TextOnly;
+      emphasis Progress1 = [AttachedState = "NotAttached"];
+      emphasis Progress6 = [AttachedState = "PartiallyAttached"];
+      emphasis Progress12 = [AttachedState = "Attached"];
+   }
+   field ShipmentLineNo {
+      size = Small;
+   }
+   field ShipmentLineRef.SourcePartNo;
+   field ShipmentLineRef.SourcePartDescription {
+      label = "Part Description";
+   }
+   field ShipmentLineRef.SourceRefType;
+   field ShipmentLineRef.SourceRef1;
+   field ShipmentLineRef.SourceRef2 {
+      size = Small;
+   }
+   field ShipmentLineRef.SourceRef3 {
+      size = Small;
+   }
+   field ShipmentLineRef.SourceRef4 {
+      size = Small;
+   }
+   measure SalesQtyToAttach(ShipmentLineRef.SourceUnitMeas) {
+      label = "Source Qty to Attach";
+   }
+   measure InventoryQtyToAttach(InventoryUom) {
+      label = "Inventory Quantity to Attach";
+   }
+   measure TotalQtyAttached(InventoryUom) {
+      label = "Inventory Qty Attached";
+   }
+
+   command AttachAllReservation;
+}
+
+list ShipmentSourceReservationStockList for ShipmentSourceReservationStockVirtual {
+   label = "";
+   editmode = SingleCellEdit;
+   multiselect = [false];
+   field Attach {
+      size = Small;
+      validate command {
+         execute {
+            if [Attach = true] {
+               if[QtyToAttach = null] {
+                  if[parent.InventoryQtyToAttach < RemainingQtyToAttach] {
+                     set QtyToAttach = parent.InventoryQtyToAttach;
+                  }
+                  else {
+                     set QtyToAttach = RemainingQtyToAttach;
+                  }
+               }
+            }
+            else {
+               set QtyToAttach = null;
+            }
+         }
+      }
+   }
+   measure QtyToAttach(InventoryUom) {
+      validate command {
+         execute {
+            if [QtyToAttach != null] {
+               set Attach = true;
+            }
+            else {
+               set Attach = false;
+            }
+         }
+      }
+   }
+   measure RemainingQtyToAttach(InventoryUom);
+   measure QtyAssigned(InventoryUom);
+   field SerialNo {
+      size = Small;
+   }
+   field LotBatchNo {
+      size = Small;
+   }
+   field ConfigurationId {
+      size = Small;
+   }
+   field WaivDevRejNo {
+      size = Small;
+   }
+   field EngChgLevel {
+      size = Small;
+   }
+   field ActivitySeqRef;
+   field LocationNo {
+      size = Small;
+   }
+   field HandlingUnitId;
+   field HandlingUnitRef.HandlingUnitTypeId {
+      size = Small;
+      label = "Handling Unit Type ID";
+   }
+   field TypeDescription {
+      size = Small;
+   }
+   field HandlingUnitRef.Sscc {
+      size = Small;
+      label = "SSCC";
+   }
+   field HandlingUnitRef.AltHandlingUnitLabelId {
+      size = Small;
+      label = "Alt. Handling Unit Label ID";
+   }
+   field Warehouse {
+      size = Small;
+   }
+   field BayNo {
+      size = Small;
+   }
+   field RowNo {
+      size = Small;
+   }
+   field TierNo {
+      size = Small;
+   }
+   field BinNo {
+      size = Small;
+   }
+   field PickListNo {
+      size = Small;
+   }
+   field CatchQtyToAttach {
+      size = Small;
+      editable = [CatchUom != null];
+   }
+   field CatchUom {
+      size = Small;
+   }
+   field TopParentHandlingUnitId;
+   field TopParentHandlingUnitTypeId {
+      size = Small;
+   }
+   field TopParentHandlingUnitTypeDesc {
+      size = Small;
+   }
+   field TopParentSscc {
+      size = Small;
+   }
+   field TopParentAltHandlingUnitLabelId {
+      size = Small;
+   }
+   field Level2HandlingUnitTypeId {
+      size = Small;
+   }
+   field Level2HandlingUnitId;
+   field Level2HandlingUnitTypeDesc {
+      size = Small;
+   }
+   field Level2SSCC {
+      size = Small;
+   }
+   field Level2AltHandlingUnitLabelId {
+      size = Small;
+   }
+}
+--------------------------------- END : dlgIdentifyPartsToHandlingUnit - Attach Reservations -------------------
+
+
+--------------------------------- START : dlgConnectPartsToHandlingUnit - Attach Parts to Handling Unit -----------------
+-------------------------------- ASSISTANTS ---------------------------------
+assistant ConnectPartsToHandlingUnitAssistant using ConnectPartsToHandlingUnitSet {
+   label = "Attach Parts to Handling Unit";
+   input(ShipmentId, HandlingUnitId, ShipmentLineNoList);
+   output(ConnectedQtyList);
+   steps {
+      step {
+         group ConnectPartsToHandlingUnitGroup;
+         list PartsForHandlingUnitList(PartsForHandlingUnitArray);
+         list PartsInHandlingUnitList(PartsInHandlingUnitArray);
+      }
+      final step {
+      }
+      cancelled step {
+      }
+   }
+   finish command {
+      enabled = [not component.ConnectPartsToHandlingUnitAssistant.IsActiveStepDirty];
+      execute {
+         call StartAttachPartsToHandlingUnit() into ConnectedQtyList {
+            when SUCCESS {
+               exit OK;
+            }
+         }
+      }
+   }
+   cancel command {
+      execute {
+         exit CANCEL;
+      }
+   }
+   restart command {
+      visible = [false];
+   }
+}
+
+---------------------------------- GROUPS -----------------------------------
+group ConnectPartsToHandlingUnitGroup for ConnectPartsToHandlingUnitVirtual {
+   label = "";
+   field HandlingUnitIdRef.HandlingUnitTypeId {
+      size = Small;
+   }
+   field HandlingUnitIdRef {
+      size = Small;
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+list PartsForHandlingUnitList for PartsForHandlingUnitVirtual {
+   label = "The shipment lines that can be attached to the handling unit.";
+   editmode = SingleCellEdit;
+   field AttachFullQty {
+      validate command {
+         execute {
+            if [AttachFullQty] {
+               set QtyToAttach = RemainingQty;
+            }
+         }
+      }
+   }
+   field ShipmentLineNo {
+      size = Small;
+   }
+   field ShipmentLineRef.SourceRef1 {
+      size = Small;
+   }
+   field ShipmentLineRef.SourceRef2 {
+      size = Small;
+   }
+   field ShipmentLineRef.SourceRef3 {
+      size = Small;
+   }
+   field ShipmentLineRef.SourceRef4 {
+      size = Small;
+   }
+   field ShipmentLineRef.SourceRefType {
+      size = Small;
+   }
+   field ShipmentLineRef.SourcePartNo {
+      size = Small;
+   }
+   measure ShipmentLineRef.ConnectedSourceQty(ShipmentLineRef.SourceUnitMeas);
+   measure QtyToAttach(ShipmentLineRef.SourceUnitMeas) {
+      label = "Quantity to Attach";
+      validate command {
+         execute {
+            set AttachFullQty = false;
+         }
+      }
+   }
+   measure RemainingQty(ShipmentLineRef.SourceUnitMeas) {
+      columnvisible = [false];
+   }
+}
+
+list PartsInHandlingUnitList for PartsInHandlingUnit {
+   label = "The shipment lines that are already attached to the handling unit.";
+   field ShipmentLineNo {
+      size = Small;
+   }
+   field SourceRef1 {
+      size = Small;
+   }
+   field SourceRef2 {
+      size = Small;
+   }
+   field SourceRef3 {
+      size = Small;
+   }
+   field SourceRef4 {
+      size = Small;
+   }
+   field SourceRefType {
+      size = Small;
+   }
+   field SourcePartNo {
+      size = Small;
+   }
+   measure Quantity(SourceUnitMeas);
+   fieldranking ShipmentLineNo, SourceRef1, SourceRef2, SourceRef3, SourceRef4, SourceRefType, SourcePartNo, Quantity, SourceUnitMeas;
+}
+--------------------------------- END : dlgConnectPartsToHandlingUnit - Attach Parts to Handling Unit -------------------
+
+--------------------------------- Start : Attach Reservation Warnings : New Dialog -------------------
+-------------------------------- ASSISTANTS ---------------------------------
+assistant AttachReservationWarnningAssitant using AttachReservationWarnningVirtualSet {
+   label = "Attach Reservation Warning";
+   input(ShipmentId, HandlingUnitId, ShipmentLineArray);
+   output(ShipmentLineArray);
+   steps {
+      step {
+         markdowntext {
+            text = "Due to that the mix of lot batch is blocked, no reservations have been attached. Do you still want to only attach the quantity from shipment line?";
+         }
+         list AttachReservationWarnningList(ReservationWarnningArray);
+      }
+      final step {
+      }
+      cancelled step {
+      }
+   }
+   finish command {
+      execute {
+         call GetShipmentLinesArrayToReduce() into ShipmentLineArray;
+         exit OK;
+      }
+   }
+   cancel command {
+      execute {
+         exit CANCEL;
+      }
+   }
+   restart command {
+      visible = [false];
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+list AttachReservationWarnningList for AttachReservationWarnningLineVirtual {
+   label = "";
+   editmode = SingleCellEdit;
+
+   field ShipmentId;
+   field ShipmentLineNo;
+   field Quantity;
+   field SourcePartNo;
+   field SourcePartDescription;
+   field Result;
+}
+--------------------------------- END : Attach Reservation Warnings : New Dialog ---------------------
+
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+
+--------------------------------- START : dlgReassignHandlingUnit - Reassign Handling Unit -----------------
+-------------------------------- STRUCTURES ---------------------------------
+structure ReassignHandlingUnitStructure {
+   attribute CategoryId Text {
+      label = "Handling Unit Category ID";
+      editable = [false];
+   }
+   attribute HandlingUnitTypeId Text {
+      label = "Handling Unit Type ID";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute HandlingUnitId Number {
+      label = "Handling Unit ID";
+      editable = [false];
+   }
+   attribute SourceShipmentId Number {
+      label = "Source Shipment ID";
+      editable = [false];
+   }
+   attribute ShipmentMethod Enumeration(ReassignShipmentMethod) {
+      label = "Destination";
+   }
+   attribute DestinationShipmentId Number {
+      label = "Shipment ID";
+   }
+   attribute ReleaseReservations Boolean("TRUE", "FALSE") {
+      label = "Release Reservations";
+      required = [true];
+   }
+   attribute SourceShipmentAddrFlag Text;
+   attribute SourceShipmentReceiverAddress Text;
+
+   reference DestinationShipmentIdRef(DestinationShipmentId) to ShipmentToReassinLov(ShipmentId) {
+      label = "Shipment ID";
+   }
+   reference HandlingUnitTypeRef(HandlingUnitTypeId) to HandlingUnitType(HandlingUnitTypeId) {
+      label = "Handling Unit Type";
+   }
+   reference HandlingUnitCategoryRef(CategoryId) to HandlingUnitCategory(HandlingUnitCategoryId) {
+      label = "Handling Unit Category";
+   }
+   reference HandlingUnitHistoryShpmntRef(HandlingUnitId, SourceShipmentId) to ShipmentHandlingUnitWithHistory(HandlingUnitId, ShipmentId) {
+      label = "Shipment ID";
+   }
+}
+
+------------------------------- ENUMERATIONS --------------------------------
+enumeration ReassignShipmentMethod {
+   enumerationtype = Custom;
+   value = "EXISTING_SHIPMENT" {
+      identifier = "ExistingShipment";
+      label = "Shipment";
+   }
+   value = "NEW_SHIPMENT" {
+      identifier = "NewShipment";
+      label = "New Shipment";
+   }
+}
+
+---------------------------------- ACTIONS ----------------------------------
+action StartReassignHandlingUnit Text {
+   initialcheck implementation;
+   supportwarnings = [true];
+   ludependencies = ShipmentHandlingUnitWithHistory;
+   parameter HandlingUnitId Number;
+   parameter SourceShipmentId Number;
+   parameter ShipmentMethod Text;
+   parameter DestinationShipmentId Number;
+   parameter ReleaseReservations Text;
+}
+
+--------------------------------- FUNCTIONS ---------------------------------
+function CheckAutoConnectionBlocked Boolean {
+   parameter DestinationShipmentId Number;
+}
+function GetDestinationShipmentIdLovUserWhere List < Entity(ShipmentToReassinLov) > {
+   parameter SourceShipmentId Number;
+   parameter SourceShipmentAddrFlag Text;
+   parameter SourceShipmentReceiverAddress Text;
+
+   where = "shipment_id != :SourceShipmentId
+            AND ((addr_flag_db = 'Y' AND :SourceShipmentAddrFlag = 'Yes') OR
+                 (addr_flag_db = 'N' AND :SourceShipmentAddrFlag = 'No' AND NVL(receiver_addr_id, 'STRING_NULL') = NVL( :SourceShipmentReceiverAddress, 'STRING_NULL')))
+            AND (NVL(shipment_type,         'STRING_NULL'), NVL(sender_type,           'STRING_NULL'), NVL(sender_id,           'STRING_NULL'), NVL(receiver_type,     'STRING_NULL'),
+                 NVL(receiver_id,           'STRING_NULL'), NVL(receiver_address1,     'STRING_NULL'), NVL(receiver_address2,   'STRING_NULL'), NVL(receiver_address3, 'STRING_NULL'),
+                 NVL(receiver_address4,     'STRING_NULL'), NVL(receiver_address5,     'STRING_NULL'), NVL(receiver_address6,   'STRING_NULL'), NVL(receiver_zip_code, 'STRING_NULL'),
+                 NVL(receiver_city,         'STRING_NULL'), NVL(receiver_state,        'STRING_NULL'), NVL(receiver_county,     'STRING_NULL'), NVL(receiver_country,  'STRING_NULL'),
+                 NVL(receiver_address_name, 'STRING_NULL'), NVL(ship_via_code,         'STRING_NULL'), NVL(delivery_terms,      'STRING_NULL'), NVL(supply_country_db, 'STRING_NULL'),
+                 NVL(use_price_incl_tax_db, 'FALSE'))
+                 IN (
+                     SELECT NVL(shipment_type,         'STRING_NULL'), NVL(sender_type_db,        'STRING_NULL'), NVL(sender_id,           'STRING_NULL'), NVL(receiver_type_db,  'STRING_NULL'),
+                            NVL(receiver_id,           'STRING_NULL'), NVL(receiver_address1,     'STRING_NULL'), NVL(receiver_address2,   'STRING_NULL'), NVL(receiver_address3, 'STRING_NULL'),
+                            NVL(receiver_address4,     'STRING_NULL'), NVL(receiver_address5,     'STRING_NULL'), NVL(receiver_address6,   'STRING_NULL'), NVL(receiver_zip_code, 'STRING_NULL'),
+                            NVL(receiver_city,         'STRING_NULL'), NVL(receiver_state,        'STRING_NULL'), NVL(receiver_county,     'STRING_NULL'), NVL(receiver_country,  'STRING_NULL'),
+                            NVL(receiver_address_name, 'STRING_NULL'), NVL(ship_via_code,         'STRING_NULL'), NVL(delivery_terms,      'STRING_NULL'), NVL(supply_country_db, 'STRING_NULL'),
+                            NVL(use_price_incl_tax_db, 'FALSE')
+                     FROM shipment
+                     WHERE shipment_id = :SourceShipmentId)";
+}
+--------------------------------- END : dlgReassignHandlingUnit - Reassign Handling Unit -------------------
+
+
+--------------------------------- START : dlgAddExistingHandlingUnits - Add Existing Handling Unit -----------------
+----------------------------- MAIN ENTRY POINTS -----------------------------
+entityset ShipmentHandlingUnitsVirtualSet for ShipmentHandlingUnitsVirtual;
+
+-------------------------------- STRUCTURES ---------------------------------
+structure ExistingHandlingUnitStructure {
+   attribute HandlingUnitId Number;
+   attribute Sscc Text;
+   attribute AltHandlingUnitLabelId Text;
+   attribute HandlingUnitTypeId Text;
+   attribute HandlingUnitCategoryId Text;
+   attribute ShipmentId Text;
+   attribute SourceRefType Text;
+   attribute HasStockReservation Text;
+}
+
+--------------------------------- VIRTUALS ----------------------------------
+virtual ShipmentHandlingUnitsVirtual {
+   attribute ShipmentId Number {
+      required = [true];
+   }
+   attribute ParentHandlingUnitId Number {
+      required = [true];
+   }
+   array HandlingUnitsArray() to ExistingHandlingUnitVirtual();
+
+   //! TODO: Should be unbounded! Action should not be bounded to virtual.
+   action StartAddingExistingHandlingUnits {
+      supportwarnings = [true];
+      ludependencies = Shipment, HandlingUnit;
+   }
+}
+
+virtual ExistingHandlingUnitVirtual {
+   ludependencies = ExistingHandlingUnitVirtual;
+
+   attribute HandlingUnitId Number {
+      label = "Handling Unit ID";
+      required = [true];
+   }
+   attribute Sscc Text {
+      label = "SSCC ID";
+   }
+   attribute AltHandlingUnitLabelId Text {
+      label = "Alt Handling Unit Label ID";
+   }
+   attribute HandlingUnitTypeId Text {
+      label = "Handling Unit Type ID";
+      fetch = "Handling_Unit_API.Get_Handling_Unit_Type_Id(handling_unit_id)";
+      maxlength = 25;
+      editable = [false];
+   }
+   attribute HandlingUnitCategoryId Text {
+      label = "Handling Unit Category ID";
+      fetch = "Handling_Unit_Type_API.Get_Handling_Unit_Category_Id(Handling_Unit_API.Get_Handling_Unit_Type_Id(handling_unit_id))";
+      maxlength = 25;
+      editable = [false];
+   }
+
+   reference HandlingUnitIdRef(HandlingUnitId) to HandlingUnitNoOrderLov(HandlingUnitId) {
+      label = "Handling Unit ID";
+   }
+   reference SsccRef(Sscc) to HandlingUnitLov10(Sscc) {
+      label = "SSCC ID";
+   }
+   reference AltHandlingUnitLabelIdRef(AltHandlingUnitLabelId) to HandlingUnitLov11(AltHandlingUnitLabelId) {
+      label = "Alt Handling Unit Label ID";
+   }
+   reference HandlingUnitTypeIdRef(HandlingUnitTypeId) to HandlingUnitType(HandlingUnitTypeId) {
+      label = "Handling Unit Type";
+   }
+   reference HandlingUnitCategoryIdRef(HandlingUnitCategoryId) to HandlingUnitCategory(HandlingUnitCategoryId) {
+      label = "Handling Unit Category";
+   }
+}
+
+--------------------------------- FUNCTIONS ---------------------------------
+function GetHandlingUnitLovUserWhere List < Entity(HandlingUnitLov) > {
+   where = "(LOCATION_NO IS NULL AND SOURCE_REF_TYPE_DB IS NULL AND SHIPMENT_ID IS NULL)";
+}
+
+function FetchHandlingUnitData Structure(ExistingHandlingUnitStructure) {
+   parameter HandlingUnitId Number;
+}
+
+function FetchHandlingUnitIdFromSscc Number {
+   parameter SsccId Text;
+}
+
+function FetchHandlingUnitIdFromAltLabel Number {
+   parameter AltHandlingUnitLabelId Text;
+}
+--------------------------------- END : dlgAddExistingHandlingUnits - Add Existing Handling Unit -------------------
+
+
+
+
+--------------------------------- START : dlgIdentifyPartsToHandlingUnit - Attach Reservations -----------------
+----------------------------- MAIN ENTRY POINTS -----------------------------
+entityset ShipmentSourceVirtualSet for ShipmentSourceVirtual;
+
+--------------------------------- VIRTUALS ----------------------------------
+virtual ShipmentSourceVirtual {
+   attribute ShipmentId Number {
+      label = "Shipment ID";
+      editable = [false];
+   }
+   attribute HandlingUnitId Number {
+      label = "Handling Unit ID";
+      editable = [false];
+   }
+   attribute Origin Text;
+   attribute ShipmentLineArray Text;
+
+   reference HandlingUnitRef(HandlingUnitId) to HandlingUnit(HandlingUnitId);
+
+   array ShipmentSourceLineArray() to ShipmentSourceLineVirtual();
+   //! TODO: Should be unbounded! Action should not be bounded to virtual.
+   action StartIdentifyPartsToHandlingUnit {
+      initialcheck implementation;
+      ludependencies = ShipmentLine, HandlingUnit, ShipmentLineHandlUnit, HandlingUnitHistory, ShipmentLineReservationsUnattached, ShipmentReservHandlUnit, ShipmentHandlingUnitWithHistory;
+   }
+}
+
+virtual ShipmentSourceLineVirtual {
+   crud = Update;
+   ludependencies = ShipmentSourceReservationStockVirtual;
+
+   attribute ShipmentId Number {
+      editable = [false];
+   }
+   attribute ShipmentLineNo Number {
+      editable = [false];
+   }
+   attribute SalesQtyToAttach Number {
+      editable = [false];
+   }
+   attribute InventoryQtyToAttach Number {
+      editable = [false];
+   }
+   attribute InventoryUom Text {
+      editable = [false];
+   }
+   attribute TotalQtyAttached Number {
+      editable = [false];
+   }
+   attribute AttachedState Enumeration(AttachedState) {
+      label = "State";
+      editable = [false];
+   }
+
+   reference ShipmentLineRef(ShipmentId, ShipmentLineNo) to ShipmentLine(ShipmentId, ShipmentLineNo);
+
+   array ReservationStockArray() to ShipmentSourceReservationStockVirtual();
+
+   //! TODO: Should be unbounded! Action should not be bounded to virtual.
+   action AttachConnectedReservation {
+      ludependencies = ShipmentSourceLineVirtual, ShipmentSourceReservationStockVirtual;
+   }
+}
+
+virtual ShipmentSourceReservationStockVirtual {
+   crud = Update;
+
+   attribute ShipmentId Number {
+      fetch = "shipment_id";
+      label = "Shipment ID";
+      required = [true];
+      editable = [false];
+   }
+   attribute Contract Text {
+      fetch = "contract";
+      label = "Site";
+      maxlength = 5;
+      required = [true];
+      format = uppercase;
+      editable = [false];
+   }
+   attribute Attach Boolean("TRUE", "FALSE") {
+      fetch = "attach";
+      label = "Attach";
+      required = [true];
+      editable = [true];
+   }
+   attribute QtyToAttach Number {
+      fetch = "qty_to_attach";
+      label = "Quantity to Attach";
+      editable = [true];
+   }
+   attribute RemainingQtyToAttach Number {
+      label = "Remaining Qty to Attach";
+      editable = [false];
+   }
+   attribute QtyAssigned Number {
+      fetch = "qty_assigned";
+      label = "Qty Reserved";
+      editable = [false];
+   }
+   attribute SerialNo Text {
+      fetch = "serial_no";
+      label = "Serial No";
+      maxlength = 50;
+      required = [true];
+      editable = [false];
+      format = uppercase;
+   }
+   attribute LotBatchNo Text {
+      fetch = "lot_batch_no";
+      label = "Lot/Batch No";
+      maxlength = 20;
+      required = [true];
+      editable = [false];
+      format = uppercase;
+   }
+   attribute ConfigurationId Text {
+      fetch = "configuration_id";
+      label = "Configuration ID";
+      maxlength = 50;
+      required = [true];
+      editable = [false];
+   }
+   attribute WaivDevRejNo Text {
+      fetch = "waiv_dev_rej_no";
+      label = "W/D/R No";
+      maxlength = 15;
+      required = [true];
+      editable = [false];
+      format = uppercase;
+   }
+   attribute EngChgLevel Text {
+      fetch = "eng_chg_level";
+      label = "Rev No";
+      maxlength = 6;
+      required = [true];
+      editable = [false];
+      format = uppercase;
+   }
+   attribute ActivitySeq Number {
+      fetch = "activity_seq";
+      label = "Activity Seq";
+      required = [true];
+      editable = [false];
+   }
+   attribute LocationNo Text {
+      fetch = "location_no";
+      label = "Location No";
+      maxlength = 35;
+      required = [true];
+      editable = [false];
+      format = uppercase;
+   }
+   attribute HandlingUnitId Number {
+      fetch = "handling_unit_id";
+      label = "Handling Unit ID";
+      required = [true];
+      editable = [false];
+   }
+   attribute TypeDescription Text {
+      fetch = "Handling_Unit_Type_API.Get_Description(Handling_Unit_API.Get_Handling_Unit_Type_Id(handling_unit_id))";
+      label = "Type Description";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute Warehouse Text {
+      fetch = "warehouse";
+      label = "Warehouse ID";
+      maxlength = 15;
+      editable = [false];
+   }
+   attribute BayNo Text {
+      fetch = "bay_no";
+      label = "Bay ID";
+      maxlength = 5;
+      editable = [false];
+   }
+   attribute RowNo Text {
+      fetch = "row_no";
+      label = "Row ID";
+      maxlength = 5;
+      editable = [false];
+   }
+   attribute TierNo Text {
+      fetch = "tier_no";
+      label = "Tier ID";
+      maxlength = 5;
+      editable = [false];
+   }
+   attribute BinNo Text {
+      fetch = "bin_no";
+      label = "Bin ID";
+      maxlength = 5;
+      editable = [false];
+   }
+   attribute SourceRef1 Text {
+      fetch = "source_ref1";
+      label = "Source Ref 1";
+      maxlength = 50;
+      editable = [false];
+      format = uppercase;
+   }
+   attribute SourceRef2 Text {
+      fetch = "source_ref2";
+      label = "Source Ref 2";
+      maxlength = 50;
+      editable = [false];
+   }
+   attribute SourceRef3 Text {
+      fetch = "source_ref3";
+      label = "Source Ref 3";
+      maxlength = 50;
+      editable = [false];
+   }
+   attribute SourceRef4 Text {
+      fetch = "source_ref4";
+      label = "Source Ref 4";
+      maxlength = 50;
+      editable = [false];
+   }
+   attribute PartNo Text {
+      fetch = "part_no";
+      label = "Part No";
+      maxlength = 25;
+      required = [true];
+      editable = [false];
+      format = uppercase;
+   }
+   attribute PickListNo Text {
+      fetch = "pick_list_no";
+      label = "Pick List No";
+      maxlength = 15;
+      required = [true];
+      editable = [false];
+   }
+   attribute SourceRefTypeDb Text {
+      fetch = "source_ref_type_db";
+      label = "Source Ref Type";
+      required = [true];
+      editable = [false];
+   }
+   attribute CatchQtyToAttach Number {
+      fetch = "catch_qty_to_attach";
+      label = "Catch Qty to Attach";
+      editable = [true];
+   }
+   attribute CatchUom Text {
+      fetch = "Inventory_Part_API.Get_Enabled_Catch_Unit_Meas(contract, part_no)";
+      label = "Catch UoM";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute InventoryUom Text {
+      editable = [false];
+   }
+   attribute TopParentHandlingUnitId Number {
+      fetch = "Handling_Unit_API.Get_Top_Parent_Handl_Unit_Id(handling_unit_id)";
+      label = "Top Parent Handling Unit ID";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TopParentHandlingUnitTypeId Text {
+      fetch = "Handling_Unit_API.Get_Top_Parent_Hu_Type_Id(handling_unit_id)";
+      label = "Top Parent Handling Unit Type ID";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TopParentHandlingUnitTypeDesc Text {
+      fetch = "Handling_Unit_Type_API.Get_Description(Handling_Unit_API.Get_Top_Parent_Hu_Type_Id(handling_unit_id))";
+      label = "Top Parent Handling Unit Type Desc";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TopParentSscc Text {
+      fetch = "Handling_Unit_API.Get_Top_Parent_Sscc(handling_unit_id)";
+      label = "Top Parent SSCC";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TopParentAltHandlingUnitLabelId Text {
+      fetch = "Handling_Unit_API.Get_Top_Parent_Alt_Hu_Label_Id(handling_unit_id)";
+      label = "Top Parent Alt Handling Unit Label ID";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute Level2HandlingUnitTypeId Text {
+      fetch = "Handling_Unit_API.Get_Handling_Unit_Type_Id(Handling_Unit_API.Get_Second_Level_Parent_Hu_Id(handling_unit_id))";
+      label = "Level 2 Handling Unit Type ID";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute Level2HandlingUnitId Number {
+      fetch = "Handling_Unit_API.Get_Second_Level_Parent_Hu_Id(handling_unit_id)";
+      label = "Level 2 Handling Unit ID";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute Level2HandlingUnitTypeDesc Text {
+      fetch = "Handling_Unit_Type_API.Get_Description(Handling_Unit_API.Get_Handling_Unit_Type_Id(Handling_Unit_API.Get_Second_Level_Parent_Hu_Id(handling_unit_id)))";
+      label = "Level 2 Handling Unit Type Desc";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute Level2SSCC Text {
+      fetch = "Handling_Unit_API.Get_Sscc(Handling_Unit_API.Get_Second_Level_Parent_Hu_Id(handling_unit_id))";
+      label = "Level 2 SSCC";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute Level2AltHandlingUnitLabelId Text {
+      fetch = "Handling_Unit_API.Get_Alt_Handling_Unit_Label_Id(Handling_Unit_API.Get_Second_Level_Parent_Hu_Id(handling_unit_id))";
+      label = "Level 2 Alt. Handling Unit Label ID";
+      maxlength = 2000;
+      editable = [false];
+   }
+
+   reference HandlingUnitRef(HandlingUnitId) to HandlingUnit(HandlingUnitId);
+   reference ActivitySeqRef(Contract, PartNo, ConfigurationId, LocationNo, LotBatchNo, SerialNo, EngChgLevel, WaivDevRejNo, HandlingUnitId, ActivitySeq) to InventoryPartInStock(Contract, PartNo, ConfigurationId, LocationNo, LotBatchNo, SerialNo, EngChgLevel, WaivDevRejNo, HandlingUnitId, ActivitySeq) {
+      label = "Activity Seq";
+   }
+   reference ShipmentIdRef(ShipmentId) to Shipment(ShipmentId) {
+      label = "Shipment ID";
+   }
+}
+
+------------------------------- ENUMERATIONS --------------------------------
+enumeration AttachedState {
+   enumerationtype = Custom;
+   value = "NOT_ATTACHED" {
+      identifier = "NotAttached";
+      label = "Not Attached";
+   }
+   value = "PARTIALLY_ATTACHED" {
+      identifier = "PartiallyAttached";
+      label = "Partially Attached";
+   }
+   value = "ATTACHED" {
+      identifier = "Attached";
+      label = "Attached";
+   }
+}
+--------------------------------- END : dlgIdentifyPartsToHandlingUnit - Attach Reservations -------------------
+
+
+--------------------------------- START : dlgConnectPartsToHandlingUnit - Attach Parts to Handling Unit -----------------
+----------------------------- MAIN ENTRY POINTS -----------------------------
+entityset ConnectPartsToHandlingUnitSet for ConnectPartsToHandlingUnitVirtual;
+
+--------------------------------- VIRTUALS ----------------------------------
+virtual ConnectPartsToHandlingUnitVirtual {
+   attribute HandlingUnitId Number {
+      label = "Handling Unit ID";
+      editable = [false];
+   }
+   attribute ShipmentId Number;
+    -- This attribute receive the selected shipment line no list from the main window.
+   attribute ShipmentLineNoList LongText {
+      inlined = [true];
+   }
+    -- This attribute hold the connected quantity amount aray for return to main window.
+   attribute ConnectedQtyList LongText {
+      inlined = [true];
+   }
+
+   reference HandlingUnitIdRef(HandlingUnitId) to HandlingUnit(HandlingUnitId) {
+      label = "Handling Unit ID";
+   }
+
+   array PartsForHandlingUnitArray() to PartsForHandlingUnitVirtual();
+//   {
+//      where = "QTY_TO_ATTACH > 0";
+//   }
+   array PartsInHandlingUnitArray(ShipmentId, HandlingUnitId) to PartsInHandlingUnit(ShipmentId, HandlingUnitId);
+
+   //! TODO: Should be unbounded! Action should not be bounded to virtual.
+   action StartAttachPartsToHandlingUnit LongText {
+      supportwarnings = [true];
+      ludependencies = HandlingUnit, ShipmentLineHandlUnit, HandlingUnitHistory, ShipmentLine, ShipmentHandlingUnitWithHistory;
+   }
+}
+
+virtual PartsForHandlingUnitVirtual {
+   crud = Update;
+   -- Use ShipmentId attribute in child virtual for use in reference.
+   attribute ShipmentId Number;
+   attribute ShipmentLineNo Number {
+      label = "Line No";
+      editable = [false];
+   }
+   attribute QtyToAttach Number;
+   attribute AttachFullQty Boolean("TRUE", "FALSE") {
+      required = [true];
+      editable = [true];
+   }
+
+   attribute RemainingQty Number {
+      editable = [false];
+      updatable = [false];
+   }
+
+   reference ShipmentLineRef(ShipmentId, ShipmentLineNo) to ShipmentLine(ShipmentId, ShipmentLineNo);
+}
+
+---------------------------------- QUERIES ----------------------------------
+query PartsInHandlingUnit {
+   from = "shipment_line_handl_unit_join";
+   lu = ShipmentLineHandlUnit;
+   keys = ShipmentId, ShipmentLineNo, HandlingUnitId;
+
+   attribute ShipmentId Number;
+   attribute ShipmentLineNo Number {
+      label = "Line No";
+   }
+   attribute HandlingUnitId Number;
+   attribute SourceRef1 Text {
+      fetch = "source_ref1";
+      label = "Source Ref 1";
+      maxlength = 50;
+      format = uppercase;
+   }
+   attribute SourceRef2 Text {
+      fetch = "source_ref2";
+      label = "Source Ref 2";
+      maxlength = 50;
+   }
+   attribute SourceRef3 Text {
+      fetch = "source_ref3";
+      label = "Source Ref 3";
+      maxlength = 50;
+   }
+   attribute SourceRef4 Text {
+      fetch = "source_ref4";
+      label = "Source Ref 4";
+      maxlength = 50;
+   }
+   attribute SourceRefType Enumeration(LogisticsSourceRefType) {
+      fetch = "source_ref_type_db";
+      label = "Source Ref Type";
+      maxlength = 100;
+   }
+   attribute SourcePartNo Text {
+      fetch = "source_part_no";
+      label = "Source Part No";
+      maxlength = 100;
+   }
+   attribute Quantity Number {
+      label = "Quantity Attached";
+   }
+   attribute SourceUnitMeas Text {
+      fetch = "source_unit_meas";
+      label = "Source UoM";
+      maxlength = 2000;
+   }
+   reference HandlingUnitIdRef(HandlingUnitId) to HandlingUnit(HandlingUnitId) {
+      label = "Handling Unit ID";
+   }
+}
+--------------------------------- END : dlgConnectPartsToHandlingUnit - Attach Parts to Handling Unit -------------------
+
+
+--------------------------------- Start : Attach Reservation Warnings : New Dialog -------------------
+----------------------------- MAIN ENTRY POINTS -----------------------------
+entityset AttachReservationWarnningVirtualSet for AttachReservationWarnningVirtual;
+
+--------------------------------- VIRTUALS ----------------------------------
+virtual AttachReservationWarnningVirtual {
+   attribute ShipmentId Number;
+   attribute HandlingUnitId Number;
+   attribute ShipmentLineArray Text;
+
+   array ReservationWarnningArray() to AttachReservationWarnningLineVirtual();
+
+   function GetShipmentLinesArrayToReduce Text;
+}
+
+virtual AttachReservationWarnningLineVirtual {
+   attribute ShipmentId Number {
+      editable = [false];
+   }
+   attribute ShipmentLineNo Number {
+      editable = [false];
+   }
+   attribute Quantity Number {
+      editable = [false];
+   }
+   attribute SourcePartNo Text {
+      editable = [false];
+      fetch = "Shipment_Line_API.Get_Source_Part_No(shipment_id, shipment_line_no)";
+   }
+   attribute SourcePartDescription Text {
+      editable = [false];
+      fetch = "Shipment_Line_API.Get_Source_Part_Description(shipment_id, shipment_line_no)";
+   }
+   attribute Result Enumeration(FndYesNo) {
+      required = [true];
+   }
+}
+--------------------------------- END : Attach Reservation Warnings : New Dialog ---------------------

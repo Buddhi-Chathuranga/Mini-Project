@@ -1,0 +1,133 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: InventoryPartBarcodeAnalysis
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+-- Date        Sign    History
+-- ----------  ------  ------------------------------------------------------
+-- 2020-12-03  JaThlk  SC2020R1-7200, Modified Get_Result_Key_List___ to print barcodes without the dialog correctly with new framework implementations.
+-- 2019-07-10  JaThlk  SCUXXW4-23055, Removed multiple calls for better performance.
+-- 2018-05-29  DaZase  SCUXXW4-12145, Added possiblity to print several barcodes in one report and added functionality to split barcodes
+-- 2018-05-29          on several reports if necessary and added functionality for layout definition and default printer to mimic IEE client.
+-- 2018-05-08  YANILK  SCUXXW4-6895, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Get_Result_Key_List___ (
+   full_selection_     IN VARCHAR2,
+   print_with_dialog_  IN BOOLEAN ) RETURN Print_Barcode_Structure_Rec
+IS
+   rec_                 Print_Barcode_Structure_Rec;   
+   selection_           VARCHAR2(32000) := CONCAT(full_selection_, ';');
+   current_selection_   VARCHAR2(32000);
+   report_id_           VARCHAR2(30) := 'INVENTORY_PART_BARCODE_REP';
+   barcode_id_          NUMBER;
+   barcode_list_        VARCHAR2(2000);
+   TYPE Barcode_List_Tab IS TABLE OF VARCHAR2(2000) INDEX BY PLS_INTEGER;
+   barcode_list_tab_    Barcode_List_Tab;   
+   coll_counter_        NUMBER := 1;
+   contract_            VARCHAR2(5);
+   report_attr_         VARCHAR2(2000);
+   parameter_attr_      VARCHAR2(2000);
+   print_attr_          VARCHAR2(2000);
+   result_key_          NUMBER;
+   result_key_list_     VARCHAR2(2000);
+   total_length_        NUMBER := 0; -- if above 1940 a new report should be printed and added to the result key list
+   default_printer_     VARCHAR2(200); 
+   print_job_id_        NUMBER;
+BEGIN    
+
+   WHILE (INSTR(selection_, ';') > 0) LOOP
+      current_selection_ := SUBSTR(selection_, 0, INSTR(selection_, ';'));
+      barcode_id_ :=  Client_SYS.Get_Key_Reference_Value(current_selection_, 'BARCODE_ID');
+      -- Security check, check all included contracts just to be sure
+      User_Allowed_Site_API.Is_Authorized(Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT'));
+      
+      -- Put latest barcode list into collection if we are over the barcode limit for this report,
+      -- due to report parameter attribute length limitation
+      IF ((total_length_ + LENGTH(barcode_id_) + 1) > 1940) THEN 
+         barcode_list_tab_(coll_counter_) := barcode_list_;
+         barcode_list_ := NULL;
+         total_length_ := 0;
+         coll_counter_ := coll_counter_ + 1;
+      END IF;   
+      
+      barcode_list_ := barcode_list_ || barcode_id_ || ';';
+      total_length_ := total_length_ + LENGTH(barcode_id_) + 1;
+      selection_ := SUBSTR(selection_, INSTR(selection_, ';') + 1); 
+   END LOOP;
+   
+   Log_SYS.Fnd_Trace_(Log_SYS.debug_, '------ TEST barcode_list_tab_.COUNT-----' || barcode_list_tab_.COUNT);
+   Log_SYS.Fnd_Trace_(Log_SYS.debug_, '------ TEST barcode_list_-----' || barcode_list_);
+   Log_SYS.Fnd_Trace_(Log_SYS.debug_, '------ TEST total_length_-----' || total_length_);
+   Log_SYS.Fnd_Trace_(Log_SYS.debug_, '------ TEST coll_counter_-----' || coll_counter_);
+   
+   -- Add the final list to the collection or the first if there is only one list
+   IF (barcode_list_ IS NOT NULL) THEN
+      barcode_list_tab_(coll_counter_) := barcode_list_;
+   END IF;   
+      
+   selection_ := CONCAT(full_selection_, ';');
+   -- Since Contract should be the same for all selection records it don't matter which one we fetch
+   contract_ := Client_SYS.Get_Key_Reference_Value(selection_, 'CONTRACT');  
+   
+   Client_SYS.Clear_Attr(report_attr_);
+   Client_SYS.Add_To_Attr('REPORT_ID', report_id_, report_attr_); 
+   IF (NOT print_with_dialog_) THEN 
+      default_printer_ := Printer_Connection_API.Get_Default_Printer(Fnd_Session_API.Get_Fnd_User, report_id_);  
+      Client_SYS.Clear_Attr(print_attr_);
+      Client_SYS.Add_To_Attr('PRINTER_ID',default_printer_, print_attr_);
+      Print_Job_API.New(print_job_id_, print_attr_);     
+      Client_SYS.Add_To_Attr('OUTPUT', 'PRINT', parameter_attr_);
+   END IF;    
+   -- Print each barcode list as a new report 
+   IF (barcode_list_tab_.COUNT > 0) THEN
+      FOR i IN barcode_list_tab_.FIRST..barcode_list_tab_.LAST  LOOP
+         Client_SYS.Clear_Attr(parameter_attr_);
+         Client_SYS.Add_To_Attr('BARCODE_ID', barcode_list_tab_(i), parameter_attr_);
+         Client_SYS.Add_To_Attr('CONTRACT', contract_, parameter_attr_);         
+                 
+         IF (print_with_dialog_) THEN
+            Log_SYS.Fnd_Trace_(Log_SYS.debug_, '------ TEST print_with_dialog_----- TRUE');
+            result_key_ := Report_Format_API.Create_New_Report(report_attr_, parameter_attr_, Fnd_Session_API.Get_Fnd_User);   
+         ELSE -- Printing without dialog and with default printer and layout definition
+            Archive_API.New_Instance(result_key_, report_attr_, parameter_attr_);
+            Client_SYS.Clear_Attr(print_attr_);
+            Client_SYS.Add_To_Attr('RESULT_KEY', result_key_, print_attr_);
+         END IF;   
+          
+         IF (result_key_list_ IS NULL) THEN
+            result_key_list_  := result_key_;
+         ELSE
+            result_key_list_  := result_key_list_ || ',' || result_key_;
+         END IF;         
+      END LOOP;
+   END IF; 
+
+   IF (NOT print_with_dialog_) THEN  
+      Client_SYS.Add_To_Attr('PRINT_JOB_ID', print_job_id_, print_attr_);
+      Print_Job_Contents_API.New_Instance(print_attr_);
+      Print_Job_API.Print(print_job_id_);
+   END IF; 
+   
+   rec_.result_key_list     := result_key_list_;
+   rec_.is_multiple_reports := Is_Multiple_Reports___(result_key_list_);
+
+   RETURN rec_;
+END Get_Result_Key_List___;   
+
+
+FUNCTION Is_Multiple_Reports___ (
+   result_key_list_  IN VARCHAR2 ) RETURN BOOLEAN
+IS
+   return_value_   BOOLEAN := FALSE;
+BEGIN
+   IF (INSTR(result_key_list_, ',') > 0) THEN
+      return_value_ := TRUE;
+   END IF;   
+   RETURN return_value_;         
+END Is_Multiple_Reports___;   
+

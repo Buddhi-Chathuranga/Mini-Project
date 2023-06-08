@@ -1,0 +1,77 @@
+-----------------------------------------------------------------------------
+--
+--  File:     IsoTimeZone.ins
+--
+--  Purpose:  Fills table ISO_TIME_ZONE_TAB with descriptions and offset factors for TimeZoneCode
+--
+--  Date    Sign   History
+--  ------  ----   -----------------------------------------------------------
+--  141015  Maabse Changed so the list is filled based on the Oracle TIMEZONE_NAMES
+--  040308  NISILK Created.
+-----------------------------------------------------------------------------
+
+SET SERVEROUTPUT ON
+
+PROMPT Inserts of Iso_Time_Zone default data....
+DECLARE
+   description     VARCHAR2(200);
+   offset_factor   NUMBER;
+   newrec_         iso_time_zone_tab%ROWTYPE;
+   
+   -- The Offset is calculated based on the offset for the specific time zone at midnight January 1st or July 1st dependent if its location is in northern or southern hemisphere.
+   CURSOR get_time_zones IS
+      SELECT DISTINCT tzname, 
+         24 * (to_date(to_char(FROM_TZ(CAST((to_date(to_char(sysdate, 'YYYY') || '-01-01 00:00', 'YYYY-MM-DD HH24:MI:SS')) AS TIMESTAMP), 'UTC') AT TIME ZONE tzname,'YYYY-MM-DD HH24:MI:SS'),'YYYY-MM-DD HH24:MI:SS') 
+             - to_date(to_char(sysdate, 'YYYY') || '-01-01 00:00', 'YYYY-MM-DD HH24:MI:SS')) offset_northern_hemisphere,
+         24 * (to_date(to_char(FROM_TZ(CAST((to_date(to_char(sysdate, 'YYYY') || '-07-01 00:00', 'YYYY-MM-DD HH24:MI:SS')) AS TIMESTAMP), 'UTC') AT TIME ZONE tzname,'YYYY-MM-DD HH24:MI:SS'),'YYYY-MM-DD HH24:MI:SS') 
+             - to_date(to_char(sysdate, 'YYYY') || '-07-01 00:00', 'YYYY-MM-DD HH24:MI:SS')) offset_southern_hemisphere
+      FROM V$TIMEZONE_NAMES
+      WHERE tzname LIKE '%/%' OR tzname = 'UTC'; --Only include UTC and Time zones that are devided into Regions.
+   
+   PROCEDURE Insert_Basic_Data___(
+       time_zone_code_ VARCHAR2,
+       description_   VARCHAR2,
+       offset_factor_ NUMBER)
+   IS
+   BEGIN
+      newrec_.time_zone_code:= time_zone_code_;
+      newrec_.description   := description_;
+      newrec_.offset_factor  := offset_factor_;
+      IF Iso_Time_Zone_API.Check_Activate_Code(time_zone_code_) = TRUE THEN
+         newrec_.used_in_appl  := 'TRUE';
+      ELSE
+         newrec_.used_in_appl  := 'FALSE';
+      END IF;
+      newrec_.rowversion := sysdate;
+      
+      Iso_Time_Zone_API.Insert_Lu_Data_Rec__(newrec_);
+   END Insert_Basic_Data___;   
+   
+BEGIN
+
+   UPDATE iso_time_zone_tab SET description = '*';
+
+   FOR rec_ IN get_time_zones LOOP
+      IF rec_.offset_northern_hemisphere - rec_.offset_southern_hemisphere = 0 THEN  -- No Daylight Saving Time
+         offset_factor := rec_.offset_northern_hemisphere;
+      ELSIF rec_.offset_northern_hemisphere - rec_.offset_southern_hemisphere < 0 THEN  -- Northern Hemishpere DayLight Saving Time  
+         offset_factor := rec_.offset_northern_hemisphere;
+      ELSIF rec_.offset_northern_hemisphere - rec_.offset_southern_hemisphere > 0 THEN  -- Southern Hemishpere DayLight Saving Time
+         offset_factor := rec_.offset_southern_hemisphere;
+      END IF;
+
+      IF rec_.tzname = 'UTC' THEN
+         description := 'UTC';
+      ELSIF offset_factor < 0 THEN
+         description := 'UTC' || offset_factor;
+      ELSE
+         description := 'UTC+' || offset_factor;
+      END IF;
+      Insert_Basic_Data___(rec_.tzname, description, offset_factor);
+   END LOOP;
+  
+   DELETE FROM iso_time_zone_tab WHERE description = '*';
+ 
+   COMMIT;
+END;
+/

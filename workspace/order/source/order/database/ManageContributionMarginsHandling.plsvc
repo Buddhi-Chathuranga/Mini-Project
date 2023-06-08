@@ -1,0 +1,413 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: ManageContributionMarginsHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+-- 2019-08-22  SeJalk  SCUXXW4-23015, Supporting to move fragment ManageContributionMarginsAssistant to a seperate projection.
+-- 2018-11-28  SeJalk  SCUXXW4-8247, Converted from dlgContributionMargin using MTG Version: 1.33
+-----------------------------------------------------------------------------
+
+layer Core;
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Contribution_Margin_Header_Virtual_Rec )
+IS   
+   full_selection_      VARCHAR2(32000) := CONCAT(rec_.selection, ';');
+   curr_selection_      VARCHAR2(32000);
+   index_               NUMBER;
+   master_              Contribution_Margin_Header_Virtual_Key;
+   detail_              Contribution_Margin_Line_Virtual_Rec;
+   quote_detail_        Contribution_Margin_Quote_Line_Virtual_Rec;
+   quote_line_rec_      Order_Quotation_Line_API.Public_Rec;
+   $IF Component_Crm_SYS.INSTALLED $THEN
+      opp_line_rec_     business_opportunity_line_tab%ROWTYPE;
+   $END
+   sales_price_         NUMBER;
+   disc_ammount_        NUMBER;
+   base_sales_price_    NUMBER;
+   base_disc_ammount_   NUMBER;
+   conv_ratio_          NUMBER;
+   quote_rec_           Order_Quotation_API.Public_Rec;
+   currency_rounding_   NUMBER;
+   net_total_base_      NUMBER;
+   $IF Component_Crm_SYS.INSTALLED $THEN
+      CURSOR get_opp_line_(opp_no_  VARCHAR2,
+                           rev_no_  VARCHAR2,
+                           line_no_ VARCHAR2 ) IS
+      SELECT *
+        FROM business_opportunity_line_tab
+       WHERE opportunity_no = opp_no_
+         AND revision_no = rev_no_
+         AND line_no = line_no_;
+   $END
+   
+BEGIN
+   super(rec_); 
+   master_.objkey := rec_.objkey;
+   index_ := INSTR(full_selection_, ';');
+   WHILE (index_ > 0) LOOP
+      curr_selection_   := Substr(full_selection_, 0, index_);
+      IF rec_.source = 'CUSTOMERQUOTE' THEN
+         quote_detail_.quotation_no  := Client_SYS.Get_Key_Reference_Value(curr_selection_, 'QUOTATION_NO');
+         quote_detail_.line_no       := Client_SYS.Get_Key_Reference_Value(curr_selection_, 'LINE_NO');
+         quote_detail_.release_no    := Client_SYS.Get_Key_Reference_Value(curr_selection_, 'REL_NO');
+         quote_detail_.line_item_no  := Client_SYS.Get_Key_Reference_Value(curr_selection_, 'LINE_ITEM_NO');
+
+         quote_line_rec_ := Order_Quotation_Line_API.Get(quote_detail_.quotation_no, quote_detail_.line_no, quote_detail_.release_no, quote_detail_.line_item_no);
+
+         quote_detail_.catalog_no            := quote_line_rec_.catalog_no;
+         quote_detail_.catalog_desc          := quote_line_rec_.catalog_desc;
+         quote_detail_.buy_qty_due           := quote_line_rec_.buy_qty_due;
+         quote_detail_.price_source          := quote_line_rec_.price_source;  
+         quote_detail_.price_source_id       := quote_line_rec_.price_source_id;       
+         quote_detail_.price_list_no         := quote_line_rec_.price_list_no;
+         quote_detail_.part_price            := NVL(quote_line_rec_.part_price, 0);
+         quote_detail_.calc_char_price       := NVL(quote_line_rec_.calc_char_price, 0);
+         quote_detail_.char_price            := NVL(quote_line_rec_.char_price, 0);
+         quote_detail_.calculated_price      := quote_detail_.part_price + quote_detail_.calc_char_price;
+         quote_detail_.sale_unit_price       := quote_line_rec_.sale_unit_price;
+         quote_detail_.base_sale_unit_price  := quote_line_rec_.base_sale_unit_price;
+         quote_detail_.unit_price_incl_tax   := quote_line_rec_.unit_price_incl_tax;
+         quote_detail_.base_unit_price_incl_tax   := quote_line_rec_.base_unit_price_incl_tax;
+         quote_detail_.discount              := quote_line_rec_.discount;
+         
+         quote_rec_                          := Order_Quotation_API.Get(quote_detail_.quotation_no);
+         currency_rounding_                  := Currency_Code_API.Get_Currency_Rounding(quote_rec_.company, quote_rec_.currency_code);
+         quote_detail_.price_conv_factor     := quote_line_rec_.price_conv_factor;
+         quote_detail_.discount_amount       := Order_Quote_Line_Discount_API.Get_Total_Line_Discount(quote_detail_.quotation_no,
+                                                                                                      quote_detail_.line_no, 
+                                                                                                      quote_detail_.release_no, 
+                                                                                                      quote_detail_.line_item_no, 
+                                                                                                      quote_detail_.buy_qty_due,
+                                                                                                      quote_detail_.price_conv_factor,
+                                                                                                      currency_rounding_);
+         quote_detail_.quotation_discount    := quote_line_rec_.quotation_discount;
+         quote_detail_.additional_discount   := quote_line_rec_.additional_discount;
+         quote_detail_.total_order_line_discount := Order_Quotation_Line_Api.Get_Total_Discount(quote_detail_.quotation_no, 
+                                                                                                quote_detail_.line_no, 
+                                                                                                quote_detail_.release_no, 
+                                                                                                quote_detail_.line_item_no); 
+         quote_detail_.cost                  := quote_line_rec_.cost;
+         quote_detail_.contribution_margin   := Order_Quotation_Line_API.Get_Quot_Line_Contribution(quote_detail_.quotation_no,
+                                                                                                    quote_detail_.line_no, 
+                                                                                                    quote_detail_.release_no, 
+                                                                                                    quote_detail_.line_item_no); 
+
+         net_total_base_ := Order_Quotation_Line_API.Get_Base_Sale_Price_Total(quote_detail_.quotation_no, 
+                                                                               quote_detail_.line_no, 
+                                                                               quote_detail_.release_no, 
+                                                                               quote_detail_.line_item_no);
+         IF (net_total_base_ IS NOT NULL AND net_total_base_ != 0) THEN
+            quote_detail_.contribution_margin_rate := Order_Quotation_Line_API.Get_Quot_Line_Contribution(quote_detail_.quotation_no, 
+                                                                                                          quote_detail_.line_no, 
+                                                                                                          quote_detail_.release_no, 
+                                                                                                          quote_detail_.line_item_no)/ net_total_base_ * 100;
+         ELSE
+            quote_detail_.contribution_margin_rate := 0;
+         END IF;
+         quote_detail_.net_amount_base := Order_Quotation_Line_API.Get_Base_Sale_Price_Total(quote_detail_.quotation_no, 
+                                                                                             quote_detail_.line_no, 
+                                                                                             quote_detail_.release_no, 
+                                                                                             quote_detail_.line_item_no);
+         quote_detail_.gross_amount_base := Order_Quotation_Line_API.Get_Base_Price_Incl_Tax_Total(quote_detail_.quotation_no, 
+                                                                                                   quote_detail_.line_no, 
+                                                                                                   quote_detail_.release_no, 
+                                                                                                   quote_detail_.line_item_no);        
+         quote_detail_.net_amount_curr := Order_Quotation_Line_API.Get_Sale_Price_Total(quote_detail_.quotation_no, 
+                                                                                        quote_detail_.line_no, 
+                                                                                        quote_detail_.release_no, 
+                                                                                        quote_detail_.line_item_no);  
+         quote_detail_.gross_amount_curr :=  Order_Quotation_Line_API.Get_Sale_Price_Incl_Tax_Total(quote_detail_.quotation_no, 
+                                                                                                    quote_detail_.line_no, 
+                                                                                                    quote_detail_.release_no, 
+                                                                                                    quote_detail_.line_item_no);
+         quote_detail_.curr_rate          := quote_line_rec_.currency_rate;
+         quote_detail_.tax_liability_type := quote_line_rec_.tax_liability_type;
+         quote_detail_.uom_conv_ratio     := quote_line_rec_.conv_factor/quote_line_rec_.inverted_conv_factor;
+         quote_detail_.contract           := quote_line_rec_.contract;       
+         New_Detail___(master_, quote_detail_);
+      ELSIF rec_.source = 'BUSINESSOPPORTUNITY' THEN
+         $IF Component_Crm_SYS.INSTALLED $THEN
+            detail_.opportunity_no  := Client_SYS.Get_Key_Reference_Value(curr_selection_, 'OPPORTUNITY_NO');
+            detail_.revision_no     := Client_SYS.Get_Key_Reference_Value(curr_selection_, 'REVISION_NO');
+            detail_.line_no         := Client_SYS.Get_Key_Reference_Value(curr_selection_, 'LINE_NO');
+
+            OPEN get_opp_line_ (detail_.opportunity_no, detail_.revision_no, detail_.line_no);
+            FETCH get_opp_line_ INTO opp_line_rec_;
+            CLOSE get_opp_line_;
+
+            base_sales_price_    := opp_line_rec_.qty * NVL(opp_line_rec_.base_sale_unit_price, 0);
+            base_disc_ammount_   := base_sales_price_ - (base_sales_price_ * (1 - NVL(opp_line_rec_.discount, 0)/100));
+
+            sales_price_   := opp_line_rec_.qty * NVL(opp_line_rec_.sale_unit_price, 0);
+            disc_ammount_  := sales_price_ - (sales_price_ * (1 - NVL(opp_line_rec_.discount, 0)/100));
+
+            IF opp_line_rec_.non_exist_part = 'TRUE' THEN
+               conv_ratio_ := 1;
+               detail_.non_existing_part := TRUE;
+            ELSE
+               conv_ratio_ := SALES_PART_API.Get_Conv_Factor(opp_line_rec_.contract,opp_line_rec_.catalog_no)/SALES_PART_API.Get_Inverted_Conv_Factor(opp_line_rec_.contract,opp_line_rec_.catalog_no);
+               detail_.non_existing_part := FALSE;
+            END IF;
+
+            detail_.part_no               := opp_line_rec_.catalog_no;
+            detail_.contract              := opp_line_rec_.contract;
+            detail_.part_description      := opp_line_rec_.description;
+            detail_.qty                   := opp_line_rec_.qty;
+            detail_.price_source          := opp_line_rec_.price_source;
+            detail_.price_source_id       := opp_line_rec_.price_source_id;
+            detail_.price                 := opp_line_rec_.part_price;
+            detail_.calc_char_price       := NVL(opp_line_rec_.calc_char_price, 0);
+            detail_.char_price            := NVL(opp_line_rec_.char_price, 0);
+            detail_.sales_unit_price      := opp_line_rec_.sale_unit_price;
+            detail_.base_sales_unit_price := opp_line_rec_.base_sale_unit_price;
+            detail_.discount              := opp_line_rec_.discount;
+            detail_.total_curr            := sales_price_ - disc_ammount_;
+            detail_.total_base            := base_sales_price_ - base_disc_ammount_;
+            detail_.cost                  := opp_line_rec_.cost;
+            detail_.total_cost            := opp_line_rec_.cost * conv_ratio_ * opp_line_rec_.qty;
+            detail_.contribution_margin   := detail_.total_base - detail_.total_cost;
+            detail_.currency_rate         := opp_line_rec_.currency_rate;
+            detail_.uom_conv_ratio        := conv_ratio_;
+
+            IF detail_.total_base != 0 THEN
+               detail_.margin_rate        := ((detail_.total_base - detail_.total_cost)/detail_.total_base) * 100;
+            ELSE
+               detail_.margin_rate := 0;
+            END IF;
+
+
+            New_Detail___(master_, detail_);
+         $ELSE
+         NULL;
+         $END
+      END IF;
+      full_selection_ := SUBSTR(full_selection_, index_ + 1);
+      index_ := INSTR(full_selection_, ';');
+   END LOOP;
+END CRUD_Create___;
+
+FUNCTION Calculate_Margin___ (
+   parent_key_ IN VARCHAR2,  
+   save_       IN VARCHAR2,
+   info$_ OUT VARCHAR2 ) RETURN VARCHAR2
+IS
+   key_           Contribution_Margin_Header_Virtual_Key;
+   parent_        Contribution_Margin_Header_Virtual_Rec;
+   line_key_      Contribution_Margin_Line_Virtual_Key;
+   old_           Contribution_Margin_Line_Virtual_Rec;
+   new_           Contribution_Margin_Line_Virtual_Rec;
+   line_sq_key_   Contribution_Margin_Quote_Line_Virtual_Key;
+   sq_old_        Contribution_Margin_Quote_Line_Virtual_Rec;
+   sq_new_        Contribution_Margin_Quote_Line_Virtual_Rec;
+   
+   msg_        CLOB;
+   adj_price_  VARCHAR2(5);
+   out_data_   CLOB;
+   names_      Message_SYS.name_table_clob;
+   values_     Message_SYS.line_table_clob;
+   count_      NUMBER;
+   temp_       VARCHAR2(32000);
+   $IF Component_Crm_SYS.INSTALLED $THEN
+      opp_no_  business_opportunity_line_tab.opportunity_no%TYPE;
+   $END
+   
+   base_sales_price_    NUMBER;
+   discount_amount_     NUMBER;
+   sales_price_         NUMBER;  
+   fee_rate_            NUMBER;
+   curr_rounding_       NUMBER;
+   total_gross_amt_     NUMBER;
+   total_net_amt_       NUMBER;
+   add_discount_amt_    NUMBER;
+   order_discount_amt_  NUMBER;
+   total_discount_      NUMBER;
+   total_cost_          NUMBER;
+   contrib_amt_         NUMBER;
+   info_                VARCHAR2(2000) := '';
+   discount_negative_   NUMBER;
+   $IF Component_Crm_SYS.INSTALLED $THEN
+      CURSOR get_line_key_(revision_no_   VARCHAR2,
+                           line_no_       VARCHAR2 ) IS
+      SELECT objkey
+        FROM ${PROJECTION}_CONTRIBUTION_MARGIN_LINE_VIRTUAL_VRT
+       WHERE revision_no = revision_no_
+         AND line_no = line_no_
+         AND opportunity_no = opp_no_;
+   $END
+BEGIN
+   key_.objkey    := parent_key_;
+   parent_        := Get_Record___(key_);
+   curr_rounding_ := 2; -- TEUXX-14791
+   IF parent_.required_margin IS NULL OR parent_.price_or_discount IS NULL THEN
+      RETURN 'INVALID';
+   END IF;
+   IF parent_.source = 'CUSTOMERQUOTE' THEN
+      FOR line_rec_ IN Get_Contribution_Margin_Quote_Lines___(key_) LOOP
+         line_sq_key_.objkey := line_rec_.objkey;
+         sq_old_ := Get_Record___(line_sq_key_);       
+
+         Message_SYS.Add_Attribute(msg_, 'QUOTATION_NO', sq_old_.quotation_no);
+         Message_SYS.Add_Attribute(msg_, 'LINE_NO', sq_old_.line_no);
+         Message_SYS.Add_Attribute(msg_, 'REL_NO', sq_old_.release_no);
+         Message_SYS.Add_Attribute(msg_, 'LINE_ITEM_NO', sq_old_.line_item_no);
+
+         IF parent_.price_or_discount = 'PRICE' THEN
+            adj_price_ := '1';
+         ELSE
+            adj_price_ := '0';
+         END IF;
+      END LOOP;
+      
+      out_data_ := Customer_Order_Pricing_API.Calculate_Margin_Values(msg_, 'SQ', adj_price_, save_, parent_.required_margin);
+      Message_SYS.Get_Clob_Attributes(out_data_, count_, names_, values_);
+
+      FOR index_ IN 1 .. count_ LOOP
+         temp_ := values_(index_);
+
+         sq_new_.line_no      := Message_SYS.Find_Attribute(temp_, 'LINE_NO', '');
+         sq_new_.release_no   := Message_SYS.Find_Attribute(temp_, 'REL_NO', '');
+         sq_new_.line_item_no := Message_SYS.Find_Attribute(temp_, 'LINE_ITEM_NO', '');
+         IF info_ = '' THEN
+            info_                := Message_SYS.Find_Attribute(temp_, 'INFO', '');
+         END IF;
+         FOR line_rec_ IN Get_Contribution_Margin_Quote_Lines___(key_) LOOP
+            line_sq_key_.objkey := line_rec_.objkey;
+            sq_old_ := Get_Record___(line_sq_key_);
+            IF (sq_old_.line_no =  sq_new_.line_no AND sq_old_.release_no =  sq_new_.release_no AND sq_old_.line_item_no =  sq_new_.line_item_no ) THEN
+               sq_new_  := sq_old_;
+
+               sq_new_.base_unit_price_incl_tax := ROUND(NVL(Message_SYS.Find_Attribute(temp_, 'BASE_UNIT_PRICE_INCL_TAX', 0), 0), curr_rounding_);
+               sq_new_.base_sale_unit_price     := ROUND(NVL(Message_SYS.Find_Attribute(temp_, 'BASE_SALE_UNIT_PRICE', 0), 0), curr_rounding_);
+               sq_new_.sale_unit_price          := ROUND(NVL(Message_SYS.Find_Attribute(temp_, 'SALE_UNIT_PRICE', 0), 0), curr_rounding_);
+               sq_new_.unit_price_incl_tax      := ROUND(NVL(Message_SYS.Find_Attribute(temp_, 'UNIT_PRICE_INCL_TAX', 0), 0), curr_rounding_);
+               sq_new_.discount                 := ROUND(NVL(Message_SYS.Find_Attribute(temp_, 'DISCOUNT', 0), 0), curr_rounding_);
+               IF (save_ = 'TRUE' AND sq_new_.discount < 0) THEN
+                  discount_negative_ := 1;
+               END IF; 
+               sq_new_.discount_amount          := ROUND(NVL(Message_SYS.Find_Attribute(temp_, 'DISCOUNT_AMOUNT', 0), 0), curr_rounding_);
+               sq_new_.total_disc_excl_tax      := ROUND(NVL(Message_SYS.Find_Attribute(temp_, 'DISC_AMOUNT_EXCL_TAX', 0), 0), curr_rounding_);
+               sq_new_.calculated_price         := sq_new_.part_price + sq_new_.calc_char_price;   
+               IF sq_new_.tax_liability_type  = 'EXM' THEN
+                  fee_rate_ := 0;
+               ELSE
+                  fee_rate_ := Source_Tax_Item_API.Get_Total_Tax_Percentage(Site_API.Get_Company(sq_new_.contract), 
+                                                                            'ORDER_QUOTATION_LINE',
+                                                                            sq_new_.quotation_no,
+                                                                            sq_new_.line_no ,
+                                                                            sq_new_.release_no,
+                                                                            sq_new_.line_item_no, '*');
+               END IF;
+              
+               IF Order_Quotation_API.Get_Use_Price_Incl_Tax_Db(sq_new_.quotation_no) = 'TRUE' THEN                 
+                  total_gross_amt_    := sq_old_.buy_qty_due * sq_new_.price_conv_factor * sq_new_.base_unit_price_incl_tax;
+                  total_net_amt_      := ROUND(total_gross_amt_/((fee_rate_ / 100) + 1), curr_rounding_);
+                  add_discount_amt_   := ROUND((total_gross_amt_ - sq_new_.discount_amount) * (sq_new_.additional_discount/100), curr_rounding_);
+                  order_discount_amt_ :=  ROUND((total_gross_amt_ - sq_new_.discount_amount) * (sq_new_.quotation_discount/100), curr_rounding_);
+                  total_discount_     := ROUND((sq_new_.total_disc_excl_tax), curr_rounding_) + ROUND((add_discount_amt_/ ((fee_rate_ / 100) + 1)), curr_rounding_);
+                  total_gross_amt_    := ROUND(total_gross_amt_, curr_rounding_);
+                  sq_new_.gross_amount_base := total_gross_amt_ - sq_new_.discount_amount - add_discount_amt_ - order_discount_amt_;
+                  sq_new_.net_amount_base   := total_net_amt_ - total_discount_;            
+               ELSE
+                  total_net_amt_ := sq_old_.buy_qty_due * sq_new_.price_conv_factor * sq_new_.base_sale_unit_price;
+                  add_discount_amt_ := ROUND((total_net_amt_ - sq_new_.discount_amount) * (sq_new_.additional_discount/100), curr_rounding_);
+                  order_discount_amt_ :=  ROUND((total_net_amt_ - sq_new_.discount_amount) * (sq_new_.quotation_discount/100), curr_rounding_);
+                  total_net_amt_ := ROUND(total_net_amt_, curr_rounding_);
+                  sq_new_.net_amount_base := total_net_amt_ - sq_new_.discount_amount - add_discount_amt_ - order_discount_amt_;
+                  sq_new_.gross_amount_base :=  ROUND(sq_new_.net_amount_base * ((fee_rate_ / 100) + 1), curr_rounding_);
+               END IF;
+               
+               total_cost_  := sq_new_.cost * sq_new_.uom_conv_ratio * sq_new_.buy_qty_due;
+               contrib_amt_ := sq_new_.net_amount_base - total_cost_ ;
+               sq_new_.contribution_margin := ROUND(contrib_amt_, curr_rounding_);
+               IF (sq_new_.net_amount_base != 0) THEN
+                  sq_new_.contribution_margin_rate := contrib_amt_/ sq_new_.net_amount_base * 100;
+               ELSE
+                  sq_new_.net_amount_base := 0;
+               END IF;              
+               sq_new_.discount_amount := ROUND(sq_new_.discount_amount/sq_new_.curr_rate, curr_rounding_);
+               sq_new_.net_amount_curr := ROUND(sq_new_.net_amount_base/sq_new_.curr_rate, curr_rounding_);
+               sq_new_.gross_amount_curr :=ROUND(sq_new_.gross_amount_base/sq_new_.curr_rate, curr_rounding_);
+               CRUD_Update___(sq_old_, sq_new_);                   
+            END IF;
+         END LOOP;            
+      END LOOP;
+   $IF Component_Crm_SYS.INSTALLED $THEN
+   ELSIF parent_.source = 'BUSINESSOPPORTUNITY' THEN       
+         FOR line_rec_ IN Get_Contribution_Margin_Lines___(key_) LOOP
+            line_key_.objkey := line_rec_.objkey;
+            old_ := Get_Record___(line_key_);
+            opp_no_ := NVL(old_.opportunity_no, opp_no_); 
+            Message_SYS.Add_Attribute(msg_, 'OPPORTUNITY_NO',  old_.opportunity_no);
+            Message_SYS.Add_Attribute(msg_, 'REVISION_NO',     old_.revision_no);
+            Message_SYS.Add_Attribute(msg_, 'OPP_LINE_NO',     old_.line_no);
+
+            IF parent_.price_or_discount = 'PRICE' THEN
+               adj_price_ := '1';
+            ELSE
+               adj_price_ := '0';
+            END IF;
+         END LOOP;
+
+         out_data_ := Customer_Order_Pricing_API.Calculate_Margin_Values(msg_, 'BO', adj_price_, save_, parent_.required_margin);
+         Message_SYS.Get_Clob_Attributes(out_data_, count_, names_, values_);
+
+         FOR index_ IN 1 .. count_ LOOP
+            temp_ := values_(index_);
+
+            new_.revision_no     := Message_SYS.Find_Attribute(temp_, 'REVISION_NO', '');
+            new_.line_no         := Message_SYS.Find_Attribute(temp_, 'LINE_NO', '');
+
+            OPEN get_line_key_ (new_.revision_no, new_.line_no);
+            FETCH get_line_key_ INTO line_key_.objkey;
+            CLOSE get_line_key_;
+
+            old_  := Get_Record___(line_key_);
+            new_  := old_;
+
+            new_.sales_unit_price      := NVL(Message_SYS.Find_Attribute(temp_, 'SALE_UNIT_PRICE', 0), 0);
+            new_.base_sales_unit_price := NVL(Message_SYS.Find_Attribute(temp_, 'BASE_SALE_UNIT_PRICE', 0), 0);
+            new_.discount              := NVL(Message_SYS.Find_Attribute(temp_, 'DISCOUNT', 0), 0);
+            IF (save_ = 'TRUE' AND sq_new_.discount < 0) THEN
+               discount_negative_ := 1;
+            END IF; 
+            base_sales_price_ := old_.qty * new_.base_sales_unit_price;
+            discount_amount_  := base_sales_price_ - (base_sales_price_ *(1 - (new_.discount/100)));
+            new_.total_base   := base_sales_price_ - discount_amount_;
+
+            sales_price_      := old_.qty * new_.sales_unit_price;
+            discount_amount_  := sales_price_ - (sales_price_ *(1 - (new_.discount/100)));
+            new_.total_curr   := sales_price_ - discount_amount_;
+
+            IF old_.currency_rate IS NOT NULL AND old_.currency_rate != 0 THEN
+               new_.total_base := new_.total_curr * old_.currency_rate;
+            END IF;
+
+            new_.total_cost            := old_.cost * old_.uom_conv_ratio * old_.qty;
+            new_.contribution_margin   := new_.total_base - new_.total_cost;
+            IF new_.total_base != 0 AND new_.total_base IS NOT NULL THEN
+               new_.margin_rate := (new_.contribution_margin / new_.total_base) * 100;
+            ELSE
+               new_.margin_rate := 0;
+            END IF;
+
+            CRUD_Update___(old_, new_);
+         END LOOP;
+      $END
+   END IF; 
+   CRUD_Update___(parent_, parent_);
+   IF info_ != '' THEN
+      Client_SYS.Add_Info(lu_name_, 'MULDISCOUNTEXIST: Margins will not be recalculated for the lines with multiple discount types.');          
+   END IF;
+   IF discount_negative_ = 1 THEN
+       Client_SYS.Add_Info(lu_name_, 'NEGATIVEDISCOUNT: Some of the lines contain negative discounts.');          
+   END IF;
+   info$_ := Client_SYS.Get_All_Info();
+   RETURN 'DONE';
+END Calculate_Margin___;
+

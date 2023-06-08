@@ -1,0 +1,382 @@
+-------------------------------------------------------------------------------------------------
+-- Date        Sign     History
+-- ----------  ------   -------------------------------------------------------------------------
+-- 2021-10-12  DhAplk   SC21R2-5048, Created.
+-------------------------------------------------------------------------------------------------
+
+fragment QuickCustOrdAddMultiplePartsAssistant;
+component ORDER;
+layer Core;
+description "Add Multiple Parts Assistant in Quick Customer Order Registration";
+
+
+--------------------------------- FRAGMENTS ---------------------------------
+
+include fragment CustomerAgreementLovSelector;
+include fragment AssortmentNodeLov3Selector;
+include fragment SalesPartActiveLovSelector;
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+
+assistant AddMultiplePartsAssistant using AddMultiplePartsSet {
+   label = "Add Multiple Parts";
+   savemode = OnLostFocus;
+   input(Contract, CustomerNo);
+   output(Objkey);
+   init command {
+      execute {
+         set AddLinesExist = false;
+      }
+   }
+   singlestep {
+      group AddMultiplePartsGroup;
+      list AddPartsList(PartLines);
+   }
+   command Apply;
+   command ApplyAndClose;
+   command Close;
+}
+
+--------------------------------- COMMANDS ----------------------------------
+command Apply for AddMultiplePartsVirtual {
+   label = "Apply";
+   --enabled = [AddLinesExist = true];
+   execute {
+      call AddLinesToTempVirtual(Objkey);
+      exit;
+   }
+}
+
+command ApplyAndClose for AddMultiplePartsVirtual {
+   label = "Apply and Close";
+   execute {
+      call AddLinesToTempVirtual(Objkey);
+      exit OK;
+   }
+}
+
+command Close for AddMultiplePartsVirtual {
+   label = "Close";
+   execute {
+      exit "CLOSE";
+   }
+}
+
+--------------------------------- SELECTORS ---------------------------------
+
+selector PriceListNoLovSelector for SalesPriceListNoLov {
+   static PriceListNo;
+   static Description;
+}
+
+selector AssortmentLovSelector for CustomerAssortmentStruct {
+   static AssortmentId;
+   static AssortmentDescription;
+}
+
+selector CustAgreementLovSelector for CustomerAgreementLov {
+   static CurrencyCode;
+   static AgreementId;
+   static Description;
+}
+
+---------------------------------- GROUPS -----------------------------------
+
+group AddMultiplePartsGroup for AddMultiplePartsVirtual {
+   label = "Part Selection";
+
+   field PartSelectionMethod {
+      required = [true];
+      defaulttoprevious = [true];
+
+      validate command {
+         execute {
+            if [PartSelectionMethod = "ASSORTMENT"] {
+               call CheckLimitSalesAssortments(CustomerNo) into LimitSalesToAssortExist;
+            }
+            else {
+               set AssortmentId = null;
+               set AssortmentNodeId = null;
+            }
+
+            if [PartSelectionMethod != "PRICELIST"] {
+               set PriceListNo = null;
+            }
+
+            if [PartSelectionMethod != "AGREEMENT"] {
+               set AgreementId = null;
+            }
+         }
+      }
+   }
+
+   field AssortmentId {
+      visible = [PartSelectionMethod = "ASSORTMENT"];
+      required = [true];
+      label = "Assortment";
+
+      lovswitch {
+         when [LimitSalesToAssortExist] {
+            lov AssortmentIdRef with AssortmentLovSelector using GetLimitSalesToAssortments {
+               description = AssortmentIdRef.AssortmentDescription;
+            }
+         }
+         when [not(LimitSalesToAssortExist)] {
+            lov AssortmentIdRef with AssortmentLovSelector {
+               description = AssortmentIdRef.AssortmentDescription;
+            }
+         }
+      }
+   }
+
+   lov AssortmentNodeIdRef with ReferenceAssortmentNodeLov3Selector {
+      visible = [PartSelectionMethod = "ASSORTMENT" and AssortmentId != NULL];
+      description = AssortmentNodeIdRef.Description;
+      editable = [AssortmentId != NULL];
+   }
+
+   lov PriceListNoRef with PriceListNoLovSelector using GetValidPriceLists(Contract) {
+      visible = [PartSelectionMethod = "PRICELIST"];
+      description = PriceListNoRef.Description;
+      required = [true];
+      freeinput = [true];
+
+      validate command {
+         execute {
+            call CheckPriceListAvailability(CustomerNo, PriceListNo);
+         }
+      }
+   }
+
+   lov AgreementIdRef with CustAgreementLovSelector {
+      visible = [PartSelectionMethod = "AGREEMENT"];
+      description = AgreementIdRef.Description;
+      required = [true];
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+list AddPartsList for AddPartsVirtual {
+   label = "Available Lines to Add";
+   editmode = SingleCellEdit;
+
+   field AddLine {
+      validate command {
+         execute {
+            if [AddLine = false and Quantity != null] {
+               set Quantity = null;
+            }
+         }
+      }
+   }
+
+   field CatalogNoRef;
+   field CatalogDescription {
+      size = Large;
+   }
+   field Quantity {
+      required = [AddLine];
+      validate command {
+         execute {
+            if [Quantity <= 0 and Quantity != null] {
+               set Quantity = null;
+               warning("Part line with zero qty will not be added to the Customer Order");
+            }
+            if [Quantity > 0 and Quantity != null] {
+               set AddLine = true;
+            }
+            else {
+               set AddLine = false;
+            }
+         }
+      }
+   }
+   field SalesUnitMeas;
+   field CatalogType;
+   field Configurable;
+}
+
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+
+
+----------------------------- MAIN ENTRY POINTS -----------------------------
+
+entityset AddMultiplePartsSet for AddMultiplePartsVirtual;
+
+------------------------------- ENUMERATIONS --------------------------------
+enumeration PartSelectionMethod {
+   value = "SITE" {
+      label = "Site";
+   }
+   value = "ASSORTMENT" {
+      label = "Assortment";
+   }
+   value = "PRICELIST" {
+      label = "Price List";
+   }
+   value = "AGREEMENT" {
+      label = "Agreement";
+   }
+}
+
+--------------------------------- VIRTUALS ----------------------------------
+
+virtual AddMultiplePartsVirtual {
+   ludependencies = AddPartsVirtual;
+
+   attribute Contract Text;
+   attribute CustomerNo Text;
+   attribute AddLinesExist Boolean("TRUE", "FALSE");
+   attribute PartSelectionMethod Enumeration(PartSelectionMethod);
+   attribute AssortmentId Text;
+   attribute AssortmentNodeId Text;
+   attribute PriceListNo Text;
+   attribute AgreementId Text;
+   attribute LimitSalesToAssortExist Boolean("TRUE", "FALSE") {
+      default = "false";
+   }
+
+   array PartLines() to AddPartsVirtual();
+
+   reference AssortmentIdRef(CustomerNo, AssortmentId) to CustomerAssortmentStruct(CustomerNo, AssortmentId) {
+      label = "Assortment";
+   }
+
+   reference AssortmentNodeIdRef(AssortmentId, AssortmentNodeId) to AssortmentNodeLov3(AssortmentId, AssortmentNodeId) {
+      label = "Assortment Node";
+   }
+
+   reference PriceListNoRef(CustomerNo, PriceListNo) to SalesPriceListNoLov(CustomerNo, PriceListNo) {
+      label = "Price List";
+   }
+
+   reference AgreementIdRef(Contract, CustomerNo, AgreementId) to CustomerAgreementLov(Contract, CustomerNo, AgreementId) {
+      label = "Agreement";
+   }
+}
+
+virtual AddPartsVirtual {
+   ludependencies = AddMultiplePartsVirtual;
+   crud = Read, Update;
+
+   attribute AddLine Boolean("TRUE", "FALSE") {
+      label = "Add";
+      required = [true];
+      default = "FALSE";
+   }
+   attribute Contract Text {
+      maxlength = 5;
+   }
+   attribute CatalogNo Text {
+      label = "Sales Part";
+      editable = [false];
+   }
+   attribute CatalogDescription Text {
+      label = "Sales Part Description";
+      maxlength = 200;
+      editable = [false];
+   }
+   attribute Quantity Number;
+
+   attribute SalesUnitMeas Text {
+      label = "Sales UoM";
+      maxlength = 10;
+      editable = [false];
+   }
+   attribute CatalogType Text {
+      label = "Sales Part Type";
+      maxlength = 50;
+      editable = [false];
+   }
+   attribute Configurable Boolean("TRUE", "FALSE") {
+      fetch = "DECODE(Sales_Part_API.Get_Configurable_Db(contract, catalog_no), 'CONFIGURED', 'TRUE', 'FALSE')";
+      label = "Configurable";
+      editable = [false];
+   }
+
+   reference CatalogNoRef(Contract, CatalogNo) to SalesPartActiveLov(Contract, CatalogNo) {
+      label = "Sales Part";
+   }
+}
+
+virtual AddPartsTempVirtual {
+   attribute Contract Text;
+   attribute CatalogNo Text;
+   attribute Quantity Number;
+   attribute SalesUnitMeas Text;
+   attribute CatalogType Text;
+   attribute Configurable Boolean("TRUE", "FALSE");
+}
+
+---------------------------------- ACTIONS ----------------------------------
+
+action AddLinesToTempVirtual {
+   initialcheck none;
+   ludependencies = AddPartsVirtual;
+   parameter SourceObjkey Text;
+}
+
+action CheckPriceListAvailability {
+   initialcheck implementation;
+   parameter CustomerNo Text;
+   parameter PriceListNo Text;
+}
+
+--------------------------------- FUNCTIONS ---------------------------------
+
+function CheckLimitSalesAssortments Boolean {
+   parameter CustomerNo Text;
+}
+
+function GetLimitSalesToAssortments List < Entity(CustomerAssortmentStruct) > {
+   where = "LIMIT_SALES_TO_ASSORTMENTS = 'True'";
+}
+
+function GetValidPriceLists List < Entity(SalesPriceListNoLov) > {
+   parameter Contract Text;
+   where = "NVL(valid_to_date, Site_API.Get_Site_Date(:Contract)) >= Site_API.Get_Site_Date(:Contract)";
+}
+
+-------------------------------- STRUCTURES ---------------------------------
+
+structure SalesPartStruct {
+   attribute CatalogNo Text;
+   attribute CatalogType Text;
+   attribute SalesUnitMeas Text;
+}
+
+---------------------------------- QUERIES ----------------------------------
+
+query SalesPriceListNoLov {
+   from = "Customer_Pricelist_Lov";
+   lu = SalesPriceList;
+   keys = CustomerNo, PriceListNo;
+   ludependencies = SalesPriceList;
+
+   attribute CustomerNo Text;
+   attribute SalesPriceGroupId Text;
+   attribute CurrencyCode Text;
+   attribute PriceListNo Text;
+   attribute Description Text {
+      fetch = "Sales_Price_List_API.Get_Description(price_list_no)";
+   }
+}
+
+------------------------------ ENTITY DETAILS -------------------------------
+
+@Override
+entity CustomerAssortmentStruct {
+   crud = Read;
+
+   attribute AssortmentId Text {
+      lovcolumn = [true];
+   }
+   attribute AssortmentDescription Text {
+      fetch = "Assortment_Structure_API.Get_Description(assortment_id)";
+      label = "Assortment Description";
+      maxlength = 200;
+      editable = [false];
+      lovcolumn = [true];
+   }
+}

@@ -1,0 +1,1059 @@
+-------------------------------------------------------------------------------------------------
+-- Date        Sign     History
+-- ----------  ------   -------------------------------------------------------------------------
+-- 2021-07-15  RoJalk  SC21R2-1374, Modified Report_Pick_Ship_Handling_Unit___ and added the missing dynamic check for Customer_Order_Post_Actions___ call.
+-- 2021-07-22  RasDlk  SC21R2-1374, Modified Report_Pick_Ship_Handling_Unit___ by passing shipment id to Pick_Report_Ship_Handl_Unit__ to support Report Picking of Shipment Handling Unit.
+-- 2021-07-15  RoJalk  SC21R2-1374, Modified Report_Pick_Ship_Handling_Unit___ and added source_post_action_info_.
+-- 2021-07-09  RoJalk  SC21R2-1374, Modified order of parameters of Pick_Shipment_API.Pick_Report_Ship_Handl_Unit__ method call.
+-- 2021-06-22  RoJalk  SC21R2-1374, Added the procedure Report_Pick_Ship_Handling_Unit___. 
+-- 2020-12-02  RoJalk  SC2020R1-8967, Modified Check_Overpicked_Order_Lines___ and converted the warning message to an info. 
+-- 2020-09-09  RoJalk  SC2020R1-10348, Modified Pick_Selected_Inv_Part_Reservations___  and included the logic 
+-- 2020-09-09          to enable 0 picking as well as skipping the already picked reservations.
+-- 2020-05-27  RasDlk  SCSPRING20-689, Modified Check_Use_Shipment_Inventory___ by adding sender related information.
+-- 2019-11-22  RoJalk  Modified Add_Inventory_Part_Res_Record_To_Attr___ and called Reserve_Shipment_API.Get_Inv_Res_Source_Type_Db
+-- 2019-11-22          to get a value for inv_res_source_type_db_.
+-- 2019-08-12  RoJalk  SCUXXW4-22971, Modified Pick_All_Customer_Order___ to send 32000 chunks of data.
+-- 2019-08-08  RoJalk  SCUXXW4-22971, Modified Pick_Selected_Customer_Order_Reservations___ to handle more than 32000 char.
+-- 2019-07-10  CKumlk  SCUXXW4-22809, Modified Pick_All___, Pick_All_Customer_Order___, Pick___, Pick_Selected_Inv_Part_Reservations___ to handle Numeric or value error.
+-- 2019-06-19  RoJalk  SCUXXW4-4869, Pick_All___, Pick_Selected___, Pick___, Pick_Selected_Customer_Order_Reservations___, 
+-- 2019-06-19          Pick_Selected_Inv_Part_Reservations___, Post_Actions___, Check_Overpicked_Order_Lines___,   
+-- 2019-06-19          Customer_Order_Post_Actions___, Add_Customer_Order_Res_Record_To_Attr___, Pick_All_Customer_Order___,
+-- 2019-06-19          Add_Inventory_Part_Res_Record_To_Attr___, Add_Aggregated_Record_To_Attr___,
+-- 2019-06-19          Report_Pick_Aggregated___, Report_Pick_Aggregated_Inv_Part_Res___, Unreserve_Selected___, Count_All_Qty_To_Pick_Rows___.
+-- 2019-05-30  SBalLK  SCUXXW4-21284, Modified Pick_Handling_Unit_Reservation___() method to handle character number conversion error.
+-- 2019-04-18  ErRalk  SCUXXW4-19247, Created.
+-------------------------------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Convert_Value_To_String___ (
+   shipment_id_ IN NUMBER) RETURN VARCHAR2
+IS
+BEGIN
+	RETURN TO_CHAR(shipment_id_);
+END Convert_Value_To_String___;
+
+FUNCTION Pick_Handling_Unit_Reservation___ (
+   key_         IN  Outermost_Handling_Unit_Key,
+   location_no_ IN  VARCHAR2,
+   info$_       OUT VARCHAR2) RETURN NUMBER
+IS
+   master_rec_          Outermost_Handling_Unit_Rec;
+   in_message_          CLOB;
+   out_message_         CLOB;
+   session_id_          NUMBER := NULL;
+   all_line_reported_   NUMBER := 0;
+   count_               NUMBER := NULL;
+   name_list_           Message_SYS.name_table;
+   value_list_          Message_SYS.line_table;
+   closed_lines_        NUMBER := 0;
+   co_post_action_info_ VARCHAR2(2000);
+   post_action_info_    VARCHAR2(2000); 
+BEGIN
+   master_rec_ := Get_Record___(key_);
+   IF master_rec_.handling_unit_id IS NOT NULL THEN
+      in_message_ := Message_SYS.Construct_Clob_Message('PICKHURESERVATION');
+      Message_SYS.Add_Attribute(in_message_, 'HANDLING_UNIT_ID', master_rec_.handling_unit_id);
+      Message_SYS.Add_Attribute(in_message_, 'LAST_LINE', 'TRUE');
+      
+      User_Allowed_Site_API.Is_Authorized(Handling_Unit_API.Get_Contract(master_rec_.handling_unit_id));
+      
+      IF master_rec_.pick_list_type = 'CUST_ORDER_PICK_LIST' THEN
+         $IF Component_Order_SYS.INSTALLED $THEN
+            out_message_ := Pick_Customer_Order_API.Pick_Reservations_Hu__(in_message_, session_id_, master_rec_.pick_list_no, location_no_);
+         $ELSE
+            NULL;
+            -- ORDER Module not installed.
+         $END
+      ELSIF  master_rec_.pick_list_type = 'INVENTORY_PICK_LIST' THEN
+         out_message_ := Inventory_Part_Reservation_API.Pick_Aggregated_Reservations__(in_message_, to_number(master_rec_.pick_list_no), location_no_);
+      END IF;
+      
+      count_ := null;
+      Message_SYS.Get_Attributes(out_message_, count_, name_list_, value_list_);
+      IF name_list_.COUNT > 0 THEN
+         FOR index_ IN name_list_.FIRST..name_list_.LAST LOOP
+            IF (name_list_(index_) = 'INFO') THEN
+               info$_ := value_list_(index_);
+            ELSIF (name_list_(index_) = 'ALL_REPORTED' AND master_rec_.pick_list_type = 'CUST_ORDER_PICK_LIST') THEN
+               all_line_reported_ := Client_SYS.Attr_Value_To_Number(NVL(value_list_(index_), 0));
+            ELSIF( name_list_(index_) = 'PICK_LIST_FULLY_REPORTED' AND master_rec_.pick_list_type = 'INVENTORY_PICK_LIST') THEN
+               all_line_reported_ := 0;
+               IF(value_list_(index_) = Fnd_Boolean_API.DB_TRUE) THEN
+                  all_line_reported_ := 1;
+               END IF;
+            ELSIF name_list_(index_) = 'SESSION_ID' THEN
+               session_id_ := Client_SYS.Attr_Value_To_Number(NVL(value_list_(index_), 0));
+            ELSIF name_list_(index_) = 'CLOSED_LINES' THEN
+               closed_lines_ := Client_SYS.Attr_Value_To_Number(NVL(value_list_(index_), 0));   
+            END IF;
+         END LOOP;
+      END IF;
+      
+      IF (session_id_ IS NOT NULL AND master_rec_.pick_list_type = 'CUST_ORDER_PICK_LIST') THEN
+         $IF Component_Order_SYS.INSTALLED $THEN
+            Temporary_Pick_Reservation_API.Clear_Session(session_id_);
+            Customer_Order_Post_Actions___(co_post_action_info_, session_id_, closed_lines_);
+         $ELSE
+            Error_SYS.Record_General(lu_name_, 'NOCOINSTALLED: Customer Order is not installed.');
+         $END
+      END IF;
+      
+      Post_Actions___ (post_action_info_, master_rec_.pick_list_no, all_line_reported_); 
+      
+      info$_ := info$_ || co_post_action_info_ || post_action_info_;
+       
+   END IF;
+   
+   RETURN all_line_reported_;
+END Pick_Handling_Unit_Reservation___;
+
+
+FUNCTION Shipment_Inventory_Used___ (
+   pick_list_no_ IN VARCHAR2) RETURN NUMBER
+IS
+BEGIN
+	RETURN Handle_Ship_Invent_Utility_API.Uses_Shipment_Inventory(pick_list_no_);
+END Shipment_Inventory_Used___;
+
+
+PROCEDURE Pick_All___ (
+   pick_list_no_       IN  VARCHAR2,
+   pick_list_type_     IN  VARCHAR2,
+   selection_          IN  CLOB,
+   ship_location_no_   IN  VARCHAR2,
+   info$_              OUT VARCHAR2) 
+IS 
+   info_               VARCHAR2(2000);
+   all_reported_       NUMBER:=0; 
+BEGIN
+   IF (pick_list_type_ = 'CUST_ORDER_PICK_LIST') THEN
+      $IF Component_Order_SYS.INSTALLED $THEN
+         Pick_All_Customer_Order___(info_, pick_list_no_, selection_, ship_location_no_);
+      $ELSE
+         Error_SYS.Record_General(lu_name_, 'NOCOINSTALLED: Customer Order is not installed.');
+      $END
+   ELSIF (pick_list_type_ = 'INVENTORY_PICK_LIST') THEN
+      Pick_Selected_Inv_Part_Reservations___(info_                         => info_,
+                                             all_reported_                 => all_reported_,
+                                             pick_list_no_                 => pick_list_no_, 
+                                             selection_                    => selection_,
+                                             ship_location_no_             => ship_location_no_,
+                                             report_from_pick_list_header_ => 'TRUE',
+                                             do_unreserve_                 => FALSE );
+   END IF; 
+   
+   Client_SYS.Add_Info(lu_name_, 'PICKINGCOMPLE: Picking of items on pick list :P1 has been reported as complete.', pick_list_no_);
+   
+   info$_ := info_ ||Client_SYS.Get_All_Info; 
+    
+END Pick_All___;
+
+PROCEDURE Pick_Selected___ (
+   selection_          IN  CLOB,
+   ship_location_no_   IN  VARCHAR2,
+   info$_              OUT VARCHAR2 ) 
+IS
+BEGIN
+   Pick___(info$_, selection_, ship_location_no_, FALSE);
+END Pick_Selected___;
+
+PROCEDURE Pick___ (
+   info_               OUT VARCHAR2,
+   selection_          IN  CLOB,
+   ship_location_no_   IN  VARCHAR2,
+   do_unreserve_       IN  BOOLEAN ) 
+IS
+   orders_to_pick_             json_array_t := json_array_t.parse(selection_);  
+   current_selection_          VARCHAR2(32000);
+   all_reported_               NUMBER:=0;
+   pick_list_no_               VARCHAR2(15);
+   pick_list_type_             VARCHAR2(20);
+BEGIN
+   -- SCUXXW4-22005 To-Do fetch the first record only.  
+   FOR order_to_pick_ IN 0 .. orders_to_pick_.get_size - 1 LOOP 
+      current_selection_ := orders_to_pick_.get_string(order_to_pick_);
+      pick_list_no_      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PICK_LIST_NO');
+      pick_list_type_    := Pick_Shipment_API.Get_Pick_List_Type(pick_list_no_);
+      EXIT;
+   END LOOP;
+   
+   IF pick_list_type_ = 'CUST_ORDER_PICK_LIST' THEN
+      $IF Component_Order_SYS.INSTALLED $THEN
+         Pick_Selected_Customer_Order_Reservations___(info_             => info_,
+                                                      all_reported_     => all_reported_,
+                                                      pick_list_no_     => pick_list_no_, 
+                                                      selection_        => selection_,
+                                                      ship_location_no_ => ship_location_no_,
+                                                      do_unreserve_     => do_unreserve_ );
+      $ELSE
+         Error_SYS.Record_General(lu_name_, 'NOCOINSTALLED: Customer Order is not installed.');
+      $END
+      
+   ELSIF pick_list_type_ = 'INVENTORY_PICK_LIST' THEN 
+      Pick_Selected_Inv_Part_Reservations___(info_                         => info_,
+                                             all_reported_                 => all_reported_,
+                                             pick_list_no_                 => pick_list_no_, 
+                                             selection_                    => selection_,
+                                             ship_location_no_             => ship_location_no_,
+                                             report_from_pick_list_header_ => 'FALSE',
+                                             do_unreserve_                 => do_unreserve_);
+   END IF;  
+   
+END Pick___;
+
+@DynamicComponentDependency ORDER
+PROCEDURE Pick_Selected_Customer_Order_Reservations___ (
+   info_              OUT VARCHAR2,
+   all_reported_      OUT NUMBER,
+   pick_list_no_      IN  VARCHAR2,
+   selection_         IN  CLOB,
+   ship_location_no_  IN  VARCHAR2,
+   do_unreserve_      IN  BOOLEAN ) 
+IS
+   closed_lines_          NUMBER := 0;
+   session_id_            NUMBER;
+   shipment_id_message_   VARCHAR2(32000);
+   overpicked_lines_      VARCHAR2(5);
+   orders_to_pick_        json_array_t := json_array_t.parse(selection_);  
+   current_selection_     VARCHAR2(32000);
+   attr_                  VARCHAR2(32000);
+   post_action_info_      VARCHAR2(2000);
+   co_post_action_info_   VARCHAR2(2000);
+   load_list_connected_   BOOLEAN := FALSE;
+   current_row_count_     NUMBER:=0; 
+   total_row_count_       NUMBER:=0; 
+   pick_reservation_info_ VARCHAR2(2000);
+BEGIN
+   total_row_count_      := orders_to_pick_.get_size;
+   
+   FOR order_to_pick_ IN 0 .. orders_to_pick_.get_size - 1 LOOP 
+      current_row_count_ := current_row_count_ + 1;
+      current_selection_ := orders_to_pick_.get_string(order_to_pick_);
+      
+      User_Allowed_SIte_API.Is_Authorized(Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT'));
+      
+      Add_Customer_Order_Res_Record_To_Attr___(attr_, load_list_connected_, current_selection_, do_unreserve_);
+      
+      IF (current_row_count_ = total_row_count_) THEN
+         Client_SYS.Add_To_Attr('LAST_LINE', 'TRUE', attr_);
+      END IF;
+      
+      IF (LENGTH(attr_) > 31500) THEN
+         Pick_Customer_Order_API.Pick_Reservations__(info_                  => pick_reservation_info_, 
+                                                     all_reported_          => all_reported_, 
+                                                     closed_lines_          => closed_lines_, 
+                                                     overpicked_lines_      => overpicked_lines_, 
+                                                     session_id_            => session_id_, 
+                                                     shipment_id_message_   => shipment_id_message_,
+                                                     attr_                  => attr_, 
+                                                     pick_list_no_          => pick_list_no_,
+                                                     ship_location_no_      => ship_location_no_, 
+                                                     trigger_shipment_flow_ => 'FALSE');
+         attr_ := NULL;   
+         info_ := info_ || pick_reservation_info_;
+      END IF;   
+   END LOOP;
+   
+   IF (attr_ IS NOT NULL) THEN
+      pick_reservation_info_ := NULL;
+      Pick_Customer_Order_API.Pick_Reservations__(info_                  => pick_reservation_info_, 
+                                                  all_reported_          => all_reported_, 
+                                                  closed_lines_          => closed_lines_, 
+                                                  overpicked_lines_      => overpicked_lines_, 
+                                                  session_id_            => session_id_, 
+                                                  shipment_id_message_   => shipment_id_message_,
+                                                  attr_                  => attr_, 
+                                                  pick_list_no_          => pick_list_no_,
+                                                  ship_location_no_      => ship_location_no_, 
+                                                  trigger_shipment_flow_ => 'FALSE');
+                                                  
+      info_ := info_ || pick_reservation_info_;  
+   END IF;                                             
+                                               
+   Customer_Order_Post_Actions___(co_post_action_info_, session_id_, closed_lines_);
+   
+   Post_Actions___ (post_action_info_, pick_list_no_, all_reported_); 
+   
+   info_ := info_ || co_post_action_info_ || post_action_info_;
+   
+   Temporary_Pick_Reservation_API.Clear_Session(session_id_);
+   
+   IF (shipment_id_message_ IS NOT NULL) THEN
+      Shipment_Flow_API.Start_Shipment_Flow(shipment_id_msg_ => shipment_id_message_, event_no_ => 40);
+   END IF;
+   
+END Pick_Selected_Customer_Order_Reservations___;
+
+PROCEDURE Pick_Selected_Inv_Part_Reservations___ (
+   info_                         OUT VARCHAR2,
+   all_reported_                 OUT NUMBER,
+   pick_list_no_                 IN  VARCHAR2,
+   selection_                    IN  CLOB,
+   ship_location_no_             IN  VARCHAR2,
+   report_from_pick_list_header_ IN  VARCHAR2,
+   do_unreserve_                 IN  BOOLEAN ) 
+IS
+   msg_                             CLOB;
+   orders_to_pick_                  json_array_t := json_array_t.parse(selection_);  
+   current_selection_               VARCHAR2(32000);
+   clob_out_data_                   CLOB;
+   pick_list_fully_reported_        VARCHAR2(5):= 'FALSE';
+   post_action_info_                VARCHAR2(2000);
+   qty_reserved_                    NUMBER:=0;
+   qty_picked_                      NUMBER:=0;
+   qty_available_to_pick_           NUMBER:=0;
+   include_res_in_pick_reporting_   BOOLEAN:=FALSE;
+BEGIN
+   FOR order_to_pick_ IN 0 .. orders_to_pick_.get_size - 1 LOOP 
+      current_selection_ := orders_to_pick_.get_string(order_to_pick_);
+      
+      User_Allowed_SIte_API.Is_Authorized(Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT'));
+      
+      IF (report_from_pick_list_header_ = 'TRUE') THEN
+         qty_reserved_                  := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'QTY_RESERVED'), 0);
+         qty_picked_                    := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'QTY_PICKED'),   0);
+         qty_available_to_pick_         := NVL(qty_reserved_ - qty_picked_, 0);
+         
+         IF (qty_available_to_pick_ > 0) THEN
+            include_res_in_pick_reporting_ := TRUE;
+         ELSE
+            include_res_in_pick_reporting_ := FALSE;
+         END IF;
+         
+      END IF;
+      
+      -- when pick reporting from pick list header exclude already picked reservations.
+      IF ((include_res_in_pick_reporting_) OR (report_from_pick_list_header_ = 'FALSE')) THEN 
+         Add_Inventory_Part_Res_Record_To_Attr___(msg_, current_selection_, do_unreserve_);
+      END IF;
+      
+   END LOOP;
+   
+   clob_out_data_ := Inventory_Part_Reservation_API.Pick_Inv_Part_Reservations(message_                      => msg_,
+                                                                               pick_list_no_                 => pick_list_no_,
+                                                                               report_from_pick_list_header_ => report_from_pick_list_header_,
+                                                                               ship_inventory_location_no_   => ship_location_no_);
+   
+   Message_SYS.Get_Attribute(clob_out_data_, 'PICK_LIST_FULLY_REPORTED', pick_list_fully_reported_);
+   IF (pick_list_fully_reported_ = 'TRUE') THEN
+      all_reported_ := 1;
+   ELSE   
+      all_reported_ := 0;
+   END IF;
+   
+   info_ := Message_SYS.Find_Attribute(clob_out_data_, 'INFO', '');
+   
+   Post_Actions___ (post_action_info_, pick_list_no_, all_reported_); 
+   
+   info_ := info_ || post_action_info_;
+    
+END Pick_Selected_Inv_Part_Reservations___;
+
+PROCEDURE Post_Actions___ (
+   info_           OUT VARCHAR2,
+   pick_list_no_   IN  VARCHAR2,
+   all_reported_   IN  NUMBER ) 
+IS
+BEGIN
+   IF (all_reported_ = 0) THEN
+      Client_SYS.Add_Info(lu_name_, 'UNPICKLINEEXIST: More unpicked lines exist on picklist :P1.', pick_list_no_);
+   ELSIF (all_reported_ = 1) THEN 
+      Client_SYS.Add_Info(lu_name_, 'PICKINGCOMPLE: Picking of items on pick list :P1 has been reported as complete.', pick_list_no_);
+   END IF;   
+   info_ := Client_SYS.Get_All_Info;
+END Post_Actions___;
+
+@DynamicComponentDependency ORDER
+PROCEDURE Check_Overpicked_Order_Lines___ (
+   info_           OUT VARCHAR2,
+   session_id_     IN  NUMBER ) 
+IS
+   info_text_1_   VARCHAR2(2000);
+   info_text_2_   VARCHAR2(2000);
+      
+   CURSOR get_overpicked_order_lines IS
+      SELECT *
+        FROM TEMP_OVERPICKED_RESERVATION
+       WHERE session_id = session_id_;
+         
+   TYPE Overpicked_Order_Lines_Tab IS TABLE OF get_overpicked_order_lines%ROWTYPE;
+   overpicked_order_lines_tab_   Overpicked_Order_Lines_Tab;
+      
+BEGIN
+   OPEN get_overpicked_order_lines;
+   FETCH get_overpicked_order_lines BULK COLLECT INTO overpicked_order_lines_tab_;
+   CLOSE get_overpicked_order_lines;
+   
+   IF (overpicked_order_lines_tab_.COUNT > 0) THEN
+      FOR i IN overpicked_order_lines_tab_.FIRST .. overpicked_order_lines_tab_.LAST LOOP
+         
+         info_text_1_ := Language_SYS.Translate_Constant (lu_name_,
+                                                         'OVERPICKLINE1: Picked Qty :P1 is greater than the Source Qty :P2 for Source Ref1 :P3',
+                                                         NULL,
+                                                         overpicked_order_lines_tab_(i).qty_picked, overpicked_order_lines_tab_(i).revised_qty_due, overpicked_order_lines_tab_(i).order_no );
+                                                         
+         info_text_2_ := Language_SYS.Translate_Constant (lu_name_,
+                                                         'OVERPICKLINE2: Source Ref2 :P1 Source Ref3 :P2. If this is not intended you will need to handle it manually.',
+                                                         NULL,
+                                                         overpicked_order_lines_tab_(i).line_no, overpicked_order_lines_tab_(i).rel_no);
+                                                         
+         Client_SYS.Add_Info(lu_name_, 'OVERPICKLINE: :P1 :P2', info_text_1_, info_text_2_);
+      END LOOP;   
+   END IF;    
+   info_ := Client_SYS.Get_All_Info;  
+END Check_Overpicked_Order_Lines___ ;
+
+@DynamicComponentDependency ORDER
+PROCEDURE Customer_Order_Post_Actions___ (
+   info_           OUT VARCHAR2,
+   session_id_     IN  NUMBER,
+   closed_lines_   IN  NUMBER ) 
+IS
+BEGIN
+   Check_Overpicked_Order_Lines___(info_, session_id_);    
+
+   IF (closed_lines_ = 1) THEN
+      Client_SYS.Add_Warning(lu_name_, 'REMRESREMOVED: Remaining reservations was removed for one or more lines(s).');
+   END IF;   
+   
+   info_ := info_ || Client_SYS.Get_All_Info;  
+  
+END Customer_Order_Post_Actions___;
+
+@DynamicComponentDependency ORDER
+PROCEDURE Add_Customer_Order_Res_Record_To_Attr___ (
+   attr_                IN OUT VARCHAR2,
+   load_list_connected_ IN OUT BOOLEAN,
+   current_selection_   IN     VARCHAR2,
+   do_unreserve_        IN     BOOLEAN ) 
+IS
+   qty_to_pick_               NUMBER;
+   order_no_                  VARCHAR2(12);
+   line_no_                   VARCHAR2(4);
+   rel_no_                    VARCHAR2(4);  
+   line_item_no_              NUMBER;
+   load_id_                   NUMBER;
+BEGIN
+   order_no_     := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SOURCE_REF1');
+   line_no_      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SOURCE_REF2');
+   rel_no_       := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SOURCE_REF3');
+   line_item_no_ := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'SOURCE_REF4'));
+   
+   Client_SYS.Add_To_Attr('ORDER_NO',         order_no_,                                                                  attr_);
+   Client_SYS.Add_To_Attr('LINE_NO',          line_no_,                                                                   attr_);
+   Client_SYS.Add_To_Attr('REL_NO',           rel_no_,                                                                    attr_);
+   Client_SYS.Add_To_Attr('LINE_ITEM_NO',     line_item_no_,                                                              attr_);
+   Client_SYS.Add_To_Attr('CONTRACT',         Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT'),         attr_);
+   Client_SYS.Add_To_Attr('PART_NO',          Client_SYS.Get_Key_Reference_Value(current_selection_, 'PART_NO'),          attr_);
+   Client_SYS.Add_To_Attr('CONFIGURATION_ID', Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONFIGURATION_ID'), attr_);
+   Client_SYS.Add_To_Attr('LOCATION_NO',      Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOCATION_NO'),      attr_);
+   Client_SYS.Add_To_Attr('LOT_BATCH_NO',     Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOT_BATCH_NO'),     attr_);
+   Client_SYS.Add_To_Attr('SERIAL_NO',        Client_SYS.Get_Key_Reference_Value(current_selection_, 'SERIAL_NO'),        attr_);
+   Client_SYS.Add_To_Attr('ENG_CHG_LEVEL',    Client_SYS.Get_Key_Reference_Value(current_selection_, 'ENG_CHG_LEVEL'),    attr_);
+   Client_SYS.Add_To_Attr('WAIV_DEV_REJ_NO',  Client_SYS.Get_Key_Reference_Value(current_selection_, 'WAIV_DEV_REJ_NO'),  attr_);
+   
+   IF (Client_SYS.Get_Key_Reference_Value(current_selection_, 'CLOSE') = 'true') THEN
+      Client_SYS.Add_To_Attr('CLOSE_LINE', 1, attr_);
+   ELSE
+      Client_SYS.Add_To_Attr('CLOSE_LINE', 0, attr_);
+   END IF;   
+   
+   Client_SYS.Add_To_Attr('INPUT_QUANTITY', Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'INPUT_QUANTITY')), attr_);
+   Client_SYS.Add_To_Attr('INPUT_CONV_FACTOR', Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'INPUT_CONV_FACTOR')), attr_);
+   Client_SYS.Add_To_Attr('INPUT_UNIT_MEAS', Client_SYS.Get_Key_Reference_Value(current_selection_, 'INPUT_UNIT_MEAS'), attr_);
+   Client_SYS.Add_To_Attr('INPUT_VARIABLE_VALUES', Client_SYS.Get_Key_Reference_Value(current_selection_, 'INPUT_VARIABLE_VALUES'), attr_);
+   Client_SYS.Add_To_Attr('ACTIVITY_SEQ',     Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'ACTIVITY_SEQ')),            attr_);
+   Client_SYS.Add_To_Attr('HANDLING_UNIT_ID', Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'HANDLING_UNIT_ID')),        attr_);
+   Client_SYS.Add_To_Attr('CATCH_QTY_TO_PICK', Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'CATCH_QTY_TO_PICK')), attr_);
+   Client_SYS.Add_To_Attr('SHIPMENT_ID', Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'SHIPMENT_ID')),             attr_);
+   
+   IF do_unreserve_ THEN
+      qty_to_pick_ := 0;
+   ELSE
+      qty_to_pick_ := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'QTY_TO_PICK'));
+   END IF;
+   Client_SYS.Add_To_Attr('QTY_TO_PICK', qty_to_pick_, attr_);
+   
+   IF ((NOT load_list_connected_) AND (qty_to_pick_ > 0)) THEN
+      load_id_ := Cust_Order_Load_List_API.Get_Load_Id(order_no_, line_no_ , rel_no_, line_item_no_);
+      IF (load_id_ IS NOT NULL) THEN
+         load_list_connected_ := TRUE;
+      END IF;   
+   END IF;   
+   
+END Add_Customer_Order_Res_Record_To_Attr___;
+
+
+PROCEDURE Add_Inventory_Part_Res_Record_To_Attr___ (
+   msg_               IN OUT CLOB,
+   current_selection_ IN     VARCHAR2,
+   do_unreserve_      IN     BOOLEAN ) 
+IS
+   inv_res_source_type_db_   VARCHAR2(20);
+BEGIN
+   Message_SYS.Add_Attribute(msg_,'CONTRACT',           Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT'));
+   Message_SYS.Add_Attribute(msg_,'PART_NO',            Client_SYS.Get_Key_Reference_Value(current_selection_, 'PART_NO'));                 
+   Message_SYS.Add_Attribute(msg_,'CONFIGURATION_ID',   Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONFIGURATION_ID'));
+   Message_SYS.Add_Attribute(msg_,'LOCATION_NO',        Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOCATION_NO'));
+   Message_SYS.Add_Attribute(msg_,'LOT_BATCH_NO',       Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOT_BATCH_NO'));
+   Message_SYS.Add_Attribute(msg_,'SERIAL_NO',          Client_SYS.Get_Key_Reference_Value(current_selection_, 'SERIAL_NO'));
+   Message_SYS.Add_Attribute(msg_,'ENG_CHG_LEVEL',      Client_SYS.Get_Key_Reference_Value(current_selection_, 'ENG_CHG_LEVEL'));
+   Message_SYS.Add_Attribute(msg_,'WAIV_DEV_REJ_NO',    Client_SYS.Get_Key_Reference_Value(current_selection_, 'WAIV_DEV_REJ_NO'));
+   Message_SYS.Add_Attribute(msg_,'ACTIVITY_SEQ',       Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'ACTIVITY_SEQ')));
+   Message_SYS.Add_Attribute(msg_,'HANDLING_UNIT_ID',   Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'HANDLING_UNIT_ID')));
+   Message_SYS.Add_Attribute(msg_,'SOURCE_REF1',        Client_SYS.Get_Key_Reference_Value(current_selection_,     'SOURCE_REF1'));
+   Message_SYS.Add_Attribute(msg_,'SOURCE_REF2',        Client_SYS.Get_Key_Reference_Value(current_selection_,     'SOURCE_REF2'));
+   Message_SYS.Add_Attribute(msg_,'SOURCE_REF3',        NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'SOURCE_REF3'), '*'));
+   Message_SYS.Add_Attribute(msg_,'SOURCE_REF4',        NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'SOURCE_REF4'), '*'));
+   inv_res_source_type_db_ := Reserve_Shipment_API.Get_Inv_Res_Source_Type_Db(Client_SYS.Get_Key_Reference_Value(current_selection_, 'SOURCE_REF_TYPE_DB'));
+   Message_SYS.Add_Attribute(msg_,'SOURCE_REF_TYPE_DB', inv_res_source_type_db_);
+   
+   IF do_unreserve_ THEN
+      Message_SYS.Add_Attribute(msg_,'QTY_PICKED', 0);
+   ELSE   
+      Message_SYS.Add_Attribute(msg_,'QTY_PICKED', Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'QTY_TO_PICK')));
+   END IF;   
+   Message_SYS.Add_Attribute(msg_, 'CATCH_QTY_PICKED', Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'CATCH_QTY_TO_PICK')));
+   Message_SYS.Add_Attribute(msg_, 'PACK_COMPLETE',     'TRUE');
+   
+END Add_Inventory_Part_Res_Record_To_Attr___;
+
+PROCEDURE Add_Aggregated_Record_To_Attr___ (
+   msg_               IN OUT CLOB,
+   current_selection_ IN     VARCHAR2 ) 
+IS
+   handling_unit_id_       NUMBER;
+BEGIN
+   handling_unit_id_ := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'HANDLING_UNIT_ID'));
+   IF (handling_unit_id_ IS NULL) THEN
+      Message_SYS.Add_Attribute(msg_,'LOCATION_NO', Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOCATION_NO'));
+   ELSE
+      Message_SYS.Add_Attribute(msg_,'HANDLING_UNIT_ID', handling_unit_id_);
+   END IF;  
+END Add_Aggregated_Record_To_Attr___;
+
+PROCEDURE Report_Pick_Ship_Handling_Unit___ (
+   ship_location_no_ IN  VARCHAR2,
+   selection_        IN  CLOB,
+   info$_            OUT VARCHAR2 ) 
+IS
+   handling_unit_id_           NUMBER;
+   orders_to_pick_             json_array_t := json_array_t.parse(selection_);  
+   current_selection_          VARCHAR2(32000);
+   msg_                        CLOB;
+   pick_list_no_               VARCHAR2(15);
+   pick_list_type_             VARCHAR2(20);
+   reservations_to_pick_found_ BOOLEAN:= FALSE; 
+   info_                       VARCHAR2(2000); 
+   all_reported_               NUMBER:=0;
+   post_action_info_           VARCHAR2(2000); 
+   source_post_action_info_    VARCHAR2(2000); 
+   clob_out_data_              CLOB;
+   closed_lines_               NUMBER;
+   session_id_                 NUMBER;
+   overpicked_lines_           VARCHAR2(5);
+   pick_list_fully_reported_   VARCHAR2(5):='FALSE';
+   shipment_id_                NUMBER;
+BEGIN
+   FOR order_to_pick_ IN 0 .. 0 LOOP 
+      current_selection_ := orders_to_pick_.get_string(order_to_pick_);
+      pick_list_no_      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PICK_LIST_NO');
+      pick_list_type_    := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PICK_LIST_TYPE');
+      shipment_id_       := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SHIPMENT_ID');
+      
+      User_Allowed_Site_API.Is_Authorized(Pick_Shipment_API.Get_Contract(pick_list_no_, pick_list_type_));
+      reservations_to_pick_found_ := TRUE;
+   END LOOP;
+   
+   IF reservations_to_pick_found_ THEN
+      FOR order_to_pick_ IN 0 .. orders_to_pick_.get_size - 1 LOOP 
+         current_selection_ := orders_to_pick_.get_string(order_to_pick_);
+         handling_unit_id_  := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'HANDLING_UNIT_ID'));
+         Message_SYS.Add_Attribute(msg_,'HANDLING_UNIT_ID', handling_unit_id_);
+      END LOOP;
+      Message_SYS.Add_Attribute(msg_,'LAST_LINE', 'TRUE');
+   END IF;
+   
+   clob_out_data_ :=  Pick_Shipment_API.Pick_Report_Ship_Handl_Unit__(msg_, ship_location_no_, pick_list_no_, shipment_id_, pick_list_type_);
+
+   IF pick_list_type_ = 'CUST_ORDER_PICK_LIST' THEN
+      Message_SYS.Get_Attribute(clob_out_data_, 'ALL_REPORTED',     all_reported_    );
+      Message_SYS.Get_Attribute(clob_out_data_, 'CLOSED_LINES',     closed_lines_    );
+      Message_SYS.Get_Attribute(clob_out_data_, 'OVERPICKED_LINES', overpicked_lines_);
+      Message_SYS.Get_Attribute(clob_out_data_, 'SESSION_ID',       session_id_      );
+      info_ := Message_SYS.Find_Attribute(clob_out_data_, 'INFO', '');
+      
+      $IF Component_Order_SYS.INSTALLED $THEN       
+         Customer_Order_Post_Actions___ (source_post_action_info_,
+                                         session_id_  ,
+                                         closed_lines_ );
+         Temporary_Pick_Reservation_API.Clear_Session(session_id_); 
+      $END
+   
+   ELSIF pick_list_type_ = 'INVENTORY_PICK_LIST' THEN 
+      info_ := Message_SYS.Find_Attribute(clob_out_data_, 'INFO',                     '');
+      Message_SYS.Get_Attribute(clob_out_data_,           'PICK_LIST_FULLY_REPORTED', pick_list_fully_reported_);  
+      IF (pick_list_fully_reported_ = 'TRUE') THEN
+         all_reported_ := 1;
+      END IF;   
+   END IF;  
+   
+   Post_Actions___ (post_action_info_, pick_list_no_, all_reported_); 
+   
+   info$_ := info_ || source_post_action_info_|| post_action_info_;           
+   
+END Report_Pick_Ship_Handling_Unit___;
+
+PROCEDURE Report_Pick_Aggregated___ (
+   ship_location_no_ IN  VARCHAR2,
+   selection_        IN  CLOB,
+   unreserve_        IN  VARCHAR2,
+   info$_            OUT VARCHAR2) 
+IS
+   orders_to_pick_             json_array_t := json_array_t.parse(selection_);  
+   current_selection_          VARCHAR2(32000);
+   msg_                        CLOB;
+   pick_list_no_               VARCHAR2(15);
+   pick_list_type_             VARCHAR2(20);
+   reservations_to_pick_found_ BOOLEAN:= FALSE; 
+   info_                       VARCHAR2(2000); 
+   all_reported_               NUMBER:=0;
+   post_action_info_           VARCHAR2(2000); 
+BEGIN
+   FOR order_to_pick_ IN 0 .. 0 LOOP 
+      current_selection_ := orders_to_pick_.get_string(order_to_pick_);
+      pick_list_no_      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PICK_LIST_NO');
+      pick_list_type_    := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PICK_LIST_TYPE');
+      
+      User_Allowed_Site_API.Is_Authorized(Pick_Shipment_API.Get_Contract(pick_list_no_, pick_list_type_));
+      reservations_to_pick_found_ := TRUE;
+   END LOOP;
+   
+   IF reservations_to_pick_found_ THEN
+      FOR order_to_pick_ IN 0 .. orders_to_pick_.get_size - 1 LOOP 
+         current_selection_ := orders_to_pick_.get_string(order_to_pick_);
+         Add_Aggregated_Record_To_Attr___(msg_, current_selection_);
+      END LOOP;
+      Message_SYS.Add_Attribute(msg_,'LAST_LINE', 'TRUE');
+   END IF;
+   
+   IF pick_list_type_ = 'CUST_ORDER_PICK_LIST' THEN
+      $IF Component_Order_SYS.INSTALLED $THEN
+         Report_Pick_Aggregated_Cust_Ord_Res___(info_             => info_,
+                                                all_reported_     => all_reported_,
+                                                msg_              => msg_,
+                                                pick_list_no_     => pick_list_no_, 
+                                                ship_location_no_ => ship_location_no_,
+                                                unreserve_        => unreserve_);
+      $ELSE
+         Error_SYS.Record_General(lu_name_, 'NOCOINSTALLED: Customer Order is not installed.');
+      $END
+      
+   ELSIF pick_list_type_ = 'INVENTORY_PICK_LIST' THEN 
+      Report_Pick_Aggregated_Inv_Part_Res___(info_             => info_,
+                                             all_reported_     => all_reported_,
+                                             msg_              => msg_,
+                                             pick_list_no_     => pick_list_no_, 
+                                             ship_location_no_ => ship_location_no_,
+                                             unreserve_        => unreserve_); 
+   END IF;  
+   
+   Post_Actions___ (post_action_info_, pick_list_no_, all_reported_); 
+   
+   info$_ := info_ || post_action_info_;           
+   
+END Report_Pick_Aggregated___;
+
+@DynamicComponentDependency ORDER
+PROCEDURE Report_Pick_Aggregated_Cust_Ord_Res___ (
+   info_             OUT VARCHAR2,
+   all_reported_     OUT NUMBER,
+   msg_              IN  CLOB,
+   pick_list_no_     IN  VARCHAR2,
+   ship_location_no_ IN  VARCHAR2,
+   unreserve_        IN  VARCHAR2 ) 
+IS
+   clob_out_data_      CLOB;
+   closed_lines_       NUMBER;
+   session_id_         NUMBER;
+   overpicked_lines_   VARCHAR2(5);
+   post_action_info_   VARCHAR2(2000);
+BEGIN
+   clob_out_data_ := Pick_Customer_Order_API.Pick_Reservations_HU__(message_          => msg_,
+                                                                    session_id_       => session_id_,
+                                                                    pick_list_no_     => pick_list_no_, 
+                                                                    ship_location_no_ => ship_location_no_,
+                                                                    unreserve_        => unreserve_);
+                                                                    
+   Message_SYS.Get_Attribute(clob_out_data_, 'ALL_REPORTED',     all_reported_    );
+   Message_SYS.Get_Attribute(clob_out_data_, 'CLOSED_LINES',     closed_lines_    );
+   Message_SYS.Get_Attribute(clob_out_data_, 'OVERPICKED_LINES', overpicked_lines_);
+   Message_SYS.Get_Attribute(clob_out_data_, 'SESSION_ID',       session_id_      );
+   
+   info_ := Message_SYS.Find_Attribute(clob_out_data_, 'INFO', '');
+   
+   Customer_Order_Post_Actions___ (post_action_info_,
+                                   session_id_  ,
+                                   closed_lines_ );
+                                   
+   Temporary_Pick_Reservation_API.Clear_Session(session_id_);  
+   
+   info_ := info_ || post_action_info_;
+                                                         
+END Report_Pick_Aggregated_Cust_Ord_Res___;
+
+PROCEDURE Report_Pick_Aggregated_Inv_Part_Res___ (
+   info_             OUT VARCHAR2,
+   all_reported_     OUT NUMBER,
+   msg_              IN  CLOB,
+   pick_list_no_     IN  VARCHAR2,
+   ship_location_no_ IN  VARCHAR2,
+   unreserve_        IN  VARCHAR2 ) 
+IS
+   clob_out_data_              CLOB;
+   pick_list_fully_reported_   VARCHAR2(5):='FALSE';
+
+BEGIN
+   -- SCUXXW4-22005 To-Do pick_list_no_ is of type number in to the below method.  
+   clob_out_data_ :=  Inventory_Part_Reservation_API.Pick_Aggregated_Reservations__(message_          => msg_,
+                                                                                    pick_list_no_     => pick_list_no_, 
+                                                                                    ship_location_no_ => ship_location_no_,
+                                                                                    unreserve_        => unreserve_);
+   info_ := Message_SYS.Find_Attribute(clob_out_data_, 'INFO',                     '');
+   Message_SYS.Get_Attribute(clob_out_data_,           'PICK_LIST_FULLY_REPORTED', pick_list_fully_reported_);  
+   
+   IF (pick_list_fully_reported_ = 'TRUE') THEN
+      all_reported_ := 1;
+   END IF;   
+                                                         
+END Report_Pick_Aggregated_Inv_Part_Res___;
+
+FUNCTION Check_Use_Shipment_Inventory___ (
+   selection_ IN CLOB) RETURN Report_Pick_Structure_Rec
+IS
+   current_selection_   VARCHAR2(32000);
+   rec_                 Report_Pick_Structure_Rec;
+   records_             json_array_t := json_array_t.parse(selection_);
+BEGIN
+	FOR record_ IN 0 .. records_.get_size - 1 LOOP 
+      current_selection_ := records_.get_string(record_);
+      
+      rec_.contract        := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT');
+      rec_.pick_list_no    := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PICK_LIST_NO');
+      rec_.pick_list_type  := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PICK_LIST_TYPE');
+      rec_.sender_type     := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SENDER_TYPE');
+      rec_.sender_id       := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SENDER_ID');
+      
+      rec_.use_shipment_inv := Handle_Ship_Invent_Utility_API.Uses_Shipment_Inventory (rec_.pick_list_no);
+      EXIT;
+   END LOOP;
+   RETURN rec_;
+END Check_Use_Shipment_Inventory___;
+
+FUNCTION Count_All_Qty_To_Pick_Rows___ (
+   selection_ IN CLOB) RETURN NUMBER
+IS
+   current_selection_           VARCHAR2(32000);
+   records_                     json_array_t := json_array_t.parse(selection_);
+   qty_to_pick_                 NUMBER:=0;
+   negative_qty_to_pick_found_  BOOLEAN:= FALSE;
+   qty_to_pick_found_           BOOLEAN:= FALSE;
+   qty_on_pick_rows_            NUMBER:=0;
+BEGIN
+	FOR record_ IN 0 .. records_.get_size - 1 LOOP 
+      current_selection_ := records_.get_string(record_);
+      
+      qty_to_pick_  := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'QTY_TO_PICK'));
+   
+      IF (qty_to_pick_ < 0 OR qty_to_pick_ IS NULL) THEN
+         negative_qty_to_pick_found_ := TRUE;
+         EXIT;
+      ELSIF (qty_to_pick_ > 0) THEN
+         qty_to_pick_found_ := TRUE;
+      END IF;  
+      
+   END LOOP;
+   
+   IF negative_qty_to_pick_found_ THEN
+      qty_on_pick_rows_ := -1;
+   ELSIF qty_to_pick_found_ THEN   
+      qty_on_pick_rows_ := 1;
+   END IF;   
+   
+   RETURN qty_on_pick_rows_;
+   
+END Count_All_Qty_To_Pick_Rows___;
+
+
+-- This empty method has been implemented to refresh the header and the details tab after closing an assistant or dialog if needed.
+PROCEDURE Refresh_Detail_Page___
+IS
+BEGIN
+	NULL;
+END Refresh_Detail_Page___;
+
+
+-- This empthy method has been implemented to refresh the header and the aggregated tab after closing an assistant or dialog if needed.
+PROCEDURE Refresh_Aggregated_Page___
+IS
+BEGIN
+	NULL;
+END Refresh_Aggregated_Page___;
+
+
+PROCEDURE Print_Pick_List___ (
+	key_            IN Shipment_Pick_List_Key,
+   pick_list_type_ IN VARCHAR2)
+IS
+   is_consolidated_  NUMBER;
+   attr_             VARCHAR2(32000);
+   attr_consol_      VARCHAR2(32000);
+   attr_inv_         VARCHAR2(32000);
+   order_no_         VARCHAR2(12);
+BEGIN
+   $IF Component_Order_SYS.INSTALLED $THEN 
+   is_consolidated_ := Customer_Order_Pick_List_API.Is_Consolidated(key_.pick_list_no);   
+   $END
+   IF pick_list_type_ = 'INVENTORY_PICK_LIST' THEN
+         Client_SYS.Clear_Attr(attr_inv_);
+         Client_SYS.Add_To_Attr('PICK_LIST_NO', key_.pick_list_no, attr_inv_);         
+   ELSIF pick_list_type_ = 'CUST_ORDER_PICK_LIST' THEN
+      IF (is_consolidated_ = 1 )THEN 
+         Client_SYS.Clear_Attr(attr_consol_);
+         Client_SYS.Add_To_Attr('PICK_LIST_NO', key_.pick_list_no, attr_consol_);
+         Client_SYS.Add_To_Attr('END', '', attr_consol_); 
+      ELSE
+         $IF Component_Order_SYS.INSTALLED $THEN 
+         order_no_ := Customer_Order_Pick_List_API.Get_Order_No(key_.pick_list_no);
+         $END  
+         Client_SYS.Clear_Attr(attr_);
+         Client_SYS.Add_To_Attr('START_EVENT', 80, attr_);
+         Client_SYS.Add_To_Attr('ORDER_NO', order_no_, attr_);
+         Client_SYS.Add_To_Attr('PICK_LIST_NO', key_.pick_list_no, attr_);
+         Client_SYS.Add_To_Attr('END', '', attr_); 
+      END IF;
+   END IF; 
+   $IF Component_Order_SYS.INSTALLED $THEN   
+   IF attr_ IS NOT NULL THEN
+      Customer_Order_Flow_API.Start_Print_Pick_List__(attr_);
+   END IF;           
+   IF attr_consol_ IS NOT NULL THEN
+      Customer_Order_Flow_API.Start_Print_Consol_Pl__(attr_consol_);
+   END IF;         
+   $END 
+   IF attr_inv_ IS NOT NULL THEN
+      Pick_Shipment_API.Start_Print_Ship_Consol_Pl__(attr_inv_);
+   END IF;  
+END Print_Pick_List___;
+
+PROCEDURE Unreserve_Selected___ (
+   selection_ IN  CLOB,
+   info$_     OUT VARCHAR2 ) 
+IS
+BEGIN
+   Pick___(info$_, selection_, NULL, TRUE);
+END Unreserve_Selected___;
+
+PROCEDURE Refresh_Detail_Tab___
+IS
+   
+BEGIN
+   NULL;
+END Refresh_Detail_Tab___;
+
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Outermost_Handling_Unit_Rec )
+IS
+   newrec_              Outermost_Handling_Unit_Rec := rec_;
+   handling_unit_rec_   Handling_Unit_API.Public_Rec;
+BEGIN
+   handling_unit_rec_                  := Handling_Unit_API.Get(newrec_.handling_unit_id);
+   newrec_.handling_unit_type_id       := handling_unit_rec_.handling_unit_type_id;
+   newrec_.handling_unit_type_desc     := Handling_Unit_Type_API.Get_Description(handling_unit_rec_.handling_unit_type_id);
+   newrec_.sscc                        := handling_unit_rec_.sscc;
+   newrec_.alt_handling_unit_label_id  := handling_unit_rec_.alt_handling_unit_label_id;
+   newrec_.parent_handling_unit_id     := handling_unit_rec_.parent_handling_unit_id;
+   newrec_.top_parent_handling_unit_id := Handling_Unit_API.Get_Top_Parent_Handl_Unit_Id(handling_unit_rec_.handling_unit_id);
+   newrec_.contract                    := handling_unit_rec_.contract;
+   newrec_.location_no                 := handling_unit_rec_.location_no;
+   super(newrec_);
+END CRUD_Create___;
+
+@DynamicComponentDependency ORDER
+PROCEDURE Pick_All_Customer_Order___ (
+   info_               OUT VARCHAR2,
+   pick_list_no_       IN  VARCHAR2,
+   selection_          IN  CLOB,
+   ship_location_no_   IN  VARCHAR2)  
+IS
+   TYPE reservation_record IS RECORD (
+      order_no               VARCHAR2(12),
+      line_no                VARCHAR2(4),
+      rel_no                 VARCHAR2(4),
+      line_item_no           NUMBER,
+      contract               VARCHAR2(5), 
+      part_no                VARCHAR2(25), 
+      configuration_id       VARCHAR2(50), 
+      location_no            VARCHAR2(35), 
+      lot_batch_no           VARCHAR2(20), 
+      serial_no              VARCHAR2(50), 
+      eng_chg_level          VARCHAR2(6), 
+      waiv_dev_rej_no        VARCHAR2(15),
+      activity_seq           NUMBER, 
+      handling_unit_id       NUMBER,
+      input_qty              NUMBER,
+      input_conv_factor      NUMBER,
+      input_unit_meas        VARCHAR2(30),
+      input_variable_values  VARCHAR2(2000),
+      catch_qty_to_pick      NUMBER,
+      shipment_id            NUMBER,
+      qty_to_pick            NUMBER );
+
+   TYPE Reservation_Tab IS TABLE OF reservation_record INDEX BY PLS_INTEGER;
+   reservation_tab_       Reservation_Tab;
+   
+   orders_to_pick_            json_array_t := json_array_t.parse(selection_);  
+   current_selection_         VARCHAR2(32000);
+   attr_                      VARCHAR2(32000);
+   session_id_                NUMBER;
+   overpicked_lines_          VARCHAR2(5);
+   shipment_id_message_       VARCHAR2(32000);
+   overpicked_info_           VARCHAR2(2000);
+   row_no_                    PLS_INTEGER := 1;
+   catch_qty_to_pick_         NUMBER;
+   qty_reserved_              NUMBER;
+   qty_picked_                NUMBER;
+   qty_to_pick_               NUMBER;
+   qty_available_to_pick_     NUMBER;
+   do_picking_                BOOLEAN:=FALSE;
+BEGIN
+   FOR order_to_pick_ IN 0 .. orders_to_pick_.get_size - 1 LOOP 
+      
+      current_selection_ := orders_to_pick_.get_string(order_to_pick_);
+      
+      qty_reserved_          := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'QTY_RESERVED'), 0);
+      qty_picked_            := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'QTY_PICKED'),   0);
+      qty_to_pick_           := NVL(Client_SYS.Get_Key_Reference_Value(current_selection_, 'QTY_TO_PICK'),  0);
+      qty_available_to_pick_ := NVL(qty_reserved_ - qty_picked_, 0);
+     
+      catch_qty_to_pick_  := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'CATCH_QTY_TO_PICK'));
+
+      -- get the edited line info to a PLSQL collection
+      -- also need to keep track of the edited row count
+      IF ((qty_available_to_pick_ != qty_to_pick_) OR (catch_qty_to_pick_ IS NOT NULL)
+           OR (Client_SYS.Get_Key_Reference_Value(current_selection_, 'CLOSE') = 'true')) THEN
+           
+         reservation_tab_(row_no_).order_no         := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SOURCE_REF1');
+         
+         User_Allowed_SIte_API.Is_Authorized(Customer_Order_API.Get_Contract(reservation_tab_(row_no_).order_no));
+         
+         reservation_tab_(row_no_).line_no          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SOURCE_REF2');
+         reservation_tab_(row_no_).rel_no           := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SOURCE_REF3');
+         reservation_tab_(row_no_).line_item_no     := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'SOURCE_REF4'));
+         reservation_tab_(row_no_).contract         := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT');
+         reservation_tab_(row_no_).part_no          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PART_NO');
+         reservation_tab_(row_no_).configuration_id := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONFIGURATION_ID');
+         reservation_tab_(row_no_).location_no      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOCATION_NO');
+         reservation_tab_(row_no_).lot_batch_no     := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOT_BATCH_NO');
+         reservation_tab_(row_no_).serial_no        := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SERIAL_NO');
+         reservation_tab_(row_no_).eng_chg_level    := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ENG_CHG_LEVEL');
+         reservation_tab_(row_no_).waiv_dev_rej_no  := Client_SYS.Get_Key_Reference_Value(current_selection_, 'WAIV_DEV_REJ_NO');
+         reservation_tab_(row_no_).input_qty             := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'INPUT_QUANTITY'));
+         reservation_tab_(row_no_).input_conv_factor     := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'INPUT_CONV_FACTOR'));
+         reservation_tab_(row_no_).input_unit_meas       := Client_SYS.Get_Key_Reference_Value(current_selection_, 'INPUT_UNIT_MEAS');
+         reservation_tab_(row_no_).input_variable_values := Client_SYS.Get_Key_Reference_Value(current_selection_, 'INPUT_VARIABLE_VALUES');
+         reservation_tab_(row_no_).activity_seq          := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'ACTIVITY_SEQ'));
+         reservation_tab_(row_no_).handling_unit_id      := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'HANDLING_UNIT_ID'));
+         reservation_tab_(row_no_).catch_qty_to_pick     := catch_qty_to_pick_;
+         reservation_tab_(row_no_).shipment_id           := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'SHIPMENT_ID'));
+         reservation_tab_(row_no_).qty_to_pick           := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'QTY_TO_PICK'));
+         
+         Customer_Order_Flow_API.Validate_Struc_Ownership(info_,
+                                                          reservation_tab_(row_no_).order_no,
+                                                          reservation_tab_(row_no_).part_no, 
+                                                          reservation_tab_(row_no_).serial_no, 
+                                                          reservation_tab_(row_no_).lot_batch_no, 
+                                                          Client_SYS.Get_Key_Reference_Value(current_selection_, 'PART_OWNERSHIP'), 
+                                                          Client_SYS.Get_Key_Reference_Value(current_selection_, 'OWNER'));
+         
+         row_no_ := row_no_ + 1;
+           
+      END IF;
+      
+   END LOOP;
+   
+    IF (reservation_tab_.COUNT > 0) THEN
+       FOR i IN reservation_tab_.FIRST..reservation_tab_.LAST LOOP
+          
+         Client_SYS.Add_To_Attr('ORDER_NO',              reservation_tab_(i).order_no,              attr_);
+         Client_SYS.Add_To_Attr('LINE_NO',               reservation_tab_(i).line_no,               attr_);
+         Client_SYS.Add_To_Attr('REL_NO',                reservation_tab_(i).rel_no,                attr_);
+         Client_SYS.Add_To_Attr('LINE_ITEM_NO',          reservation_tab_(i).line_item_no,          attr_);
+         Client_SYS.Add_To_Attr('CONTRACT',              reservation_tab_(i).contract,              attr_);
+         Client_SYS.Add_To_Attr('PART_NO',               reservation_tab_(i).part_no,               attr_);
+         Client_SYS.Add_To_Attr('CONFIGURATION_ID',      reservation_tab_(i).configuration_id,      attr_);
+         Client_SYS.Add_To_Attr('LOCATION_NO',           reservation_tab_(i).location_no,           attr_);
+         Client_SYS.Add_To_Attr('LOT_BATCH_NO',          reservation_tab_(i).lot_batch_no ,         attr_);
+         Client_SYS.Add_To_Attr('SERIAL_NO',             reservation_tab_(i).serial_no ,            attr_);
+         Client_SYS.Add_To_Attr('ENG_CHG_LEVEL',         reservation_tab_(i).eng_chg_level ,        attr_);
+         Client_SYS.Add_To_Attr('WAIV_DEV_REJ_NO',       reservation_tab_(i).waiv_dev_rej_no ,      attr_);
+         Client_SYS.Add_To_Attr('INPUT_QUANTITY',        reservation_tab_(i).input_qty,            attr_);
+         Client_SYS.Add_To_Attr('INPUT_CONV_FACTOR',     reservation_tab_(i).input_conv_factor,     attr_);
+         Client_SYS.Add_To_Attr('INPUT_UNIT_MEAS',       reservation_tab_(i).input_unit_meas,       attr_);
+         Client_SYS.Add_To_Attr('INPUT_VARIABLE_VALUES', reservation_tab_(i).input_variable_values, attr_);
+         Client_SYS.Add_To_Attr('ACTIVITY_SEQ',          reservation_tab_(i).activity_seq,          attr_);
+         Client_SYS.Add_To_Attr('HANDLING_UNIT_ID',      reservation_tab_(i).handling_unit_id,      attr_);
+         Client_SYS.Add_To_Attr('CATCH_QTY_TO_PICK',     reservation_tab_(i).catch_qty_to_pick,     attr_);
+         Client_SYS.Add_To_Attr('SHIPMENT_ID',           reservation_tab_(i).shipment_id,           attr_);
+         Client_SYS.Add_To_Attr('QTY_TO_PICK',           reservation_tab_(i).qty_to_pick,           attr_);
+         
+         -- all edited lines added to attr.
+         IF (reservation_tab_.COUNT = i) THEN
+            Client_SYS.Add_To_Attr('LAST_LINE', 'TRUE', attr_);
+         END IF;   
+         
+      END LOOP;
+      
+      IF (LENGTH(attr_) > 31500) THEN
+         Client_SYS.Add_To_Attr('FROM_HEADER', 'TRUE', attr_);
+         Pick_Customer_Order_API.Pick_Resevations_From_Header__(overpicked_lines_, attr_, session_id_, shipment_id_message_,
+                                                                pick_list_no_, ship_location_no_);
+         attr_ := NULL;                                                       
+      END IF;   
+   
+   END IF;
+   
+   IF (attr_ IS NOT NULL) THEN
+      -- pick report what is reamainingon the attr
+      do_picking_ := TRUE;
+   ELSE
+      -- No edited records, but need to trigger the picking process
+      IF (reservation_tab_.COUNT = 0) THEN
+         do_picking_ := TRUE;
+         Client_SYS.Add_To_Attr('LAST_LINE',   'TRUE', attr_);
+      END IF;                                                       
+   END IF;    
+   
+   IF do_picking_ THEN
+      Client_SYS.Add_To_Attr('FROM_HEADER', 'TRUE', attr_);
+      
+      Pick_Customer_Order_API.Pick_Resevations_From_Header__(overpicked_lines_, attr_, session_id_, shipment_id_message_,
+                                                             pick_list_no_, ship_location_no_);
+   END IF;   
+                                                          
+   IF (overpicked_lines_ IS NOT NULL) THEN
+      Check_Overpicked_Order_Lines___(overpicked_info_, session_id_);
+   END IF;   
+   
+   info_ := info_ || overpicked_info_ ;
+   
+   -- Info collected above because below method clears it
+   IF (shipment_id_message_ IS NOT NULL) THEN
+      Shipment_Flow_API.Start_Shipment_Flow(shipment_id_msg_ => shipment_id_message_, event_no_ => 40 );
+   END IF; 
+   
+END Pick_All_Customer_Order___;
+

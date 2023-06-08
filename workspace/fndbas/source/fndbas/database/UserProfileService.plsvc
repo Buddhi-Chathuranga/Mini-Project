@@ -1,0 +1,423 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: UserProfileService
+--  Component:    FNDBAS
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  170306  sawelk  Created.  
+--  211228  rakuse  Refactored Get_Profile_Section___ to Get_Profile_Section_Values___ (TEZAUFW-1755).
+-----------------------------------------------------------------------------
+
+layer Core;
+
+-------------------- PRIVATE DECLARATIONS -----------------------------------
+
+separator_            CONSTANT VARCHAR2(2)   := CHR(30);
+my_elements_entry_    CONSTANT VARCHAR2(100) := 'User/ifsweb/Application/CompositePages/MyElements';
+pages_entry_          CONSTANT VARCHAR2(100) := 'User/ifsweb/Application/CompositePages/Pages/';
+pages_settings_entry_ CONSTANT VARCHAR2(100) := 'User/ifsweb/Application/CompositePages/Pages/SettingsOverrides/';
+
+-------------------- LU SPECIFIC IMPLEMENTATION METHODS ---------------------
+
+FUNCTION Get_Personal_Profile_Id___ RETURN VARCHAR2
+IS
+BEGIN
+   RETURN Fndrr_User_Client_Profile_API.Get_Personal_Profile_Id(Fnd_Session_API.Get_Fnd_User());
+END Get_Personal_Profile_Id___;
+
+FUNCTION Get_Base_Profile_Id___ RETURN VARCHAR2
+IS
+BEGIN
+   RETURN Fndrr_User_Client_Profile_API.Get_Base_Profile_Id(Fnd_Session_API.Get_Fnd_User());
+END Get_Base_Profile_Id___;
+
+
+FUNCTION Get_Profile_Id___(
+   userid_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   
+BEGIN
+   RETURN Fndrr_User_Client_Profile_API.Get_Personal_Profile_Id(userid_);
+END Get_Profile_Id___;
+
+
+PROCEDURE Set_Client_Profile_Value___ (
+   profile_section_ IN VARCHAR2,
+   profile_entry_   IN VARCHAR2,
+   profile_value_   IN VARCHAR2 ) 
+IS
+BEGIN
+   Fndrr_Client_Profile_Value_API.Set_Value__(Get_Personal_Profile_Id___, profile_section_, profile_entry_, profile_value_);
+END Set_Client_Profile_Value___;
+
+@Deprecated
+FUNCTION Get_Profile_Section___ (
+   profile_section_ IN VARCHAR2) RETURN Objid_Arr
+IS
+BEGIN
+	RETURN Get_Profile_Section_Values___(profile_section_);
+END Get_Profile_Section___;
+
+
+FUNCTION Get_Profile_Section_Values___(
+   profile_section_ IN VARCHAR2 ) RETURN Objid_Arr
+IS
+   arr_             Objid_Arr := Objid_Arr();
+   
+   CURSOR get_section_values(profile_id_ IN VARCHAR2, base_profile_id_ IN VARCHAR2) IS
+   -- Merge personal with Base profile and standered profile
+   -- first merge personal with Base
+      (SELECT A.SECTION, A.ENTRY, A.PROF_VALUE, A.OBJID
+       FROM (SELECT T.PROFILE_SECTION SECTION,
+                    T.PROFILE_ENTRY   ENTRY,
+                    T.PROFILE_VALUE   PROF_VALUE,
+                    T.OBJID
+             FROM FNDRR_CLIENT_PROFILE_VALUE T
+             WHERE T.PROFILE_ID = profile_id_
+             AND T.PROFILE_SECTION LIKE profile_section_||'%') A  -- get personal
+   UNION
+      (SELECT A.SECTION, A.ENTRY, A.PROF_VALUE, A.OBJID
+       FROM (SELECT TV.PROFILE_SECTION SECTION,
+                    TV.PROFILE_ENTRY   ENTRY,
+                    TV.PROFILE_VALUE   PROF_VALUE,
+                    TV.OBJID
+             FROM FNDRR_CLIENT_PROFILE_VALUE TV
+             WHERE TV.PROFILE_ID = base_profile_id_
+             AND TV.PROFILE_SECTION LIKE profile_section_||'%') A -- get base
+       WHERE A.SECTION NOT IN                                 --Minus  intersection (personal / Base)
+            (SELECT T.PROFILE_SECTION SECTION
+             FROM FNDRR_CLIENT_PROFILE_VALUE T
+             WHERE T.PROFILE_ID = profile_id_
+             AND T.PROFILE_SECTION LIKE profile_section_||'%')
+       OR A.ENTRY NOT IN
+            (SELECT T.PROFILE_ENTRY ENTRY
+             FROM FNDRR_CLIENT_PROFILE_VALUE T
+             WHERE T.PROFILE_ID = profile_id_
+             AND T.PROFILE_SECTION LIKE profile_section_||'%')))
+   UNION
+      (SELECT A.SECTION, A.ENTRY, A.PROF_VALUE, A.OBJID       -- now merge with Default (standered)
+       FROM (SELECT TV.PROFILE_SECTION SECTION,
+                    TV.PROFILE_ENTRY   ENTRY,
+                    TV.PROFILE_VALUE   PROF_VALUE,
+                    TV.OBJID
+            FROM FNDRR_CLIENT_PROFILE_VALUE TV
+            WHERE TV.PROFILE_ID = (SELECT T.profile_id
+                                   FROM FNDRR_CLIENT_PROFILE_TAB T
+                                   WHERE T.owner IS NULL
+                                   AND T.default_profile = 1 AND ROWNUM < 2) --default_prof_id
+            AND TV.PROFILE_SECTION LIKE profile_section_||'%') A  --  get default    
+       WHERE (A.SECTION NOT IN
+             (SELECT T.PROFILE_SECTION SECTION                --Minus  intersection (personal / standered)
+              FROM FNDRR_CLIENT_PROFILE_VALUE T
+              WHERE T.PROFILE_ID = profile_id_
+              AND T.PROFILE_SECTION LIKE profile_section_||'%')
+              OR A.ENTRY NOT IN
+             (SELECT T.PROFILE_ENTRY ENTRY
+              FROM FNDRR_CLIENT_PROFILE_VALUE T
+              WHERE T.PROFILE_ID = profile_id_
+              AND T.PROFILE_SECTION LIKE profile_section_||'%'))  
+       AND (A.SECTION NOT IN
+             (SELECT T.PROFILE_SECTION SECTION                --Minus  intersection (Base / standered)
+              FROM FNDRR_CLIENT_PROFILE_VALUE T
+              WHERE T.PROFILE_ID = base_profile_id_
+              AND T.PROFILE_SECTION LIKE profile_section_||'%')
+              OR A.ENTRY NOT IN
+             (SELECT T.PROFILE_ENTRY ENTRY
+              FROM FNDRR_CLIENT_PROFILE_VALUE T
+              WHERE T.PROFILE_ID = base_profile_id_
+              AND T.PROFILE_SECTION LIKE profile_section_||'%')));
+BEGIN     
+   FOR rec_ IN get_section_values(Get_Personal_Profile_Id___, Get_Base_Profile_Id___)  LOOP
+      arr_.extend;
+      arr_(arr_.last):= rec_.objid;      
+   END LOOP;
+   
+   RETURN arr_;
+END Get_Profile_Section_Values___;
+
+
+FUNCTION Get_Profile_Details___ RETURN Objid_Arr
+IS
+   arr_ Objid_Arr := Objid_Arr();
+   
+   CURSOR get_profile_details(profile_id_ IN VARCHAR2) IS
+      SELECT profile_id, profile_name, owner, objid
+      FROM   FNDRR_CLIENT_PROFILE
+      WHERE  profile_id = profile_id_;   
+BEGIN
+   FOR rec_ IN get_profile_details(Get_Personal_Profile_Id___)  LOOP
+      arr_.extend;
+      arr_(arr_.last):= rec_.objid;      
+   END LOOP;
+   
+   RETURN arr_;
+END Get_Profile_Details___;
+
+PROCEDURE Set_Profile_Text_Value___ (
+   profile_section_ IN VARCHAR2,
+   profile_entry_   IN VARCHAR2,
+   profile_value_   IN VARCHAR2 ) 
+IS
+BEGIN
+   Fndrr_Client_Profile_Value_API.Set_Value__(Get_Personal_Profile_Id___, profile_section_, profile_entry_, profile_value_);
+END Set_Profile_Text_Value___;
+
+
+PROCEDURE Set_Profile_Binary_Value___ (
+   profile_section_      IN VARCHAR2,
+   profile_entry_        IN VARCHAR2,
+   profile_binary_value_ IN CLOB ) 
+IS  
+BEGIN
+   Fndrr_Client_Profile_Value_API.Set_Binary_Value__(Get_Personal_Profile_Id___, profile_section_, profile_entry_, profile_binary_value_);
+END Set_Profile_Binary_Value___;
+
+
+FUNCTION Get_Text_Value___ (
+   profile_section_ IN VARCHAR2,
+   profile_entry_   IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   profile_value_ VARCHAR2(4000);
+   
+   CURSOR get_data(profile_id_ IN VARCHAR2) IS
+      SELECT profile_value
+      FROM   FNDRR_CLIENT_PROFILE_VALUE
+      WHERE  profile_id      = profile_id_
+      AND    profile_section = profile_section_
+      AND    profile_entry   = profile_entry_;
+   
+BEGIN
+   OPEN get_data(Get_Personal_Profile_Id___);
+   FETCH get_data INTO profile_value_;
+   CLOSE get_data;
+   
+   RETURN profile_value_;
+END Get_Text_Value___;
+
+
+FUNCTION Get_Binary_Value___ (
+   profile_section_ IN VARCHAR2,
+   profile_entry_   IN VARCHAR2 ) RETURN CLOB
+IS
+   profile_binary_value_ CLOB;
+   CURSOR get_data(profile_id_ IN VARCHAR2) IS
+      SELECT profile_binary_value
+      FROM   FNDRR_CLIENT_PROFILE_VALUE
+      WHERE  profile_id      = profile_id_
+      AND    profile_section = profile_section_
+      AND    profile_entry   = profile_entry_;  
+BEGIN
+   OPEN get_data(Get_Personal_Profile_Id___);
+   FETCH get_data INTO profile_binary_value_;
+   CLOSE get_data;
+   
+   RETURN profile_binary_value_;
+END Get_Binary_Value___;
+
+
+PROCEDURE Remove_Profile_Section___ (
+   profile_section_ IN VARCHAR2 ) 
+IS
+BEGIN
+   Fndrr_Client_Profile_Value_API.Delete_Section__(Get_Personal_Profile_Id___, profile_section_);
+END Remove_Profile_Section___;
+
+
+PROCEDURE Remove_Profile_Entry___ (
+   profile_section_ IN VARCHAR2,
+   profile_entry_   IN VARCHAR2 ) 
+IS 
+BEGIN 
+   Fndrr_Client_Profile_Value_API.Delete_Value__(Get_Personal_Profile_Id___, profile_section_, profile_entry_);
+END Remove_Profile_Entry___;
+
+
+FUNCTION Save_All_My_Elements___ (
+	modified_ids_  IN Text_Arr,
+   deleted_ids_   IN Text_Arr,
+	data_          IN CLOB) RETURN VARCHAR2
+IS
+   TYPE clob_tab_ IS TABLE OF CLOB;
+   clob_arr_   clob_tab_ := clob_tab_();
+   
+   profile_id_ VARCHAR2(100);
+   pos_        NUMBER := 1;
+   next_pos_   NUMBER := 1;
+   length_     NUMBER := 1;
+   count_      NUMBER := 1;
+BEGIN
+   WHILE (INSTR(data_, separator_, pos_) > 0) LOOP
+      next_pos_ := INSTR(data_, separator_, pos_) + 1;
+      length_ := next_pos_ - pos_ - 1;
+      clob_arr_.extend;
+      clob_arr_(count_) := SUBSTR(data_, pos_, length_);
+      pos_ := next_pos_;
+      count_ := count_ + 1;
+   END LOOP;
+   
+   IF (deleted_ids_.COUNT > 0) THEN
+      profile_id_ := Get_Personal_Profile_Id___;
+      FOR i_ IN deleted_ids_.FIRST..deleted_ids_.LAST LOOP
+         Fndrr_Client_Profile_Value_API.Delete_Value__(profile_id_, my_elements_entry_, deleted_ids_(i_));
+      END LOOP;
+   END IF;
+   
+   IF (modified_ids_.COUNT > 0) THEN
+      FOR i_ IN modified_ids_.FIRST.. modified_ids_.LAST LOOP
+         Set_Profile_Binary_Value___(my_elements_entry_, modified_ids_(i_), clob_arr_(i_));
+      END LOOP;
+   END IF;
+   
+	RETURN 'SUCCESS!!!';
+END Save_All_My_Elements___;
+
+
+FUNCTION Get_All_My_Elements___ RETURN CLOB
+IS
+   arr_           Objid_Arr;
+   elements_clob_ CLOB;
+   element_clob_  CLOB;
+BEGIN
+   arr_ := Get_Profile_Section___(my_elements_entry_);
+   IF (arr_.COUNT > 0) THEN
+      FOR i_ IN arr_.FIRST.. arr_.LAST LOOP
+         element_clob_ := Fndrr_Client_Profile_Value_API.Get_Binary_Value_By_Id__(arr_(i_));
+         IF(length(elements_clob_) != 0) THEN
+            elements_clob_ := elements_clob_ || separator_ || element_clob_ ||  separator_;
+         ELSE
+            elements_clob_ := element_clob_ ||  separator_;
+         END IF;
+      END LOOP;
+      
+      RETURN elements_clob_;
+   END IF;
+   
+   RETURN NULL;
+END Get_All_My_Elements___;
+
+
+FUNCTION Get_My_Elements_In_Page___ (
+	page_id_ IN VARCHAR2) RETURN CLOB
+IS
+   elements_str_   VARCHAR2(32000);
+   element_id_     VARCHAR2(4000);
+   page_entry_     VARCHAR2(4000);
+   elements_clob_  CLOB;
+   element_clob_   CLOB;
+   pos_            NUMBER := 1;
+   next_pos_       NUMBER := 1;
+   length_         NUMBER := 1;
+   count_          NUMBER := 1;
+BEGIN
+   page_entry_ := pages_entry_ || page_id_;
+   
+   elements_str_ := Get_Text_Value___(page_entry_, 'MyElements');
+   
+   WHILE (INSTR(elements_str_, separator_, pos_) > 0) LOOP
+      next_pos_ := INSTR(elements_str_, separator_, pos_) + 1;
+      length_ := next_pos_ - pos_ - 1;
+      element_id_ := SUBSTR(elements_str_, pos_, length_);
+      element_clob_ := Get_Binary_Value___(my_elements_entry_, element_id_);
+      IF(length(elements_clob_) != 0) THEN
+         elements_clob_ := elements_clob_ || separator_ || element_clob_ ||  separator_;
+      ELSE
+         elements_clob_ := element_clob_ ||  separator_;
+      END IF;
+      pos_ := next_pos_;
+      count_ := count_ + 1;
+   END LOOP;
+   
+   IF (length(elements_clob_) != 0) THEN
+      RETURN elements_clob_;
+   END IF;
+   
+   RETURN NULL;
+END Get_My_Elements_In_Page___;
+
+
+FUNCTION Get_My_Element_Indexes___ (
+	ids_ IN Text_Arr,
+	page_id_ IN VARCHAR2) RETURN Number_Arr
+IS
+   page_entry_  VARCHAR2(4000);
+   index_entry_ VARCHAR2(4000);
+   index_       VARCHAR2(2000);
+   index_arr_   Number_Arr := Number_Arr();
+   count_       NUMBER := 1;
+BEGIN
+   page_entry_ := pages_settings_entry_ || page_id_;
+   IF (ids_.COUNT > 0) THEN
+      FOR i_ IN ids_.FIRST..ids_.LAST LOOP
+         index_entry_ := page_entry_ || '/' || ids_(i_);
+         index_ := Get_Text_Value___(index_entry_, 'Index');
+         index_arr_.extend;
+         index_arr_(count_) := to_number(index_);
+         count_ := count_ + 1;
+      END LOOP;
+   END IF;
+   
+   RETURN index_arr_;
+END Get_My_Element_Indexes___;
+
+
+FUNCTION Add_Elements_To_Page___ (
+	ids_     IN Text_Arr,
+	indexes_ IN Number_Arr,
+	page_id_ IN VARCHAR2) RETURN VARCHAR2
+IS
+   profile_id_          VARCHAR2(100);
+   page_entry_          VARCHAR2(32000);
+   page_settings_entry_ VARCHAR2(500);
+   index_entry_         VARCHAR2(32000);
+   ids_str_             VARCHAR2(32000);
+BEGIN
+   profile_id_ := Get_Personal_Profile_Id___;
+   page_entry_ := pages_entry_ || page_id_;
+   page_settings_entry_ := pages_settings_entry_ || page_id_;
+   
+   IF (ids_.COUNT > 0 AND indexes_.COUNT > 0) THEN 
+      FOR i_ IN ids_.FIRST..ids_.LAST LOOP
+         IF (i_ = 1 ) THEN
+            ids_str_ := ids_(i_) || separator_;
+         ELSE
+            ids_str_ := ids_str_ || separator_ || ids_(i_) || separator_;
+         END IF;
+         index_entry_ := page_settings_entry_ || '/' || ids_(i_);
+         Set_Profile_Text_Value___(index_entry_, 'Index', indexes_(i_));
+      END LOOP;
+   
+      Set_Profile_Text_Value___(page_entry_, 'MyElements', ids_str_);
+   ELSE
+      Remove_Profile_Entry___(page_entry_, 'MyElements');
+      Remove_Profile_Section___(page_settings_entry_);
+   END IF;
+   
+	RETURN 'SUCCESS!!!';
+END Add_Elements_To_Page___;
+
+
+FUNCTION Get_Saved_Search___ RETURN Text_Arr
+IS
+   arr_   Text_Arr := Text_Arr();
+   count_ NUMBER := 1;
+   
+   CURSOR get_data(profile_id_ VARCHAR2) IS
+      SELECT REGEXP_SUBSTR(profile_section, 'Clients\/(.*?)\/Pages.', 1, 1, NULL, 1) AS client,
+             REGEXP_SUBSTR(profile_section, 'Pages\/(.*?)\/search.', 1, 1, NULL, 1) AS page,
+             profile_value
+        FROM FNDRR_CLIENT_PROFILE_VALUE
+       WHERE profile_section LIKE '%search:page%'
+         AND profile_entry NOT LIKE '%page:prev%'
+         AND profile_id = profile_id_;
+BEGIN
+   FOR rec_ IN get_data(Get_Personal_Profile_Id___) LOOP
+      arr_.extend;
+      arr_(count_) := rec_.client || '/' || rec_.page || separator_ || rec_.profile_value;
+      count_ := count_ + 1;
+   END LOOP;
+   
+	RETURN arr_;
+END Get_Saved_Search___;

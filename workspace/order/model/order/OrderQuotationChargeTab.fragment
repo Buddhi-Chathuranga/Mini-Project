@@ -1,0 +1,1382 @@
+------------------------------------------------------------------------------------------------------
+-- Date        Sign       History
+-- ----------  ------   ------------------------------------------------------------------------------
+-- 2021-01-29  Skanlk   SCZ-13274, Modified the validate command of ChargeTypeRef in OrdeQuotationChargeList to set the TaxCodeFlag as false when creating a new charge line.
+-- 2021-01-26  Skanlk   SCZ-13325, Modified the validate command of ChargeTypeRef to retrieve a value for Delivery Type when creating a new SQ charge line.
+-- 2020-11-13  MaEelk   SC2020R1-11302, Handled PrintChargeType as an enumeration.
+-- 2019-10-21  MaEelk   SCXTEND-1102, Removed the structure GetTaxLinesStructure and added its contents to ChargeDefaultsStructure.
+-- 2019-10-21           Removed the function GetTaxLines and Moved its usage to GetChargeDefaultsStructure.
+-- 2019-10-21  MaEelk   SCXTEND-1082, Merged GetChargeDefaultsStructure and GetChargeTypeGroupDescStructure and named it ChargeDefaultsStructure.
+-- 2019-10-21           Merged the usage of GetChargeTypeGroupDesc into GetChargeDefaults.
+-- 2019-10-21  MaEelk   SCXTEND-1066,  ValidatePricesAndAmountsStructure was renamed as PricesAndAmountsStructure.
+-- 2019-10-21           Replaced the structures CalculateTotalChargeAmountsStructure and CalculateLinePricesStructure  PricesAndAmountsStructure.
+-- 2019-10-21           Introduced two parameters CalculateLinePrices, CalculateTotalChargeAmounts  to ValidatePricesAndAmounts.
+-- 2019-10-21           Removed CalculateTotalChargeAmounts and CalculateLinePrices from the fragment.
+-- 2019-10-16  Hairlk   SCXTEND-800, Avalara integration, Added refrence and lov CustomerTaxUsageTypeRef to quotation charge line.
+-- 2019-05-17  fgusse   SCUXXW4-20685, Added translatable in DocumentTextCommand
+-- 2019-05-13  fgusse   SCUXXW4-19178, Changed Taxable to Boolean in TaxCodeFilter
+-- 2018-12-23  HaPulk   SCUXXW4-959, Converted from tbwOrdeQuotationCharge using MTG Version: 1.34
+------------------------------------------------------------------------------------------------------
+
+fragment OrderQuotationChargeTab;
+component ORDER;
+layer Core;
+description "Use this fragment to enter one or several charge lines that are connected to the quotation as a whole or to a specific quotation line";
+
+include fragment TaxCalcStructureActiveSelector;
+include fragment TaxCodeRestrictedSelector;
+include fragment TaxCodeExemptRestrictedSelector;
+include fragment QuotationLineChargeLovSelector;
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+
+-------------------------------- MAIN PAGES ---------------------------------
+page List using OrderQuotationChargeSet {
+   label = "Order Quotation Charge";
+   list OrdeQuotationChargeList;
+}
+
+--------------------------------- COMMANDS ----------------------------------
+command DocumentTextCommand for OrderQuotationCharge {
+   label = "Document Text";
+   mode = SingleRecord;
+   enabled = [NoteId != null];
+   variable LabelTextVar {
+      type = Text;
+   }
+   execute {
+      set LabelTextVar = "for Sales Quotation - ${QuotationNo}, ${ChargeType}" {
+         translatable = true;
+      }
+      assistant DocumentText.DocumentText(NoteId, LabelTextVar) {
+         when OK {
+            exit OK;
+         }
+      }
+   }
+}
+command ChargeTaxLinesCommand for OrderQuotationCharge {
+   label = "Charge Tax Lines";
+   mode = SingleRecord;
+   enabled = [true];
+
+   variable PackageNameVar Text;
+   variable ReadOnlyVar Boolean;
+   variable CalcBaseVar Text;
+   variable TitleVar Text;
+   variable SetDefaultCmdVisibleVar Boolean;
+
+   execute {
+      set PackageNameVar = "ORDER_QUOTATION_CHARGE_API";
+      if [parent.UsePriceInclTax = true] {
+         set CalcBaseVar = "GROSS_BASE";
+      }
+      else {
+         set CalcBaseVar = "NET_BASE";
+      }
+
+      if [parent.Objstate = "Invoiced" or parent.Objstate = "Cancelled" or parent.TaxCalcMethod != "NOT_USED"] {
+         set ReadOnlyVar = true;
+      }
+      else {
+         set ReadOnlyVar = false;
+      }
+
+      set TitleVar = "Quotation Charge Tax Lines" {
+         translatable = true;
+      }
+
+      set SetDefaultCmdVisibleVar = true;
+
+
+      assistant TaxLinesCommonAssistant(keyref, PackageNameVar, ReadOnlyVar, CalcBaseVar, TitleVar, null, SetDefaultCmdVisibleVar) {
+         when OK {
+            call RefreshChargeLines();
+            exit OK;
+         }
+         when CANCEL {
+            exit CANCEL;
+         }
+      }
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+
+list OrdeQuotationChargeList for OrderQuotationCharge {
+   orderby = QuotationNo, QuotationChargeNo;
+
+   crudactions {
+      new {
+         enabled = [parent.Objstate != "Cancelled" and parent.Objstate != "Closed"];
+      }
+      delete {
+         enabled = [parent.Objstate != "Cancelled" and parent.Objstate != "Closed"];
+      }
+      edit {
+         enabled = [parent.Objstate != "Cancelled" and parent.Objstate != "Closed"];
+      }
+   }
+
+   field QuotationChargeNo {
+      size = Small;
+   }
+
+   lov ChargeTypeRef with ReferenceSalesChargeTypeSelector using SalesChgTypeCategoryOther {
+      description = ChargeTypeDescription;
+
+      validate command {
+         variable TaxFromDefaultsVar {
+            type = Text;
+         }
+         variable PricesAndAmountsStructureVar {
+            type = PricesAndAmountsStructure;
+         }
+         variable ChargeDefaultsStructureVar {
+            type = ChargeDefaultsStructure;
+         }
+         variable NewLineVar {
+            type = Boolean;
+         }
+
+         execute {
+            if [isNew] {
+               set NewLineVar = true;
+               set TaxCodeFlag = false;
+            }
+            else {
+               set NewLineVar = false;
+            }
+
+
+            set TaxFromDefaultsVar = "TRUE";
+
+            -- GetChargeDefaults
+            call GetChargeDefaults(Company, Contract, QuotationNo, LineNo, RelNo, LineItemNo, QuotationChargeNo, ChargeType, TaxCode, parent.CurrencyCode, parent.UsePriceInclTax) into ChargeDefaultsStructureVar;
+            set ChargeTypeDescription = ChargeDefaultsStructureVar.ChargeTypeDescription;
+            set ChargeGroupDescription = ChargeDefaultsStructureVar.ChargeGroupDescription;
+
+            set SalesUnitMeas = ChargeDefaultsStructureVar.SalesUnitMeas;
+            set Company = ChargeDefaultsStructureVar.Company;
+            set TaxCodeDescription = ChargeDefaultsStructureVar.TaxCodeDesc;
+            if [DuplicatedLine = "FALSE" or DuplicatedLine = null] {
+               set DeliveryType = ChargeDefaultsStructureVar.DeliveryType;
+            }
+            set IntrastatExempt = ChargeDefaultsStructureVar.IntrastatExempt;
+            set UnitCharge = ChargeDefaultsStructureVar.UnitCharge;
+            set CurrencyRate = ChargeDefaultsStructureVar.CurrencyRate;
+
+            set Charge = ChargeDefaultsStructureVar.Charge;
+            set ChargeCost = ChargeDefaultsStructureVar.ChargeCost;
+            set ChargeCostPercent = ChargeDefaultsStructureVar.ChargeCostPercent;
+            set PrintChargeType = ChargeDefaultsStructureVar.PrintChargeType;
+
+            set BaseChargeAmount = ChargeDefaultsStructureVar.BaseChargeAmount;
+            set BaseChargeAmtInclTax = ChargeDefaultsStructureVar.BaseChargeAmtInclTax;
+            set ChargeAmount = ChargeDefaultsStructureVar.ChargeAmount;
+            set ChargeAmountInclTax = ChargeDefaultsStructureVar.ChargeAmountInclTax;
+
+            -- GetTaxLines
+            set MultipleTaxLines = ChargeDefaultsStructureVar.MultipleTaxLines;
+            set Taxable = ChargeDefaultsStructureVar.Taxable;
+            set TaxLiabilityType = ChargeDefaultsStructureVar.TaxLiabilityType;
+
+//            if (bLineDuplicated || bLinePaste)
+//            {
+//                    TaxFromDefaultsVar = "FALSE";
+//            }
+            if [ChargeType != null] {
+               call ValidatePricesAndAmounts(QuotationNo, QuotationChargeNo, LineNo, RelNo, LineItemNo, Contract, parent.CustomerNo,
+               parent.CurrencyCode, CurrencyRate, TaxLiability, TaxLiabilityType, TaxCode, TaxCalcStructureId, TaxCodeFlag, TaxFromDefaultsVar,
+               parent.SupplyCountry, DeliveryType, Charge, ChargeAmountInclTax, ChargeAmount, ChargeType, parent.UsePriceInclTax, parent.WantedDeliveryDate,
+               ChargeNetAmtCurr, GrossAmtCurr, ChargedQty, MultipleTaxLines, TaxClassId, IfsCurrRounding, NewLineVar, true, true) into PricesAndAmountsStructureVar;
+
+               set BaseChargeAmount = PricesAndAmountsStructureVar.BaseChargeAmount;
+               set BaseChargeAmtInclTax = PricesAndAmountsStructureVar.BaseChargeAmtInclTax;
+               set ChargeAmount = PricesAndAmountsStructureVar.ChargeAmount;
+               set ChargeAmountInclTax = PricesAndAmountsStructureVar.ChargeAmountInclTax;
+               set MultipleTaxLines = PricesAndAmountsStructureVar.MultipleTaxLines;
+               set TaxCode = PricesAndAmountsStructureVar.TaxCode;
+               set TaxClassId = PricesAndAmountsStructureVar.TaxClassId;
+               set TaxFromDefaults = PricesAndAmountsStructureVar.TaxFromDefaults;
+
+               set ChargeNetAmtCurr = PricesAndAmountsStructureVar.ChargeNetAmtCurr;
+               set GrossAmtCurr = PricesAndAmountsStructureVar.GrossAmtCurr;
+               set TaxAmountBase = PricesAndAmountsStructureVar.TaxAmountBase;
+               set ChrgNetAmtBase = PricesAndAmountsStructureVar.ChrgNetAmtBase;
+               set GrossAmtBase = PricesAndAmountsStructureVar.GrossAmtBase;
+               set TaxAmountCurrency = PricesAndAmountsStructureVar.TaxAmountCurrency;
+               set TaxCalcStructureId = PricesAndAmountsStructureVar.TaxCalcStructureId;
+               set OldTaxCalcStructureId = PricesAndAmountsStructureVar.OldTaxCalcStructureId;
+            }
+         }
+      }
+   }
+
+   field ChargeTypeRef.ChargeGroup {
+      size = Small;
+      label = "Charge Group";
+   }
+   field ChargeGroupDescription;
+   lov CustomerTaxUsageTypeRef with ReferenceCustomerTaxUsageTypeSelector {
+      description = CustomerTaxUsageTypeRef.Description;
+   }
+
+   field ChargeAmount {
+      editable = [(Charge = null) and(parent.UsePriceInclTax = false)];
+      preserveprecision = [true];
+
+      validate command {
+         variable TaxFromDefaultsVar {
+            type = Text;
+         }
+         variable PricesAndAmountsStructureVar {
+            type = PricesAndAmountsStructure;
+         }
+         variable NewLineVar {
+            type = Boolean;
+         }
+         execute {
+            if [isNew] {
+               set NewLineVar = true;
+            }
+            else {
+               set NewLineVar = false;
+            }
+            set TaxFromDefaultsVar = "FALSE";
+
+            call ValidatePricesAndAmounts(QuotationNo, QuotationChargeNo, LineNo, RelNo, LineItemNo, Contract, parent.CustomerNo,
+            parent.CurrencyCode, CurrencyRate, TaxLiability, TaxLiabilityType, TaxCode, TaxCalcStructureId, TaxCodeFlag, TaxFromDefaultsVar,
+            parent.SupplyCountry, DeliveryType, Charge, ChargeAmountInclTax, ChargeAmount, ChargeType, parent.UsePriceInclTax, parent.WantedDeliveryDate,
+            ChargeNetAmtCurr, GrossAmtCurr, ChargedQty, MultipleTaxLines, TaxClassId, IfsCurrRounding, NewLineVar, true, true) into PricesAndAmountsStructureVar;
+
+            set BaseChargeAmount = PricesAndAmountsStructureVar.BaseChargeAmount;
+            set BaseChargeAmtInclTax = PricesAndAmountsStructureVar.BaseChargeAmtInclTax;
+            set ChargeAmount = PricesAndAmountsStructureVar.ChargeAmount;
+            set ChargeAmountInclTax = PricesAndAmountsStructureVar.ChargeAmountInclTax;
+            set MultipleTaxLines = PricesAndAmountsStructureVar.MultipleTaxLines;
+            set TaxCode = PricesAndAmountsStructureVar.TaxCode;
+            set TaxClassId = PricesAndAmountsStructureVar.TaxClassId;
+            set TaxFromDefaults = PricesAndAmountsStructureVar.TaxFromDefaults;
+
+            set ChargeNetAmtCurr = PricesAndAmountsStructureVar.ChargeNetAmtCurr;
+            set GrossAmtCurr = PricesAndAmountsStructureVar.GrossAmtCurr;
+            set TaxAmountBase = PricesAndAmountsStructureVar.TaxAmountBase;
+            set ChrgNetAmtBase = PricesAndAmountsStructureVar.ChrgNetAmtBase;
+            set GrossAmtBase = PricesAndAmountsStructureVar.GrossAmtBase;
+            set TaxAmountCurrency = PricesAndAmountsStructureVar.TaxAmountCurrency;
+            set TaxCalcStructureId = PricesAndAmountsStructureVar.TaxCalcStructureId;
+            set OldTaxCalcStructureId = PricesAndAmountsStructureVar.OldTaxCalcStructureId;
+         }
+      }
+   }
+   field ChargeAmountInclTax {
+      editable = [(Charge = null) and(parent.UsePriceInclTax = true)];
+      preserveprecision = [true];
+
+      validate command {
+         variable TaxFromDefaultsVar {
+            type = Text;
+         }
+         variable PricesAndAmountsStructureVar {
+            type = PricesAndAmountsStructure;
+         }
+         variable NewLineVar {
+            type = Boolean;
+         }
+
+         execute {
+            if [isNew] {
+               set NewLineVar = true;
+            }
+            else {
+               set NewLineVar = false;
+            }
+            set TaxFromDefaultsVar = "FALSE";
+            call ValidatePricesAndAmounts(QuotationNo, QuotationChargeNo, LineNo, RelNo, LineItemNo, Contract, parent.CustomerNo,
+            parent.CurrencyCode, CurrencyRate, TaxLiability, TaxLiabilityType, TaxCode, TaxCalcStructureId, TaxCodeFlag, TaxFromDefaultsVar,
+            parent.SupplyCountry, DeliveryType, Charge, ChargeAmountInclTax, ChargeAmount, ChargeType, parent.UsePriceInclTax, parent.WantedDeliveryDate,
+            ChargeNetAmtCurr, GrossAmtCurr, ChargedQty, MultipleTaxLines, TaxClassId, IfsCurrRounding, NewLineVar, true, true) into PricesAndAmountsStructureVar;
+
+            set BaseChargeAmount = PricesAndAmountsStructureVar.BaseChargeAmount;
+            set BaseChargeAmtInclTax = PricesAndAmountsStructureVar.BaseChargeAmtInclTax;
+            set ChargeAmount = PricesAndAmountsStructureVar.ChargeAmount;
+            set ChargeAmountInclTax = PricesAndAmountsStructureVar.ChargeAmountInclTax;
+            set MultipleTaxLines = PricesAndAmountsStructureVar.MultipleTaxLines;
+            set TaxCode = PricesAndAmountsStructureVar.TaxCode;
+            set TaxClassId = PricesAndAmountsStructureVar.TaxClassId;
+            set TaxFromDefaults = PricesAndAmountsStructureVar.TaxFromDefaults;
+
+            set ChargeNetAmtCurr = PricesAndAmountsStructureVar.ChargeNetAmtCurr;
+            set GrossAmtCurr = PricesAndAmountsStructureVar.GrossAmtCurr;
+            set TaxAmountBase = PricesAndAmountsStructureVar.TaxAmountBase;
+            set ChrgNetAmtBase = PricesAndAmountsStructureVar.ChrgNetAmtBase;
+            set GrossAmtBase = PricesAndAmountsStructureVar.GrossAmtBase;
+            set TaxAmountCurrency = PricesAndAmountsStructureVar.TaxAmountCurrency;
+            set TaxCalcStructureId = PricesAndAmountsStructureVar.TaxCalcStructureId;
+            set OldTaxCalcStructureId = PricesAndAmountsStructureVar.OldTaxCalcStructureId;
+         }
+      }
+   }
+   field Charge {
+      size = Small;
+
+      editable = [ChargeAmount = null];
+      validate command {
+         variable CalculateTotalChargeAmountsStructureVar {
+            type = PricesAndAmountsStructure;
+         }
+         variable TaxFromDefaultsVar {
+            type = Text;
+         }
+         variable NewLineVar {
+            type = Boolean;
+         }
+         execute {
+            if [isNew] {
+               set NewLineVar = true;
+            }
+            else {
+               set NewLineVar = false;
+            }
+            -- CalculateTotalChargeAmounts
+            set TaxFromDefaultsVar = "FALSE";
+            call ValidatePricesAndAmounts(QuotationNo, QuotationChargeNo, LineNo, RelNo, LineItemNo, Contract,
+            parent.CustomerNo, parent.CurrencyCode, CurrencyRate, TaxLiability, TaxLiabilityType, TaxCode,
+            TaxCalcStructureId, TaxCodeFlag, TaxFromDefaultsVar, parent.SupplyCountry,
+            DeliveryType, Charge, ChargeAmountInclTax, ChargeAmount, ChargeType,
+            parent.UsePriceInclTax, parent.WantedDeliveryDate, ChargeNetAmtCurr, GrossAmtCurr, ChargedQty,
+            MultipleTaxLines, TaxCode, IfsCurrRounding, NewLineVar, false, true) into CalculateTotalChargeAmountsStructureVar;
+
+            set ChargeNetAmtCurr = CalculateTotalChargeAmountsStructureVar.ChargeNetAmtCurr;
+            set GrossAmtCurr = CalculateTotalChargeAmountsStructureVar.GrossAmtCurr;
+            set TaxAmountBase = CalculateTotalChargeAmountsStructureVar.TaxAmountBase;
+            set ChrgNetAmtBase = CalculateTotalChargeAmountsStructureVar.ChrgNetAmtBase;
+            set GrossAmtBase = CalculateTotalChargeAmountsStructureVar.GrossAmtBase;
+            set TaxAmountCurrency = CalculateTotalChargeAmountsStructureVar.TaxAmountCurrency;
+            set TaxCalcStructureId = CalculateTotalChargeAmountsStructureVar.TaxCalcStructureId;
+            set OldTaxCalcStructureId = CalculateTotalChargeAmountsStructureVar.OldTaxCalcStructureId;
+         }
+      }
+   }
+   field ChargeBasisCurr;
+   field ChargedQty {
+      size = Small;
+
+      validate command {
+         variable CalculateTotalChargeAmountsStructureVar {
+            type = PricesAndAmountsStructure;
+         }
+         variable TaxFromDefaultsVar {
+            type = Text;
+         }
+         variable NewLineVar {
+            type = Boolean;
+         }
+         execute {
+            if [isNew] {
+               set NewLineVar = true;
+            }
+            else {
+               set NewLineVar = false;
+            }
+            -- CalculateTotalChargeAmounts
+            set TaxFromDefaultsVar = "FALSE";
+            call ValidatePricesAndAmounts(QuotationNo, QuotationChargeNo, LineNo, RelNo, LineItemNo, Contract,
+            parent.CustomerNo, parent.CurrencyCode, CurrencyRate, TaxLiability, TaxLiabilityType, TaxCode,
+            TaxCalcStructureId, TaxCodeFlag, TaxFromDefaultsVar, parent.SupplyCountry,
+            DeliveryType, Charge, ChargeAmountInclTax, ChargeAmount, ChargeType,
+            parent.UsePriceInclTax, parent.WantedDeliveryDate, ChargeNetAmtCurr, GrossAmtCurr, ChargedQty,
+            MultipleTaxLines, TaxCode, IfsCurrRounding, NewLineVar, false, true) into CalculateTotalChargeAmountsStructureVar;
+
+            set ChargeNetAmtCurr = CalculateTotalChargeAmountsStructureVar.ChargeNetAmtCurr;
+            set GrossAmtCurr = CalculateTotalChargeAmountsStructureVar.GrossAmtCurr;
+            set TaxAmountBase = CalculateTotalChargeAmountsStructureVar.TaxAmountBase;
+            set ChrgNetAmtBase = CalculateTotalChargeAmountsStructureVar.ChrgNetAmtBase;
+            set GrossAmtBase = CalculateTotalChargeAmountsStructureVar.GrossAmtBase;
+            set TaxAmountCurrency = CalculateTotalChargeAmountsStructureVar.TaxAmountCurrency;
+            set TaxCalcStructureId = CalculateTotalChargeAmountsStructureVar.TaxCalcStructureId;
+            set OldTaxCalcStructureId = CalculateTotalChargeAmountsStructureVar.OldTaxCalcStructureId;
+         }
+      }
+   }
+   field SalesUnitMeas {
+      size = Small;
+   }
+   field BaseChargeAmount {
+      editable = [(Charge = null) and(parent.UsePriceInclTax = false)];
+      preserveprecision = [true];
+
+      validate command {
+         variable ValidateBaseSaleUnitPriceStructureVar {
+            type = ValidateBaseSaleUnitPriceStructure;
+         }
+         variable UsePriceInclTaxVar {
+            type = Boolean;
+         }
+         variable TaxFromDefaultsVar {
+            type = Text;
+         }
+         variable PricesAndAmountsStructureVar {
+            type = PricesAndAmountsStructure;
+         }
+         variable NewLineVar {
+            type = Boolean;
+         }
+         execute {
+            set UsePriceInclTaxVar = false;
+            call ValidateBaseSaleUnitPrice(QuotationNo, BaseChargeAmount, BaseChargeAmtInclTax, Contract, UsePriceInclTaxVar, parent.CurrencyCode) into ValidateBaseSaleUnitPriceStructureVar;
+            set ChargeAmount = ValidateBaseSaleUnitPriceStructureVar.ChargeAmount;
+            set ChargeAmountInclTax = ValidateBaseSaleUnitPriceStructureVar.ChargeAmountInclTax;
+            set CurrencyRate = ValidateBaseSaleUnitPriceStructureVar.CurrencyRate;
+
+            if [isNew] {
+               set NewLineVar = true;
+            }
+            else {
+               set NewLineVar = false;
+            }
+            set TaxFromDefaultsVar = "FALSE";
+            call ValidatePricesAndAmounts(QuotationNo, QuotationChargeNo, LineNo, RelNo, LineItemNo, Contract, parent.CustomerNo,
+            parent.CurrencyCode, CurrencyRate, TaxLiability, TaxLiabilityType, TaxCode, TaxCalcStructureId, TaxCodeFlag, TaxFromDefaultsVar,
+            parent.SupplyCountry, DeliveryType, Charge, ChargeAmountInclTax, ChargeAmount, ChargeType, parent.UsePriceInclTax, parent.WantedDeliveryDate,
+            ChargeNetAmtCurr, GrossAmtCurr, ChargedQty, MultipleTaxLines, TaxClassId, IfsCurrRounding, NewLineVar, true, true) into PricesAndAmountsStructureVar;
+
+            set BaseChargeAmount = PricesAndAmountsStructureVar.BaseChargeAmount;
+            set BaseChargeAmtInclTax = PricesAndAmountsStructureVar.BaseChargeAmtInclTax;
+            set ChargeAmount = PricesAndAmountsStructureVar.ChargeAmount;
+            set ChargeAmountInclTax = PricesAndAmountsStructureVar.ChargeAmountInclTax;
+            set MultipleTaxLines = PricesAndAmountsStructureVar.MultipleTaxLines;
+            set TaxCode = PricesAndAmountsStructureVar.TaxCode;
+
+            set TaxClassId = PricesAndAmountsStructureVar.TaxClassId;
+            set TaxFromDefaults = PricesAndAmountsStructureVar.TaxFromDefaults;
+
+            set ChargeNetAmtCurr = PricesAndAmountsStructureVar.ChargeNetAmtCurr;
+            set GrossAmtCurr = PricesAndAmountsStructureVar.GrossAmtCurr;
+            set TaxAmountBase = PricesAndAmountsStructureVar.TaxAmountBase;
+            set ChrgNetAmtBase = PricesAndAmountsStructureVar.ChrgNetAmtBase;
+            set GrossAmtBase = PricesAndAmountsStructureVar.GrossAmtBase;
+            set TaxAmountCurrency = PricesAndAmountsStructureVar.TaxAmountCurrency;
+            set TaxCalcStructureId = PricesAndAmountsStructureVar.TaxCalcStructureId;
+            set OldTaxCalcStructureId = PricesAndAmountsStructureVar.OldTaxCalcStructureId;
+         }
+      }
+   }
+   field BaseChargeAmtInclTax {
+      editable = [(Charge = null) and(parent.UsePriceInclTax = true)];
+      preserveprecision = [true];
+
+      validate command {
+         variable ValidateBaseSaleUnitPriceStructureVar {
+            type = ValidateBaseSaleUnitPriceStructure;
+         }
+         variable UsePriceInclTaxVar {
+            type = Boolean;
+         }
+         variable TaxFromDefaultsVar {
+            type = Text;
+         }
+         variable PricesAndAmountsStructureVar {
+            type = PricesAndAmountsStructure;
+         }
+         variable NewLineVar {
+            type = Boolean;
+         }
+         execute {
+            if [isNew] {
+               set NewLineVar = true;
+            }
+            else {
+               set NewLineVar = false;
+            }
+            set UsePriceInclTaxVar = true;
+            call ValidateBaseSaleUnitPrice(QuotationNo, BaseChargeAmount, BaseChargeAmtInclTax, Contract, UsePriceInclTaxVar, parent.CurrencyCode) into ValidateBaseSaleUnitPriceStructureVar;
+            set ChargeAmount = ValidateBaseSaleUnitPriceStructureVar.ChargeAmount;
+            set ChargeAmountInclTax = ValidateBaseSaleUnitPriceStructureVar.ChargeAmountInclTax;
+            set CurrencyRate = ValidateBaseSaleUnitPriceStructureVar.CurrencyRate;
+
+            set TaxFromDefaultsVar = "FALSE";
+            call ValidatePricesAndAmounts(QuotationNo, QuotationChargeNo, LineNo, RelNo, LineItemNo, Contract, parent.CustomerNo,
+            parent.CurrencyCode, CurrencyRate, TaxLiability, TaxLiabilityType, TaxCode, TaxCalcStructureId, TaxCodeFlag, TaxFromDefaultsVar,
+            parent.SupplyCountry, DeliveryType, Charge, ChargeAmountInclTax, ChargeAmount, ChargeType, parent.UsePriceInclTax, parent.WantedDeliveryDate,
+            ChargeNetAmtCurr, GrossAmtCurr, ChargedQty, MultipleTaxLines, TaxClassId, IfsCurrRounding, NewLineVar, true, true) into PricesAndAmountsStructureVar;
+
+            set BaseChargeAmount = PricesAndAmountsStructureVar.BaseChargeAmount;
+            set BaseChargeAmtInclTax = PricesAndAmountsStructureVar.BaseChargeAmtInclTax;
+            set ChargeAmount = PricesAndAmountsStructureVar.ChargeAmount;
+            set ChargeAmountInclTax = PricesAndAmountsStructureVar.ChargeAmountInclTax;
+            set MultipleTaxLines = PricesAndAmountsStructureVar.MultipleTaxLines;
+            set TaxCode = PricesAndAmountsStructureVar.TaxCode;
+            set TaxClassId = PricesAndAmountsStructureVar.TaxClassId;
+            set TaxFromDefaults = PricesAndAmountsStructureVar.TaxFromDefaults;
+
+            set ChargeNetAmtCurr = PricesAndAmountsStructureVar.ChargeNetAmtCurr;
+            set GrossAmtCurr = PricesAndAmountsStructureVar.GrossAmtCurr;
+            set TaxAmountBase = PricesAndAmountsStructureVar.TaxAmountBase;
+            set ChrgNetAmtBase = PricesAndAmountsStructureVar.ChrgNetAmtBase;
+            set GrossAmtBase = PricesAndAmountsStructureVar.GrossAmtBase;
+            set TaxAmountCurrency = PricesAndAmountsStructureVar.TaxAmountCurrency;
+            set TaxCalcStructureId = PricesAndAmountsStructureVar.TaxCalcStructureId;
+            set OldTaxCalcStructureId = PricesAndAmountsStructureVar.OldTaxCalcStructureId;
+         }
+      }
+   }
+   lov LineNoRef with ReferenceQuotationLineChargeLovSelector {
+      size = Small;
+      filterexclude = RelNo;
+
+      validate command {
+         variable PricesAndAmountsStructureVar {
+            type = PricesAndAmountsStructure;
+         }
+         variable TaxFromDefaultsVar {
+            type = Text;
+         }
+         variable NewLineVar {
+            type = Boolean;
+         }
+         execute {
+            if [isNew] {
+               set NewLineVar = true;
+            }
+            else {
+               set NewLineVar = false;
+            }
+
+            set TaxFromDefaultsVar = "FALSE";
+            call ValidatePricesAndAmounts(QuotationNo, QuotationChargeNo, LineNo, RelNo, LineItemNo, Contract, parent.CustomerNo,
+            parent.CurrencyCode, CurrencyRate, TaxLiability, TaxLiabilityType, TaxCode, TaxCalcStructureId, TaxCodeFlag, TaxFromDefaultsVar,
+            parent.SupplyCountry, DeliveryType, Charge, ChargeAmountInclTax, ChargeAmount, ChargeType, parent.UsePriceInclTax, parent.WantedDeliveryDate,
+            ChargeNetAmtCurr, GrossAmtCurr, ChargedQty, MultipleTaxLines, TaxClassId, IfsCurrRounding, NewLineVar, true, true) into PricesAndAmountsStructureVar;
+
+            set BaseChargeAmount = PricesAndAmountsStructureVar.BaseChargeAmount;
+            set BaseChargeAmtInclTax = PricesAndAmountsStructureVar.BaseChargeAmtInclTax;
+            set ChargeAmount = PricesAndAmountsStructureVar.ChargeAmount;
+            set ChargeAmountInclTax = PricesAndAmountsStructureVar.ChargeAmountInclTax;
+            set MultipleTaxLines = PricesAndAmountsStructureVar.MultipleTaxLines;
+            set TaxCode = PricesAndAmountsStructureVar.TaxCode;
+            set TaxClassId = PricesAndAmountsStructureVar.TaxClassId;
+            set TaxFromDefaults = PricesAndAmountsStructureVar.TaxFromDefaults;
+
+            set ChargeNetAmtCurr = PricesAndAmountsStructureVar.ChargeNetAmtCurr;
+            set GrossAmtCurr = PricesAndAmountsStructureVar.GrossAmtCurr;
+            set TaxAmountBase = PricesAndAmountsStructureVar.TaxAmountBase;
+            set ChrgNetAmtBase = PricesAndAmountsStructureVar.ChrgNetAmtBase;
+            set GrossAmtBase = PricesAndAmountsStructureVar.GrossAmtBase;
+            set TaxAmountCurrency = PricesAndAmountsStructureVar.TaxAmountCurrency;
+            set TaxCalcStructureId = PricesAndAmountsStructureVar.TaxCalcStructureId;
+            set OldTaxCalcStructureId = PricesAndAmountsStructureVar.OldTaxCalcStructureId;
+
+            set RelNo = LineNoRef.RelNo;
+            set LineItemNo = null;
+         }
+      }
+   }
+   field RelNo {
+      size = Small;
+
+      validate command {
+         variable PricesAndAmountsStructureVar {
+            type = PricesAndAmountsStructure;
+         }
+         variable TaxFromDefaultsVar {
+            type = Text;
+         }
+         variable NewLineVar {
+            type = Boolean;
+         }
+         execute {
+            set LineItemNo = null;
+            if [isNew] {
+               set NewLineVar = true;
+            }
+            else {
+               set NewLineVar = false;
+            }
+            set TaxFromDefaultsVar = "FALSE";
+            call ValidatePricesAndAmounts(QuotationNo, QuotationChargeNo, LineNo, RelNo, LineItemNo, Contract, parent.CustomerNo,
+            parent.CurrencyCode, CurrencyRate, TaxLiability, TaxLiabilityType, TaxCode, TaxCalcStructureId, TaxCodeFlag, TaxFromDefaultsVar,
+            parent.SupplyCountry, DeliveryType, Charge, ChargeAmountInclTax, ChargeAmount, ChargeType, parent.UsePriceInclTax, parent.WantedDeliveryDate,
+            ChargeNetAmtCurr, GrossAmtCurr, ChargedQty, MultipleTaxLines, TaxClassId, IfsCurrRounding, NewLineVar, true, true) into PricesAndAmountsStructureVar;
+
+            set BaseChargeAmount = PricesAndAmountsStructureVar.BaseChargeAmount;
+            set BaseChargeAmtInclTax = PricesAndAmountsStructureVar.BaseChargeAmtInclTax;
+            set ChargeAmount = PricesAndAmountsStructureVar.ChargeAmount;
+            set ChargeAmountInclTax = PricesAndAmountsStructureVar.ChargeAmountInclTax;
+            set MultipleTaxLines = PricesAndAmountsStructureVar.MultipleTaxLines;
+            set TaxCode = PricesAndAmountsStructureVar.TaxCode;
+            set TaxClassId = PricesAndAmountsStructureVar.TaxClassId;
+            set TaxFromDefaults = PricesAndAmountsStructureVar.TaxFromDefaults;
+
+            set ChargeNetAmtCurr = PricesAndAmountsStructureVar.ChargeNetAmtCurr;
+            set GrossAmtCurr = PricesAndAmountsStructureVar.GrossAmtCurr;
+            set TaxAmountBase = PricesAndAmountsStructureVar.TaxAmountBase;
+            set ChrgNetAmtBase = PricesAndAmountsStructureVar.ChrgNetAmtBase;
+            set GrossAmtBase = PricesAndAmountsStructureVar.GrossAmtBase;
+            set TaxAmountCurrency = PricesAndAmountsStructureVar.TaxAmountCurrency;
+            set TaxCalcStructureId = PricesAndAmountsStructureVar.TaxCalcStructureId;
+            set OldTaxCalcStructureId = PricesAndAmountsStructureVar.OldTaxCalcStructureId;
+         }
+      }
+   }
+   field TaxLiability {
+      size = Small;
+   }
+   field TaxLiabilityType {
+      size = Small;
+   }
+   field ChargeTypeRef.Taxable {
+      size = Small;
+      label = "Taxable";
+   }
+
+   -- Below two fields has been added for the same purpose due to the limitation when adding FUNCTION into LOVs
+   lov TaxCodeRef with ReferenceStatutoryFeeSelector {
+      columnexclude = [true];
+      searchable = true;
+   }
+
+   lov TaxCodeRef with ReferenceStatutoryFeeSelector using TaxCodeFilter(QuotationNo, LineNo, RelNo, LineItemNo, Contract, parent.WantedDeliveryDate, ChargeTypeRef.Taxable, TaxLiabilityType) {
+      editable = [parent.TaxCalcMethod = "NOT_USED"];
+      searchable = false;
+      description = TaxCodeDescription;
+
+      validate command {
+         variable TaxFromDefaultsVar {
+            type = Text;
+         }
+         variable PricesAndAmountsStructureVar {
+            type = PricesAndAmountsStructure;
+         }
+         variable NewLineVar {
+            type = Boolean;
+         }
+
+         execute {
+            if [isNew] {
+               set NewLineVar = true;
+            }
+            else {
+               set NewLineVar = false;
+            }
+            call GetTaxCodeDescription(Company, TaxCode) into TaxCodeDescription;
+
+            if [TaxCode != null] {
+               if [TaxCalcStructureId != null] {
+                  messagebox("", question, "This will overwrite the existing tax calculation structure. Do you want to continue?") {
+                     when "Yes" {
+                        set TaxEdited = true;
+                     }
+                     when "No" {
+                        set TaxEdited = false;
+                        set TaxCode = original.TaxCode;
+                        exit;
+                     }
+                  }
+               }
+               if [MultipleTaxLines = true and TaxCalcStructureId = null] {
+                  messagebox("", question, "This will overwrite the existing multiple tax lines. Do you want to continue?") {
+                     when "Yes" {
+                        set TaxEdited = true;
+                     }
+                     when "No" {
+                        set TaxEdited = false;
+                        set TaxCode = original.TaxCode;
+                        exit;
+                     }
+                  }
+               }
+               set MultipleTaxLines = false;
+            }
+            if [(TaxCode = "") and(MultipleTaxLines = true)] {
+               set MultipleTaxLines = false;
+            }
+            if [(TaxCode = "") and(MultipleTaxLines = false)] {
+               set TaxFromDefaultsVar = "DO_NOT_FETCH";
+               set FetchTaxCodes = "FALSE";
+            }
+            if [TaxClassId != null] {
+               set TaxClassId = null;
+            }
+            if [TaxCalcStructureId != null] {
+               set TaxCalcStructureId = null;
+            }
+            set TaxCodeFlag = true;
+            set TaxEdited = true;
+
+            call ValidatePricesAndAmounts(QuotationNo, QuotationChargeNo, LineNo, RelNo, LineItemNo, Contract, parent.CustomerNo,
+            parent.CurrencyCode, CurrencyRate, TaxLiability, TaxLiabilityType, TaxCode, TaxCalcStructureId, TaxCodeFlag, TaxFromDefaultsVar,
+            parent.SupplyCountry, DeliveryType, Charge, ChargeAmountInclTax, ChargeAmount, ChargeType, parent.UsePriceInclTax, parent.WantedDeliveryDate,
+            ChargeNetAmtCurr, GrossAmtCurr, ChargedQty, MultipleTaxLines, TaxClassId, IfsCurrRounding, NewLineVar, true, true) into PricesAndAmountsStructureVar;
+
+            set BaseChargeAmount = PricesAndAmountsStructureVar.BaseChargeAmount;
+            set BaseChargeAmtInclTax = PricesAndAmountsStructureVar.BaseChargeAmtInclTax;
+            set ChargeAmount = PricesAndAmountsStructureVar.ChargeAmount;
+            set ChargeAmountInclTax = PricesAndAmountsStructureVar.ChargeAmountInclTax;
+            set MultipleTaxLines = PricesAndAmountsStructureVar.MultipleTaxLines;
+            set TaxCode = PricesAndAmountsStructureVar.TaxCode;
+            set TaxClassId = PricesAndAmountsStructureVar.TaxClassId;
+            set TaxFromDefaults = PricesAndAmountsStructureVar.TaxFromDefaults;
+
+            set ChargeNetAmtCurr = PricesAndAmountsStructureVar.ChargeNetAmtCurr;
+            set GrossAmtCurr = PricesAndAmountsStructureVar.GrossAmtCurr;
+            set TaxAmountBase = PricesAndAmountsStructureVar.TaxAmountBase;
+            set ChrgNetAmtBase = PricesAndAmountsStructureVar.ChrgNetAmtBase;
+            set GrossAmtBase = PricesAndAmountsStructureVar.GrossAmtBase;
+            set TaxAmountCurrency = PricesAndAmountsStructureVar.TaxAmountCurrency;
+            set TaxCalcStructureId = PricesAndAmountsStructureVar.TaxCalcStructureId;
+            set OldTaxCalcStructureId = PricesAndAmountsStructureVar.OldTaxCalcStructureId;
+         }
+      }
+   }
+
+   lov TaxClassIdRef with ReferenceTaxClassSelector {
+      description = TaxClassIdRef.Description;
+   }
+
+   lov TaxCalcStructureIdRef with ReferenceTaxCalcStructureActiveSelector {
+      editable = [parent.TaxCalcMethod = "NOT_USED"];
+      validate command {
+         variable TaxFromDefaultsVar {
+            type = Text;
+         }
+         variable CalculateLinePricesStructureVar {
+            type = PricesAndAmountsStructure;
+         }
+         variable CalculateTotalChargeAmountsStructureVar {
+            type = PricesAndAmountsStructure;
+         }
+         variable NewLineVar {
+            type = Boolean;
+         }
+
+         execute {
+            if [isNew] {
+               set NewLineVar = true;
+            }
+            else {
+               set NewLineVar = false;
+            }
+            if [TaxCalcStructureId != null] {
+               if [TaxCode != null] {
+                  messagebox("", question, "This will overwrite the existing tax code. Do you want to continue?") {
+                     when "Yes" {
+                        set TaxEdited = true;
+                     }
+                     when "No" {
+                        set TaxEdited = false;
+                        set TaxCalcStructureId = original.TaxCalcStructureId;
+                        exit;
+                     }
+                  }
+                  set TaxCode = null;
+                  set TaxCodeDescription = null;
+               }
+               else {
+                  if [MultipleTaxLines = true and original.TaxCalcStructureId = null] {
+                     messagebox("", question, "This will overwrite the existing multiple tax lines. Do you want to continue?") {
+                        when "Yes" {
+                           set TaxEdited = true;
+                        }
+                        when "No" {
+                           set TaxEdited = false;
+                           set TaxCalcStructureId = original.TaxCalcStructureId;
+                           exit;
+                        }
+                     }
+                  }
+               }
+               if [TaxClassId != null] {
+                  set TaxClassId = null;
+               }
+            }
+            if [(TaxCalcStructureId = null) and(OldTaxCalcStructureId != null)] {
+               set TaxFromDefaultsVar = "DO_NOT_FETCH";
+               set FetchTaxCodes = "FALSE";
+            }
+
+            set OldTaxCalcStructureId = TaxCalcStructureId;
+            set TaxEdited = true;
+
+            -- CalculateLinePrices
+            call ValidatePricesAndAmounts(QuotationNo, QuotationChargeNo, LineNo, RelNo, LineItemNo, Contract,
+            parent.CustomerNo, parent.CurrencyCode, CurrencyRate, TaxLiability, TaxLiabilityType, TaxCode,
+            TaxCalcStructureId, TaxCodeFlag, TaxFromDefaultsVar, parent.SupplyCountry,
+            DeliveryType, Charge, ChargeAmountInclTax, ChargeAmount, ChargeType,
+            parent.UsePriceInclTax, parent.WantedDeliveryDate, ChargeNetAmtCurr, GrossAmtCurr, ChargedQty,
+            MultipleTaxLines, TaxCode, IfsCurrRounding, NewLineVar, true, false) into CalculateLinePricesStructureVar;
+
+            set BaseChargeAmount = CalculateLinePricesStructureVar.BaseChargeAmount;
+            set BaseChargeAmtInclTax = CalculateLinePricesStructureVar.BaseChargeAmtInclTax;
+            set ChargeAmount = CalculateLinePricesStructureVar.ChargeAmount;
+            set ChargeAmountInclTax = CalculateLinePricesStructureVar.ChargeAmountInclTax;
+            set MultipleTaxLines = CalculateLinePricesStructureVar.MultipleTaxLines;
+            set TaxCode = CalculateLinePricesStructureVar.TaxCode;
+            set TaxCalcStructureId = CalculateLinePricesStructureVar.TaxCalcStructureId;
+            set TaxClassId = CalculateLinePricesStructureVar.TaxClassId;
+            set TaxFromDefaults = CalculateLinePricesStructureVar.TaxFromDefaults;
+            set OldTaxCalcStructureId = CalculateLinePricesStructureVar.OldTaxCalcStructureId;
+
+            -- CalculateTotalChargeAmounts
+            call ValidatePricesAndAmounts(QuotationNo, QuotationChargeNo, LineNo, RelNo, LineItemNo, Contract,
+            parent.CustomerNo, parent.CurrencyCode, CurrencyRate, TaxLiability, TaxLiabilityType, TaxCode,
+            TaxCalcStructureId, TaxCodeFlag, TaxFromDefaultsVar, parent.SupplyCountry,
+            DeliveryType, Charge, ChargeAmountInclTax, ChargeAmount, ChargeType,
+            parent.UsePriceInclTax, parent.WantedDeliveryDate, ChargeNetAmtCurr, GrossAmtCurr, ChargedQty,
+            MultipleTaxLines, TaxCode, IfsCurrRounding, NewLineVar, false, true) into CalculateTotalChargeAmountsStructureVar;
+
+            set ChargeNetAmtCurr = CalculateTotalChargeAmountsStructureVar.ChargeNetAmtCurr;
+            set GrossAmtCurr = CalculateTotalChargeAmountsStructureVar.GrossAmtCurr;
+            set TaxAmountBase = CalculateTotalChargeAmountsStructureVar.TaxAmountBase;
+            set ChrgNetAmtBase = CalculateTotalChargeAmountsStructureVar.ChrgNetAmtBase;
+            set GrossAmtBase = CalculateTotalChargeAmountsStructureVar.GrossAmtBase;
+            set TaxAmountCurrency = CalculateTotalChargeAmountsStructureVar.TaxAmountCurrency;
+            set TaxCalcStructureId = CalculateTotalChargeAmountsStructureVar.TaxCalcStructureId;
+            set OldTaxCalcStructureId = CalculateTotalChargeAmountsStructureVar.OldTaxCalcStructureId;
+         }
+      }
+   }
+   field MultipleTaxLines {
+      size = Small;
+   }
+
+   lov DeliveryTypeRef with ReferenceDeliveryTypeSelector {
+      description = DeliveryTypeRef.Description;
+
+      validate command {
+         variable TaxFromDefaultsVar {
+            type = Text;
+         }
+         variable CalculateLinePricesStructureVar {
+            type = PricesAndAmountsStructure;
+         }
+         variable CalculateTotalChargeAmountsStructureVar {
+            type = PricesAndAmountsStructure;
+         }
+         variable NewLineVar {
+            type = Boolean;
+         }
+
+         execute {
+            if [isNew] {
+               set NewLineVar = true;
+            }
+            else {
+               set NewLineVar = false;
+            }
+            if [TaxLiabilityType = null] {
+               call GetTaxLiabilityTypeDb(QuotationNo, QuotationChargeNo, TaxLiability) into TaxLiabilityType;
+            }
+            if [TaxLiabilityType = "EXM"] {
+
+               set TaxFromDefaultsVar = "TRUE";
+               -- CalculateLinePrices
+               call ValidatePricesAndAmounts(QuotationNo, QuotationChargeNo, LineNo, RelNo, LineItemNo, Contract,
+               parent.CustomerNo, parent.CurrencyCode, CurrencyRate, TaxLiability, TaxLiabilityType, TaxCode,
+               TaxCalcStructureId, TaxCodeFlag, TaxFromDefaultsVar, parent.SupplyCountry,
+               DeliveryType, Charge, ChargeAmountInclTax, ChargeAmount, ChargeType,
+               parent.UsePriceInclTax, parent.WantedDeliveryDate, ChargeNetAmtCurr, GrossAmtCurr, ChargedQty,
+               MultipleTaxLines, TaxCode, IfsCurrRounding, NewLineVar, true, false) into CalculateLinePricesStructureVar;
+
+               set BaseChargeAmount = CalculateLinePricesStructureVar.BaseChargeAmount;
+               set BaseChargeAmtInclTax = CalculateLinePricesStructureVar.BaseChargeAmtInclTax;
+               set ChargeAmount = CalculateLinePricesStructureVar.ChargeAmount;
+               set ChargeAmountInclTax = CalculateLinePricesStructureVar.ChargeAmountInclTax;
+               set MultipleTaxLines = CalculateLinePricesStructureVar.MultipleTaxLines;
+               set TaxCode = CalculateLinePricesStructureVar.TaxCode;
+               set TaxCalcStructureId = CalculateLinePricesStructureVar.TaxCalcStructureId;
+               set TaxClassId = CalculateLinePricesStructureVar.TaxClassId;
+               set TaxFromDefaults = CalculateLinePricesStructureVar.TaxFromDefaults;
+               set OldTaxCalcStructureId = CalculateLinePricesStructureVar.OldTaxCalcStructureId;
+
+               -- CalculateTotalChargeAmounts
+               call ValidatePricesAndAmounts(QuotationNo, QuotationChargeNo, LineNo, RelNo, LineItemNo, Contract,
+               parent.CustomerNo, parent.CurrencyCode, CurrencyRate, TaxLiability, TaxLiabilityType, TaxCode,
+               TaxCalcStructureId, TaxCodeFlag, TaxFromDefaultsVar, parent.SupplyCountry,
+               DeliveryType, Charge, ChargeAmountInclTax, ChargeAmount, ChargeType,
+               parent.UsePriceInclTax, parent.WantedDeliveryDate, ChargeNetAmtCurr, GrossAmtCurr, ChargedQty,
+               MultipleTaxLines, TaxCode, IfsCurrRounding, NewLineVar, false, true) into CalculateTotalChargeAmountsStructureVar;
+
+               set ChargeNetAmtCurr = CalculateTotalChargeAmountsStructureVar.ChargeNetAmtCurr;
+               set GrossAmtCurr = CalculateTotalChargeAmountsStructureVar.GrossAmtCurr;
+               set TaxAmountBase = CalculateTotalChargeAmountsStructureVar.TaxAmountBase;
+               set ChrgNetAmtBase = CalculateTotalChargeAmountsStructureVar.ChrgNetAmtBase;
+               set GrossAmtBase = CalculateTotalChargeAmountsStructureVar.GrossAmtBase;
+               set TaxAmountCurrency = CalculateTotalChargeAmountsStructureVar.TaxAmountCurrency;
+               set TaxCalcStructureId = CalculateTotalChargeAmountsStructureVar.TaxCalcStructureId;
+               set OldTaxCalcStructureId = CalculateTotalChargeAmountsStructureVar.OldTaxCalcStructureId;
+            }
+         }
+      }
+   }
+
+   field ChrgNetAmtBase;
+   field ChargeNetAmtCurr;
+   field GrossAmtBase;
+   field GrossAmtCurr;
+   field ChargeCost {
+      editable = [ChargeCostPercent = null];
+   }
+   field ChargeCostPercent {
+      size = Small;
+      editable = [ChargeCost = null];
+   }
+   field TotalChargeCost;
+   field PrintChargeType {
+      enumerationtrue = "Yes";
+      enumerationfalse = "No";
+      truelabel = "Yes";
+      falselabel = "No";
+   }
+   field DocumentText {
+      size = Small;
+   }
+   field IntrastatExempt {
+      size = Small;
+   }
+   field UnitCharge {
+      size = Small;
+   }
+   badge ChargeTypeRef.SalesChgTypeCategory {
+      size = Small;
+      label = "Charge Category";
+   }
+   field ChargePriceListNo {
+      size = Small;
+   }
+   field OrderQuotationLineRef.AdjustedWeightGross {
+      label = "Adjusted Gross Weight";
+   }
+   field OrderQuotationLineRef.AdjustedVolume {
+      label = "Adjusted Volume";
+   }
+
+   field CampaignIdRef;
+   field DealIdRef;
+
+   fieldranking QuotationChargeNo, ChargeTypeRef, ChargeAmount, ChargedQty, TaxCodeRef, GrossAmtCurr;
+
+   commandgroup DocumentTextCmdGroup {
+      command DocumentTextCommand;
+   }
+   commandgroup ChargeTaxLinesCmdGroup {
+      command ChargeTaxLinesCommand;
+   }
+}
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+
+----------------------------- MAIN ENTRY POINTS -----------------------------
+entityset OrderQuotationChargeSet for OrderQuotationCharge;
+
+------------------------------ ENTITY DETAILS -------------------------------
+@Override
+entity OrderQuotationCharge {
+   keys = QuotationNo, QuotationChargeNo {
+      where = "QUOTATION_NO = :QuotationNo and QUOTATION_CHARGE_NO = :QuotationChargeNo";
+   }
+
+//   keys = QuotationChargeNo, QuotationNo {
+//      where = "QUOTATION_CHARGE_NO = :QuotationChargeNo and QUOTATION_NO = :QuotationNo";
+//   }
+   ludependencies = OrderQuotationCharge, OrderQuotationLine, OrderQuotation, DocumentText;
+
+   use attributes = ChargeType, ChargeAmount, ChargeAmountInclTax, Charge, ChargedQty, SalesUnitMeas, BaseChargeAmount,
+   BaseChargeAmtInclTax, LineNo, RelNo, TaxCode, TaxClassId, TaxCalcStructureId, DeliveryType, ChargeCost,
+   ChargeCostPercent, ChargePriceListNo, NoteId, Company, LineItemNo, Contract, CurrencyRate, CampaignId, DealId,
+   IntrastatExempt, UnitCharge, CustomerTaxUsageType;
+
+   attribute QuotationChargeNo Number {
+      label = "Sequence No";
+      editable = [false];
+   }
+   attribute ChargeType Text {
+      required = [true];
+   }
+   attribute ChargeTypeDescription Text {
+      fetch = "Order_Quotation_Charge_API.Get_Charge_Type_Desc(contract,quotation_no,charge_type)";
+      label = "Charge Type Description";
+      maxlength = 2000;
+      editable = [false];
+      updatable = [false];
+      insertable = [false];
+   }
+   attribute ChargeGroupDescription Text {
+      fetch = "Order_Quotation_Charge_API.Get_Charge_Group_Desc(contract,quotation_no,charge_type)";
+      label = "Charge Group Description";
+      maxlength = 2000;
+      editable = [false];
+      updatable = [false];
+      insertable = [false];
+   }
+   attribute ChargeAmount Number {
+      label = "Charge Price/Curr";
+      format = ifscurrency;
+   }
+   attribute ChargeAmountInclTax Number {
+      label = "Chrg Price incl Tax/Curr";
+      format = ifscurrency;
+   }
+   attribute Charge Number {
+      label = "Charge (%)";
+   }
+   attribute ChargeBasisCurr Number {
+      fetch = "Order_Quotation_Charge_API.Get_Charge_Percent_Basis(quotation_no,quotation_charge_no)";
+      label = "Charge (%) Basis/Curr";
+      maxlength = 2000;
+      editable = [false];
+      updatable = [false];
+      insertable = [false];
+      format = ifscurrency;
+   }
+   attribute ChargedQty Number {
+      label = "Charge Qty";
+   }
+   attribute SalesUnitMeas Text {
+      label = "Price UoM";
+      editable = [false];
+   }
+   attribute BaseChargeAmount Number {
+      label = "Charge Price/Base";
+      format = ifscurrency;
+   }
+   attribute BaseChargeAmtInclTax Number {
+      label = "Chrg Price incl Tax/Base";
+      format = ifscurrency;
+      insertable = [false];
+   }
+   attribute LineNo Text {
+      label = "Connect to Line No";
+   }
+   attribute RelNo Text {
+      label = "Connect to Del No";
+   }
+   attribute TaxLiability Text {
+      fetch = "Order_Quotation_Charge_API.Get_Connected_Tax_Liability__(quotation_no, line_no, rel_no, line_item_no)";
+      label = "Tax Liability";
+      maxlength = 20;
+      editable = [false];
+      updatable = [false];
+      insertable = [false];
+      format = uppercase;
+   }
+   attribute TaxLiabilityType Text {
+      fetch = "Order_Quotation_Charge_API.Get_Conn_Tax_Liability_Type_Db(quotation_no, line_no, rel_no, line_item_no)";
+      label = "Tax Liability Type";
+      maxlength = 100;
+      editable = [false];
+      updatable = [false];
+      insertable = [false];
+   }
+   attribute TaxCode Text {
+      format = uppercase;
+   }
+   attribute TaxCodeDescription Text {
+      fetch = "Statutory_Fee_API.Get_Description(company,tax_code)";
+      label = "Tax Code Description";
+      maxlength = 2000;
+      editable = [false];
+      updatable = [false];
+      insertable = [false];
+   }
+   attribute TaxClassId Text {
+      label = "Tax Class";
+      editable = [false];
+   }
+   attribute MultipleTaxLines Boolean("TRUE", "FALSE") {
+      fetch = "Source_Tax_Item_API.Multiple_Tax_Items_Exist(company, 'ORDER_QUOTATION_CHARGE', quotation_no, quotation_charge_no, '*', '*', '*')";
+      label = "Multiple Tax Lines";
+      editable = [false];
+      updatable = [false];
+      insertable = [false];
+   }
+   attribute ChrgNetAmtBase Number {
+      fetch = "Order_Quotation_Charge_API.Get_Total_Base_Charged_Amount(quotation_no,quotation_charge_no)";
+      label = "Chrg Net Amt/Base";
+      maxlength = 0;
+      editable = [false];
+      updatable = [false];
+      insertable = [false];
+      format = ifscurrency;
+   }
+   attribute ChargeNetAmtCurr Number {
+      fetch = "Order_Quotation_Charge_API.Get_Total_Charged_Amount(quotation_no,quotation_charge_no)";
+      label = "Charge Net Amt/Curr";
+      maxlength = 0;
+      editable = [false];
+      updatable = [false];
+      insertable = [false];
+      format = ifscurrency;
+   }
+   attribute GrossAmtBase Number {
+      fetch = "Order_Quotation_Charge_API.Get_Total_Base_Amnt_Incl_Tax(quotation_no,quotation_charge_no)";
+      label = "Gross Amt/Base";
+      maxlength = 0;
+      editable = [false];
+      updatable = [false];
+      insertable = [false];
+      format = ifscurrency;
+   }
+   attribute GrossAmtCurr Number {
+      fetch = "Order_Quotation_Charge_API.Get_Total_Charge_Amnt_Incl_Tax(quotation_no,quotation_charge_no)";
+      label = "Gross Amt/Curr";
+      maxlength = 0;
+      editable = [false];
+      updatable = [false];
+      insertable = [false];
+      format = ifscurrency;
+   }
+   attribute ChargeCost Number {
+      format = ifscurrency;
+      --insertable = [true];
+      updatable = [true];
+      --editable = [false];
+   }
+   attribute ChargeCostPercent Number {
+      label = "Charge Cost (%)";
+      --insertable = [false];
+      updatable = [true];
+      --editable = [true];
+   }
+   attribute TotalChargeCost Number {
+      fetch = "Order_Quotation_Charge_API.Get_Total_Base_Charged_Cost(quotation_no, quotation_charge_no)";
+      label = "Total Charge Cost";
+      editable = [false];
+      updatable = [false];
+      insertable = [false];
+      format = ifscurrency;
+   }
+   attribute PrintChargeType Enumeration(GenYesNo) {
+      fetch = "print_charge_type_db";
+      label = "Print Charge";
+      required = [true];
+   }
+   attribute DocumentText Boolean {
+      fetch = "DECODE(Document_Text_API.Note_Id_Exist(note_id), '1', 'TRUE', 'FALSE')";
+      label = "Document Text";
+      editable = [false];
+      updatable = [false];
+      insertable = [false];
+   }
+   attribute ChargePriceListNo Text {
+      label = "Price List No";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute Company Text {
+      editable = [ETag = null];
+   }
+   attribute LineItemNo Number {
+      editable = [ETag = null];
+   }
+   attribute CampaignId Number {
+      label = "Campaign";
+      editable = [false];
+   }
+   attribute TaxAmountCurrency Number {
+      fetch = "Order_Quotation_Charge_API.Get_Total_Tax_Amount(quotation_no, quotation_charge_no)";
+      label = "Tax Amount/Currency";
+      editable = [false];
+      updatable = [false];
+      insertable = [false];
+      format = ifscurrency;
+   }
+   attribute DealId Number {
+      editable = [false];
+   }
+   attribute TaxCodeFlag Boolean {
+      fetch = "null";
+   }
+   attribute TaxFromDefaults Text {
+      fetch = "null";
+   }
+   attribute OldTaxCalcStructureId Text {
+      fetch = "null";
+   }
+   attribute TaxAmountBase Number {
+      fetch = "null";
+   }
+   attribute TaxEdited Boolean {
+      fetch = "null";
+   }
+   attribute FetchTaxCodes Text {
+      fetch = "null";
+   }
+   attribute DuplicatedLine Text {
+      fetch = "'FALSE'";
+   }
+   reference ChargeTypeRef(Contract, ChargeType) to SalesChargeType(Contract, ChargeType) {
+      label = "Charge Type";
+   }
+   reference OrderQuotationLineRef(QuotationNo, LineNo, RelNo, LineItemNo) to OrderQuotationLine(QuotationNo, LineNo, RelNo, LineItemNo);
+   reference LineNoRef(QuotationNo, RelNo, LineNo) to QuotationLineChargeLov(QuotationNo, RelNo, LineNo) {
+      label = "Connect to Line No";
+   }
+   reference TaxCodeRef(Company, TaxCode) to StatutoryFee(Company, FeeCode) {
+      label = "Tax Code";
+   }
+   reference TaxClassIdRef(Company, TaxClassId) to TaxClass(Company, TaxClassId) {
+      label = "Tax Class";
+   }
+   reference TaxCalcStructureIdRef(Company, TaxCalcStructureId) to TaxCalcStructureActive(Company, TaxCalcStructureId) {
+      label = "Tax Calculation Structure";
+   }
+   reference DeliveryTypeRef(Company, DeliveryType) to DeliveryType(Company, DelivTypeId) {
+      label = "Delivery Type";
+   }
+   reference QuotationNoRef(QuotationNo) to OrderQuotation(QuotationNo) {
+      label = "Quotation No";
+   }
+   reference CampaignIdRef(CampaignId) to Campaign(CampaignId) {
+      label = "Campaign";
+   }
+   reference DealIdRef(CampaignId, DealId) to SalesPromotionDeal(CampaignId, DealId) {
+      label = "Deal ID";
+   }
+   reference CustomerTaxUsageTypeRef(CustomerTaxUsageType) to CustomerTaxUsageType(CustomerTaxUsageType) {
+      label = "Customer Tax Usage Type";
+   }
+}
+
+---------------------------------- ACTIONS ----------------------------------
+action RefreshChargeLines {
+   initialcheck none;
+   ludependencies = OrderQuotationCharge;
+}
+
+--------------------------------- FUNCTIONS ---------------------------------
+function ValidateBaseSaleUnitPrice Structure(ValidateBaseSaleUnitPriceStructure) {
+   parameter QuotationNo Text;
+   parameter BaseChargeAmount Number;
+   parameter BaseChargeAmtInclTax Number;
+   parameter Contract Text;
+   parameter UsePriceInclTaxParent Boolean;
+   parameter CurrencyCodeParent Text;
+}
+
+-- CalculateTotalChargeAmounts + CalculateLinePrices
+function ValidatePricesAndAmounts Structure(PricesAndAmountsStructure) {
+   parameter QuotationNo Text;
+   parameter QuotationChargeNo Number;
+   parameter LineNo Text;
+   parameter RelNo Text;
+   parameter LineItemNo Number;
+   parameter Contract Text;
+   parameter CustomerNoParent Text;
+   parameter CurrencyCodeParent Text;
+   parameter CurrencyRate Number;
+   parameter TaxLiability Text;
+   parameter TaxLiabilityType Text;
+   parameter TaxCode Text;
+   parameter TaxCalcStructureId Text;
+   parameter TaxCodeFlag Boolean;
+   parameter TaxFromDefaults Text;
+   parameter SupplyCountryDbParent Lookup(IsoCountry);
+   parameter DeliveryType Text;
+   parameter Charge Number;
+   parameter ChargeAmountInclTax Number;
+   parameter ChargeAmount Number;
+   parameter ChargeType Text;
+   parameter UsePriceInclTaxParent Boolean;
+   parameter WantedDeliveryDateParent Timestamp;
+   parameter ChargeNetAmtCurr Number;
+   parameter GrossAmtCurr Number;
+   parameter ChargedQty Number;
+   parameter MultipleTaxLines Boolean;
+   parameter TaxClassId Text;
+   parameter IfsCurrRounding Number;
+   parameter NewLine Boolean;
+   parameter CalculateLinePrices Boolean;
+   parameter CalculateTotalChargeAmounts Boolean;
+}
+
+function GetChargeDefaults Structure(ChargeDefaultsStructure) {
+   parameter Company Text;
+   parameter Contract Text;
+   parameter QuotationNo Text;
+   parameter LineNo Text;
+   parameter RelNo Text;
+   parameter LineItemNo Number;
+   parameter QuotationChargeNo Number;
+   parameter ChargeType Text;
+   parameter TaxCode Text;
+   parameter CurrencyCodeParent Text;
+   parameter UsePriceInclTaxParent Boolean;
+}
+
+function GetTaxCodeDescription Text {
+   parameter Company Text;
+   parameter TaxCode Text;
+}
+
+function GetTaxLiabilityTypeDb Text {
+   parameter QuotationNo Text;
+   parameter QuotationChargeNo Number;
+   parameter TaxLiability Text;
+}
+
+function SalesChgTypeCategoryOther List < Entity(SalesChargeType) > {
+   where = "sales_chg_type_category_db = 'OTHER'";
+}
+
+function TaxCodeFilter List < Entity(StatutoryFee) > {
+   parameter QuotationNo Text;
+   parameter LineNo Text;
+   parameter RelNo Text;
+   parameter LineItemNo Number;
+   parameter Contract Text;
+   parameter WantedDeliveryDate Timestamp;
+   parameter Taxable Boolean;
+   parameter TaxLiabilityType Text;
+}
+-------------------------------- STRUCTURES ---------------------------------
+structure ValidateBaseSaleUnitPriceStructure {
+   attribute ChargeAmountInclTax Number;
+   attribute ChargeAmount Number;
+   attribute CurrencyRate Number;
+}
+
+structure PricesAndAmountsStructure {
+   attribute ChargeNetAmtCurr Number;
+   attribute GrossAmtCurr Number;
+   attribute TaxAmountBase Number;
+   attribute ChrgNetAmtBase Number;
+   attribute GrossAmtBase Number;
+   attribute TaxAmountCurrency Number;
+   attribute TaxCalcStructureId Text;
+   attribute OldTaxCalcStructureId Text;
+   attribute BaseChargeAmount Number;
+   attribute BaseChargeAmtInclTax Number;
+   attribute ChargeAmount Number;
+   attribute ChargeAmountInclTax Number;
+   attribute MultipleTaxLines Boolean;
+   attribute TaxCode Text;
+   attribute TaxClassId Text;
+   attribute TaxFromDefaults Text;
+}
+
+structure ChargeDefaultsStructure {
+   attribute ChargeTypeDescription Text;
+   attribute ChargeGroupDescription Text;
+   attribute SalesUnitMeas Text;
+   attribute Company Text;
+   attribute TaxCodeDesc Text;
+   attribute DeliveryType Text;
+   attribute PrintChargeType Enumeration(GenYesNo);
+   attribute ChargeCost Number;
+   attribute Charge Number;
+   attribute ChargeCostPercent Number;
+   attribute IntrastatExempt Boolean;
+   attribute UnitCharge Boolean;
+   attribute ChargeAmount Number;
+   attribute ChargeAmountInclTax Number;
+   attribute CurrencyRate Number;
+   attribute BaseChargeAmount Number;
+   attribute BaseChargeAmtInclTax Number;
+   attribute MultipleTaxLines Boolean;
+   attribute Taxable Text;
+   attribute TaxLiabilityType Text;
+
+}
+

@@ -1,0 +1,1460 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: Prepare
+--
+--  Purpose: Provides help during IFS Applications installation process.
+--           Must be deployed as SYS.
+--
+--  IFS/Design Template Version 2.3
+--
+--  Date    Sign   History
+--  ------  ----   -----------------------------------------------------------
+--  061122  HAAR   Created
+--  111101  HAAR   Added Dba_Running_Jobs to appowner.
+--  120130  HAAR   Added Dba_Context to appowner.
+--  130108  SJayLK RUB-368: BA Execution Parameter Implementation, Added FND_ORA_PARAMETER
+--  131123  BUHI   Added grants to SYS views & packages needed by monitoring tool.
+--  140108  BUHI   Added grants to SYS views & packages needed by monitoring tool BP2.
+--  140613  CHMU   Added grants required for Oracle AQ
+--  140716  WAWI   Added grants for Oracle AQ JMS
+-----------------------------------------------------------------------------
+
+
+DEFINE MODULE        = SYS
+DEFINE SERVICE       = Prepare
+DEFINE PKG           = PREPARE_SYS
+
+DEFINE CAMUNDA_APPOWNER  = IFSCAMSYS
+DEFINE IAM_APPOWNER      = IFSIAMSYS
+DEFINE IFSCRT_APPOWNER   = IFSCRTSYS
+
+-----------------------------------------------------------------------------
+-------------------- PACKAGES FOR METHODS -----------------------------------
+-----------------------------------------------------------------------------
+
+PROMPT Creating &PKG implementation
+
+CREATE OR REPLACE PACKAGE BODY &PKG IS
+
+   schema_exists        EXCEPTION;
+   schema_object_exists EXCEPTION;
+   int_user_profile_    CONSTANT VARCHAR2(30) := '&INTERNAL_USER_PROFILE';
+   internal_users_      CONSTANT VARCHAR2(300) := 'IFSPRINT;IFSMONITORING;&IAM_APPOWNER.;';
+
+-----------------------------------------------------------------------------
+-------------------- SERVICE SPECIFIC IMPLEMENTATION METHOD DECLARATIONS ----
+-----------------------------------------------------------------------------
+
+PROCEDURE Create_User___ (
+   username_ IN VARCHAR2,
+   password_ IN VARCHAR2,
+   default_ts_ IN VARCHAR2 DEFAULT 'IFSAPP_DATA',
+   temp_ts_    IN VARCHAR2 DEFAULT 'TEMP',
+   profile_    IN VARCHAR2 DEFAULT 'DEFAULT' );
+
+PROCEDURE Update_User___ (
+   username_   IN VARCHAR2,
+   password_   IN VARCHAR2 DEFAULT NULL,
+   default_ts_ IN VARCHAR2 DEFAULT NULL,
+   temp_ts_    IN VARCHAR2 DEFAULT NULL,
+   profile_    IN VARCHAR2 DEFAULT NULL,
+   force_prf_  IN BOOLEAN  DEFAULT FALSE );
+
+PROCEDURE Run_Ddl_Command___ (
+   stmt_      IN VARCHAR2,
+   procedure_ IN VARCHAR2,
+   show_info_ IN BOOLEAN DEFAULT FALSE,
+   raise_     IN BOOLEAN DEFAULT TRUE );
+
+PROCEDURE Show_Message___ (
+   message_ IN VARCHAR2 );
+
+-----------------------------------------------------------------------------
+-------------------- SERVICE SPECIFIC IMPLEMENTATION METHODS ----------------
+-----------------------------------------------------------------------------
+
+FUNCTION Check_Schema___ (
+   username_    IN VARCHAR2 ) RETURN BOOLEAN
+IS
+      CURSOR get_user IS
+   SELECT username
+   FROM dba_users
+   WHERE username = upper(username_);
+   schema_        VARCHAR2(30);
+BEGIN
+   OPEN  get_user;
+   FETCH get_user INTO schema_;
+   CLOSE get_user;
+   IF schema_ IS NULL THEN
+      RETURN(FALSE);
+   ELSE
+      RETURN(TRUE);
+   END IF;
+END Check_Schema___;
+
+FUNCTION Check_Schema_Object___ (
+   username_    IN VARCHAR2,
+   object_name_ IN VARCHAR2,
+   object_type_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+      CURSOR get_schema IS
+   SELECT owner
+   FROM dba_objects
+   WHERE object_name = upper(object_name_)
+   AND   object_type = upper(object_type_)
+   AND   owner      != upper(username_);
+   schema_        VARCHAR2(30);
+BEGIN
+   OPEN  get_schema;
+   FETCH get_schema INTO schema_;
+   CLOSE get_schema;
+   IF schema_ IS NULL THEN
+      RETURN(NULL);
+   ELSE
+      RETURN(schema_);
+   END IF;
+END Check_Schema_Object___;
+
+PROCEDURE Test_Schema___ (
+   username_      IN VARCHAR2 )
+IS
+BEGIN
+   IF Check_Schema___(username_) THEN
+      RAISE schema_exists;
+   END IF;
+END Test_Schema___;
+
+FUNCTION Test_Schema_Object___ (
+   username_      IN VARCHAR2,
+   object_name_   IN VARCHAR2 DEFAULT NULL,
+   object_type_   IN VARCHAR2 DEFAULT NULL ) RETURN VARCHAR2
+IS
+   schema_ VARCHAR2(30);
+BEGIN
+   IF Check_Schema___(username_) THEN
+      RAISE schema_exists;
+   END IF;
+   schema_ := Check_Schema_Object___(username_, object_name_, object_type_);
+   IF schema_ IS NOT NULL THEN
+      RETURN(schema_);
+   END IF;
+   RETURN NULL;
+END Test_Schema_Object___;
+
+PROCEDURE Create_User___ (
+   username_ IN VARCHAR2,
+   password_ IN VARCHAR2,
+   default_ts_ IN VARCHAR2 DEFAULT 'IFSAPP_DATA',
+   temp_ts_    IN VARCHAR2 DEFAULT 'TEMP',
+   profile_    IN VARCHAR2 DEFAULT 'DEFAULT' )
+IS
+BEGIN
+  IF  NVL(username_, ' ') = ' '
+   OR  NVL(password_, ' ') = ' ' THEN
+      Raise_Application_Error(-20000, 'Username and password must be set to create a user.');
+   ELSE
+      Run_Ddl_Command___('CREATE USER ' || username_ || ' IDENTIFIED BY "'|| password_ || '" DEFAULT TABLESPACE ' || default_ts_ || ' TEMPORARY TABLESPACE ' || temp_ts_ || ' PROFILE ' || profile_, 'Create_User___', FALSE);
+   END IF;
+END Create_User___;
+
+PROCEDURE Drop_User___ (username_ IN VARCHAR2)
+IS
+BEGIN
+   Run_Ddl_Command___('DROP USER ' || username_ || ' CASCADE ', 'Drop_User___', FALSE);
+END Drop_User___;
+
+PROCEDURE Update_User___ (
+   username_   IN VARCHAR2,
+   password_   IN VARCHAR2 DEFAULT NULL,
+   default_ts_ IN VARCHAR2 DEFAULT NULL,
+   temp_ts_    IN VARCHAR2 DEFAULT NULL,
+   profile_    IN VARCHAR2 DEFAULT NULL,
+   force_prf_  IN BOOLEAN  DEFAULT FALSE )
+IS
+   CURSOR get_user_info IS
+      SELECT profile, default_tablespace, temporary_tablespace
+      FROM dba_users
+      WHERE username = username_;
+   stmt_              VARCHAR2(2000);
+   existing_profile_  VARCHAR2(2000);
+   existing_def_ts_   VARCHAR2(2000);
+   existing_temp_ts_  VARCHAR2(2000);
+BEGIN
+   stmt_ := NULL;
+   OPEN get_user_info;
+   FETCH get_user_info INTO existing_profile_, existing_def_ts_, existing_temp_ts_;
+   CLOSE get_user_info;
+   IF password_ IS NOT NULL THEN
+      stmt_ := stmt_ || ' IDENTIFIED BY "'|| password_ || '" ';
+      Show_Message___ ('New password for user '||username_);
+   END IF;
+   IF default_ts_ IS NOT NULL
+   AND existing_def_ts_ IS NOT NULL THEN
+      IF default_ts_ != existing_def_ts_ THEN
+         stmt_ := stmt_ || ' DEFAULT TABLESPACE ' || default_ts_ || ' ';
+         Show_Message___ ('Default tablespace for user '||username_||' will be changed to '||default_ts_);
+      END IF;
+   END IF;
+   IF temp_ts_ IS NOT NULL
+   AND existing_temp_ts_ IS NOT NULL THEN
+      IF temp_ts_ != existing_temp_ts_ THEN
+         stmt_ := stmt_ || ' TEMPORARY TABLESPACE ' || temp_ts_ || ' ';
+         Show_Message___ ('Temporary tablespace for user '||username_||' will be changed to '||temp_ts_);
+      END IF;
+   END IF;
+   IF profile_ IS NOT NULL
+   AND existing_profile_ IS NOT NULL THEN
+      IF existing_profile_ != profile_
+      AND (existing_profile_ = 'DEFAULT'
+      OR   force_prf_)      THEN
+         stmt_ := stmt_ || ' PROFILE ' || profile_ || ' ';
+         Show_Message___ ('Database profile for user '||username_||' will be changed to '||profile_);
+      END IF;
+   END IF;
+   IF stmt_ IS NOT NULL THEN
+      Run_Ddl_Command___('ALTER USER ' || username_ || stmt_, 'Update_User___', FALSE);
+   END IF;
+END Update_User___;
+
+PROCEDURE Grant_Unlimited_Quota___ (
+   username_ IN VARCHAR2 )
+IS
+BEGIN
+--
+-- Qouta on Tablespaces
+--
+   --Run_Ddl_Command___('GRANT UNLIMITED TABLESPACE TO ' || username_, 'Grant_Unlimited_Quota___', TRUE);
+   Run_Ddl_Command___('ALTER USER ' || username_ ||' QUOTA UNLIMITED ON &IFSAPP_DATA', 'Grant_Unlimited_Quota___', TRUE);
+   Run_Ddl_Command___('ALTER USER ' || username_ ||' QUOTA UNLIMITED ON &IFSAPP_INDEX', 'Grant_Unlimited_Quota___', TRUE);
+   Run_Ddl_Command___('ALTER USER ' || username_ ||' QUOTA UNLIMITED ON &IFSAPP_ARCHIVE_DATA', 'Grant_Unlimited_Quota___', TRUE);
+   Run_Ddl_Command___('ALTER USER ' || username_ ||' QUOTA UNLIMITED ON &IFSAPP_ARCHIVE_INDEX', 'Grant_Unlimited_Quota___', TRUE);
+   Run_Ddl_Command___('ALTER USER ' || username_ ||' QUOTA UNLIMITED ON &IFSAPP_LOB', 'Grant_Unlimited_Quota___', TRUE);
+   Run_Ddl_Command___('ALTER USER ' || username_ ||' QUOTA UNLIMITED ON &IFSAPP_REPORT_DATA', 'Grant_Unlimited_Quota___', TRUE);
+   Run_Ddl_Command___('ALTER USER ' || username_ ||' QUOTA UNLIMITED ON &IFSAPP_REPORT_INDEX', 'Grant_Unlimited_Quota___', TRUE);    
+END Grant_Unlimited_Quota___;
+
+PROCEDURE Create_Audit_Policy___
+IS
+BEGIN
+     -- Audit policy containing all Secure Configuration audit-options
+   Run_Ddl_Command___( 
+    'CREATE AUDIT POLICY IFS_SECURECONFIG ' ||
+                 'PRIVILEGES ALTER ANY TABLE, CREATE ANY TABLE, ' ||
+                            'DROP ANY TABLE, CREATE ANY PROCEDURE, ' ||
+                            'DROP ANY PROCEDURE, ALTER ANY PROCEDURE, '||
+                            'GRANT ANY PRIVILEGE, ' ||
+                            'GRANT ANY OBJECT PRIVILEGE, GRANT ANY ROLE, '||
+                            'AUDIT SYSTEM, CREATE EXTERNAL JOB, ' || 
+                            'CREATE ANY JOB, CREATE ANY LIBRARY, ' ||
+                            'EXEMPT ACCESS POLICY, CREATE USER, ' ||
+                            'DROP USER, ALTER DATABASE, ALTER SYSTEM, '||
+                            'CREATE PUBLIC SYNONYM, DROP PUBLIC SYNONYM, ' ||
+                            'CREATE SQL TRANSLATION PROFILE, ' ||
+                            'CREATE ANY SQL TRANSLATION PROFILE, ' ||
+                            'DROP ANY SQL TRANSLATION PROFILE, ' ||
+                            'ALTER ANY SQL TRANSLATION PROFILE, ' ||
+                            'TRANSLATE ANY SQL, ' ||
+                            'CREATE ANY SQL TRANSLATION PROFILE, ' ||
+                            'DROP ANY SQL TRANSLATION PROFILE, ' ||
+                            'ALTER ANY SQL TRANSLATION PROFILE, ' ||
+                            'TRANSLATE ANY SQL, EXEMPT REDACTION POLICY, ' ||
+                            'PURGE DBA_RECYCLEBIN, LOGMINING, ' ||
+                            'ADMINISTER KEY MANAGEMENT ' ||
+                 'ACTIONS ALTER USER, CREATE ROLE, ALTER ROLE, DROP ROLE, '||
+                         'SET ROLE, CREATE PROFILE, ALTER PROFILE, ' ||
+                         'DROP PROFILE, CREATE DATABASE LINK, ' ||
+                         'ALTER DATABASE LINK, DROP DATABASE LINK, '||
+                         'CREATE DIRECTORY, DROP DIRECTORY', 'Create_Audit_Policy___', FALSE);
+END Create_Audit_Policy___;
+
+PROCEDURE Run_Ddl_Command___ (
+   stmt_      IN VARCHAR2,
+   procedure_ IN VARCHAR2,
+   show_info_ IN BOOLEAN DEFAULT FALSE,
+   raise_     IN BOOLEAN DEFAULT TRUE )
+IS
+BEGIN
+   -- Safe due to deployed as sys
+   -- ifs_assert_safe haarse 2010-09-23
+   IF show_info_ THEN
+      Dbms_Output.Put_Line('Executing ' || stmt_);
+   END IF;
+   EXECUTE IMMEDIATE stmt_;
+EXCEPTION
+   WHEN OTHERS THEN
+      Show_Message___ (procedure_ || ' generates error when executing: ');
+      Show_Message___ (stmt_);
+      IF raise_ THEN
+         RAISE;
+      END IF;
+END Run_Ddl_Command___;
+
+PROCEDURE Show_Message___ (
+   message_ IN VARCHAR2 )
+IS
+   temp_msg_         VARCHAR2(4000);
+   space_position_   NUMBER;
+BEGIN
+   temp_msg_ := message_;
+   WHILE (LENGTH(temp_msg_) > 255) LOOP
+      space_position_ := INSTR(SUBSTR(temp_msg_,1,255), ' ', -1);
+      IF space_position_ < 240 THEN
+         space_position_ := 240;
+      END IF;
+      Dbms_Output.Put_Line(SUBSTR(temp_msg_,1,space_position_));
+      temp_msg_ := SUBSTR(temp_msg_, space_position_+1);
+   END LOOP;
+   IF temp_msg_ IS NOT NULL THEN
+      Dbms_Output.Put_Line(temp_msg_);
+   END IF;
+END Show_Message___;
+
+FUNCTION Create_Random_Pwd___ RETURN VARCHAR2
+IS
+  pwd_ varchar2(20);
+BEGIN
+   -- complies to ora12c_verify_function and ora12c_strong_verify_function
+   -- 2 lower 2 upper, 2 digits, 1 special character , 12 random any character, 1 special character. Replace of unwanted characters 
+   pwd_ := dbms_random.string('l',2) || dbms_random.string('u',2) || to_char(trunc(dbms_random.value(0,9))) || to_char(trunc(dbms_random.value(0,9))) ||  '(' || dbms_random.string('p',12)  ||  ')' ;
+   pwd_ := regexp_replace(pwd_,'["]|[@]|[\]|[/]|['']',dbms_random.string('a',1));   
+  RETURN pwd_;
+END Create_Random_Pwd___;
+
+-----------------------------------------------------------------------------
+-------------------- SERVICE SPECIFIC PRIVATE METHODS -----------------------
+-----------------------------------------------------------------------------
+
+
+-----------------------------------------------------------------------------
+-------------------- SERVICE SPECIFIC PROTECTED METHODS ---------------------
+-----------------------------------------------------------------------------
+
+-----------------------------------------------------------------------------
+-------------------- SERVICE SPECIFIC PUBLIC METHODS ------------------------
+-----------------------------------------------------------------------------
+
+PROCEDURE Create_Audit_Policy 
+IS
+   ifs_policy_name_  CONSTANT VARCHAR2(100) := 'IFS_SECURECONFIG';
+   policy_name_      VARCHAR2(100);
+   policy_enabled_   VARCHAR2(6) := 'FALSE';
+   dummy_            NUMBER;
+   CURSOR check_policy IS
+      SELECT 1
+      FROM audit_unified_policies
+      WHERE policy_name = ifs_policy_name_;
+   CURSOR check_enable IS
+      SELECT 'TRUE'
+      FROM audit_unified_enabled_policies
+      WHERE policy_name = ifs_policy_name_;
+BEGIN
+   -- Check if IFS_SECURECONFIG is enabled
+   OPEN check_enable;
+   FETCH check_enable INTO policy_enabled_;
+   CLOSE check_enable;
+   --
+   OPEN check_policy;
+   FETCH check_policy INTO dummy_;
+   IF check_policy%FOUND THEN
+      Run_Ddl_Command___('NOAUDIT POLICY ' || ifs_policy_name_, 'Create_Audit_Policy', FALSE);
+      Run_DDL_Command___('DROP AUDIT POLICY ' || ifs_policy_name_, 'Create_Audit_Policy', FALSE);
+   END IF;
+   CLOSE check_policy;
+   Create_Audit_Policy___;
+   -- Disable ORA_SECURECONFIG for all users
+   Run_Ddl_Command___('NOAUDIT POLICY ORA_SECURECONFIG', 'Create_Audit_Policy', FALSE);
+   -- Enable IFS_SECURECONFIG for all users
+   IF (policy_enabled_ = 'TRUE') THEN
+      Run_Ddl_Command___('AUDIT POLICY ' || ifs_policy_name_, 'Create_Audit_Policy', FALSE);
+   ELSE
+      Run_Ddl_Command___('NOAUDIT POLICY ' || ifs_policy_name_, 'Create_Audit_Policy', FALSE);
+   END IF;
+END Create_Audit_Policy;
+
+PROCEDURE Disable_All_Audit_Policies 
+IS
+   CURSOR check_policy IS
+      SELECT policy_name
+      FROM audit_unified_enabled_policies;
+BEGIN
+   FOR rec IN check_policy LOOP 
+      Run_Ddl_Command___('NOAUDIT POLICY ' || rec.policy_name, 'Disable_All_Audit_Policies', FALSE);
+   END LOOP;
+END Disable_All_Audit_Policies;
+
+PROCEDURE Create_User_Profile (
+   profile_    IN VARCHAR2 )
+IS
+   dummy_  NUMBER;
+   CURSOR check_profile IS
+      SELECT 1
+      FROM dba_profiles
+      WHERE profile = UPPER(profile_);
+BEGIN
+   OPEN check_profile;
+   FETCH check_profile INTO dummy_;
+   IF check_profile%FOUND THEN
+      CLOSE check_profile;
+      Dbms_Output.Put_Line('The profile "'|| UPPER(profile_) ||'" already exists in this database.');
+   ELSE
+      CLOSE check_profile;
+      Run_DDL_Command___('CREATE PROFILE '|| UPPER(profile_) || ' LIMIT PASSWORD_LIFE_TIME UNLIMITED PASSWORD_LOCK_TIME UNLIMITED PASSWORD_GRACE_TIME UNLIMITED', 'Create_User_Profile', FALSE);
+   END IF;
+END Create_User_Profile;
+
+PROCEDURE Create_Appowner (
+   username_   IN VARCHAR2 DEFAULT 'IFSAPP',
+   password_   IN VARCHAR2,
+   default_ts_ IN VARCHAR2 DEFAULT 'IFSAPP_DATA',
+   temp_ts_    IN VARCHAR2 DEFAULT 'TEMP',
+   profile_    IN VARCHAR2 DEFAULT 'DEFAULT' )
+IS
+   schema_  VARCHAR2(30);
+BEGIN
+   BEGIN
+   -- Test if appowner exists
+      schema_ := Test_Schema_Object___(username_, 'FND_SESSION_API', 'PACKAGE');
+      IF schema_ IS NOT NULL THEN
+         RAISE schema_object_exists;
+      END IF;
+   -- create user/schema
+      Create_User___(username_, password_, default_ts_, temp_ts_, profile_);
+   EXCEPTION
+      WHEN schema_exists THEN
+         Dbms_Output.Put_Line('The schema "'||username_||'" already exists in this database.');
+         Update_User___(username_, profile_ => profile_);  -- Only change the user profile
+      WHEN schema_object_exists THEN
+         raise_application_error(-20101, 'An Application Owner "'||schema_||'" already exists in this database.');
+   END;
+   -- Grant quota
+   Grant_Unlimited_Quota___(username_);
+-- eventually create empty Fnd_Session_API
+END Create_Appowner;
+
+PROCEDURE Create_Ialowner (
+   username_   IN VARCHAR2 DEFAULT 'IFSINFO',
+   password_   IN VARCHAR2,
+   default_ts_ IN VARCHAR2 DEFAULT 'IFSAPP_DATA',
+   temp_ts_    IN VARCHAR2 DEFAULT 'TEMP',
+   profile_    IN VARCHAR2 DEFAULT 'DEFAULT' )
+IS
+   schema_ VARCHAR2(30);
+   pwd_    VARCHAR2(120);
+BEGIN
+   BEGIN
+   -- Test if ialowner exists
+      schema_ := Test_Schema_Object___(username_, 'IAL_OBJECT_SLAVE_API', 'PACKAGE');
+      IF schema_ IS NOT NULL THEN
+         RAISE schema_object_exists;
+      END IF;
+      -- Create user/schema
+      IF password_ = 'CREATE_RANDOM_PASSWORD' THEN
+         pwd_ := Create_Random_Pwd___;
+      ELSE
+         pwd_ := password_;
+      END IF;
+      Create_User___(username_, pwd_, default_ts_, temp_ts_, profile_);
+   EXCEPTION
+      WHEN schema_exists THEN
+         Dbms_Output.Put_Line('The schema "'||username_||'" already exists in this database.');
+         Update_User___(username_, profile_ => profile_);  -- Only change the user profile
+      WHEN schema_object_exists THEN
+         raise_application_error(-20101, 'An IAL Owner "'||schema_||'" already exists in this database.');
+   END;
+   -- Grant quota
+   Grant_Unlimited_Quota___(username_);
+END Create_Ialowner;
+
+PROCEDURE Create_Ifssys (
+   username_   IN VARCHAR2 DEFAULT 'IFSSYS',
+   password_   IN VARCHAR2,
+   default_ts_ IN VARCHAR2 DEFAULT 'IFSAPP_DATA',
+   temp_ts_    IN VARCHAR2 DEFAULT 'TEMP',
+   profile_    IN VARCHAR2 DEFAULT 'DEFAULT' )
+IS
+BEGIN
+   BEGIN
+      -- Test if ifssys exists
+      Test_Schema___(username_);
+      -- create user/schema
+      Create_User___(username_, password_, default_ts_, temp_ts_, profile_);
+   EXCEPTION
+      WHEN schema_exists THEN
+         Dbms_Output.Put_Line('The schema "'||username_||'" already exists in this database.');
+         Update_User___(username_, profile_ => profile_);  -- Only change the user profile
+   END;
+   -- Grant create session
+   Run_DDL_Command___('GRANT CREATE SESSION TO ' || username_, 'Create_Ifssys___', FALSE);
+END Create_Ifssys;
+
+PROCEDURE Create_Camunda_Appowner (
+   username_   IN VARCHAR2 DEFAULT 'IFSCAMSYS',
+   default_ts_ IN VARCHAR2 DEFAULT 'IFSAPP_DATA',
+   temp_ts_    IN VARCHAR2 DEFAULT 'TEMP',
+   profile_    IN VARCHAR2 DEFAULT 'DEFAULT')
+IS
+   schema_   VARCHAR2(30);
+   password_ VARCHAR2(30);
+BEGIN
+   password_ := Create_Random_Pwd___;
+   BEGIN
+   -- Test if IFSCAMSYS user exists
+      schema_ := Test_Schema_Object___(username_, 'ACT_GE_PROPERTY', 'TABLE');
+      IF schema_ IS NOT NULL THEN
+         RAISE schema_object_exists;
+      END IF;
+   -- create user/schema
+      Create_User___(username_, password_, default_ts_, temp_ts_, profile_);
+   EXCEPTION
+      WHEN schema_exists THEN
+         Dbms_Output.Put_Line('The schema "'||username_||'" already exists in this database.');
+         Update_User___(username_, profile_ => profile_);  -- Only change the user profile
+      WHEN schema_object_exists THEN
+         raise_application_error(-20101, 'A Camunda Application Owner "'||schema_||'" already exists in this database.');
+   END;
+   -- Grant quota
+   Grant_Unlimited_Quota___(username_);
+END Create_Camunda_Appowner;
+
+PROCEDURE Drop_Camunda_Appowner ( username_   IN VARCHAR2 DEFAULT 'CAMUNDA')
+IS
+   count_   NUMBER;
+BEGIN
+    -- Test if CAMUNDA user exists
+    SELECT count(1)
+	  into count_
+	  FROM dba_users
+	  where username = username_;
+	
+    IF count_ > 0 THEN
+	  -- delete user
+	  Drop_User___(username_);
+    END IF;
+END Drop_Camunda_Appowner;
+
+PROCEDURE Drop_Camunda_Package ( 
+   username_      IN VARCHAR2 DEFAULT 'IFSCAMSYS',
+   package_name_  IN VARCHAR2 DEFAULT 'IFSCAMSYS_INSTALL_SYS')
+IS
+   count_ NUMBER;
+BEGIN
+   -- Test if package with old name exists
+   SELECT count(1)
+   INTO count_
+   FROM dba_objects
+   WHERE object_name = upper(package_name_)
+   AND   object_type = 'PACKAGE'
+   AND   owner       = upper(username_);
+   IF count_ > 0 THEN
+      Run_Ddl_Command___('DROP PACKAGE ' || username_ || '.' || package_name_, 'Remove_Package', FALSE);
+   END IF;
+END Drop_Camunda_Package;
+
+PROCEDURE Create_Ifsiamsys_Appowner (
+   username_   IN VARCHAR2 DEFAULT 'IFSIAMSYS',
+   password_   IN VARCHAR2,
+   default_ts_ IN VARCHAR2 DEFAULT 'IFSAPP_DATA',
+   temp_ts_    IN VARCHAR2 DEFAULT 'TEMP',
+   profile_    IN VARCHAR2 DEFAULT 'DEFAULT')
+IS
+BEGIN
+   BEGIN
+      -- Test if IFSIAMSYS user exists
+      Test_Schema___(username_);
+      -- create user/schema
+      Create_User___(username_, password_, default_ts_, temp_ts_, profile_);
+   EXCEPTION
+      WHEN schema_exists THEN
+         Dbms_Output.Put_Line('The schema "'||username_||'" already exists in this database.');
+         Update_User___(username_, profile_ => profile_);  -- Only change the user profile
+   END;
+   -- Grant quota
+   Grant_Unlimited_Quota___(username_);
+END Create_Ifsiamsys_Appowner;
+
+PROCEDURE Create_Ifscrtsys_Appowner (
+   username_   IN VARCHAR2 DEFAULT 'IFSCRTSYS',
+   password_   IN VARCHAR2,
+   default_ts_ IN VARCHAR2 DEFAULT 'IFSAPP_DATA',
+   temp_ts_    IN VARCHAR2 DEFAULT 'TEMP',
+   profile_    IN VARCHAR2 DEFAULT 'DEFAULT')
+IS
+BEGIN
+   BEGIN
+      -- Test if IFSCRTSYS user exists
+      Test_Schema___(username_);
+      -- create user/schema
+      Create_User___(username_, password_, default_ts_, temp_ts_, profile_);
+   EXCEPTION
+      WHEN schema_exists THEN
+         Dbms_Output.Put_Line('The schema "'||username_||'" already exists in this database.');
+         Update_User___(username_, profile_ => profile_);  -- Only change the user profile
+   END;
+   -- Grant quota
+   Grant_Unlimited_Quota___(username_);
+END Create_Ifscrtsys_Appowner;
+
+PROCEDURE Create_Int_User (
+   username_   IN VARCHAR2,
+   password_   IN VARCHAR2,
+   default_ts_ IN VARCHAR2 DEFAULT 'IFSAPP_DATA',
+   temp_ts_    IN VARCHAR2 DEFAULT 'TEMP',
+   profile_    IN VARCHAR2 DEFAULT 'DEFAULT',
+   connect_ifssys_ IN VARCHAR2 DEFAULT 'TRUE' )
+IS
+   pwd_ VARCHAR2(120);
+BEGIN
+   BEGIN
+      Test_Schema___(username_);
+      -- create user/schema
+      IF password_ = 'CREATE_RANDOM_PASSWORD' THEN
+         pwd_ := Create_Random_Pwd___;
+      ELSE
+         pwd_ := password_;
+      END IF;
+      Create_User___(username_, pwd_, default_ts_, temp_ts_, profile_);
+   EXCEPTION
+      WHEN schema_exists THEN
+         Dbms_Output.Put_Line('The schema "'||username_||'" already exists in this database.');
+         Update_User___(username_, profile_ => profile_);  -- Only change the user profile
+   END;
+   IF connect_ifssys_ = 'TRUE' THEN
+      Run_DDL_Command___('ALTER USER "'||username_||'" GRANT CONNECT THROUGH IFSSYS', 'Create_Int_Users', FALSE);
+   END IF;
+END Create_Int_User;
+
+PROCEDURE Create_Ifsmonitoring (
+   username_   IN VARCHAR2 DEFAULT 'IFSMONITORING',
+   password_   IN VARCHAR2,
+   default_ts_ IN VARCHAR2 DEFAULT 'IFSAPP_DATA',
+   temp_ts_    IN VARCHAR2 DEFAULT 'TEMP',
+   profile_    IN VARCHAR2 DEFAULT 'DEFAULT')
+IS
+BEGIN
+   BEGIN
+      -- Test if IFSMONITORING user exists
+      Test_Schema___(username_);
+      -- create user/schema
+      Create_User___(username_, password_, default_ts_, temp_ts_, profile_);
+   EXCEPTION
+      WHEN schema_exists THEN
+         Dbms_Output.Put_Line('The schema "'||username_||'" already exists in this database.');
+         Update_User___(username_, profile_ => profile_);  -- Only change the user profile
+   END;
+END Create_Ifsmonitoring;
+
+PROCEDURE Set_Internal_User_Profile
+IS
+BEGIN
+   Update_User___('IFSADMIN', profile_ => int_user_profile_);
+   Update_User___('IFSCONNECT', profile_ => int_user_profile_);
+   Update_User___('IFSPLSQLAP', profile_ => int_user_profile_);
+   Update_User___('IFSPRINT', profile_ => int_user_profile_);
+   Update_User___('CBSSERVER', profile_ => int_user_profile_);
+   Update_User___('DOCVUETICKETUSER', profile_ => int_user_profile_);
+   Update_User___('DEMANDSERVER', profile_ => int_user_profile_);
+END Set_Internal_User_Profile;
+
+PROCEDURE Dbagrant (
+   username_   IN VARCHAR2 )
+IS
+   dummy_   dba_sys_privs.privilege%TYPE;
+   oracle_version_   NUMBER;
+   CURSOR get_alter_user_grants IS
+      SELECT privilege
+      FROM   dba_sys_privs
+      WHERE  grantee = upper(username_)
+      AND    privilege = 'ALTER USER';
+   CURSOR get_source$_grants IS
+      SELECT privilege
+      FROM   all_tab_privs
+      WHERE  grantee = upper(username_)
+      AND    table_name = 'SOURCE$'
+      AND    privilege IN ('INSERT', 'UPDATE', 'DELETE');
+
+   PROCEDURE Run_Ddl (stmt_  IN VARCHAR2,
+                      type_  IN VARCHAR2 DEFAULT 'NORMAL')
+   IS
+      no_role              EXCEPTION;
+      PRAGMA               EXCEPTION_INIT(no_role, -1951);
+   BEGIN
+      EXECUTE IMMEDIATE stmt_;
+      Dbms_Output.Put_Line('SUCCESS: ' || stmt_);
+   EXCEPTION
+      WHEN no_role THEN
+         NULL;
+      WHEN OTHERS THEN
+         Dbms_Output.Put_Line('ERROR  : ' || stmt_);
+         CASE type_
+            WHEN 'NORMAL' THEN
+               NULL;
+            WHEN 'ORACLETEXT' THEN
+               Dbms_Output.Put_Line('CAUSE  : IFS Applications requires Oracle Text.');
+               Dbms_Output.Put_Line('CAUSE  : Install Oracle Text if you are going to install IFS Applications.');
+            WHEN 'CTXSYS' THEN
+               Dbms_Output.Put_Line('CAUSE  : Index CTXSYS.DRX$ERR_KEY already exists. This error is OK.');
+            ELSE
+               NULL;
+         END CASE;
+   END Run_Ddl;
+
+   PROCEDURE Revoke_Java_Grant
+   IS
+      type_name_           VARCHAR2(100);
+      name_                VARCHAR2(100);
+   --
+      CURSOR get_java_grant IS
+         SELECT seq
+         FROM   Dba_Java_Policy
+         WHERE  kind = 'GRANT'
+         AND    grantee = upper(username_)
+         AND    type_schema = 'SYS'
+         AND    type_name = upper(type_name_)
+         AND    name = upper(name_);
+   --
+      PROCEDURE Run_Java(stmt_   IN VARCHAR2,
+                         output_ IN BOOLEAN DEFAULT FALSE)
+      IS
+      BEGIN
+         EXECUTE IMMEDIATE stmt_;
+         IF output_ THEN
+            Dbms_Output.Put_Line('SUCCESS: REVOKE Dbms_Java.Grant_Permission succeded');
+         END IF;
+      EXCEPTION
+         WHEN OTHERS THEN
+            Dbms_Output.Put_Line('ERROR  : GRANT Dbms_Java.Delete_Permission failed.');
+            Dbms_Output.Put_Line('CAUSE  : Make sure that Java_Pool_Size is set to at least 8M.');
+      END;
+
+   BEGIN
+      --
+      -- Run_DDL('REVOKE JAVAUSERPRIV FROM '||username_);
+      --
+      type_name_ := 'java.util.PropertyPermission';
+      name_      := 'ifs.fnd.ap.connectionstring';
+      FOR rec IN get_java_grant LOOP
+         Run_Java('BEGIN Dbms_Java.Disable_Permission('||to_char(rec.seq)||'); END;');
+         Run_Java('BEGIN Dbms_Java.Delete_Permission('||to_char(rec.seq)||'); END;', TRUE);
+      END LOOP;
+      --
+      type_name_ := 'java.util.PropertyPermission';
+      name_      := 'ifs.fnd.ap.compression';
+      FOR rec IN get_java_grant LOOP
+         Run_Java('BEGIN Dbms_Java.Disable_Permission('||to_char(rec.seq)||'); END;');
+         Run_Java('BEGIN Dbms_Java.Delete_Permission('||to_char(rec.seq)||'); END;', TRUE);
+      END LOOP;
+      --
+      type_name_ := 'java.util.PropertyPermission';
+      name_      := 'SHARED_SECRET';
+      FOR rec IN get_java_grant LOOP
+         Run_Java('BEGIN Dbms_Java.Disable_Permission('||to_char(rec.seq)||'); END;');
+         Run_Java('BEGIN Dbms_Java.Delete_Permission('||to_char(rec.seq)||'); END;', TRUE);
+      END LOOP;
+      --
+      type_name_ := 'java.lang.RuntimePermission';
+      name_      := 'setFactory';
+      FOR rec IN get_java_grant LOOP
+         Run_Java('BEGIN Dbms_Java.Disable_Permission('||to_char(rec.seq)||'); END;');
+         Run_Java('BEGIN Dbms_Java.Delete_Permission('||to_char(rec.seq)||'); END;', TRUE);
+      END LOOP;
+   END Revoke_Java_Grant;
+   
+   FUNCTION Im_View_Available RETURN BOOLEAN
+   IS
+      view_installed_ VARCHAR2(5);
+   BEGIN
+      SELECT 'TRUE'
+      INTO   view_installed_
+      FROM   dba_views
+      WHERE  owner = 'SYS'
+      AND    view_name = 'V_$IM_SEGMENTS';
+
+      IF view_installed_ = 'TRUE' THEN
+         RETURN TRUE;
+      ELSE
+         RETURN FALSE;
+      END IF;
+   EXCEPTION
+      WHEN no_data_found THEN
+         RETURN FALSE;
+   END Im_View_Available;     
+   
+BEGIN
+   --
+   -- Oracle install privileges
+   --
+   Run_Ddl('GRANT ADMINISTER DATABASE TRIGGER TO ' || username_);
+   --Run_Ddl('GRANT ALTER PROFILE TO ' || username_);
+   Run_Ddl('GRANT ALTER SYSTEM TO ' || username_);
+   Run_Ddl('GRANT ANALYZE ANY DICTIONARY TO ' || username_);
+   Run_Ddl('GRANT AUDIT SYSTEM TO ' || username_);
+   Run_Ddl('GRANT CREATE ANY DIRECTORY TO ' || username_);
+   --Run_Ddl('GRANT CREATE ANY PROCEDURE TO ' || username_ || ' WITH ADMIN OPTION');
+   --Run_Ddl('GRANT CREATE ANY SYNONYM TO ' || username_);
+   --Run_Ddl('GRANT CREATE ANY VIEW TO ' || username_);
+   Run_Ddl('GRANT CREATE ANY CONTEXT TO ' || username_);
+   Run_Ddl('GRANT CREATE PROCEDURE TO ' || username_ || ' WITH ADMIN OPTION');
+   Run_Ddl('GRANT CREATE SYNONYM TO ' || username_);
+   Run_Ddl('GRANT CREATE VIEW TO ' || username_);
+   Run_Ddl('GRANT CREATE DATABASE LINK TO ' || username_);
+   Run_Ddl('GRANT CREATE JOB TO ' || username_);
+   Run_Ddl('GRANT CREATE MATERIALIZED VIEW TO ' || username_);
+   Run_Ddl('GRANT CREATE PROCEDURE TO ' || username_);
+   --Run_Ddl('GRANT CREATE PROFILE TO ' || username_);
+   Run_Ddl('GRANT CREATE ROLE TO ' || username_);
+   Run_Ddl('GRANT CREATE SEQUENCE TO ' || username_);
+
+   -- Required CREATE TABLE to include WITH ADMIN OPTION.
+   Run_Ddl('GRANT CREATE TABLE TO ' || username_ || ' WITH ADMIN OPTION');
+
+   Run_Ddl('GRANT CREATE TRIGGER TO ' || username_);
+   Run_Ddl('GRANT CREATE TYPE TO ' || username_);
+   Run_Ddl('GRANT CREATE USER TO ' || username_);
+   Run_Ddl('GRANT CREATE VIEW TO ' || username_);
+   Run_Ddl('GRANT DEBUG ANY PROCEDURE TO ' || username_ || ' WITH ADMIN OPTION');
+   Run_Ddl('GRANT DEBUG CONNECT SESSION TO ' || username_ || ' WITH ADMIN OPTION');
+   Run_Ddl('GRANT DROP ANY CONTEXT TO ' || username_);
+   Run_Ddl('GRANT DROP ANY DIRECTORY TO ' || username_);
+   Run_Ddl('GRANT DROP ANY ROLE TO ' || username_);
+   Run_Ddl('GRANT DROP ANY TYPE TO ' || username_);
+   --Run_Ddl('GRANT DROP PROFILE TO ' || username_);
+   Run_Ddl('GRANT DROP USER TO ' || username_);
+   --Run_Ddl('GRANT GRANT ANY ROLE TO ' || username_);
+   Run_Ddl('GRANT MANAGE SCHEDULER TO ' || username_);
+   Run_Ddl('GRANT MERGE ANY VIEW TO ' || username_ || ' WITH ADMIN OPTION');
+   --
+   -- Grant Alter User privilege
+   --
+   Run_Ddl('GRANT ALTER USER TO ' || username_);
+   --
+   -- Oracle session privileges
+   --
+   Run_Ddl('GRANT CREATE SESSION TO ' || username_ || ' WITH ADMIN OPTION');
+   Run_Ddl('GRANT ALTER SESSION TO ' || username_ || ' WITH ADMIN OPTION');
+   Run_Ddl('GRANT RESTRICTED SESSION TO ' || username_);
+   Run_Ddl('ALTER USER ' || username_ || ' GRANT CONNECT THROUGH IFSSYS');
+   --
+   -- Oracle Dictionary views
+   --
+   -- News grants due to changes in how Oracle grants to public
+   --
+   Run_Ddl('GRANT SELECT ON ALL_ARGUMENTS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON ALL_DB_LINKS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON ALL_ERRORS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON ALL_SOURCE TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON ALL_OBJECTS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON ALL_PROCEDURES TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON ALL_TAB_COLUMNS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON ALL_USERS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON ALL_VIEWS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON USER_ARGUMENTS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON USER_COL_COMMENTS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON USER_CONSTRAINTS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON USER_CONS_COLUMNS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON USER_DB_LINKS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON USER_INDEXES TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON USER_IND_COLUMNS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON USER_SOURCE TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON USER_TAB_COLUMNS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON USER_TRIGGERS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON USER_VIEWS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON USER_PROCEDURES TO ' || username_ || ' WITH GRANT OPTION');
+   --   
+   Run_Ddl('GRANT SELECT ON DBA_AUDIT_TRAIL TO ' || username_);
+   Run_Ddl('GRANT SELECT ON DBA_CONSTRAINTS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_COL_COMMENTS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_CONTEXT TO ' || username_);
+   Run_Ddl('GRANT SELECT ON DBA_DB_LINKS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_EXTENTS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_INDEXES TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_IND_COLUMNS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_JOBS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_JOBS_RUNNING TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_LOCKS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBMS_LOCK_ALLOCATED TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_MVIEWS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_MVIEW_LOGS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_OBJECTS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_2PC_PENDING TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_PENDING_TRANSACTIONS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_PLSQL_OBJECT_SETTINGS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_PROFILES TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_ROLES TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_ROLE_PRIVS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_SEGMENTS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_SCHEDULER_JOBS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_SCHEDULER_JOB_ARGS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_SCHEDULER_JOB_LOG TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_SCHEDULER_JOB_RUN_DETAILS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_SCHEDULER_RUNNING_JOBS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_SYS_PRIVS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_TABLES TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_TAB_COLUMNS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_TAB_COMMENTS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_TAB_PRIVS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_TABLESPACES TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_TEMP_FILES TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_TRIGGERS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_USERS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_VIEWS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_DIRECTORIES TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON PROXY_USERS TO ' || username_ || ' WITH GRANT OPTION');
+   
+   -- PL/SQL Developer
+   Run_Ddl('GRANT SELECT ON V_$SESSION TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON V_$SESSTAT TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON GV_$SESSTAT TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON V_$STATNAME TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON V_$OPEN_CURSOR TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON V_$SQLTEXT_WITH_NEWLINES TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON V_$LOCK TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON V_$MYSTAT TO ' || username_ || ' WITH GRANT OPTION');
+      --
+   Run_Ddl('GRANT SELECT ON GV_$SESSION TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON V_$ACCESS TO ' || username_);
+   Run_Ddl('GRANT SELECT ON V_$DATABASE TO ' || username_);
+   Run_Ddl('GRANT SELECT ON V_$NLS_VALID_VALUES TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON V_$OPTION TO ' || username_);
+   Run_Ddl('GRANT SELECT ON V_$INSTANCE TO ' || username_);
+   Run_Ddl('GRANT SELECT ON GV_$INSTANCE TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON V_$PROCESS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON V_$PARAMETER TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON V_$RESERVED_WORDS TO ' || username_);
+   Run_Ddl('GRANT SELECT ON V_$BGPROCESS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON GV_$SYSSTAT TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON GV_$PROCESS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON GV_$SGA TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON GV_$SGA_DYNAMIC_COMPONENTS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON V_$SQL TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON GV_$SQL TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON V_$SQL_PLAN TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON V_$SQL_PLAN_STATISTICS_ALL TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON V_$SQL_BIND_CAPTURE TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON GV_$LOCKED_OBJECT TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON GV_$PARAMETER2 TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_FREE_SPACE TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON DBA_DATA_FILES TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON AUDIT_ACTIONS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON V_$IM_SEGMENTS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON USER_TAB_COMMENTS TO ' || username_ || ' WITH GRANT OPTION');
+
+   --
+   -- IFS Monitoring BEGIN
+   Run_Ddl('GRANT SELECT ON GV_$LOCK TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON GV_$TRANSACTION TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON GV_$SQLAREA TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON V_$SGAINFO TO ' || username_ );
+   Run_Ddl('GRANT SELECT ON V_$SGASTAT TO ' || username_ );
+   Run_Ddl('GRANT SELECT ON V_$PGASTAT TO ' || username_ );
+   Run_Ddl('GRANT SELECT ON V_$SYSSTAT TO ' || username_ );
+   -- END IFS Monitoring
+   Run_Ddl('GRANT SELECT ON ARGUMENT$ TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON COM$ TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON COL$ TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON JOBSEQ TO ' || username_);
+   Run_Ddl('GRANT SELECT ON OBJ$ TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON USER$ TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON PENDING_TRANS$ TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON SOURCE$ TO ' || username_ || ' WITH GRANT OPTION');
+   --
+   -- Oracle packages
+   --
+   Run_Ddl('GRANT EXECUTE ON DBMS_ALERT TO ' || username_);
+   Run_Ddl('GRANT EXECUTE ON DBMS_LOCK TO ' || username_);
+   Run_Ddl('GRANT EXECUTE ON DBMS_FLASHBACK TO ' || username_);
+   Run_Ddl('GRANT EXECUTE ON DBMS_HPROF TO ' || username_);
+   Run_Ddl('GRANT EXECUTE ON DBMS_MONITOR TO ' || username_);
+   Run_Ddl('GRANT EXECUTE ON DBMS_PIPE TO ' || username_);
+   --Run_Ddl('GRANT EXECUTE ON DBMS_SYSTEM TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT EXECUTE ON UTL_FILE TO ' || username_);
+   Run_Ddl('GRANT EXECUTE ON UTL_HTTP TO ' || username_);
+   Run_Ddl('GRANT EXECUTE ON UTL_SMTP TO ' || username_);
+   --Run_Ddl('GRANT EXECUTE ON UTL_TCP TO ' || username_);
+   Run_Ddl('GRANT EXECUTE ON DBMS_HM TO ' || username_ || ' WITH GRANT OPTION');
+   -- Grants needed for Appowner to be able to use encryption
+   --
+   Run_Ddl('GRANT EXECUTE ON DBMS_CRYPTO TO ' || username_);
+   --
+   --
+   -- Grants needed for Appowner to be able to use parallel re-compilation
+   --
+   Run_Ddl('GRANT EXECUTE ON UTL_RECOMP TO ' || username_ );
+   --
+   --
+   -- Grants needed for Appowner to be able to shrink lob segments, only available in Enterprise Edition
+   --
+   SELECT COUNT(*)
+   INTO oracle_version_
+   FROM v$version
+   WHERE UPPER(banner) LIKE '%ENTERPRISE%EDITION%';
+   IF (oracle_version_ > 0) THEN
+      Run_Ddl('GRANT EXECUTE ON DBMS_REDEFINITION TO ' || username_ );
+   END IF;
+   --
+   --
+   -- Grants needed for Appowner to be able to use OracleText
+   --
+   Run_Ddl('GRANT EXECUTE ON CTXSYS.CTX_DDL TO ' || username_, 'ORACLETEXT');
+   Run_Ddl('GRANT SELECT ON CTXSYS.CTX_INDEX_ERRORS TO ' || username_ || ' WITH GRANT OPTION');
+   --
+   -- Grants required for Oracle Advanced Queuing and Oracle AQ JMS
+   --
+   Run_Ddl('GRANT AQ_USER_ROLE TO ' || username_ || ' WITH ADMIN OPTION');
+   Run_Ddl('GRANT AQ_ADMINISTRATOR_ROLE TO ' || username_ || ' WITH ADMIN OPTION');
+   Run_Ddl('GRANT EXECUTE ON DBMS_AQ TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT EXECUTE ON DBMS_AQADM TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT EXECUTE ON DBMS_AQIN TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT EXECUTE ON DBMS_AQJMS TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON gv_$aq TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON dba_queues TO ' || username_ || ' WITH GRANT OPTION');
+   Run_Ddl('GRANT SELECT ON dba_queue_subscribers TO ' || username_ || ' WITH GRANT OPTION');
+   BEGIN
+      dbms_aqadm.grant_type_access(username_);
+      dbms_aqadm.grant_system_privilege('ENQUEUE_ANY', username_, TRUE);
+      dbms_aqadm.grant_system_privilege('DEQUEUE_ANY', username_, TRUE);
+      dbms_aqadm.grant_system_privilege('MANAGE_ANY', username_, TRUE);
+   EXCEPTION
+      WHEN OTHERS THEN
+         dbms_output.put_line('ERROR: '||SQLERRM);
+   END;
+   --
+   -- Index needed for IFS Applications to be able to use OracleText with expected performance
+   --
+   Run_Ddl('CREATE INDEX CTXSYS.DRX$ERR_KEY ON CTXSYS.DR$INDEX_ERROR (ERR_IDX_ID, ERR_TEXTKEY)', 'CTXSYS');
+--
+-- Handle problems with histograms
+--
+$IF Dbms_Db_Version.ver_le_10 $THEN
+   Dbms_Stats.Set_Param('method_opt', 'for all columns size 1');
+$END
+   --
+   -- Revoke grants for installing of old implementation of PL/SQL Access Provider and IFS Extended Server
+   --
+   Revoke_Java_Grant;
+   --
+   -- Add java grants for Data Migration
+   --
+   Run_DDL('GRANT JAVAUSERPRIV TO '||username_);
+   Run_DDL('BEGIN Dbms_Java.Grant_Permission('''||username_||''',''SYS:java.io.FilePermission'',''<<ALL FILES>>'',''read,write,delete'');END;');
+   --
+   -- Remove ddl grants on SOURCE$
+   --
+   FOR rec IN get_source$_grants LOOP
+      Run_Ddl('REVOKE '||rec.privilege||' ON SOURCE$ FROM ' || username_);
+   END LOOP;
+   Dbms_Output.Put_Line(' ');
+   Dbms_Output.Put_Line('Run the cleanup.sql as SYS to revoke obsolete privileges');
+   Dbms_Output.Put_Line(' ');
+END Dbagrant;
+
+PROCEDURE DbagrantIal (
+   username_ IN VARCHAR2 )
+IS
+   CURSOR get_source$_grants IS
+SELECT privilege
+FROM   all_tab_privs
+WHERE  grantee = upper(username_)
+AND    table_name = 'SOURCE$'
+AND    privilege IN ('INSERT', 'UPDATE', 'DELETE');
+--
+   PROCEDURE Run_Ddl (stmt_  IN VARCHAR2,
+                      debug_ IN VARCHAR2 DEFAULT 'TRUE') IS
+   BEGIN
+      EXECUTE IMMEDIATE stmt_;
+      Dbms_Output.Put_Line('SUCCESS: ' || stmt_);
+   EXCEPTION
+      WHEN OTHERS THEN
+         Dbms_Output.Put_Line('ERROR  : ' || stmt_);
+   END Run_Ddl;
+BEGIN
+   --
+   -- Oracle install privileges
+   --
+   Run_Ddl('GRANT CREATE SESSION TO ' || username_);
+   Run_Ddl('GRANT ALTER SESSION TO ' || username_);
+   Run_Ddl('GRANT CREATE VIEW TO ' || username_);
+   Run_Ddl('GRANT CREATE PROCEDURE TO ' || username_);
+   Run_Ddl('GRANT CREATE TABLE TO ' || username_);
+   Run_Ddl('GRANT MERGE ANY VIEW TO ' || username_);
+   Run_Ddl('GRANT SELECT ON SOURCE$ TO ' || username_);
+--
+-- Grants needed for IAL owner to be able to use parallel re-compilation
+--
+   Run_Ddl('GRANT EXECUTE ON UTL_RECOMP TO ' || username_ );
+--
+--
+-- Remove ddl grants from SOURCE$
+--
+   FOR rec IN get_source$_grants LOOP
+      Run_Ddl('REVOKE '||rec.privilege||' ON SOURCE$ FROM ' || username_);
+   END LOOP;
+END DbagrantIal;
+
+PROCEDURE DbagrantProfiler (
+   username_ IN VARCHAR2,
+   refresh_  IN BOOLEAN DEFAULT FALSE )
+IS
+   count_ NUMBER;
+      
+   CURSOR check_prof_objects_exist IS
+      SELECT COUNT(*)
+      FROM   all_objects
+      WHERE  owner = 'SYS'
+      AND   ((object_type = 'TABLE'
+      AND     object_name IN ('PLSQL_PROFILER_RUNS', 'PLSQL_PROFILER_UNITS', 'PLSQL_PROFILER_DATA'))
+      OR     (object_type = 'SEQUENCE'
+      AND     object_name IN ('PLSQL_PROFILER_RUNNUMBER')));
+      
+   PROCEDURE Run_Ddl (
+      stmt_  IN VARCHAR2,
+      debug_ IN BOOLEAN DEFAULT TRUE)
+   IS
+   BEGIN
+      EXECUTE IMMEDIATE stmt_;
+      Dbms_Output.Put_Line('SUCCESS: ' || stmt_);
+   EXCEPTION
+      WHEN OTHERS THEN
+         IF (debug_ OR SQLCODE NOT IN (-00942, -01434)) THEN -- Table or Synonym not exist
+            Dbms_Output.Put_Line('ERROR  : ' || stmt_);
+         END IF;
+   END Run_Ddl;
+BEGIN
+   OPEN check_prof_objects_exist;
+   FETCH check_prof_objects_exist INTO count_;
+   CLOSE check_prof_objects_exist;
+
+   IF (refresh_ AND count_ != 4) THEN
+      Run_Ddl('REVOKE SELECT,INSERT,UPDATE,DELETE ON PLSQL_PROFILER_RUNS FROM '||username_, FALSE);
+      Run_Ddl('REVOKE ALL ON PLSQL_PROFILER_UNITS FROM '||username_, FALSE);
+      Run_Ddl('REVOKE ALL ON PLSQL_PROFILER_DATA FROM '||username_, FALSE);
+      Run_Ddl('REVOKE ALL ON PLSQL_PROFILER_RUNNUMBER FROM '||username_, FALSE);
+         
+      Run_Ddl('DROP SYNONYM '||username_||'.PLSQL_PROFILER_RUNS', FALSE);
+      Run_Ddl('DROP SYNONYM '||username_||'.PLSQL_PROFILER_UNITS', FALSE);
+      Run_Ddl('DROP SYNONYM '||username_||'.PLSQL_PROFILER_DATA', FALSE);
+      Run_Ddl('DROP SYNONYM '||username_||'.PLSQL_PROFILER_RUNNUMBER', FALSE);
+   ELSE
+      --
+      -- Oracle profiler tables
+      --
+      Run_Ddl('GRANT SELECT,INSERT,UPDATE,DELETE ON PLSQL_PROFILER_RUNS      TO '||username_||' WITH GRANT OPTION');
+      Run_Ddl('GRANT SELECT,INSERT,UPDATE,DELETE ON PLSQL_PROFILER_UNITS     TO '||username_||' WITH GRANT OPTION');
+      Run_Ddl('GRANT SELECT,INSERT,UPDATE,DELETE ON PLSQL_PROFILER_DATA      TO '||username_||' WITH GRANT OPTION');
+      Run_Ddl('GRANT ALL                         ON PLSQL_PROFILER_RUNNUMBER TO '||username_||' WITH GRANT OPTION');
+      --
+      -- CREATE SYNONYMS FOR Appowner TO Profiler TABLES
+      --
+      Run_Ddl('GRANT CREATE SESSION TO ' || username_);
+      Run_Ddl('CREATE OR REPLACE SYNONYM '||username_||'.PLSQL_PROFILER_RUNS FOR sys.PLSQL_PROFILER_RUNS');
+      Run_Ddl('CREATE OR REPLACE SYNONYM '||username_||'.PLSQL_PROFILER_UNITS FOR sys.PLSQL_PROFILER_UNITS');
+      Run_Ddl('CREATE OR REPLACE SYNONYM '||username_||'.PLSQL_PROFILER_DATA FOR sys.PLSQL_PROFILER_DATA');
+      Run_Ddl('CREATE OR REPLACE SYNONYM '||username_||'.PLSQL_PROFILER_RUNNUMBER FOR sys.PLSQL_PROFILER_RUNNUMBER');
+   END IF;
+END DbagrantProfiler;
+
+PROCEDURE Ial_Grant (
+   ial_owner_ IN VARCHAR2,
+   app_owner_ IN VARCHAR2 )
+IS
+BEGIN
+--
+-- Execute on IAL packages
+--
+   Run_Ddl_Command___('GRANT EXECUTE ON '||ial_owner_||'.IAL_OBJECT_SLAVE_API TO ' || app_owner_, 'Ial_Grant', FALSE);
+END Ial_Grant;
+
+PROCEDURE DbagrantIfsCamSys (
+   username_ IN VARCHAR2 )
+IS
+   PROCEDURE Run_Ddl (stmt_  IN VARCHAR2,
+                      debug_ IN VARCHAR2 DEFAULT 'TRUE') IS
+   BEGIN
+      EXECUTE IMMEDIATE stmt_;
+      Dbms_Output.Put_Line('SUCCESS: ' || stmt_);
+   EXCEPTION
+      WHEN OTHERS THEN
+         Dbms_Output.Put_Line('ERROR  : ' || stmt_);
+   END Run_Ddl;
+BEGIN
+   --
+   -- Oracle install privileges
+   --
+   Run_Ddl('GRANT CREATE SESSION TO ' || username_);
+   Run_Ddl('GRANT ALTER SESSION TO ' || username_);
+   Run_Ddl('GRANT CREATE VIEW TO ' || username_);
+   Run_Ddl('GRANT CREATE PROCEDURE TO ' || username_);
+   Run_Ddl('GRANT CREATE TABLE TO ' || username_);
+   Run_Ddl('GRANT MERGE ANY VIEW TO ' || username_);
+END DbagrantIfsCamSys;
+
+PROCEDURE IfsCamSys_Grant (
+   camunda_owner_ IN VARCHAR2,
+   app_owner_     IN VARCHAR2 )
+IS
+BEGIN
+--
+-- Execute on Camunda Installation package
+--
+   Run_Ddl_Command___('GRANT EXECUTE ON '||camunda_owner_||'.CAMUNDA_INSTALL_SYS TO ' || app_owner_, 'IfsCamSys_Grant', FALSE);
+END IfsCamSys_Grant;
+
+PROCEDURE DbagrantIfsIamSys (
+   username_ IN VARCHAR2 )
+IS
+   PROCEDURE Run_Ddl (stmt_  IN VARCHAR2,
+                      debug_ IN VARCHAR2 DEFAULT 'TRUE') IS
+   BEGIN
+      EXECUTE IMMEDIATE stmt_;
+      Dbms_Output.Put_Line('SUCCESS: ' || stmt_);
+   EXCEPTION
+      WHEN OTHERS THEN
+         Dbms_Output.Put_Line('ERROR  : ' || stmt_);
+   END Run_Ddl;
+BEGIN
+   --
+   -- Oracle install privileges
+   --
+   Run_Ddl('GRANT CREATE SESSION TO ' || username_);
+   Run_Ddl('GRANT CREATE TABLE TO ' || username_);
+   Run_Ddl('GRANT CREATE VIEW TO ' || username_);
+   Run_Ddl('GRANT CREATE TRIGGER TO ' || username_);
+   Run_Ddl('GRANT CREATE PROCEDURE TO ' || username_);
+   Run_Ddl('GRANT CREATE SEQUENCE TO ' || username_);
+   Run_Ddl('GRANT CREATE SYNONYM TO ' || username_);
+   Run_Ddl('GRANT MERGE ANY VIEW TO ' || username_);
+END DbagrantIfsIamSys;
+
+PROCEDURE DbagrantIfsCrtSys (
+   username_ IN VARCHAR2 )
+IS
+   PROCEDURE Run_Ddl (stmt_  IN VARCHAR2,
+                      debug_ IN VARCHAR2 DEFAULT 'TRUE') IS
+   BEGIN
+      EXECUTE IMMEDIATE stmt_;
+      Dbms_Output.Put_Line('SUCCESS: ' || stmt_);
+   EXCEPTION
+      WHEN OTHERS THEN
+         Dbms_Output.Put_Line('ERROR  : ' || stmt_);
+   END Run_Ddl;
+BEGIN
+   --
+   -- Oracle install privileges
+   --
+   Run_Ddl('GRANT CREATE SESSION TO ' || username_);
+   Run_Ddl('GRANT CREATE TABLE TO ' || username_);
+   Run_Ddl('GRANT CREATE VIEW TO ' || username_);
+   Run_Ddl('GRANT CREATE TRIGGER TO ' || username_);
+   Run_Ddl('GRANT CREATE PROCEDURE TO ' || username_);
+   Run_Ddl('GRANT CREATE SEQUENCE TO ' || username_);
+   Run_Ddl('GRANT CREATE SYNONYM TO ' || username_);
+   Run_Ddl('GRANT MERGE ANY VIEW TO ' || username_);
+END DbagrantIfsCrtSys;
+
+PROCEDURE DbagrantIfsDbReadOnly (
+   username_ IN VARCHAR2 )
+IS
+   PROCEDURE Run_Ddl (stmt_  IN VARCHAR2,
+                      debug_ IN VARCHAR2 DEFAULT 'TRUE') IS
+   BEGIN
+      EXECUTE IMMEDIATE stmt_;
+      Dbms_Output.Put_Line('SUCCESS: ' || stmt_);
+   EXCEPTION
+      WHEN OTHERS THEN
+         Dbms_Output.Put_Line('ERROR  : ' || stmt_);
+   END Run_Ddl;
+BEGIN
+   --
+   -- Oracle install privileges
+   --
+   Run_Ddl('GRANT CREATE SESSION TO ' || username_);
+   Run_Ddl('GRANT SELECT ANY TABLE TO ' || username_);
+   
+END DbagrantIfsDbReadOnly;
+
+PROCEDURE EnableEditionsToUser (
+   username_ IN VARCHAR2 )
+IS
+   CURSOR edition_enabled_for_user IS
+     SELECT editions_enabled
+     FROM dba_users
+     WHERE username=username_;
+   CURSOR get_all_mviews IS
+     SELECT mview_name
+     FROM all_mviews
+     WHERE owner=username_;
+   CURSOR get_all_user_types IS
+     SELECT type_name 
+     FROM all_types
+     WHERE owner=username_; 
+   stmt_    VARCHAR2(4000);
+   enabled_ VARCHAR2(5);
+
+   PROCEDURE Run_Ddl (stmt_  IN VARCHAR2) IS
+   BEGIN
+      EXECUTE IMMEDIATE stmt_;
+      Dbms_Output.Put_Line('SUCCESS: ' || stmt_);
+   EXCEPTION
+      WHEN OTHERS THEN
+         Dbms_Output.Put_Line('ERROR  : ' || stmt_);
+         RAISE;
+   END Run_Ddl;
+
+BEGIN
+   OPEN edition_enabled_for_user;
+   FETCH edition_enabled_for_user INTO enabled_;
+   IF enabled_ = 'N' THEN
+      -- update all materialized views
+      for mview in get_all_mviews loop
+	     Run_Ddl('ALTER MATERIALIZED VIEW ' || username_ || '.' || mview.mview_name || ' EVALUATE USING CURRENT EDITION');
+      end loop;
+      --update all user types
+      for user_type in get_all_user_types loop
+	     Run_Ddl('ALTER TYPE ' || username_ || '.' || user_type.type_name || ' NONEDITIONABLE');
+      end loop;
+      -- Enable EBR editions to user
+      Run_Ddl('ALTER USER ' || username_ || ' ENABLE EDITIONS');
+   ELSE
+      Dbms_Output.Put_Line('Editions already enabled for ' || username_);
+   END IF;
+END EnableEditionsToUser;
+
+PROCEDURE Refresh_Profiler_Grants (
+   app_owner_ IN VARCHAR2 )
+IS
+   CURSOR get_profiler_users IS
+      SELECT owner grantee
+      FROM   all_synonyms
+      WHERE  table_owner = 'SYS'
+      AND    table_name IN ('PLSQL_PROFILER_RUNS', 'PLSQL_PROFILER_UNITS', 'PLSQL_PROFILER_DATA', 'PLSQL_PROFILER_RUNNUMBER')
+      AND    synonym_name IN ('PLSQL_PROFILER_RUNS', 'PLSQL_PROFILER_UNITS', 'PLSQL_PROFILER_DATA', 'PLSQL_PROFILER_RUNNUMBER')
+      AND    owner <> app_owner_;
+BEGIN
+   DbagrantProfiler(app_owner_, TRUE);
+   FOR rec_ IN get_profiler_users LOOP
+      DbagrantProfiler(rec_.grantee, TRUE);
+   END LOOP;
+END Refresh_Profiler_Grants;
+
+PROCEDURE Public_Revoke (
+   do_revoke_ VARCHAR2 )
+IS
+   stmt_  VARCHAR2(200);
+   count_ NUMBER := 0;
+   CURSOR get_public_privileges IS
+      SELECT *
+      FROM sys.dba_tab_privs
+      WHERE grantee='PUBLIC'
+      AND   table_name IN ('UTL_FILE', 'UTL_HTTP', 'UTL_SMTP', 'UTL_TCP');
+   PROCEDURE Grant_Object (
+      owner_       IN VARCHAR2,
+      object_name_ IN VARCHAR2,
+      grantee_     IN VARCHAR2,
+      privilege_   IN VARCHAR2,
+      grantable_   IN VARCHAR2 DEFAULT 'NO' )
+   IS
+      stmt_ VARCHAR2(2000);
+   BEGIN
+      stmt_ := 'GRANT '||privilege_||' ON '||owner_||'."'||object_name_||'" TO '||grantee_;
+      IF (grantable_ = 'YES') THEN
+         stmt_ := stmt_ || ' WITH GRANT OPTION';
+      END IF;
+      stmt_ := stmt_ || ';';
+      Dbms_Output.Put_Line('RUN THIS COMMAND TO REGRANT THE PRIVILEGE: '||stmt_);
+   END Grant_Object;
+BEGIN
+--
+-- Revoke access from the role Public
+--
+   IF UPPER(do_revoke_) = 'Y' THEN
+      FOR rec IN get_public_privileges LOOP
+         IF count_ = 0 THEN
+            Dbms_Output.Put_Line(' ');
+            Dbms_Output.Put_Line('Privleges are revoked from PUBLIC. Run the marked lines to regrant these privleges');
+            Dbms_Output.Put_Line('==================================================================================');
+         END IF;
+         count_ := count_ + 1;
+         BEGIN
+            stmt_ := 'REVOKE ALL ON '||rec.owner||'."'||rec.table_name||'" FROM '||rec.grantee;
+            Run_Ddl_Command___(stmt_, 'Public_Revoke', FALSE);
+            Dbms_Output.Put_Line('SUCCESS: '||stmt_);
+            Grant_Object(rec.owner, rec.table_name, rec.grantee, rec.privilege, rec.grantable);
+         EXCEPTION
+            WHEN OTHERS THEN
+               NULL;
+         END;
+      END LOOP;
+      stmt_ := 'GRANT EXECUTE ON utl_file TO XDB';
+      Run_Ddl_Command___(stmt_, 'Grant_XDB', FALSE);
+	  --PACAPPF-3534 start
+      stmt_ := 'GRANT EXECUTE ON utl_http TO CTXSYS';
+      Run_Ddl_Command___(stmt_, 'Grant_CTXSYS', FALSE);
+      --PACAPPF-3534 end
+   END IF;
+END Public_Revoke;
+
+PROCEDURE Prepare_For_Multitenant
+IS
+   stmt_ VARCHAR2(2000) :=
+  'DECLARE
+      CURSOR c1 IS
+         SELECT NAME
+         FROM v$pdbs;
+   BEGIN
+      FOR rec IN c1 LOOP
+         EXECUTE IMMEDIATE ''ALTER PLUGGABLE DATABASE ''||rec.name||'' SAVE STATE'';
+      END LOOP;
+   END;';
+   CURSOR get_db_info IS
+      SELECT cdb
+      FROM v$database;
+BEGIN
+   FOR rec_ IN get_db_info LOOP
+      IF rec_.cdb = 'YES' THEN
+         EXECUTE IMMEDIATE stmt_;
+      END IF;
+   END LOOP;
+END Prepare_For_Multitenant;
+
+
+FUNCTION Is_Ial_Slave_Locked RETURN NUMBER
+IS
+   is_locked_ NUMBER;
+BEGIN
+   SELECT 1
+   INTO   is_locked_
+   FROM   v$libcache_locks  a,
+          v$db_object_cache b
+   WHERE  a.object_handle = b.addr
+   AND    b.owner = 'IFSINFO'
+   AND    b.type IN ('PACKAGE', 'PACKAGE BODY')
+   AND    b.name = 'IAL_OBJECT_SLAVE_API'
+   AND    a.type = 'PIN'
+   AND    a.mode_held IN (2, 3); -- 2 - Share mode; 3 - Exclusive mode
+
+   RETURN NVL(is_locked_,0);
+EXCEPTION
+   WHEN no_data_found THEN
+      RETURN 0;
+   WHEN too_many_rows THEN
+      RETURN 1;
+END Is_Ial_Slave_Locked;
+
+END &PKG;
+/
+SHOW ERROR
+
+-----------------------------------------------------------------------------
+
+----------------------------------------------------------
+-- <UNDEFINE_SECTION>
+----------------------------------------------------------
+-- This section is reserved for undefine statements
+-- nothing should be manually written below because
+-- that would be overwritten everytime the IFS / Undefine
+-- tool is run.
+-- Also do NOT make any changes to the above tag because
+-- this will result in duplicated code
+----------------------------------------------------------
+UNDEFINE MODULE
+UNDEFINE SERVICE
+UNDEFINE PKG

@@ -1,0 +1,223 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: SalesQuotationLineDiscountHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign    History
+--  --------   ------  ---------------------------------------------------------
+-- 2020-09-02  MaEelk  GESPRING20-5399, Modified CRUD_Create___ and called Order_Quotation_Line_API.Get_Displayed_Discount__ to fetch the discount.
+-- 2018-06-20  SeJalk  SCUXXW4-8542, created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+@Override
+PROCEDURE CRUD_Create___ (
+   rec_  IN  Order_Quote_Line_Discount_Virtual_Rec )
+IS
+   rec_dup_   Order_Quote_Line_Discount_Virtual_Rec;
+   quatation_line_rec_     Order_Quotation_Line_API.Public_Rec;
+BEGIN
+   rec_dup_ := rec_;
+   rec_dup_.sales_part_description := Sales_Part_API.Get_Catalog_Desc(rec_.contract,rec_.catalog_no);
+   rec_dup_.currency_code := Order_Quotation_Api.Get_currency_code(rec_.quotation_no);
+   quatation_line_rec_ := Order_Quotation_Line_API.Get(rec_.quotation_no, rec_.line_no, rec_.rel_no, rec_.line_item_no);  
+   rec_dup_.base_sale_unit_price := quatation_line_rec_.base_sale_unit_price;
+   rec_dup_.sale_unit_price := quatation_line_rec_.sale_unit_price;
+   rec_dup_.discount := quatation_line_rec_.discount/100;
+   -- gelr:disc_price_rounded, begin   
+    --set the Discount using Order_Quotation_Line_API.Get_Displayed_Discount__
+   rec_dup_.discount := Order_Quotation_Line_API.Get_Displayed_Discount__(rec_.quotation_no, rec_.line_no, rec_.rel_no, rec_.line_item_no)/100;
+   -- gelr:disc_price_rounded, end
+  
+   rec_dup_.unit_price_incl_tax := quatation_line_rec_.unit_price_incl_tax;
+   rec_dup_.base_unit_price_incl_tax := quatation_line_rec_.base_unit_price_incl_tax;
+  
+   Get_Discount_Values___(rec_.quotation_no,  rec_.line_no,  rec_.rel_no,  rec_.line_item_no, rec_.use_price_incl_tax, rec_dup_.acc_discount_net_amt, rec_dup_.acc_discount_gross_amt);
+
+   super(rec_dup_);
+END CRUD_Create___;
+
+@Override
+PROCEDURE CRUD_Default___ (
+   key_  IN     Order_Quote_Line_Discount_Key,
+   attr_ IN OUT VARCHAR2,
+   info_    OUT VARCHAR2 )
+IS 
+   quotation_no_ Order_Quote_Line_Discount_tab.quotation_no%TYPE;
+   line_no_ Order_Quote_Line_Discount_tab.line_no%TYPE;
+   rel_no_ Order_Quote_Line_Discount_tab.rel_no%TYPE;
+   line_item_no_ Order_Quote_Line_Discount_tab.line_item_no%TYPE;
+   disc_line_no_ NUMBER;
+BEGIN 
+   quotation_no_ := Client_SYS.Get_Item_Value('QUOTATION_NO', attr_);
+   line_no_ := Client_SYS.Get_Item_Value('LINE_NO', attr_);
+   rel_no_ := Client_SYS.Get_Item_Value('REL_NO', attr_);
+   line_item_no_ := Client_SYS.Get_Item_Value('LINE_ITEM_NO', attr_);
+   
+   SELECT NVL(MAX(DISCOUNT_LINE_NO),0) INTO  disc_line_no_ FROM ORDER_QUOTE_LINE_DISCOUNT
+   WHERE QUOTATION_NO = quotation_no_ AND
+         LINE_NO = line_no_ AND
+         REL_NO = rel_no_ AND
+         LINE_ITEM_NO = line_item_no_; 
+   super(key_, attr_, info_);
+   Client_SYS.Add_To_Attr('DISCOUNT_LINE_NO', disc_line_no_ + 1, attr_);      
+END CRUD_Default___;
+
+@Override
+PROCEDURE CRUD_Create___ (
+   etag_ IN OUT VARCHAR2,
+   key_  IN OUT Order_Quote_Line_Discount_Key,
+   attr_ IN OUT VARCHAR2,
+   info_    OUT VARCHAR2,
+   action_ IN VARCHAR2 )
+IS
+BEGIN
+   super(etag_, key_, attr_, info_, action_);
+   Order_Quote_Line_Discount_API.Calc_Discount_Upd_Oq_Line__(key_.quotation_no, key_.line_no, key_.rel_no, key_.line_item_no);
+END CRUD_Create___; 
+
+@Override
+PROCEDURE CRUD_Update___ (
+   etag_ IN OUT VARCHAR2,
+   key_  IN OUT Order_Quote_Line_Discount_Key,
+   attr_ IN OUT VARCHAR2,
+   info_    OUT VARCHAR2,
+   action_ IN VARCHAR2 )
+IS
+BEGIN
+   super(etag_, key_, attr_, info_, action_);
+   Order_Quote_Line_Discount_API.Calc_Discount_Upd_Oq_Line__(key_.quotation_no, key_.line_no, key_.rel_no, key_.line_item_no);
+END CRUD_Update___;
+
+@Override
+PROCEDURE CRUD_Delete___ (
+   etag_ IN OUT VARCHAR2,
+   key_  IN     Order_Quote_Line_Discount_Key,
+   info_    OUT VARCHAR2,
+   action_ IN VARCHAR2 )
+IS
+BEGIN
+    super(etag_, key_, info_, action_);
+    Order_Quote_Line_Discount_API.Calc_Discount_Upd_Oq_Line__(key_.quotation_no, key_.line_no, key_.rel_no, key_.line_item_no);
+END CRUD_Delete___;
+
+PROCEDURE Get_Discount_Values___( 
+   quotation_no_        IN VARCHAR2,
+   line_no_             IN VARCHAR2,
+   rel_no_              IN VARCHAR2,
+   line_item_no_        IN NUMBER,
+   use_price_incl_tax_  IN BOOLEAN,
+   net_amount_curr_     OUT   NUMBER, 
+   gross_amount_curr_   OUT   NUMBER)
+IS
+   company_                VARCHAR2(20);
+   line_discount_          NUMBER; 
+   curr_rounding_          NUMBER;
+   line_tax_dom_amount_    NUMBER;
+   line_net_dom_amount_    NUMBER;
+   line_gross_dom_amount_  NUMBER;
+   line_tax_curr_amount_   NUMBER;
+BEGIN
+   company_ := Order_Quotation_Line_API.Get_Company(quotation_no_,  line_no_,  rel_no_,  line_item_no_);
+   curr_rounding_ := Currency_Code_API.Get_Currency_Rounding(company_, Order_Quotation_API.Get_Currency_Code(quotation_no_));
+   line_discount_ := Order_Quote_Line_Discount_API.Get_Total_Line_Discount(quotation_no_,  line_no_,  rel_no_,  line_item_no_,1, 1, curr_rounding_);
+   IF use_price_incl_tax_ THEN
+       gross_amount_curr_ := line_discount_;
+   ELSE
+       net_amount_curr_   := line_discount_;
+   END IF;
+
+   Tax_Handling_Order_Util_API.Get_Amounts(line_tax_dom_amount_,
+                                           line_net_dom_amount_, 
+                                           line_gross_dom_amount_,
+                                           line_tax_curr_amount_,
+                                           net_amount_curr_,
+                                           gross_amount_curr_,
+                                           company_, 
+                                           'ORDER_QUOTATION_LINE',
+                                           quotation_no_,  line_no_,  rel_no_,  line_item_no_,
+                                           '*');                                        
+END Get_Discount_Values___;
+
+PROCEDURE Update_Parent___ (
+   obj_key_ IN VARCHAR2 ) 
+IS
+   key_   Order_Quote_Line_Discount_Virtual_Key;
+   rec_   Order_Quote_Line_Discount_Virtual_Rec;
+   new_rec_   Order_Quote_Line_Discount_Virtual_Rec;
+BEGIN
+   key_.Objkey := obj_key_;
+   rec_ := Get_Record___(key_);
+   new_rec_ := rec_;
+   Get_Discount_Values___(rec_.quotation_no,  rec_.line_no,  rec_.rel_no,  rec_.line_item_no, rec_.use_price_incl_tax, new_rec_.acc_discount_net_amt, new_rec_.acc_discount_gross_amt);
+   new_rec_.discount := Order_Quotation_Line_API.Get_Discount(rec_.quotation_no,  rec_.line_no,  rec_.rel_no,  rec_.line_item_no)/100;
+   CRUD_Update___(rec_, new_rec_);
+END Update_Parent___;
+
+
+PROCEDURE Update_Discount_Line_No___ (
+   quotation_no_     IN VARCHAR2,
+   line_no_          IN VARCHAR2,
+   rel_no_           IN VARCHAR2,
+   line_item_no_     IN NUMBER,
+   discount_no_ IN NUMBER,
+   create_discount_ IN BOOLEAN) 
+IS
+   CURSOR Get_Discount_Lines IS
+   SELECT objid, objversion, discount_line_no  FROM ORDER_QUOTE_LINE_DISCOUNT
+   WHERE QUOTATION_NO = quotation_no_ AND
+         LINE_NO = line_no_ AND
+         REL_NO = rel_no_ AND
+         LINE_ITEM_NO = line_item_no_
+         AND discount_no <> discount_no_
+         ORDER BY discount_line_no;
+         
+   CURSOR Get_Discount_Del_Lines IS
+   SELECT objid, objversion, discount_line_no  FROM ORDER_QUOTE_LINE_DISCOUNT
+   WHERE QUOTATION_NO = quotation_no_ AND
+         LINE_NO = line_no_ AND
+         REL_NO = rel_no_ AND
+         LINE_ITEM_NO = line_item_no_
+         ORDER BY discount_line_no;      
+         
+
+   objid_               VARCHAR2(2000) ;
+   objversion_          VARCHAR2(2000) ;
+   attr_               VARCHAR2(2000) ;
+   info_              VARCHAR2(2000) ;
+   count_             NUMBER := 1;
+   discount_line_no_  NUMBER;
+BEGIN
+   IF  create_discount_ THEN
+      discount_line_no_ := Order_Quote_Line_Discount_API.Get_Discount_Line_No(quotation_no_,  line_no_,  rel_no_,  line_item_no_, discount_no_);
+      FOR  rec_ IN Get_Discount_Lines LOOP
+         IF rec_.discount_line_no >= discount_line_no_ THEN
+            Client_SYS.Clear_Attr(attr_);
+            Client_SYS.Add_To_Attr('DISCOUNT_LINE_NO', rec_.discount_line_no + 1, attr_);
+            Order_Quote_Line_Discount_API.Modify__(info_, rec_.objid, rec_.objversion, attr_, 'DO');
+
+         END IF;
+      END LOOP;
+   ELSE   
+      -- if deletion of records
+      FOR  rec_ IN Get_Discount_Del_Lines LOOP    
+         IF rec_.discount_line_no <> count_ THEN
+            Client_SYS.Clear_Attr(attr_);
+            Client_SYS.Add_To_Attr('DISCOUNT_LINE_NO', count_, attr_);
+            Order_Quote_Line_Discount_API.Modify__(info_, rec_.objid, rec_.objversion, attr_, 'DO');
+
+         END IF;
+         count_ := count_ +1;
+      END LOOP;
+   END IF; 
+END Update_Discount_Line_No___;
+
+FUNCTION Get_Discont___(
+	discount_type_ IN VARCHAR2) RETURN NUMBER
+IS
+BEGIN
+	RETURN Sales_Discount_Type_API.Get_Discount(discount_type_);
+END Get_Discont___;

@@ -1,0 +1,145 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: CustomerDeliveryReliabilityAnalysis
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign    History
+--  ------     ------  ---------------------------------------------------------
+--  2018-08-16 StHose  Renamed and modified method Get_Statistics 
+--  2018-06-28 StHose  First version
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Get_Statistics___(
+   selection_  IN VARCHAR2) RETURN Struct_Summary_Rec
+IS
+   selected_records_          VARCHAR2(32000) := selection_;
+   current_selection_         VARCHAR2(32000);
+   early_del_count_           NUMBER;
+   early_del_days_            NUMBER;
+   early_ship_count_          NUMBER;
+   early_ship_days_           NUMBER;
+   late_del_count_            NUMBER;
+   late_del_days_             NUMBER;
+   late_ship_count_           NUMBER;
+   late_ship_days_            NUMBER;
+   count_                     NUMBER;
+   days_                      NUMBER;
+   row_count_                 NUMBER;
+   order_no_                  VARCHAR2(12); 
+   line_no_                   VARCHAR2(4);
+   rel_no_                    VARCHAR2(4);
+   line_item_no_              NUMBER;
+   struct_summary_  Struct_Summary_Rec := NULL;
+
+   CURSOR get_early_del IS
+   SELECT count(distinct(ORDER_NO||LINE_NO||REL_NO||to_char(LINE_ITEM_NO))), 
+                    NVL ( sum(trunc(PROMISED_DELIVERY_DATE) - (trunc(REAL_SHIP_DATE) + DELIVERY_LEADTIME)),0)
+               FROM CUSTOMER_ORDER_JOIN 
+              WHERE trunc(PROMISED_DELIVERY_DATE) > trunc(REAL_SHIP_DATE + DELIVERY_LEADTIME)
+                AND ORDER_NO = order_no_ AND LINE_NO = line_no_ AND REL_NO = rel_no_ AND LINE_ITEM_NO = line_item_no_;
+
+   CURSOR get_early_ship IS
+   SELECT count(distinct(ORDER_NO||LINE_NO||REL_NO||to_char(LINE_ITEM_NO))), 
+                    NVL( sum(Work_Time_Calendar_API.Get_Work_Days_Between(Site_API.Get_Dist_Calendar_Id(CONTRACT), 
+                                                                          least(PLANNED_SHIP_DATE, REAL_SHIP_DATE), 
+                                                                          greatest(REAL_SHIP_DATE, PLANNED_SHIP_DATE))) / 
+                         count(distinct(ORDER_NO||LINE_NO||REL_NO||to_char(LINE_ITEM_NO))) , 0)
+               FROM CUSTOMER_ORDER_JOIN
+              WHERE trunc(PLANNED_SHIP_DATE) > trunc(REAL_SHIP_DATE)
+                AND ORDER_NO = order_no_ AND LINE_NO = line_no_ AND REL_NO = rel_no_ AND LINE_ITEM_NO = line_item_no_;
+              
+   CURSOR get_late_del IS
+   SELECT count(distinct(ORDER_NO||LINE_NO||REL_NO||to_char(LINE_ITEM_NO))), 
+                     NVL(sum((trunc(REAL_SHIP_DATE) + DELIVERY_LEADTIME) - trunc(PROMISED_DELIVERY_DATE)) / count(distinct(ORDER_NO||LINE_NO||REL_NO||to_char(LINE_ITEM_NO))), 0)
+                FROM CUSTOMER_ORDER_JOIN
+               WHERE trunc(PROMISED_DELIVERY_DATE) < trunc(REAL_SHIP_DATE + DELIVERY_LEADTIME)
+                 AND ORDER_NO = order_no_ AND LINE_NO = line_no_ AND REL_NO = rel_no_ AND LINE_ITEM_NO = line_item_no_;
+
+               
+   CURSOR get_late_ship IS
+   SELECT count(distinct(ORDER_NO||LINE_NO||REL_NO||to_char(LINE_ITEM_NO))), 
+                     NVL(sum(Work_Time_Calendar_API.Get_Work_Days_Between(Site_API.Get_Dist_Calendar_Id(CONTRACT), 
+                                                                          least(REAL_SHIP_DATE, PLANNED_SHIP_DATE), 
+                                                                          greatest(PLANNED_SHIP_DATE, REAL_SHIP_DATE))) / 
+                         count(distinct(ORDER_NO||LINE_NO||REL_NO||to_char(LINE_ITEM_NO))), 0)
+               FROM CUSTOMER_ORDER_JOIN
+              WHERE trunc(PLANNED_SHIP_DATE) < trunc(REAL_SHIP_DATE)
+                AND ORDER_NO = order_no_ AND LINE_NO = line_no_ AND REL_NO = rel_no_ AND LINE_ITEM_NO = line_item_no_;
+              
+BEGIN
+  early_del_count_:=0;
+  early_del_days_:=0;
+  early_ship_count_:=0;
+  early_ship_days_:=0;
+  late_del_count_:=0;
+  late_del_days_:=0;
+  late_ship_count_:=0;
+  late_ship_days_:=0;
+  row_count_:=0;
+
+WHILE (INSTR(selected_records_, Client_Sys.record_separator_) > 0) LOOP
+      current_selection_  := substr(selected_records_, 0, INSTR(selected_records_, Client_Sys.record_separator_));
+      order_no_     := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');
+      line_no_      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_NO');
+      rel_no_       := Client_SYS.Get_Key_Reference_Value(current_selection_, 'REL_NO');
+      line_item_no_ := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_ITEM_NO'));
+      
+      OPEN get_early_del;
+      FETCH get_early_del INTO count_, days_;
+      CLOSE get_early_del;
+      early_del_count_:=early_del_count_ + count_;
+      early_del_days_:=early_del_days_ + days_;
+
+      OPEN get_early_ship;
+      FETCH get_early_ship INTO count_, days_;
+      CLOSE get_early_ship;
+      early_ship_count_:=early_ship_count_ + count_;
+      early_ship_days_:=early_ship_days_ + days_;
+
+      OPEN get_late_del;
+      FETCH get_late_del INTO count_, days_;
+      CLOSE get_late_del;
+      late_del_count_:=late_del_count_ + count_;
+      late_del_days_:=late_del_days_ + days_;
+
+      OPEN get_late_ship;
+      FETCH get_late_ship INTO count_, days_;
+      CLOSE get_late_ship;
+      late_ship_count_:=late_ship_count_ + count_;
+      late_ship_days_:=late_ship_days_ + days_;
+      row_count_:=row_count_+1;
+      selected_records_ := substr(selected_records_, INSTR(selected_records_, Client_Sys.record_separator_)+1); 
+   END LOOP;
+
+   struct_summary_.early_del_count:=early_del_count_;
+   IF (early_del_count_!=0)THEN
+      struct_summary_.early_del_days:=ROUND(early_del_days_/early_del_count_,2);
+   ELSE
+      struct_summary_.early_del_days:=0;
+   END IF;
+   struct_summary_.early_ship_count:=early_ship_count_;
+   IF (early_ship_count_!=0)THEN
+      struct_summary_.early_ship_days:=ROUND(early_ship_days_/early_ship_count_,2);
+   ELSE
+      struct_summary_.early_ship_days:=0;
+   END IF;
+   struct_summary_.late_del_count:=late_del_count_;
+   IF (late_del_count_!=0)THEN
+      struct_summary_.late_del_days:=ROUND(late_del_days_/late_del_count_,2);
+   ELSE
+      struct_summary_.late_del_days:=0;
+   END IF;
+   struct_summary_.late_ship_count:=late_ship_count_;
+   IF (late_ship_count_!=0)THEN
+      struct_summary_.late_ship_days:=ROUND(late_ship_days_/late_ship_count_,2);
+   ELSE
+      struct_summary_.late_ship_days:=0;
+   END IF;
+   struct_summary_.row_count:=row_count_;
+     
+RETURN struct_summary_;
+END   Get_Statistics___ ;

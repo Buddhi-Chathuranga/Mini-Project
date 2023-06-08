@@ -1,0 +1,424 @@
+--  Date        Sign    History
+--  ---------   ------  -------------------------------------------------------------------------
+--  2020-09-30  JuMalk  Bug SC2020R1-9743, Removed word Assistant from header, navigator and removed markdown text on how to use it.
+--  2020-07-22  SeJalk  Bug 154898 (SCZ-10862), Modified Assistand by adding StatGrp as a parameter to action CreatePurchasePart.
+--  2019-11-13  FRBESE  SCXTEND-1158, Changed NewPartAssistantNavEntry navigator entry index from 600 to 400.
+--  2019-08-29  MaAuse  SCUXXW4-24004, Modified condition in IsNextStepValidforPartcaStep.
+--  2019-01-14  AwWelk  SCUXXW4-1699, Created to handled the New Part Wizard functionality in IFSEE.
+-------------------------------------------------------------------------------------------------
+client NewPartAssistant;
+component PARTCA;
+layer Core;
+projection NewPartAssistantHandling;
+
+include fragment NewPartAssistantGeneral;
+@DynamicComponentDependency INVENT
+include fragment NewPartAssistantInvent;
+@DynamicComponentDependency ORDER
+include fragment NewPartAssistantOrder;
+@DynamicComponentDependency PURCH
+include fragment NewPartAssistantPurch;
+--------------------------------- FRAGMENTS ---------------------------------
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+navigator {
+   entry NewPartAssistantNavEntry parent PartcaNavigator.PartMasterDataMasterPart at index 400 {
+      label = "New Part";
+      assistant Assistant;
+   }
+}
+-------------------------------- MAIN PAGES ---------------------------------
+
+-------------------------------- ASSISTANTS ---------------------------------
+assistant Assistant using NewPartAssistantVirtualSet {
+   label = "${Title}";
+   savemode = OnLostFocus;
+
+   init command {
+      execute {
+         set GtinValidated = true;
+         set Title = "New Part";
+      }
+   }
+   steps {
+      step {
+         label = "General";
+         enabled = [not PartCatalogCreated];
+
+         group PartTypeGroup;
+         group PartInformationGroup;
+
+         next command {
+            enabled = [condition.IsNextStepValidforGeneralStep];
+         }
+      }
+      step {
+         label = "Master Part";
+         optional = [IsPartCatalogStepOptional];
+         visible = [PartType != null and(not PartCatalogExist)];
+         enabled = [(not PartCatalogExist) and(not PartCatalogCreated)];
+
+         group PartSerialTrackingGroup;
+         group LotBatchTrackingGroup;
+         group MiscPartSettingGroup;
+         group GtinGroup;
+
+         next command {
+            enabled = [condition.IsNextStepValidforPartcaStep];
+         }
+      }
+      @DynamicComponentDependency INVENT
+      step {
+         label = "Inventory Part";
+         optional = [IsInventoryStepOptional];
+         visible = [PartType in("PurchasedInventoryPart", "PurchasedInventorySalesPart") and(not InventoryPartExist)];
+         enabled = [(not InventoryPartExist) and(not InventoryPartCreated)];
+
+         group InventPartGeneralInfoGroup;
+         group CostMiscPartInfoGroup;
+
+         next command {
+            enabled = [condition.IsNextStepValidforInventStep];
+
+            variable InventoryPartDescriptionVar Text;
+            execute {
+
+               if [not PartCatalogExist and not PartCatalogCreated] {
+                  call CreateMasterPart(PartNo, Description, InventoryUnitMeas,
+                  EngSerialTrackingCode, SerialTrackingCode, Configurable,
+                  ConditionCodeUsage, LotTrackingCode, CatchUnitEnabled,
+                  MultilevelTracking, Gtin, GtinSeries, ReceiptIssueSerialTrack) {
+                     when SUCCESS {
+                        set PartCatalogCreated = true;
+                        success("Master part: ${PartNo} created.");
+                     }
+
+                     when FAIL {
+                        error("${error.Message}");
+                        exit CANCEL;
+                     }
+                  }
+               }
+               if[not InventoryPartExist and not InventoryPartCreated] {
+                  set InventoryPartDescriptionVar = Description;
+                  if [not UsePartCatalogDescription] {
+                     set InventoryPartDescriptionVar = InventoryPartDescription;
+                  }
+
+                  call CreateInventoryPart(Contract, PartNo, InventoryPartDescriptionVar, AccountingGroup,
+                  PartProductCode, PartProductFamily, PlannerBuyer, PrimeCommodity,
+                  SecondCommodity, InventoryUnitMeas, CatchUnitMeas, TypeCode, ZeroCostLevel,
+                  InventoryPartCostLevel, InventoryValuationMethod,
+                  NegativeOnHandAllowed, EstimatedMaterialCost) {
+                     when SUCCESS {
+                        set InventoryPartCreated = true;
+                        set PurchasePartCreated = true;
+                        success("Inventory part: ${PartNo} created on site ${Contract}.");
+                     }
+                     when FAIL {
+                        error("${error.Message}");
+                        exit CANCEL;
+                     }
+                  }
+               }
+            }
+         }
+      }
+      @DynamicComponentDependency ORDER
+      step {
+         label = "Sales Part";
+         optional = [IsSalesStepOptional];
+         visible = [PartType in("PurchasedInventorySalesPart", "NonInventorySalesPart") and(not SalesPartExist)];
+         enabled = [(not SalesPartExist) and(not SalesPartCreated)];
+
+         group SalesPartGeneralGroup;
+         group SalesPartUnitOfMeasureGroup;
+         group SalesPartPricingGroup;
+         group SalesPartTaxGroup;
+         group SalesPartSourcingGroup;
+         group SalesPartGroup;
+
+         next command {
+            enabled = [condition.IsNextStepValidforSalesStep];
+            execute {
+               call CreateSalesPart(Contract, CatalogNo, CatalogType, SalesType, NonInvPartType, SourcingOption, RuleId,
+               SalesPriceGroupId, CatalogGroup, DiscountGroup, SalesPartRebateGroup, SalesUnitMeas, SalesConvFactor,
+               SalesPriceUnitMeas, SalesPriceConvFactor, InvertedConvFactor, SalesListPrice, SalesListPriceInclTax,
+               SalesRentalListPrice, SalesRentalListPriceInclTax, TaxCode, TaxClassId, SalesTaxable, UsePriceIncludingTaxOrder) {
+                  when SUCCESS {
+                     set SalesPartCreated = true;
+                     success("Sales part: ${PartNo} created on site ${Contract}.");
+                  }
+                  when FAIL {
+                     error("${error.Message}");
+                     exit CANCEL;
+                  }
+               }
+            }
+         }
+      }
+      @DynamicComponentDependency PURCH
+      step {
+         label = "Purchase Part";
+         optional = [IsPurchStepOptional];
+         visible = [PartType in("PurchasedNonInventoryPart")];
+         group PurchasePartGeneralGroup;
+
+         next command {
+            enabled = [condition.IsNextStepValidforPurchPartStep];
+
+            execute {
+               if [not PartCatalogExist and not PartCatalogCreated] {
+                  call CreateMasterPart(PartNo, Description, BuyUnitMeas,
+                  EngSerialTrackingCode, SerialTrackingCode, Configurable,
+                  ConditionCodeUsage, LotTrackingCode, CatchUnitEnabled,
+                  MultilevelTracking, Gtin, GtinSeries, ReceiptIssueSerialTrack) {
+                     when SUCCESS {
+                        set PartCatalogCreated = true;
+                        success("Master part: ${PartNo} created.");
+                     }
+                     when FAIL {
+                        error("${error.Message}");
+                        exit CANCEL;
+                     }
+                  }
+               }
+
+               if [not PurchasePartExist and not PurchasePartCreated] {
+                  call CreatePurchasePart(PartNo, Contract, BuyerCode, PurchTaxable, BuyUnitMeas, StatGrp) {
+                     when SUCCESS {
+                        set PurchasePartCreated = true;
+                        success("Purchase part: ${PartNo} created on site ${Contract}.");
+                     }
+                     when FAIL {
+                        error("${error.Message}");
+                        exit CANCEL;
+                     }
+
+                  }
+               }
+            }
+         }
+
+      }
+      @DynamicComponentDependency PURCH
+      step {
+         label = "Supplier for Purchase Part";
+         optional = [IsSupPurchPartStepOptional];
+         visible = [PartType in("PurchasedInventoryPart", "PurchasedInventorySalesPart", "PurchasedNonInventoryPart")];
+
+         group SupplierForPurchasePartGroup;
+         group SupplierForPurchasePartPricingGroup;
+      }
+      final step {
+
+      }
+   }
+
+   finish command {
+      enabled = [(component.Assistant.ActiveStep = 1 and condition.IsFinishValidForGeneralStep) or
+      (component.Assistant.ActiveStep = 2 and condition.IsFinishValidForMasterPartStep) or
+      (component.Assistant.ActiveStep = 3 and condition.IsFinishValidForInventortyPartStep) or
+      (component.Assistant.ActiveStep = 4 and condition.IsFinishValidForSalesPartStep) or
+      (component.Assistant.ActiveStep = 5 and condition.IsFinishValidForPurchasePartStep) or
+      (component.Assistant.ActiveStep = 6 and condition.IsFinishValidForSupplierPurPartStep)];
+
+      variable InventoryPartDescriptionVar Text;
+
+      execute {
+
+         if[PartType in("PurchasedInventoryPart", "PurchasedInventorySalesPart")] {
+            if [component.Assistant.ActiveStep > 2] {
+               if [not PartCatalogExist and not PartCatalogCreated] {
+                  call CreateMasterPart(PartNo, Description, InventoryUnitMeas,
+                  EngSerialTrackingCode, SerialTrackingCode, Configurable,
+                  ConditionCodeUsage, LotTrackingCode, CatchUnitEnabled,
+                  MultilevelTracking, Gtin, GtinSeries, ReceiptIssueSerialTrack) {
+                     when SUCCESS {
+                        set PartCatalogCreated = true;
+                        success("Master part: ${PartNo} created.");
+                     }
+                     when FAIL {
+                        error("${error.Message}");
+                        exit CANCEL;
+                     }
+
+                  }
+               }
+               if[not InventoryPartExist and not InventoryPartCreated] {
+                  set InventoryPartDescriptionVar = Description;
+                  if [not UsePartCatalogDescription] {
+                     set InventoryPartDescriptionVar = InventoryPartDescription;
+                  }
+
+                  @DynamicComponentDependency INVENT
+                  call CreateInventoryPart(Contract, PartNo, InventoryPartDescriptionVar, AccountingGroup,
+                  PartProductCode, PartProductFamily, PlannerBuyer, PrimeCommodity,
+                  SecondCommodity, InventoryUnitMeas, CatchUnitMeas, TypeCode, ZeroCostLevel,
+                  InventoryPartCostLevel, InventoryValuationMethod,
+                  NegativeOnHandAllowed, EstimatedMaterialCost) {
+                     when SUCCESS {
+                        set InventoryPartCreated = true;
+                        set PurchasePartCreated = true;
+                        success("Inventory part: ${PartNo} created on site ${Contract}.");
+                     }
+                     when FAIL {
+                        error("${error.Message}");
+                        exit CANCEL;
+                     }
+                  }
+               }
+               @DynamicComponentDependency ORDER
+               if [(PartType = "PurchasedInventorySalesPart") and(not SalesPartExist) and(not SalesPartCreated) and(component.Assistant.ActiveStep > 3)] {
+                  call CreateSalesPart(Contract, CatalogNo, CatalogType, SalesType, NonInvPartType, SourcingOption, RuleId,
+                  SalesPriceGroupId, CatalogGroup, DiscountGroup, SalesPartRebateGroup, SalesUnitMeas, SalesConvFactor,
+                  SalesPriceUnitMeas, SalesPriceConvFactor, InvertedConvFactor, SalesListPrice, SalesListPriceInclTax,
+                  SalesRentalListPrice, SalesRentalListPriceInclTax, TaxCode, TaxClassId, SalesTaxable, UsePriceIncludingTaxOrder) {
+                     when SUCCESS {
+                        set SalesPartCreated = true;
+                        success("Sales part: ${PartNo} created on site ${Contract}.");
+                     }
+
+                     when FAIL {
+                        error("${error.Message}");
+                        exit CANCEL;
+                     }
+                  }
+               }
+               @DynamicComponentDependency PURCH
+               if [component.Assistant.ActiveStep > 5] {
+                  call CreateSupplierForPurchasePart(PartNo, Contract, VendorNo, AcquisitionType,
+                  BuyUnitMeas, PurchConvFactor, VendorPartNo, VendorPartDescription,
+                  PurchListPrice, PurchListPriceInclTax, PurchRentalListPrice, PurchRentalListPriceInclTax,
+                  PurchCurrencyCode, PurchPriceUnitMeas, PurchPriceConvFactor, FeeCode, Discount,
+                  AdditionalCostAmount, AdditionalCostInclTax) {
+                     when SUCCESS {
+                        set SupplierForPurchasePartCreated = true;
+                        success("Supplier: ${VendorNo} for purchase part: ${PartNo} created.");
+                     }
+
+                     when FAIL {
+                        error("${error.Message}");
+                        exit CANCEL;
+                     }
+                  }
+               }
+            }
+         }
+         if [PartType = "PurchasedNonInventoryPart"] {
+            if [component.Assistant.ActiveStep > 4] {
+               if [not PartCatalogExist and not PartCatalogCreated] {
+                  call CreateMasterPart(PartNo, Description, BuyUnitMeas,
+                  EngSerialTrackingCode, SerialTrackingCode, Configurable,
+                  ConditionCodeUsage, LotTrackingCode, CatchUnitEnabled,
+                  MultilevelTracking, Gtin, GtinSeries, ReceiptIssueSerialTrack) {
+                     when SUCCESS {
+                        set PartCatalogCreated = true;
+                        success("Master part: ${PartNo} created.");
+                     }
+                     when FAIL {
+                        error("${error.Message}");
+                        exit CANCEL;
+                     }
+                  }
+               }
+               if [not PurchasePartExist and not PurchasePartCreated] {
+                  @DynamicComponentDependency PURCH
+                  call CreatePurchasePart(PartNo, Contract, BuyerCode, PurchTaxable, BuyUnitMeas, StatGrp) {
+                     when SUCCESS {
+                        set PurchasePartCreated = true;
+                        success("Purchase part: ${PartNo} created on site ${Contract}.");
+                     }
+
+                     when FAIL {
+                        error("${error.Message}");
+                        exit CANCEL;
+                     }
+
+                  }
+               }
+            }
+            if [component.Assistant.ActiveStep > 5] {
+               @DynamicComponentDependency PURCH
+               if [not SupplierForPurchasePartCreated] {
+                  call CreateSupplierForPurchasePart(PartNo, Contract, VendorNo, AcquisitionType,
+                  BuyUnitMeas, PurchConvFactor, VendorPartNo, VendorPartDescription,
+                  PurchListPrice, PurchListPriceInclTax, PurchRentalListPrice, PurchRentalListPriceInclTax,
+                  PurchCurrencyCode, PurchPriceUnitMeas, PurchPriceConvFactor, FeeCode, Discount,
+                  AdditionalCostAmount, AdditionalCostInclTax) {
+                     when SUCCESS {
+                        set SupplierForPurchasePartCreated = true;
+                        success("Supplier: ${VendorNo} for purchase part: ${PartNo} created.");
+                     }
+                     when FAIL {
+                        error("${error.Message}");
+                        exit CANCEL;
+                     }
+
+                  }
+               }
+            }
+         }
+         if [PartType = "NonInventorySalesPart"] {
+            if [component.Assistant.ActiveStep > 3] {
+               if [not PartCatalogExist and not PartCatalogCreated] {
+                  call CreateMasterPart(PartNo, Description, SalesUnitMeas,
+                  EngSerialTrackingCode, SerialTrackingCode, Configurable,
+                  ConditionCodeUsage, LotTrackingCode, CatchUnitEnabled,
+                  MultilevelTracking, Gtin, GtinSeries, ReceiptIssueSerialTrack) {
+                     when SUCCESS {
+                        set PartCatalogCreated = true;
+                        success("Master part: ${PartNo} created.");
+                     }
+                     when FAIL {
+                        error("${error.Message}");
+                        exit CANCEL;
+                     }
+
+                  }
+               }
+
+               @DynamicComponentDependency ORDER
+               if [(not SalesPartExist) and(not SalesPartCreated)] {
+                  call CreateSalesPart(Contract, CatalogNo, CatalogType, SalesType, NonInvPartType, SourcingOption, RuleId,
+                  SalesPriceGroupId, CatalogGroup, DiscountGroup, SalesPartRebateGroup, SalesUnitMeas, SalesConvFactor,
+                  SalesPriceUnitMeas, SalesPriceConvFactor, InvertedConvFactor, SalesListPrice, SalesListPriceInclTax,
+                  SalesRentalListPrice, SalesRentalListPriceInclTax, TaxCode, TaxClassId, SalesTaxable, UsePriceIncludingTaxOrder) {
+                     when SUCCESS {
+                        set SalesPartCreated = true;
+                        success("Sales part: ${PartNo} created on site ${Contract}.");
+                     }
+
+                     when FAIL {
+                        error("${error.Message}");
+                        exit CANCEL;
+                     }
+                  }
+               }
+            }
+         }
+         exit OK;
+      }
+   }
+}
+
+--------------------------------- COMMANDS ----------------------------------
+
+----------------------------- VISUAL COMPONENTS -----------------------------
+
+-------------------------------- CONDITIONS ---------------------------------
+condition IsNextStepValidforGeneralStep = ((PartNo != null) and(Contract != null) and(PartType != null) and(Description != null));
+condition IsNextStepValidforPartcaStep = (LotTrackingCode != null and GtinValidated and(GtinSeries != null and Gtin != null or GtinSeries = null));
+condition IsNextStepValidforInventStep =(PlannerBuyer != null and InventoryUnitMeas != null and TypeCode != null  and ZeroCostLevel != null and EstimatedMaterialCost != null and NegativeOnHandAllowed != null);
+condition IsNextStepValidforSalesStep =((SalesPriceGroupId != null) and(CatalogGroup != null) and(SalesUnitMeas != null) and(PartType = "NonInventorySalesPart" or SalesConvFactor != null) and(SalesPriceUnitMeas != null) and(SalesPriceConvFactor != null) and(SalesListPrice != null or SalesListPriceInclTax != null) and(RentalInstalled = "FALSE" or(SalesRentalListPrice != null or SalesRentalListPriceInclTax != null)) and(PartType != "NonInventorySalesPart" or SalesCost != null));
+condition IsNextStepValidforPurchPartStep = (BuyUnitMeas != null);
+
+-- conditions for each step required fields
+condition IsFinishValidForGeneralStep = false;
+condition IsFinishValidForMasterPartStep = false;
+condition IsFinishValidForInventortyPartStep = ((PartNo != null) and(Description != null) and(Contract != null) and(PartType != null)) and(PlannerBuyer != null and InventoryUnitMeas != null and TypeCode != null  and ZeroCostLevel != null and ZeroCostLevel != null and EstimatedMaterialCost != null and NegativeOnHandAllowed != null);
+condition IsFinishValidForPurchasePartStep =((PartNo != null) and(Description != null) and(Contract != null) and(PartType != null)) and(BuyUnitMeas != null);
+condition IsFinishValidForSalesPartStep = ((PartNo != null) and(Description != null) and(Contract != null)) and(SalesType != null and SalesPriceGroupId != null and CatalogGroup != null and SalesUnitMeas != null and SourcingOption != null and(PartType = "NonInventorySalesPart" or SalesConvFactor != null) and SalesPriceUnitMeas != null and SalesPriceConvFactor != null and SalesListPrice != null and SalesListPriceInclTax != null and SalesRentalListPrice != null and SalesRentalListPriceInclTax != null and SalesTaxable != null and UsePriceIncludingTaxOrder != null and(PartType != "NonInventorySalesPart" or SalesCost != null));
+condition IsFinishValidForSupplierPurPartStep =((PartNo != null) and(Description != null) and(Contract != null) and(PartType != null))
+and((PartType in("PurchasedNonInventoryPart") and PurchTaxable != null) or(PartType != "PurchasedNonInventoryPart"))
+and(VendorNo != null and AcquisitionType != null and BuyUnitMeas != null and PurchConvFactor != null and PurchListPrice != null and PurchCurrencyCode != null and PurchListPriceInclTax != null and PurchRentalListPrice != null and PurchRentalListPriceInclTax != null and PurchPriceUnitMeas != null and UsePriceIncludingTaxPurch != null and AdditionalCostAmount != null);

@@ -1,0 +1,354 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: StreamSubscriptions
+--  Component:    FNDBAS
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  10/01/2018  sawelk  Created
+--  200702  maabse  TEAURENAFW-2974: Added subscription dialog
+--  201221  maabse  TEAURENAFW-4416: Use clob for column_data
+-----------------------------------------------------------------------------
+
+layer Core;
+
+PROCEDURE Delete_Notifications___ (
+   delete_category_ IN VARCHAR2 ) 
+IS
+   
+BEGIN
+   Fnd_Obj_Subscription_Util_API.Bulk_Cleanup_User_(delete_category_);
+END Delete_Notifications___;
+
+FUNCTION Get_New_Message_Count___(
+   last_received_date_ IN DATE ) RETURN NUMBER
+IS
+   stream_count_ NUMBER;
+   CURSOR stream_count_cur IS         
+         select count(*) from FND_STREAM t where t.created_date > last_received_date_;
+BEGIN
+   
+   OPEN stream_count_cur;
+   FETCH stream_count_cur INTO stream_count_;
+   CLOSE stream_count_cur;
+   RETURN stream_count_;
+END Get_New_Message_Count___;
+
+
+----------------------------- SUBSCRIPTION DIALOG -------------------------------
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN OUT Subscription_Virtual_Rec )
+IS
+   subscription_id_ NUMBER;
+   row_id_  VARCHAR2(100);
+   
+   CURSOR get_fnd_obj_subscription IS
+      SELECT subscription_id,
+             subscription_type, 
+             subscription_header,
+             notes,
+             send_email_db,
+             expiry_date,
+             disabled_db,
+             self_notify_db,
+             one_time_db,
+             objid,
+             objversion
+      FROM fnd_obj_subscription
+      WHERE subscription_id = subscription_id_;
+   
+BEGIN   
+   
+   IF rec_.subscription_id IS NOT NULL THEN
+      subscription_id_ := rec_.subscription_id;
+   ELSE
+      row_id_ := Object_Connection_SYS.Get_Rowid_From_Keyref(rec_.lu_name, rec_.key_ref);
+      subscription_id_ := Fnd_Obj_Subscription_Util_API.Get_Object_Sub_Id_For_User(rec_.lu_name, row_id_);
+   END IF;
+
+   IF subscription_id_ IS NULL THEN
+      rec_.expiry_date := add_months(sysdate, 1);
+   ELSE
+      FOR subrec_ IN get_fnd_obj_subscription LOOP
+         rec_.subscription_id := subrec_.subscription_id;
+         rec_.subscription_header := subrec_.subscription_header;
+         rec_.notes := subrec_.notes;
+         rec_.send_email := CASE subrec_.send_email_db WHEN 'TRUE' THEN TRUE ELSE FALSE END;
+         rec_.expiry_date := subrec_.expiry_date;
+         rec_.disabled := CASE subrec_.disabled_db WHEN 'TRUE' THEN TRUE ELSE FALSE END;
+         rec_.self_notify := CASE subrec_.self_notify_db WHEN 'TRUE' THEN TRUE ELSE FALSE END;
+         rec_.one_time := CASE subrec_.one_time_db WHEN 'TRUE' THEN TRUE ELSE FALSE END;
+      END LOOP;
+   END IF;
+   
+   super(rec_);
+END CRUD_Create___;
+
+PROCEDURE Fill_Subscription_Columns___(
+    objkey_ IN VARCHAR2)
+IS
+   subcolrec_    Subscription_Column_Virtual_Rec;
+   first_column_ BOOLEAN := TRUE;
+   attribute_    VARCHAR2(100);
+   label_        VARCHAR2(100);
+   base_view_    VARCHAR2(50);
+   count_        NUMBER;
+   column_       VARCHAR2(500);
+   columns_      json_array_t;
+   
+   CURSOR get_subscription IS
+      SELECT objkey,
+             subscription_id,
+             lu_name, 
+             column_data
+      FROM ${PROJECTION}_subscription_virtual_vrt
+      WHERE objkey = objkey_;
+   
+   CURSOR get_columns (subscription_id_ NUMBER) IS
+      SELECT 
+         subscription_id,
+         SUBSCRIPTION_COLUMN,  
+         SUBSCRIPTION_LU,  
+         DISPLAY_NAME
+      FROM fnd_obj_subscrip_column
+      WHERE subscription_id = subscription_id_;
+BEGIN
+   FOR rec_ IN get_subscription LOOP
+      IF rec_.column_data IS NOT NULL THEN
+         columns_ := json_array_t.parse(rec_.column_data);
+         
+         base_view_ := Dictionary_Sys.Get_Base_View(rec_.lu_name);
+
+         FOR i IN 0 .. columns_.get_size - 1 LOOP        
+            column_ := columns_.get_string(i);
+            -- Get data sent from client.
+            attribute_ := dictionary_sys.Clientnametodbname_(Client_SYS.Get_Key_Reference_Value(column_, 'ATTRIBUTE'));       
+            label_ := Client_SYS.Get_Key_Reference_Value(column_, 'LABEL');  
+            
+            --SOLSETFW
+            -- Verify that column exit on the view
+            SELECT COUNT(*) INTO count_ 
+            from dictionary_sys_view_column_act 
+            where lu_name = rec_.lu_name 
+               AND Column_name = attribute_ 
+               AND view_name = base_view_;
+
+            -- Add to table   
+            IF count_ = 1 THEN
+               subcolrec_.objkey           := sys_guid();
+               subcolrec_.parent_objkey    := objkey_;
+               subcolrec_.subscription_id  := rec_.subscription_id;
+               subcolrec_.subscription_column := attribute_;
+               subcolrec_.display_name := label_;
+               IF rec_.subscription_id IS NULL AND first_column_ THEN
+                  subcolrec_.selected := TRUE;
+                  first_column_:= FALSE;
+               ELSE
+                  subcolrec_.selected := Fnd_Obj_Subscrip_Column_API.Exists(rec_.subscription_id, attribute_);
+               END IF;
+               CRUD_Create___(subcolrec_);
+            END IF;
+         END LOOP;
+      ELSE
+         FOR subrec_ IN get_columns(rec_.subscription_id) LOOP
+            subcolrec_.objkey           := sys_guid();
+            subcolrec_.parent_objkey    := rec_.objkey;
+            subcolrec_.subscription_id  := rec_.subscription_id;
+            subcolrec_.subscription_column := subrec_.subscription_column;
+            subcolrec_.display_name := subrec_.display_name;
+            subcolrec_.selected := TRUE;
+            CRUD_Create___(subcolrec_);
+         END LOOP;
+      END IF;
+   END LOOP;
+END Fill_Subscription_Columns___;
+
+PROCEDURE Save_Subscription___ (
+   objkey_ IN VARCHAR2,
+   parentkeyref_ IN VARCHAR2)
+IS
+   info_                   VARCHAR2(2000);
+   objid_                  VARCHAR2(100);
+   objversion_             VARCHAR2(100);
+   attr_                   VARCHAR2(4000);
+   
+   create_     BOOLEAN := FALSE;
+   key_        Subscription_Virtual_Key;
+   newrec_     Subscription_Virtual_Rec;
+   fndkey_     Fnd_Obj_Subscription_Key;
+   fndcolkey_  Fnd_Obj_Subscrip_Column_Key;
+   
+   CURSOR get_subscription_columns IS
+      SELECT subscription_id, subscription_column, selected, display_name
+      FROM   ${PROJECTION}_subscription_column_virtual_vrt
+      WHERE  parent_objkey = newrec_.objkey;  
+BEGIN
+   key_.objkey := objkey_;
+   newrec_ := Get_Record___(key_);
+   Client_SYS.Clear_Attr(attr_);
+   
+   -- Prepare Insert if new
+   IF newrec_.subscription_id IS NULL THEN
+      create_ := TRUE;
+      Fnd_Obj_Subscription_API.New__(info_, objid_, objversion_, attr_, 'PREPARE');
+      newrec_.subscription_id := Client_SYS.Get_Item_Value('SUBSCRIPTION_ID', attr_);
+   END IF;
+   
+   -- New and Modify attributes
+   Client_SYS.Add_To_Attr('ONE_TIME_DB',  CASE newrec_.one_time WHEN TRUE THEN 'TRUE' ELSE 'FALSE' END, attr_);
+   IF newrec_.one_time THEN
+      newrec_.expiry_date := add_months(sysdate, 12); -- Set expire date one year from now if only notify once.
+   END IF;
+   Client_SYS.Add_To_Attr('EXPIRY_DATE', newrec_.expiry_date, attr_);
+   Client_SYS.Add_To_Attr('SEND_EMAIL_DB', CASE newrec_.send_email WHEN TRUE THEN 'TRUE' ELSE 'FALSE' END, attr_);
+   Client_SYS.Add_To_Attr('SELF_NOTIFY_DB', CASE newrec_.self_notify WHEN TRUE THEN 'TRUE' ELSE 'FALSE' END, attr_);
+   Client_SYS.Add_To_Attr('DISABLED_DB', CASE newrec_.disabled WHEN TRUE THEN 'TRUE' ELSE 'FALSE' END, attr_);
+   Client_SYS.Add_To_Attr('NOTES', newrec_.notes, attr_);
+   
+   IF create_ THEN
+      -- New
+      Client_SYS.Add_To_Attr('LU_NAME', newrec_.lu_name, attr_);
+      Client_SYS.Add_To_Attr('CLIENT_VIEW', Dictionary_Sys.Get_Base_View(newrec_.lu_name), attr_);
+      Client_SYS.Add_To_Attr('SUB_OBJID', Object_Connection_SYS.Get_Rowid_From_Keyref(newrec_.lu_name, newrec_.key_ref), attr_);
+      Client_SYS.Add_To_Attr('USERNAME', newrec_.obj_created_by, attr_);
+      Client_SYS.Add_To_Attr('SUBSCRIPTION_TYPE_DB', 'OBJECT', attr_);
+      Client_SYS.Add_To_Attr('SUBSCRIPTION_HEADER', Get_Subscription_Header___(newrec_.lu_name, newrec_.key_ref), attr_);
+      Client_SYS.Add_To_Attr('CLIENT_URL', Get_Client_Url___(newrec_.lu_name, newrec_.key_ref), attr_);
+      Client_SYS.Add_To_Attr('WEB_URL', Get_Web_Url___(newrec_.page_url, newrec_.key_ref, parentkeyref_), attr_);
+      
+      Fnd_Obj_Subscription_API.New__(info_, objid_, objversion_, attr_, 'DO');
+   ELSE
+      -- Modify
+      fndkey_.subscription_id := newrec_.subscription_id;
+      Get_Objid_Objversion___(objid_, objversion_, fndkey_);
+      fnd_obj_subscription_api.Modify__(info_, objid_, objversion_, attr_, 'DO');  
+   END IF;
+   
+   -- Remove or Insert Fnd_Obj_Subscrip_Columns
+   FOR colrec_ IN get_subscription_columns LOOP
+      IF Fnd_Obj_Subscrip_Column_API.Exists(newrec_.subscription_id, colrec_.subscription_column) THEN
+         IF colrec_.selected != 1 THEN
+            -- Remove
+            fndcolkey_.subscription_id := newrec_.subscription_id;
+            fndcolkey_.subscription_column := colrec_.subscription_column;
+            Get_Objid_Objversion___(objid_, objversion_, fndcolkey_);
+            Fnd_Obj_Subscrip_Column_API.Remove__(info_, objid_, objversion_, 'DO');  
+         END IF;
+      ELSE
+         IF colrec_.selected = 1 THEN
+            -- Insert
+            Client_SYS.Clear_Attr(attr_);
+            Client_SYS.Add_To_Attr('SUBSCRIPTION_ID', newrec_.subscription_id, attr_);
+            Client_SYS.Add_To_Attr('SUBSCRIPTION_COLUMN', colrec_.subscription_column, attr_);
+            Client_SYS.Add_To_Attr('SUBSCRIPTION_LU', newrec_.lu_name, attr_);
+            Client_SYS.Add_To_Attr('DISPLAY_NAME', colrec_.display_name, attr_);
+            Fnd_Obj_Subscrip_Column_API.New__(info_, objid_, objversion_, attr_, 'DO');
+         END IF;
+      END IF;
+   END LOOP;
+   --   Refresh Runtime tracking
+   Fnd_Obj_Tracking_Runtime_API.Refresh_Lu_(newrec_.lu_name);
+END Save_Subscription___;
+
+PROCEDURE Remove_Subscription___ (
+   subscription_id_ IN NUMBER)
+IS
+   info_        VARCHAR2(2000);
+   objid_       VARCHAR2(100);
+   objversion_  VARCHAR2(100);
+   fndsubkey_   Fnd_Obj_Subscription_Key;
+BEGIN
+   fndsubkey_.subscription_id := subscription_id_;
+   Get_Objid_Objversion___(objid_, objversion_, fndsubkey_);
+	Fnd_Obj_Subscription_API.Remove__(info_, objid_, objversion_, 'DO');
+END Remove_Subscription___;
+ 
+FUNCTION Get_Client_Url___(
+   lu_name_ IN VARCHAR2, 
+   key_ref_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   result_ VARCHAR2(2000) := NULL;
+BEGIN
+  result_ := 'ifshome:entity.' || lu_name_ || '?external_search=' || key_ref_;
+  result_ := substr(result_, 0, length(result_) - 1); -- Remove last ^
+  result_ := replace(result_, '^', '%26');              -- Replace ^ with %26
+  RETURN result_;
+END Get_Client_Url___;
+
+FUNCTION Get_Web_Url___(
+   page_url_ IN VARCHAR2, 
+   key_ref_ IN VARCHAR2,
+   parent_key_ref_ IN VARCHAR2) RETURN VARCHAR2
+IS
+  
+BEGIN
+   IF parent_key_ref_ IS NOT NULL THEN
+      RETURN page_url_ || '?$filter=keyref eq ''' || utl_url.escape(parent_key_ref_, true) || ''''; 
+   ELSE
+      RETURN page_url_ || '?$filter=keyref eq ''' || utl_url.escape(key_ref_, true) || ''''; 
+   END IF; 
+  -- Following characters are not escaped by utl_url.escape are: (need to be handled separatly later)
+  -- Hyphen -, Underscore _, Period ., Exclamation !, Tilde ~, Asterisk *, Quote ' , and Parenthesis ( and ).
+END Get_Web_Url___;
+
+
+FUNCTION Get_Subscription_Header___(
+   lu_name_ IN VARCHAR2, 
+   key_ref_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   result_ VARCHAR2(2000) := NULL;
+BEGIN
+    -- Transform ORDER_CLASS_DB=INT^ORDER_NO=200027^ in to INT/20027
+   result_ := Object_Connection_SYS.Convert_To_Key_Value(lu_name_, key_ref_);  -- Convert ORDER_CLASS_DB=INT^ORDER_NO=200027^ in to INT^20027^
+   result_ := replace(result_, '^', '/');              -- Replace ^ with /
+   result_ := substr(result_, 0, length(result_) - 1); -- Remove last /
+   RETURN Dictionary_SYS.Get_Lu_Prompt_(lu_name_) || ' ' || result_;    -- Add LU prompt_: Material Requisition INT/20027  
+END Get_Subscription_Header___;
+
+PROCEDURE Select_All_Fields___ (
+   objkey_ IN VARCHAR2 ) 
+IS
+   key_ Subscription_Virtual_Key;
+   old_ Subscription_Column_Virtual_Rec;
+   new_ Subscription_Column_Virtual_Rec;
+   parentkey_ Subscription_Column_Virtual_Key;
+BEGIN
+   key_.objkey := objkey_;
+   FOR column_rec_ IN Get_Column_Array___(key_) LOOP  
+      IF column_rec_.selected = 0 THEN
+         parentkey_.objkey  := column_rec_.objkey;
+         old_ :=  Get_Record___(parentkey_);
+         new_ := old_;
+         new_.selected := TRUE;   
+             
+         CRUD_Update___(old_,new_ );            
+      END IF;
+         
+   END LOOP;
+END Select_All_Fields___;
+
+
+PROCEDURE Select_No_Fields___ (
+   objkey_ IN VARCHAR2 ) 
+IS
+   key_ Subscription_Virtual_Key;
+   old_ Subscription_Column_Virtual_Rec;
+   new_ Subscription_Column_Virtual_Rec;
+   parentkey_ Subscription_Column_Virtual_Key;
+BEGIN
+   key_.objkey := objkey_;
+   FOR column_rec_ IN Get_Column_Array___(key_) LOOP  
+      IF column_rec_.selected = 1 THEN
+         parentkey_.objkey  := column_rec_.objkey;
+         old_ :=  Get_Record___(parentkey_);
+         new_ := old_;
+         new_.selected := FALSE;   
+             
+         CRUD_Update___(old_,new_ );            
+      END IF;
+         
+   END LOOP;
+END Select_No_Fields___;

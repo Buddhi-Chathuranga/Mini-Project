@@ -1,0 +1,226 @@
+----------------------------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  -----------------------------------------------------------------------------------
+-- 2021-02-05  ErRalk  SC2020R1-12365, Added ViewConfigurationCommand to TransportTaskLineDetailsList to view configuration details.
+-- 2019-07-23  ChFolk  SCUXXW4-22440 Created.
+----------------------------------------------------------------------------------------------------------
+fragment TransportTaskLineCommands;
+component INVENT;
+layer Core;
+description "This contains the commands for Transport Task Line which are common to many pages.";
+
+include fragment InventoryPartInStockLov25Selector;
+include fragment UserAllowedSiteLovSelector;
+include fragment InventoryPartInStockLov3Selector;
+include fragment InventoryLocation17Selector;
+include fragment InventoryPartInStockLov4Selector;
+include fragment InventoryPartInStockLov10Selector;
+include fragment InventoryPartInStockLov11Selector;
+include fragment InventoryLocation11Selector;
+include fragment TransportTaskLineInitialCheck;
+include fragment HandlingUnitLov1Selector;
+include fragment HandlingUnitLov2Selector;
+include fragment HandlingUnitLov3Selector;
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+
+--------------------------------- COMMANDS ----------------------------------
+command PickTransportTaskLineCommand {
+   label = "Pick";
+   mode = SelectedRecords;
+   enabled = [TransportTaskStatusDb = "CREATED"];
+   bulkexecute {
+      bulkcall PickTransportTaskLine(TransportTaskId, LineNo);
+      refresh;
+   }
+}
+
+command UnpickTransportTaskLineCommand {
+   label = "Unpick";
+   mode = SelectedRecords;
+   enabled = [TransportTaskStatusDb = "PICKED"];
+   bulkexecute {
+      bulkcall UnpickTransportTaskLine(TransportTaskId, LineNo);
+      refresh;
+   }
+}
+
+command ExecuteTransportTaskLineCommand {
+   label = "Execute";
+   mode = SelectedRecords;
+   enabled = [TransportTaskStatusDb = "PICKED" or TransportTaskStatusDb = "CREATED" and NoOfUnidentifiedSerials = 0];
+   variable PartTrackingSessionIdNum {
+      type = Number;
+   }
+   bulkexecute {
+      call ExecuteTransportTaskLines(Selection, PartTrackingSessionIdNum);
+      refresh;
+   }
+}
+
+command ExecuteTransportTaskLineforSerialsCommand {
+   label = "Execute";
+   mode = SelectedRecords;
+   enabled = [(TransportTaskStatusDb = "PICKED" or TransportTaskStatusDb = "CREATED") and NoOfUnidentifiedSerials > 0];
+   variable PartTrackingSessionIdNum {
+      type = Number;
+   }
+   variable StructureVar Structure(TypeConversionStructure);
+
+   execute {
+      call ConvertTransportTaskIdAndLineNo(TransportTaskId, LineNo) into StructureVar;
+
+      assistant IdentifySerialsInMultipleLocAssistant("33", StructureVar.TransportTaskId, StructureVar.LineNo, null, null, null, FromContract, PartNo, NoOfUnidentifiedSerials) into(PartTrackingSessionIdNum) {
+         when OK {
+            call ExecuteTransportTaskLinesForSerials(TransportTaskId, LineNo, PartTrackingSessionIdNum);
+         }
+      }
+      refresh;
+   }
+}
+
+command MoveToNewTrasportTaskCommand {
+   label = "Move to New Transport Task";
+   mode = SelectedRecords;
+   enabled = [not isDirty and count(*, TransportTaskStatusDb = "CREATED") > 0];
+
+   variable NewTransportTaskIdNum {
+      type = Number;
+   }
+
+   bulkexecute {
+      ifany [TransportTaskStatusDb != "CREATED"] {
+         info("Line/Lines with other status than 'Created' will not be processed");
+      }
+      call GetNewTransportTaskId() into NewTransportTaskIdNum;
+      if [NewTransportTaskIdNum != null] {
+         dialog MoveToNewTransportTaskDialog(NewTransportTaskIdNum) into(SetToFixed, PrintTransportTask, OpenTransportTask) {
+            when OK {
+               call MoveToNewTransportTask(NewTransportTaskIdNum, SetToFixed, PrintTransportTask, Selection) into ResultKeysStr;
+               if [PrintTransportTask] {
+                  printdialog ResultKeysStr;
+               }
+               if [OpenTransportTask] {
+                  navigate "page/TransportTask/Form?$filter=TransportTaskId eq ${NewTransportTaskIdNum}";
+               }
+            }
+         }
+      }
+   }
+}
+
+command ApplyDropOffLocationCommand {
+   label = "Apply Drop-Off Location";
+   mode = SelectedRecords;
+   enabled = [not isDirty and count(*, TransportTaskStatusDb = "CREATED" and ForwardToLocationNo = null) > 0];
+   bulkexecute {
+      bulkcall ApplyDropOffLocation(TransportTaskId, LineNo);
+
+   }
+}
+
+command ConvertToDirectTransportTaskCommand {
+   label = "Convert to Direct Transport Task";
+   mode = SelectedRecords;
+   enabled = [not isDirty  and count(*, TransportTaskStatusDb = "CREATED" and ForwardToLocationNo != null) > 0];
+   bulkexecute {
+      bulkcall RevokeTwoStepTransportTaskLines(TransportTaskId, LineNo);
+
+   }
+}
+
+@DynamicComponentDependency CFGCHR
+command ViewConfigurationCommand {
+   label = "View Configuration";
+   enabled = [ConfigurationId != "*"];
+   variable Mode;
+   execute {
+      set Mode = "View";
+      navigate "assistant/PartConfigurationAssistant/EditConfiguration?$action=InitConfiguration{  VarMode:$[Mode],
+                                                                                                   VarPartNo:$[PartNo],
+                                                                                                   VarConfigurationId:$[ConfigurationId]}";
+   }
+}
+
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+---------------------------------- ACTIONS ----------------------------------
+action PickTransportTaskLine {
+   initialcheck TransportTaskLineInitialCheck(TransportTaskId, LineNo);
+   parameter TransportTaskId Number;
+   parameter LineNo Number;
+   ludependencies = TransportTaskLine;
+   ludependencies = TransportTask;
+}
+
+action UnpickTransportTaskLine {
+   initialcheck TransportTaskLineInitialCheck(TransportTaskId, LineNo);
+   parameter TransportTaskId Number;
+   parameter LineNo Number;
+   ludependencies = TransportTaskLine;
+   ludependencies = TransportTask;
+}
+
+action ExecuteTransportTaskLines {
+   initialcheck  implementation;
+   parameter SelectedKeyList Text;
+   parameter PartTrackingSessionId Number;
+   ludependencies = TransportTaskLine;
+   ludependencies = TransportTask;
+}
+action ExecuteTransportTaskLinesForSerials {
+   initialcheck TransportTaskLineInitialCheck(TransportTaskId, LineNo);
+   parameter TransportTaskId Number;
+   parameter LineNo Number;
+   parameter PartTrackingSessionId Number;
+   ludependencies = TransportTaskLine;
+   ludependencies = TransportTask;
+}
+action MoveToNewTransportTask Text {
+   initialcheck  implementation;
+   parameter NewTransportTaskId Number;
+   parameter SetToFixed Boolean;
+   parameter PrintTransportTask Boolean;
+   parameter Selection Text;
+   ludependencies = TransportTaskLine;
+   ludependencies = TransportTask;
+}
+
+action ApplyDropOffLocation {
+   initialcheck TransportTaskLineInitialCheck(TransportTaskId, LineNo);
+   supportwarnings = [true];
+   parameter TransportTaskId Number;
+   parameter LineNo Number;
+   ludependencies = TransportTaskLine;
+   ludependencies = TransportTask;
+}
+
+action RevokeTwoStepTransportTaskLines {
+   initialcheck TransportTaskLineInitialCheck(TransportTaskId, LineNo);
+   supportwarnings = [true];
+   parameter TransportTaskId Number;
+   parameter LineNo Number;
+   ludependencies = TransportTaskLine;
+   ludependencies = TransportTask;
+}
+
+//! TODO: Should be refactored as a function!
+action GetNewTransportTaskId Number {
+   initialcheck none;
+   supportwarnings = [true];
+   ludependencies = TransportTaskLine;
+   ludependencies = TransportTask;
+}
+
+
+--------------------------------- FUNCTIONS ---------------------------------
+
+function ConvertTransportTaskIdAndLineNo Structure(TypeConversionStructure) {
+   parameter TransportTaskId Number;
+   parameter LineNo Number;
+}
+-------------------------------- STRUCTURES ---------------------------------
+structure TypeConversionStructure {
+   attribute TransportTaskId Text;
+   attribute LineNo Text;
+}

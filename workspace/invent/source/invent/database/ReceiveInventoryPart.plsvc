@@ -1,0 +1,633 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: ReceiveInventoryPart
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  200310  WaSalk  GESPRING20-3756, Modified Receive_Inventory_Part_In_Update___ and Receive_Inventory_Part_In_Create___ to get the DeliveryReasonId value from parameters.
+--  200220  WaSalk  GESPRING200-1794, Added DeliveryReasonId to Receive_Inventory_Part_In_Update___() and Receive_Inventory_Part_In_Create___().
+--  190726  ChFolk  SCUXXW4-23328, Added condition_code_ parameter instead of NULL to the method call Inventory_Part_In_Stock_API.Rece_Part_With_Posting_Clob. 
+--  190102  Yasmlk  SCUXXW4-6301, Added Get_Report_List_Details_For_Print_Serviceability___.
+--  181227  JaThlk  SCUXXW4-6301, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Get_Report_Result_Key_List___ (
+   selected_key_list_  IN VARCHAR2) RETURN VARCHAR2
+IS
+   selection_              VARCHAR2(32000) := CONCAT(selected_key_list_, ';');
+   current_selection_      VARCHAR2(32000);
+   parameter_attr_         VARCHAR2(32000);
+   report_attr_            VARCHAR2(1000);
+   result_key_             NUMBER;
+   result_key_list_        VARCHAR2(5000);
+   
+   part_no_                VARCHAR2(25);
+   serial_no_              VARCHAR2(50);
+   lot_batch_no_           VARCHAR2(20);
+   condition_code_         VARCHAR2(10);
+   contract_               VARCHAR2(5);
+BEGIN
+   WHILE (INSTR(selection_, ';') > 0) LOOP  
+      current_selection_ := SUBSTR(selection_, 0, INSTR(selection_, ';'));
+      part_no_        := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PART_NO');
+      serial_no_      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SERIAL_NO');
+      lot_batch_no_   := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOT_BATCH_NO');
+      contract_       := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT');
+      Inventory_Part_Initial_Check___ (contract_, part_no_);
+      condition_code_ := Condition_Code_Manager_API.Get_Condition_Code(part_no_,serial_no_,lot_batch_no_);
+      IF condition_code_ IS NOT NULL THEN
+         Client_SYS.Clear_Attr(report_attr_);
+         Client_SYS.Add_To_Attr('REPORT_ID', 'IN_PRT_COND_TAG_REP', report_attr_);
+
+         Client_SYS.Clear_Attr(parameter_attr_);
+         Client_SYS.Add_To_Attr('PART_NO', part_no_, parameter_attr_);
+         Client_SYS.Add_To_Attr('CONTRACT', Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT'), parameter_attr_);
+         Client_SYS.Add_To_Attr('SERIAL_NO', serial_no_, parameter_attr_);
+         Client_SYS.Add_To_Attr('CONDITION_CODE', condition_code_, parameter_attr_);
+         Client_SYS.Add_To_Attr('LOT_BATCH_NO', lot_batch_no_, parameter_attr_);
+         result_key_ := Report_Format_API.Create_New_Report(report_attr_, parameter_attr_, Fnd_Session_API.Get_Fnd_User);        
+         IF (result_key_list_ IS NULL) THEN
+            result_key_list_ := result_key_;
+         ELSE
+            result_key_list_ := result_key_list_ || ',' || result_key_;
+         END IF;
+      END IF;
+      selection_ := substr(selection_, INSTR(selection_, ';') + 1); 
+   END LOOP;
+   
+	RETURN result_key_list_;
+END Get_Report_Result_Key_List___;
+
+
+FUNCTION Get_Report_List_Details_For_Print_Serviceability___(
+   selection_key_list_    IN VARCHAR2,
+   serviceability_status_ IN VARCHAR2)  RETURN VARCHAR2
+IS
+   selection_              VARCHAR2(32000) := CONCAT(selection_key_list_,';');
+   current_selection_      VARCHAR2(32000);
+   param_attr_             VARCHAR2(32000);
+   report_attr_            VARCHAR2(1000);
+   print_job_id_           NUMBER;
+   result_key_list_        VARCHAR2(5000);
+   inv_part_in_stock_keys_ Inventory_Part_In_Stock_key;
+   quantity_on_hand_       NUMBER;
+
+BEGIN
+ 
+   WHILE (INSTR(selection_, ';') > 0) LOOP  
+      Client_SYS.Clear_Attr(param_attr_);
+      current_selection_ := SUBSTR(selection_,0,INSTR(selection_,';'));
+      inv_part_in_stock_keys_.part_no          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PART_NO');
+      inv_part_in_stock_keys_.contract         := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT');
+      inv_part_in_stock_keys_.serial_no        := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SERIAL_NO');
+      inv_part_in_stock_keys_.lot_batch_no     := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOT_BATCH_NO');
+      inv_part_in_stock_keys_.configuration_id := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONFIGURATION_ID');
+      inv_part_in_stock_keys_.location_no      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOCATION_NO');
+      inv_part_in_stock_keys_.eng_chg_level    := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ENG_CHG_LEVEL');
+      inv_part_in_stock_keys_.activity_seq     := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'ACTIVITY_SEQ'));
+      inv_part_in_stock_keys_.handling_unit_id := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'HANDLING_UNIT_ID'));
+      Inventory_Part_Initial_Check___ (inv_part_in_stock_keys_.contract, inv_part_in_stock_keys_.part_no);
+
+      IF(((inv_part_in_stock_keys_.serial_no='*' OR inv_part_in_stock_keys_.serial_no IS NULL) AND serviceability_status_ IS NOT NULL)
+         OR (inv_part_in_stock_keys_.serial_no !='*' AND inv_part_in_stock_keys_.serial_no IS NOT NULL)) THEN
+         Client_SYS.Add_To_Attr('REPORT_ID', 'SERVICEABILITY_TAG_REP', report_attr_);
+         Client_SYS.Add_To_Attr('PART_NO', inv_part_in_stock_keys_.part_no, param_attr_);
+         Client_SYS.Add_To_Attr('CONTRACT', inv_part_in_stock_keys_.contract, param_attr_);
+         
+         IF (inv_part_in_stock_keys_.lot_batch_no != '*') THEN
+            Client_SYS.Add_To_Attr('LOT_BATCH_NO', inv_part_in_stock_keys_.lot_batch_no, param_attr_);
+         END IF;
+      END IF;   
+      
+      quantity_on_hand_ := Inventory_Part_In_Stock_API.Get_Qty_Onhand(  inv_part_in_stock_keys_.contract,
+                                                                        inv_part_in_stock_keys_.part_no,
+                                                                        inv_part_in_stock_keys_.configuration_id,
+                                                                        inv_part_in_stock_keys_.location_no,
+                                                                        inv_part_in_stock_keys_.lot_batch_no,
+                                                                        inv_part_in_stock_keys_.serial_no,
+                                                                        inv_part_in_stock_keys_.eng_chg_level,
+                                                                        inv_part_in_stock_keys_.waiv_dev_rej_no,
+                                                                        inv_part_in_stock_keys_.activity_seq,
+                                                                        inv_part_in_stock_keys_.handling_unit_id  );
+                                                                       
+      IF((inv_part_in_stock_keys_.serial_no = '*' OR inv_part_in_stock_keys_.serial_no IS NULL) 
+         AND serviceability_status_ IS NOT NULL) THEN
+         Client_SYS.Add_To_Attr('QUANTITY', quantity_on_hand_, param_attr_);
+         Client_SYS.Add_To_Attr('STATUS', serviceability_status_, param_attr_);
+         
+      ELSIF (inv_part_in_stock_keys_.serial_no != '*' AND inv_part_in_stock_keys_.serial_no IS NOT NULL) THEN
+         Client_SYS.Add_To_Attr('SERIAL_NO', inv_part_in_stock_keys_.serial_no, param_attr_);
+         Client_SYS.Add_To_Attr('QUANTITY', '1', param_attr_);
+      END IF;
+      
+      IF(((inv_part_in_stock_keys_.serial_no ='*' OR inv_part_in_stock_keys_.serial_no IS NULL)
+         AND serviceability_status_ IS NOT NULL) OR inv_part_in_stock_keys_.serial_no != '*' AND inv_part_in_stock_keys_.serial_no IS NOT NULL) THEN
+         print_job_id_ := Report_Format_API.Create_New_Report(report_attr_, param_attr_, Fnd_Session_API.Get_Fnd_User);        
+         result_key_list_ := result_key_list_ || ',' || print_job_id_ ;
+      END IF;
+      selection_ := SUBSTR(selection_,INSTR(selection_,';')+1);
+   END LOOP;
+   
+RETURN result_key_list_;   
+END Get_Report_List_Details_For_Print_Serviceability___;
+
+
+FUNCTION Validate_Location_Info___(
+   contract_         IN VARCHAR2,
+   location_no_      IN VARCHAR2 )  RETURN Warehouse_Location_Info_Structure_Rec
+IS
+   inventory_location_rec_   Inventory_Location_API.Public_Rec;
+   warehouse_loc_rec_        Warehouse_Location_Info_Structure_Rec;
+BEGIN
+   inventory_location_rec_                      := Inventory_Location_API.Get(contract_, location_no_);
+   warehouse_loc_rec_.warehouse                 := inventory_location_rec_.warehouse;
+   warehouse_loc_rec_.bay_no                    := inventory_location_rec_.bay_no;
+   warehouse_loc_rec_.row_no                    := inventory_location_rec_.row_no;
+   warehouse_loc_rec_.tier_no                   := inventory_location_rec_.tier_no;
+   warehouse_loc_rec_.bin_no                    := inventory_location_rec_.bin_no;
+   warehouse_loc_rec_.location_type             := rtrim(Inventory_Location_API.Get_Location_Type(contract_, location_no_));
+   RETURN warehouse_loc_rec_;
+END Validate_Location_Info___;
+
+
+@Override
+PROCEDURE CRUD_Default___ (
+   key_  IN     Inventory_Part_In_Stock_Key,
+   attr_ IN OUT VARCHAR2,
+   info_    OUT VARCHAR2 )
+IS
+   contract_                 VARCHAR2(5);
+   part_no_                  VARCHAR2(25);
+   receipt_date_             DATE;
+   lot_tracking_code_db_     part_catalog_tab.lot_tracking_code%TYPE;
+   inventory_location_rec_   Inventory_Location_API.Public_Rec;
+   revision_no_              VARCHAR2(6);
+   default_location_         VARCHAR2(35);
+   durability_days_          NUMBER;
+   expiration_date_          DATE;
+BEGIN
+   contract_             := Client_SYS.Get_Item_Value('CONTRACT', attr_);
+   part_no_              := Client_SYS.Get_Item_Value('PART_NO', attr_);
+   receipt_date_         := Site_API.Get_Site_Date(contract_);
+   default_location_     := Inventory_Part_Def_Loc_API.Get_Location_No(contract_, part_no_);
+   lot_tracking_code_db_ := Part_Catalog_API.Get_Lot_Tracking_Code_Db(part_no_);
+   revision_no_          := rtrim(Inventory_Part_Revision_API.Get_Eng_Chg_Level(contract_, part_no_, receipt_date_));
+   durability_days_      := Inventory_Part_API.Get_Durability_Day(contract_, part_no_);
+   super(key_, attr_, info_);
+   IF lot_tracking_code_db_ = 'NOT LOT TRACKING' THEN
+      Client_SYS.Add_To_Attr('LOT_BATCH_NO', '*', attr_);
+   END IF;   
+   Client_SYS.Add_To_Attr('SERIAL_NO', '*', attr_);
+   Client_SYS.Add_To_Attr('WAIV_DEV_REJ_NO', '*', attr_);
+   Client_SYS.Add_To_Attr('ENG_CHG_LEVEL', revision_no_, attr_);
+   Client_SYS.Add_To_Attr('LOCATION_NO', default_location_, attr_);
+   Client_SYS.Add_To_Attr('REMOVE_COST_DETAILS', 'FALSE', attr_);
+   IF default_location_ IS NOT NULL THEN
+      inventory_location_rec_ := Inventory_Location_API.Get(contract_, default_location_);
+      Client_SYS.Add_To_Attr('WAREHOUSE', inventory_location_rec_.warehouse, attr_);
+      Client_SYS.Add_To_Attr('BAY_NO', inventory_location_rec_.bay_no, attr_);
+      Client_SYS.Add_To_Attr('ROW_NO', inventory_location_rec_.row_no, attr_);
+      Client_SYS.Add_To_Attr('TIER_NO', inventory_location_rec_.tier_no, attr_);
+      Client_SYS.Add_To_Attr('BIN_NO', inventory_location_rec_.bin_no, attr_);
+      Client_SYS.Add_To_Attr('LOCATION_TYPE', rtrim(Inventory_Location_API.Get_Location_Type(contract_, default_location_)), attr_);
+   END IF;
+   IF durability_days_ IS NOT NULL THEN
+      expiration_date_ := receipt_date_ + durability_days_;
+      Client_SYS.Add_To_Attr('EXPIRATION_DATE', expiration_date_, attr_);
+   END IF;
+END CRUD_Default___;
+
+
+FUNCTION Check_Exist___(
+   contract_         IN VARCHAR2,
+   part_no_          IN VARCHAR2,
+   configuration_id_ IN VARCHAR2,
+   lot_batch_no_     IN VARCHAR2,
+   serial_no_        IN VARCHAR2,
+   condition_code_   IN VARCHAR2 )  RETURN Check_Exist_Structure_Rec
+IS
+   rec_   Check_Exist_Structure_Rec;
+BEGIN
+   rec_.lot_batch_exist     := Lot_Batch_Master_API.Check_Exist(part_no_, lot_batch_no_);
+   rec_.standard_cost_exist := Inventory_Part_Unit_Cost_API.Standard_Cost_Exist(contract_, part_no_, configuration_id_, lot_batch_no_, serial_no_, condition_code_);
+   RETURN rec_;
+END Check_Exist___;
+
+--! TODO: TEUXX-7130, Print barcode logic has not been implemented.
+PROCEDURE Receive_Inventory_Part_In_Update___ (
+   key_                       IN Inventory_Part_In_Stock_Key,
+   quantity_received_         IN NUMBER,
+   catch_quantity_received_   IN NUMBER,
+   account_no_                IN VARCHAR2,
+   cost_center_               IN VARCHAR2,
+   code_c_                    IN VARCHAR2,
+   code_d_                    IN VARCHAR2,
+   object_no_                 IN VARCHAR2,
+   project_no_                IN VARCHAR2,
+   code_g_                    IN VARCHAR2,
+   code_h_                    IN VARCHAR2,
+   code_i_                    IN VARCHAR2,
+   code_j_                    IN VARCHAR2,
+   inventory_source_          IN VARCHAR2,
+   cost_detail_id_            IN NUMBER,
+   serial_objkey_             IN VARCHAR2,
+   print_barcode_             IN VARCHAR2,
+   expiration_date_           IN DATE,
+   delivery_reason_id_        IN VARCHAR2,
+   info$_                     OUT VARCHAR2)
+IS   
+   barcode_id_attr_         CLOB;
+   barcode_id_              NUMBER;
+   part_ownership_db_       VARCHAR2(20);
+   date_of_expire_          DATE;  
+   serial_tracked_db_       VARCHAR2(5);
+   serial_no_list_          CLOB;
+   received_catch_qty_      NUMBER;
+   
+   CURSOR get_expiration_date IS
+      SELECT expiration_date
+      FROM   inventory_part_in_stock_deliv
+      WHERE contract = key_.contract
+      AND   part_no = key_.part_no
+      AND   configuration_id = key_.configuration_id
+      AND   location_no = key_.location_no
+      AND   lot_batch_no = key_.lot_batch_no
+      AND   serial_no = key_.serial_no
+      AND   eng_chg_level = key_.eng_chg_level
+      AND   waiv_dev_rej_no = key_.waiv_dev_rej_no
+      AND   activity_seq = key_.activity_seq
+      AND   handling_unit_id = key_.handling_unit_id;
+BEGIN
+
+   part_ownership_db_ := Get_Ownership___(key_.contract,
+                                          key_.part_no,
+                                          key_.configuration_id,
+                                          key_.location_no,
+                                          key_.lot_batch_no,
+                                          key_.serial_no,
+                                          key_.eng_chg_level,
+                                          key_.waiv_dev_rej_no,
+                                          key_.activity_seq,
+                                          key_.handling_unit_id );
+   IF expiration_date_ IS NOT NULL THEN
+      date_of_expire_ := expiration_date_; 
+   ELSE
+      OPEN get_expiration_date;
+      FETCH get_expiration_date INTO date_of_expire_;
+      CLOSE get_expiration_date;
+   END IF;                                       
+
+
+   serial_tracked_db_ := Part_Catalog_API.Get_Rcpt_Issue_Serial_Track_Db(key_.part_no); 
+   IF serial_tracked_db_ = 'TRUE' AND key_.serial_no = '*' THEN
+      serial_no_list_ := Get_Serials___(serial_objkey_);
+      IF serial_no_list_ IS NOT NULL THEN   
+         IF INSTR(serial_no_list_, Client_Sys.record_separator_, 1) = 0 THEN
+            received_catch_qty_ := catch_quantity_received_;
+         ELSE
+            received_catch_qty_ := NULL;
+         END IF;
+         barcode_id_attr_ := Inventory_Part_In_Stock_API.Rece_Part_With_Posting_Clob(  serial_no_list_,
+                                                                                       key_.contract,
+                                                                                       key_.part_no,
+                                                                                       key_.configuration_id,
+                                                                                       key_.location_no,
+                                                                                       key_.lot_batch_no,
+                                                                                       key_.eng_chg_level,
+                                                                                       key_.waiv_dev_rej_no,
+                                                                                       TO_CHAR(key_.handling_unit_id),
+                                                                                       TO_CHAR(date_of_expire_, 'YYYY-MM-DD HH24:MI:SS'),
+                                                                                       TO_CHAR(received_catch_qty_),
+                                                                                       account_no_,
+                                                                                       cost_center_,
+                                                                                       code_c_,
+                                                                                       code_d_,
+                                                                                       object_no_,
+                                                                                       project_no_,
+                                                                                       code_g_,
+                                                                                       code_h_,
+                                                                                       code_i_,
+                                                                                       code_j_,
+                                                                                       inventory_source_,
+                                                                                       cost_detail_id_,
+                                                                                       NULL,
+                                                                                       part_ownership_db_,
+                                                                                       print_barcode_,
+                                                                                       delivery_reason_id_);
+
+         info$_ := Handling_Unit_API.Get_Max_Capacity_Exceeded_Info(key_.handling_unit_id);
+      ELSE
+         
+         Inventory_Part_In_Stock_API.Receive_Part_With_Posting(   key_.contract,
+                                                                  key_.part_no,
+                                                                  key_.configuration_id,
+                                                                  key_.location_no,
+                                                                  key_.lot_batch_no,
+                                                                  key_.serial_no,
+                                                                  key_.eng_chg_level,
+                                                                  key_.waiv_dev_rej_no,
+                                                                  0,
+                                                                  key_.handling_unit_id,
+                                                                  'NREC',
+                                                                  date_of_expire_,
+                                                                  quantity_received_,
+                                                                  0,
+                                                                  catch_quantity_received_,
+                                                                  account_no_,
+                                                                  cost_center_,
+                                                                  code_c_,
+                                                                  code_d_,
+                                                                  object_no_,
+                                                                  project_no_,
+                                                                  code_g_,
+                                                                  code_h_,
+                                                                  code_i_,
+                                                                  code_j_,
+                                                                  inventory_source_,
+                                                                  NULL,
+                                                                  cost_detail_id_,
+                                                                  NULL,
+                                                                  part_ownership_db_,
+                                                                  delivery_reason_id_); 
+
+         IF print_barcode_ = '1' THEN
+            Inventory_Part_Barcode_API.New(   barcode_id_, 
+                                              key_.contract, 
+                                              key_.part_no, 
+                                              key_.configuration_id, 
+                                              key_.lot_batch_no, 
+                                              key_.serial_no, 
+                                              key_.eng_chg_level, 
+                                              key_.waiv_dev_rej_no, 
+                                              1, 
+                                              0);     
+         END IF;                                                         
+         info$_ := Handling_Unit_API.Get_Max_Capacity_Exceeded_Info(key_.handling_unit_id);     
+      END IF;  
+   ELSE
+      Inventory_Part_In_Stock_API.Receive_Part_With_Posting(   key_.contract,
+                                                               key_.part_no,
+                                                               key_.configuration_id,
+                                                               key_.location_no,
+                                                               key_.lot_batch_no,
+                                                               key_.serial_no,
+                                                               key_.eng_chg_level,
+                                                               key_.waiv_dev_rej_no,
+                                                               0,
+                                                               key_.handling_unit_id,
+                                                               'NREC',
+                                                               date_of_expire_,
+                                                               quantity_received_,
+                                                               0,
+                                                               catch_quantity_received_,
+                                                               account_no_,
+                                                               cost_center_,
+                                                               code_c_,
+                                                               code_d_,
+                                                               object_no_,
+                                                               project_no_,
+                                                               code_g_,
+                                                               code_h_,
+                                                               code_i_,
+                                                               code_j_,
+                                                               inventory_source_,
+                                                               NULL,
+                                                               cost_detail_id_,
+                                                               NULL,
+                                                               part_ownership_db_,
+                                                               delivery_reason_id_);
+      info$_ := Handling_Unit_API.Get_Max_Capacity_Exceeded_Info(key_.handling_unit_id);                                                               
+   END IF;
+END Receive_Inventory_Part_In_Update___;
+
+
+FUNCTION Get_Ownership___(
+   contract_           IN VARCHAR2,
+   part_no_            IN VARCHAR2,
+   configuration_id_   IN VARCHAR2,
+   location_no_        IN VARCHAR2,
+   lot_batch_no_       IN VARCHAR2,
+   serial_no_          IN VARCHAR2,
+   eng_chg_level_      IN VARCHAR2,
+   waiv_dev_rej_no_    IN VARCHAR2,
+   activity_seq_       IN NUMBER,
+   handling_unit_id_   IN NUMBER ) RETURN VARCHAR2
+IS
+   part_ownership_db_       VARCHAR2(20);
+   part_ownership_db_value_ VARCHAR2(20);
+BEGIN
+   part_ownership_db_ := Inventory_Part_In_Stock_API.Get_Part_Ownership_Db(   contract_,
+                                                                              part_no_,
+                                                                              configuration_id_,
+                                                                              location_no_,
+                                                                              lot_batch_no_,
+                                                                              serial_no_,
+                                                                              eng_chg_level_,
+                                                                              waiv_dev_rej_no_,
+                                                                              activity_seq_,
+                                                                              handling_unit_id_   );
+
+   IF serial_no_ = '*' THEN
+      part_ownership_db_value_ := NVL(part_ownership_db_,'COMPANY OWNED');
+   ELSIF Part_Serial_Catalog_API.Get_Part_Ownership_Db(part_no_, serial_no_) = 'COMPANY RENTAL ASSET' THEN
+      part_ownership_db_value_ := Part_Serial_Catalog_API.Get_Part_Ownership_Db(part_no_, serial_no_);
+   ELSE
+      part_ownership_db_value_ := NVL(part_ownership_db_,'COMPANY OWNED');
+   END IF;       
+   
+   RETURN part_ownership_db_value_;                                                                           
+END Get_Ownership___;
+
+--! TODO: TEUXX-7130, Print barcode logic has not been implemented.
+PROCEDURE Receive_Inventory_Part_In_Create___ (
+   contract_                IN VARCHAR2,
+   part_no_                 IN VARCHAR2,
+   configuration_id_        IN VARCHAR2,
+   location_no_             IN VARCHAR2,
+   lot_batch_no_            IN VARCHAR2,
+   eng_chg_level_           IN VARCHAR2,
+   waiv_dev_rej_no_         IN VARCHAR2,
+   activity_seq_            IN NUMBER,
+   serial_no_               IN VARCHAR2,
+   handling_unit_id_        IN NUMBER,
+   quantity_received_       IN NUMBER,
+   catch_quantity_received_ IN NUMBER,
+   account_no_              IN VARCHAR2,
+   cost_center_             IN VARCHAR2,
+   code_c_                  IN VARCHAR2,
+   code_d_                  IN VARCHAR2,
+   object_no_               IN VARCHAR2,
+   project_no_              IN VARCHAR2,
+   code_g_                  IN VARCHAR2,
+   code_h_                  IN VARCHAR2,
+   code_i_                  IN VARCHAR2,
+   code_j_                  IN VARCHAR2,
+   inventory_source_        IN VARCHAR2,
+   cost_detail_id_          IN NUMBER,
+   condition_code_          IN VARCHAR2,
+   serial_objkey_           IN VARCHAR2,
+   print_barcode_           IN VARCHAR2,
+   owner_name_              IN VARCHAR2,
+   owner_                   IN VARCHAR2,
+   ownership_               IN VARCHAR2,
+   expiration_date_         IN DATE,
+   delivery_reason_id_      IN VARCHAR2,
+   info$_                  OUT VARCHAR2   ) 
+IS
+   barcode_id_attr_         CLOB;
+   barcode_id_              NUMBER;
+   serial_tracked_db_       VARCHAR2(5);
+   serial_no_list_          CLOB := '';
+   received_catch_qty_      NUMBER;
+BEGIN
+   
+   serial_tracked_db_ := Part_Catalog_API.Get_Rcpt_Issue_Serial_Track_Db(part_no_);
+   IF serial_tracked_db_ = 'TRUE' THEN
+      serial_no_list_ := Get_Serials___(serial_objkey_);
+      IF serial_no_list_ IS NOT NULL THEN
+         IF INSTR(serial_no_list_, Client_Sys.record_separator_, 1) = 0 THEN
+            received_catch_qty_ := catch_quantity_received_;
+         ELSE
+            received_catch_qty_ := NULL;
+         END IF;
+         barcode_id_attr_ := Inventory_Part_In_Stock_API.Rece_Part_With_Posting_Clob(  serial_no_list_,
+                                                                                       contract_,
+                                                                                       part_no_,
+                                                                                       configuration_id_,
+                                                                                       location_no_,
+                                                                                       lot_batch_no_,
+                                                                                       eng_chg_level_,
+                                                                                       waiv_dev_rej_no_,
+                                                                                       handling_unit_id_,
+                                                                                       TO_CHAR(expiration_date_, 'YYYY-MM-DD HH24:MI:SS'), 
+                                                                                       TO_CHAR(received_catch_qty_),
+                                                                                       account_no_,
+                                                                                       cost_center_,
+                                                                                       code_c_,
+                                                                                       code_d_,
+                                                                                       object_no_,
+                                                                                       project_no_,
+                                                                                       code_g_,
+                                                                                       code_h_,
+                                                                                       code_i_,
+                                                                                       code_j_,
+                                                                                       inventory_source_,
+                                                                                       TO_CHAR(cost_detail_id_),
+                                                                                       condition_code_,
+                                                                                       ownership_,
+                                                                                       print_barcode_,
+                                                                                       delivery_reason_id_);
+         info$_ := Handling_Unit_API.Get_Max_Capacity_Exceeded_Info(handling_unit_id_);     
+         
+      ELSE
+         Inventory_Part_In_Stock_API.Receive_Part_With_Posting(   contract_,
+                                                                  part_no_,
+                                                                  configuration_id_,
+                                                                  location_no_,
+                                                                  lot_batch_no_,
+                                                                  serial_no_,
+                                                                  eng_chg_level_,
+                                                                  waiv_dev_rej_no_,
+                                                                  0,
+                                                                  handling_unit_id_,
+                                                                  'NREC',
+                                                                  expiration_date_,
+                                                                  quantity_received_,
+                                                                  0,
+                                                                  catch_quantity_received_,
+                                                                  account_no_,
+                                                                  cost_center_,
+                                                                  code_c_,
+                                                                  code_d_,
+                                                                  object_no_,
+                                                                  project_no_,
+                                                                  code_g_,
+                                                                  code_h_,
+                                                                  code_i_,
+                                                                  code_j_,
+                                                                  inventory_source_,
+                                                                  NULL,
+                                                                  cost_detail_id_,
+                                                                  condition_code_,
+                                                                  ownership_,
+                                                                  delivery_reason_id_);
+         IF print_barcode_ = '1' THEN
+            Inventory_Part_Barcode_API.New(   barcode_id_, 
+                                              contract_, 
+                                              part_no_, 
+                                              configuration_id_, 
+                                              lot_batch_no_, 
+                                              serial_no_, 
+                                              eng_chg_level_, 
+                                              waiv_dev_rej_no_, 
+                                              1, 
+                                              0);     
+         END IF;                                             
+         info$_ := Handling_Unit_API.Get_Max_Capacity_Exceeded_Info(handling_unit_id_);
+      END IF;
+   ELSE
+      Inventory_Part_In_Stock_API.Receive_Part_With_Posting(   contract_,
+                                                               part_no_,
+                                                               configuration_id_,
+                                                               location_no_,
+                                                               lot_batch_no_,
+                                                               serial_no_,
+                                                               eng_chg_level_,
+                                                               waiv_dev_rej_no_,
+                                                               0,
+                                                               handling_unit_id_,
+                                                               'NREC',
+                                                               expiration_date_,
+                                                               quantity_received_,
+                                                               0,
+                                                               catch_quantity_received_,
+                                                               account_no_,
+                                                               cost_center_,
+                                                               code_c_,
+                                                               code_d_,
+                                                               object_no_,
+                                                               project_no_,
+                                                               code_g_,
+                                                               code_h_,
+                                                               code_i_,
+                                                               code_j_,
+                                                               inventory_source_,
+                                                               NULL,
+                                                               cost_detail_id_,
+                                                               condition_code_,
+                                                               ownership_,
+                                                               delivery_reason_id_);
+      info$_ := Handling_Unit_API.Get_Max_Capacity_Exceeded_Info(handling_unit_id_);                                                      
+
+   END IF;
+END Receive_Inventory_Part_In_Create___;
+
+
+FUNCTION Get_Ownership_Db_Value___ (
+	ownership_db_value_ IN VARCHAR2) RETURN VARCHAR2
+IS
+BEGIN    
+	RETURN ownership_db_value_;
+END Get_Ownership_Db_Value___;
+
+FUNCTION Get_Serials___ (
+   serial_objkey_ IN VARCHAR2 ) RETURN CLOB
+IS
+   serial_key_       Serial_Number_Virtual_Key;
+   serial_no_list_   CLOB;
+BEGIN
+   serial_key_.objkey := serial_objkey_;
+   FOR line_rec_ IN Get_Serial_No_Array___(serial_key_) LOOP
+      IF serial_no_list_ IS NULL THEN
+         serial_no_list_ := line_rec_.serial_no;
+      ELSE
+         serial_no_list_ := serial_no_list_ || Client_SYS.record_separator_ || line_rec_.serial_no;
+      END IF;
+   END LOOP;
+   RETURN serial_no_list_;
+END Get_Serials___;

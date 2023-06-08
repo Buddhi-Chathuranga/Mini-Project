@@ -1,0 +1,193 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: CustomerOrderInvoiceLinesHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+-- 2019-08-12  RaVdlk  SCUXXW4-13659, Aligned with the Customer Order Invoice page plsvc and modifieid Calculate_Invoice_Amounts___
+-- 2018-08-20  RaVdlk  SCUXXW4-1059, Added the method Reconsume_Prepayments___ and Overridden the CRUD_Update___
+-- 2018-06-15  RaVdlk  SCUXXW4-1059, Added Tax_Code_Lov___ for tax code LovUserWhere 
+-- 2018-06-15  RaVdlk  SCUXXW4-1059, Created
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Calculate_Price_Information___(
+   net_curr_price_        IN NUMBER,
+   gross_curr_price_      IN NUMBER,
+   multiple_tax_lines_    IN BOOLEAN,
+   tax_code_              IN VARCHAR2,
+   tax_calc_structure_id_ IN VARCHAR2,
+   invoice_id_            IN NUMBER,
+   item_id_               IN NUMBER,
+   contract_              IN VARCHAR2,
+   invoice_date_          IN DATE,
+   currency_              IN VARCHAR2,
+   use_piv_               IN VARCHAR2 ) RETURN Price_Info_Rec
+IS
+   tax_class_id_            VARCHAR2(20);
+   source_ref_type_         VARCHAR2(20);
+   currency_rounding_       NUMBER := 16;
+   attr_                    VARCHAR2(2000);
+   price_info_rec_          Price_Info_Rec := NULL;
+   multiple_tax_            VARCHAR2(20);
+   
+BEGIN
+   
+source_ref_type_ := 'INVOICE';
+
+   IF (multiple_tax_lines_)THEN
+      multiple_tax_ := 'TRUE';
+   ELSE
+      multiple_tax_ := 'FAlSE';
+   END IF;
+
+price_info_rec_.net_curr_price         := net_curr_price_;     
+price_info_rec_.gross_curr_price       := gross_curr_price_;
+price_info_rec_.tax_code               := tax_code_;
+price_info_rec_.tax_calc_structure_id  := tax_calc_structure_id_;
+
+Tax_Handling_Order_Util_API.Get_Prices(   price_info_rec_.net_dom_price,
+                                          price_info_rec_.gross_dom_price,
+                                          price_info_rec_.net_curr_price,
+                                          price_info_rec_.gross_curr_price,
+                                          multiple_tax_ ,
+                                          price_info_rec_.tax_code,
+                                          price_info_rec_.tax_calc_structure_id,
+                                          tax_class_id_,
+                                          invoice_id_,
+                                          item_id_,
+                                          '*',
+                                          '*',
+                                          '*',
+                                          source_ref_type_,
+                                          contract_,
+                                          '',
+                                          '',
+                                          invoice_date_,
+                                          '',
+                                          '',
+                                          '',
+                                          use_piv_,
+                                          currency_,
+                                          '',
+                                          'FALSE',
+                                          '',
+                                          '',
+                                          '',
+                                          currency_rounding_,
+                                          'FALSE',
+                                          attr_);
+   IF (multiple_tax_ = 'TRUE')THEN
+      price_info_rec_.multiple_tax_lines := TRUE;
+   ELSE
+      price_info_rec_.multiple_tax_lines := FALSE;
+   END IF;
+RETURN  price_info_rec_;
+
+END Calculate_Price_Information___;
+
+FUNCTION Calculate_Invoice_Amounts___(
+   company_                   IN VARCHAR2,
+   invoice_id_                IN NUMBER,
+   item_id_                   IN NUMBER,
+   price_qty_                 IN NUMBER,
+   unit_price_incl_tax_       IN NUMBER,
+   sale_unit_price_           IN NUMBER,
+   charge_percent_basis_      IN NUMBER,
+   charge_percent_            IN NUMBER,
+   order_discount_            IN NUMBER,
+   discount_                  IN NUMBER,
+   additional_discount_       IN NUMBER,
+   net_curr_amount_           IN NUMBER,
+   gross_curr_amount_         IN NUMBER,
+   vat_curr_amount_           IN NUMBER,
+   vat_dom_amount_            IN NUMBER,
+   tax_code_                  IN VARCHAR2,
+   tax_calc_structure_id_     IN VARCHAR2) RETURN Invoice_Item_Rec
+IS
+   invoice_item_rec_          Invoice_Item_Rec;
+   tax_code_local_            VARCHAR2(20) := tax_code_;
+   tax_calc_struc_id_local_   VARCHAR2(20) := tax_calc_structure_id_;
+   gross_curr_amount_local_   NUMBER := gross_curr_amount_;
+   net_curr_amount_local_     NUMBER := net_curr_amount_;
+   vat_curr_amount_local_     NUMBER := vat_curr_amount_;
+   vat_dom_amount_local_      NUMBER := vat_dom_amount_;
+BEGIN
+   Customer_Order_Inv_Item_API.Get_Amounts__(vat_curr_amount_local_, vat_dom_amount_local_, gross_curr_amount_local_, net_curr_amount_local_, 
+                                             tax_code_local_, tax_calc_struc_id_local_, company_, invoice_id_, item_id_, price_qty_, 
+                                             unit_price_incl_tax_, sale_unit_price_, charge_percent_basis_, charge_percent_, order_discount_, 
+                                             discount_, additional_discount_);
+      
+   --invoice_item_rec_.vat_dom_amount      := vat_dom_amount_local_;
+   invoice_item_rec_.vat_curr_amount     := vat_curr_amount_local_;
+   invoice_item_rec_.gross_curr_amount   := gross_curr_amount_local_;
+   invoice_item_rec_.net_curr_amount     := net_curr_amount_local_;
+   invoice_item_rec_.tax_code            := tax_code_local_;
+   invoice_item_rec_.tax_calc_struc_id   := tax_calc_struc_id_local_;
+         
+   RETURN invoice_item_rec_;
+END Calculate_Invoice_Amounts___;
+
+
+FUNCTION Get_Tax_Rate___(
+   company_       IN VARCHAR2,
+   tax_code_      IN VARCHAR2 ) RETURN NUMBER
+   
+IS
+   tax_rate_       NUMBER ;
+BEGIN 
+     tax_rate_ := Statutory_Fee_API.Get_Percentage(company_,tax_code_);
+     RETURN tax_rate_;
+          
+END Get_Tax_Rate___ ;  
+
+
+PROCEDURE Reconsume_Prepayments___(
+   company_       IN VARCHAR2,
+   invoice_id_    IN NUMBER,
+   order_no_      IN VARCHAR2)
+   
+IS
+   invoice_type_  VARCHAR2 (20);
+   exists_        VARCHAR2(5);
+  
+BEGIN 
+   invoice_type_ := Invoice_API.Get_Invoice_Type (company_, invoice_id_);
+   IF (invoice_type_ = 'CUSTORDDEB')THEN
+      exists_ := Customer_Order_Inv_Item_API.Is_Prepaym_Lines_Exist(company_, invoice_id_);
+      IF (exists_ = 'TRUE')THEN
+         Invoice_Customer_Order_API.Reconsume_Prepaym_Inv_Lines__(company_, invoice_id_,order_no_);
+      END IF;   
+   END IF;   
+          
+END Reconsume_Prepayments___ ;  
+
+@Override
+PROCEDURE CRUD_Update___ (
+   etag_     IN OUT VARCHAR2,
+   key_      IN OUT Customer_Order_Inv_Item_Key,
+   attr_     IN OUT VARCHAR2,
+   info_     OUT VARCHAR2,
+   action_   IN VARCHAR2 )
+IS
+   company_      VARCHAR2 (20);
+   invoice_id_   NUMBER ;
+   reconsume_    NUMBER ;
+   rec_          Customer_Order_Inv_Item_API.Public_Rec;
+
+BEGIN
+   rec_     := Customer_Order_Inv_Item_API.Get(key_.company,key_.invoice_id,key_.item_id); 
+   reconsume_ := Client_SYS.Get_Item_Value('RECONSUME', attr_);
+   attr_ := Client_SYS.Remove_Attr('RECONSUME', attr_);
+   Client_SYS.Add_To_Attr('SERVER_CHANGE','FALSE', attr_);
+   super(etag_, key_, attr_, info_, action_);
+         
+   IF (reconsume_ = 1)THEN
+      Reconsume_Prepayments___(company_,invoice_id_,rec_.order_no);
+   END IF;
+   
+END CRUD_Update___;

@@ -1,0 +1,1616 @@
+-------------------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  --------------------------------------------------------------------------
+-- 2022-02-01  PumJlk  SCZ-17478, Added 'Details' command in CustRefRef lov in CustomerOrdersList.
+-- 2021-12-23  Skanlk   Bug 161134(SC21R2-6825), Added the attribute TaxIdType for the entity CustomerOrder and modified command BulkValidateTaxIdNumberCommand by
+-- 2021-12-23           passing the TAX_ID_TYPE to validate Tax ID other than EU countires.
+-- 2021-10-01  NiRalk   SC21R2-2867, Modified HandleReturnMaterialAuthorizViewEditCommand to navigate to
+-- 2021-10-01           ReturnMaterialAuthorizationLines instead of CustomerReturnMaterialAuthorizationLines.
+-- 2021-09-08  ThKrlk   Bug 160717(SC21R2-2542), Modified ManualCreditCheckCommand to facilitate to release the Blocked CO. Added new action ManualCreditCheckHist.
+-- 2021-01-18  KiSalk   Bug 157485(SCZ-13238), Enabled search for the Name on Customer field.
+-- 2020-11-23  MaEelk   SC2020R1-9295, JinsuiInvoice was set to be an toggle when editable.
+-- 2020-11-12  MaEelk   SC2020R1-11302, SmConnection, SchedulingConnection, StagedBilling, PickInventoryType were handled as Enumerations
+-- 2020-11-12           ApplyFixDelivFreightDb, ConfirmDeliveriesDb, DelayCogsToDelivConfDb, CheckSalesGrpDelivConfDb, UsePreShipDelNoteDb, B2bOrderDb, JinsuiInvoiceDb
+-- 2020-11-12           were replaced with ApplyFixDelivFreight, ConfirmDeliveries, DelayCogsToDelivConf,  CheckSalesGrpDelivConf, UsePreShipDelNote, B2bOrder, JinsuiInvoice respectively.
+-- 2020-07-17  RoJalk   Bug 154273(SCZ-10310), Added the parametrs PickingLeadtime, DeliveryLeadtime, ShipAddrNoChangedVar to the function ValidateAddressNo.
+-- 2019-10-24  HarWlk   SCXTEND-963, Salesman renamed to Salesperson
+-- 2019-09-18  chlelk   SCXTEND-410, Field ranking was done for 40 fields
+-- 2019-07-29  RuLiLk   SCUXXW4-23255, Removed stage billing condition from IsCreateAdvanceInvoiceCommandEnabled method.
+-- 2019-07-02  Satglk   SCUXXW4-22663, Modified CreateProjectCommand, added additional attribute CustomerId for navigation.
+-- 2019-05-13  fgusse   SCUXXW4-20685, Added ludependencies for documenttext.
+-- 2019-05-01  AyAmlk   SCUXXW4-17406, Added enablefunction feature to improve performance at populate.
+-- 2019-03-22  DaZase   SCUXXW4-16379, moved code to fragment.
+-- 2018-08-31  JeLise   SCUXXW4-1076, Converted from tbwOverviewCustOrd using MTG Version: 1.27
+-------------------------------------------------------------------------------------------------
+fragment CustomerOrderList;
+
+component ORDER;
+layer Core;
+description "Use this fragment to view the records of the customer orders in the system.";
+include fragment UserAllowedSiteLovSelector;
+include fragment CustOrdCust1Selector;
+include fragment OrderCoordinatorLovSelector;
+include fragment SalesPartSalesmanLovSelector;
+include fragment CustomerAgreementLovSelector;
+include fragment TaxLiabilityLovSelector;
+include fragment OrderDeliveryTermLovSelector;
+include fragment CustBillAddressLovSelector;
+include fragment CustAddressShipLovSelector;
+include fragment CustInfoContactLovPubSelector;
+include fragment ReturnMaterialCustomerOrder;
+include fragment OutputTypeLovSelector;
+include fragment MpccomPhraseTextLovSelector;
+include fragment TaxCalcStructureActiveSelector;
+include fragment TaxCodeRestrictedSelector;
+@DynamicComponentDependency PURCH
+include fragment ValidSupplierLovSelector;
+include fragment CustomerOrderStateBadge;
+include fragment TaxIdNumbersValidation;
+include fragment ShipmentTypeSelector;
+
+//NOTE: warningsenabled gives an error if its in the fragment but please use it in client files that use this fragment
+//warningsenabled = CustomerOrder;
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+-------------------------------- ASSISTANTS ---------------------------------
+
+--------------------------------- COMMANDS ----------------------------------
+command CreateProjectCommand for CustomerOrder {
+   label = "Create Project";
+   mode = SingleRecord;
+   enabled = [Objstate = "Planned" and ProjectId = null];
+   variable FromCommandVar {
+      type = Boolean;
+   }
+   variable CreateAndCopyVar {
+      type = Boolean;
+   }
+   variable PageTypeVar {
+      type = Text;
+   }
+   execute {
+      set FromCommandVar = true;
+      set CreateAndCopyVar = true;
+      set PageTypeVar = "Customer Order";
+      navigate "assistant/CreateCopyProject/CreateCopyProjectAssistant?$action=InitProjectNavigation
+      {
+         ProjectId: $[ProjectId],
+         FromCommand:$[FromCommandVar],
+         CreateCopy:$[CreateAndCopyVar],
+         VarCompany:$[Company],
+         VarSite:$[Contract],
+         VarOrderNo:$[OrderNo],
+         PageType:$[PageTypeVar],
+         VarCustomerId: $[CustomerNo]
+      }";
+   }
+}
+command ProjectDetailsCommand for CustomerOrder {
+   label = "Project Details";
+   mode = SelectedRecords;
+   enabled = [ProjectId != null];
+   bulkexecute {
+      bulknavigate "page/ProjectDefinition/Form?$filter=ProjectId eq $[ProjectId]";
+   }
+}
+command SalesContractDetailsCommand for CustomerOrder {
+   label = "Sales Contract Details";
+   mode = SelectedRecords;
+   enabled = [SalesContractNo != null];
+   bulkexecute {
+      bulknavigate "page/SalesContract/Form?$filter=ContractNo eq $[SalesContractNo]";
+   }
+}
+
+command CreateAdvanceInvoiceCommand for CustomerOrder {
+   label = "Create Advance Invoice";
+   mode = SingleRecord;
+   enabled = [not(Objstate in("Delivered", "Cancelled", "Invoiced")) and JinsuiInvoice = false and(TotalNetBase > 0 or TotChrgNetAmtBase > 0)];
+
+   variable AdvanceInvoiceInfoVar Structure(AdvanceInvoiceInfoStructure);
+
+   execute {
+      call GetAdvanceInvoiceData(Company, CustomerNo) into AdvanceInvoiceInfoVar;
+      if [AdvanceInvoiceInfoVar.AllowWithDelivConfDb = "FALSE" and ConfirmDeliveries = true] {
+         info("The customer order has requested to confirm deliveries. Company ${Company} does not allow using delivery confirmation for advance invoices.");
+      }
+      else {
+         if [UsePriceInclTaxDb = true and(AdvanceInvoiceInfoVar.BaseForAdvInvoice = "NET AMOUNT" or AdvanceInvoiceInfoVar.BaseForAdvInvoice = "NET AMOUNT WITH CHARGES")] {
+            warning("Price including tax cannot be used with the net amount or the net amount with charge as base for an advance invoice. Please select the gross amount or the gross amount with charges as base for the advance invoice on the Company / Distribution / Order tab.");
+         }
+         else {
+            if [AdvanceInvoiceInfoVar.CollectiveCustomer = "C"] {
+               messagebox("", question, "The Customer ${CustomerNo} has the collective invoice functionality activated. By creating an advance invoice, the order will be excluded from the collective invoice. Do you want to proceed?") {
+                  when "Yes" {
+                     assistant CreateAdvancePaymentInvoice.CreateAdvancePaymentInvoiceAssistant(OrderNo) {
+                        when OK {
+                           exit OK;
+                        }
+                     }
+                  }
+                  when "No" {
+                     exit;
+                  }
+               }
+            }
+            else {
+               assistant CreateAdvancePaymentInvoice.CreateAdvancePaymentInvoiceAssistant(OrderNo) {
+                  when OK {
+                     exit OK;
+                  }
+               }
+            }
+         }
+      }
+   }
+}
+command InvoiceInfoCommand for CustomerOrder {
+   label = "Invoice Info";
+   mode = SelectedRecords;
+   bulkexecute {
+      bulknavigate "page/CustomerOrderInvoiceLines/List?$filter=OrderNo eq $[OrderNo]";
+   }
+}
+command BlockedInfoCommand for CustomerOrder {
+   label = "Blocked Info";
+   mode = SelectedRecords;
+   enabled = [Objstate = "Blocked"];
+   bulkexecute {
+      bulknavigate "page/HandleBlockedCustomerOrders/List?$filter=OrderNo eq $[OrderNo]";
+   }
+}
+command ShipmentLinesCommand for CustomerOrder {
+   label = "Shipment Lines";
+   mode = SelectedRecords;
+   enabled = [ShipmentInfo != 0];
+   bulkexecute {
+      bulknavigate "page/ShipmentLines/List?$filter=SourceRef1 eq $[OrderNo]";
+   }
+}
+//command HandleReturnMaterialAuthorizCreateCommand for CustomerOrder {
+//   Can be found in the fragment ReturnMaterialCustomerOrder
+//}
+command HandleReturnMaterialAuthorizViewEditCommand for CustomerOrder {
+   label = "View/Edit Return Material Authorization";
+   mode = SelectedRecords;
+   bulkexecute {
+      bulknavigate "page/ReturnMaterialAuthorizationLines/List?$filter=OrderNo eq $[OrderNo]";
+   }
+}
+command HandlePrepaymentBasedInvoiceCommand for CustomerOrder {
+   label = "Handle Prepayment Based Invoice";
+   mode = SingleRecord;
+
+   variable CollectiveCustomerVar Text;
+
+   execute {
+      call GetCollectiveCustomer(CustomerNo) into CollectiveCustomerVar;
+      if [CollectiveCustomerVar = "C"] {
+         messagebox("", question, "The customer ${CustomerNo} has the collective invoice functionality activated. By creating a prepayment invoice, the order will be excluded from the collective invoice. Do you want to proceed?") {
+            when "Yes" {
+               navigate "page/HandlePrepaymentBasedInvoice/Form?$filter=OrderNo eq $[OrderNo]";
+            }
+            when "No" {
+               exit;
+            }
+         }
+      }
+      else {
+         navigate "page/HandlePrepaymentBasedInvoice/Form?$filter=OrderNo eq $[OrderNo]";
+      }
+   }
+}
+command DocumentTextCommand for CustomerOrder {
+   label = "Document Text";
+   enabled = [NoteId != null];
+   variable LabelTextVar {
+      type = Text;
+   }
+   execute {
+      set LabelTextVar = " for Customer Order - ${OrderNo}" {
+         translatable = true;
+      }
+      assistant DocumentText.DocumentText(NoteId, LabelTextVar) {
+         when OK {
+            exit OK;
+         }
+      }
+   }
+}
+command ManualCreditCheckCommand for CustomerOrder {
+   label = "Manual Credit Check";
+   mode = SingleRecord;
+   enabled = [OrderNo != null and not(Objstate in("Delivered", "Cancelled", "Invoiced"))];
+   variable MessageVar {
+      type = Structure(CreditCheckStructure);
+   }
+   execute {
+      call ManualCreditCheck() into MessageVar;
+      if [MessageVar.MessageType = "InfoMessage"] {
+         info("${MessageVar.Message}");
+      }
+      else {
+         if [MessageVar.MessageType = "Question"] {
+            messagebox("", question, "${MessageVar.Message}") {
+               when "Yes" {
+                  call SetOrderBlocked(MessageVar.CreditBlockReason);
+               }
+               when "No" {
+                  call LogManualCreditCheckHist();
+               }
+            }
+         }
+         else {
+            if [MessageVar.MessageType = "QuestionBlockRelease"] {
+               messagebox("", question, "${MessageVar.Message}") {
+                  when "Yes" {
+                     call ManualCreditCheckHist("OK", ReleasedFromCreditCheck, "TRUE");
+                  }
+                  when "No" {
+                     call ManualCreditCheckHist("OK", ReleasedFromCreditCheck, "FALSE");
+                  }
+               }
+            }
+         }
+      }
+   }
+}
+command CopyCustomerOrderCommand for CustomerOrder {
+   label = "Copy Order";
+   mode = SingleRecord;
+   enabled = [OrderNo != null];
+   execute {
+      navigate "assistant/CopyCustomerOrder/Assistant?$action=SetupCustomerOrderInfo{FromOrderNoStr:$[OrderNo]}";
+   }
+}
+
+command ValidateAddressNoCommand for CustomerOrder {
+   variable AddressVar {
+      type = Structure(AddressStructure);
+   }
+   variable DeliveryVar {
+      type = Structure(DeliveryStructure);
+   }
+   variable ShipAddrNoChangedVar {
+      type = Boolean;
+   }
+   execute {
+      call ValidateAddressNo(true, CustomerNo, ShipAddrNo, Company, SupplyCountryDb, LanguageCode, AgreementId, Contract,
+      AddrFlagDb, DeliveryTerms, ShipmentType, VendorNo, ShipViaCode, DelTermsLocation, OrderNo, WantedDeliveryDate, UsePriceInclTaxDb,
+      PickingLeadtime, DeliveryLeadtime, ShipAddrNoChangedVar) into AddressVar;
+      set ShipViaCode = AddressVar.ShipViaCode;
+      set DeliveryTerms = AddressVar.DelivTerm;
+      set DeliveryLeadtime = AddressVar.Leadtime;
+      set ExtTransportCalendarId = AddressVar.ExtTransportCalendarId;
+      set DelTermsLocation = AddressVar.DelTermsLocation;
+      set FreightMapId = AddressVar.FreightMapId;
+      set ZoneId = AddressVar.ZoneId;
+      set CustCalendarId = AddressVar.CustCalendarId;
+      set RouteId = AddressVar.RouteId;
+      set ForwardAgentId = AddressVar.ForwardAgentId;
+      set PickingLeadtime = AddressVar.PickingLeadtime;
+      set ShipmentType = AddressVar.ShipmentType;
+      set DistrictCode = AddressVar.DistrictCode;
+      set RegionCode = AddressVar.RegionCode;
+      set WantedDeliveryDate = AddressVar.WantedDeliveryDate;
+      set FreightPriceListNo = AddressVar.FreightPriceListNo;
+      if [AddressVar.TaxLiability != null] {
+         set TaxLiability = AddressVar.TaxLiability;
+      }
+   }
+}
+command ValidateShipAddrNoCommand clone ValidateAddressNoCommand {
+   variable OldShipAddrNoVar {
+      type = Text;
+   }
+   execute {
+      call GetShipAddrNo(OrderNo) into OldShipAddrNoVar;
+      if [(ShipAddrNo != OldShipAddrNoVar) or(ShipAddrNo != original.ShipAddrNo)] {
+         set ShipAddrNoChangedVar = true;
+         super;
+      }
+   }
+}
+command ValidateAgreementIdCommand clone ValidateAddressNoCommand {
+   execute {
+      super;
+      if [AgreementId = null] {
+         info("No Agreement registered - Please verify the Ship Via and Delivery Terms.");
+      }
+   }
+}
+command ValidateSupplierCommand for CustomerOrder {
+   variable SupplierVar {
+      type = Structure(DeliveryStructure);
+   }
+   variable DeliveryVar {
+      type = Structure(DeliveryStructure);
+   }
+   execute {
+      if [VendorNo = null] {
+         set ShipViaCode = null;
+      }
+      call ValidateSupplier(OrderNo, Contract, CustomerNo, ShipAddrNo, AddrFlagDb, ShipViaCode, VendorNo, AgreementId,
+      DeliveryTerms, DelTermsLocation, UsePriceInclTaxDb) into SupplierVar;
+      set RouteId = SupplierVar.RouteId;
+      set ForwardAgentId = SupplierVar.ForwardAgentId;
+      set ExtTransportCalendarId = SupplierVar.ExtTransportCalendarId;
+      set FreightMapId = SupplierVar.FreightMapId;
+      set ZoneId = SupplierVar.ZoneId;
+      set FreightPriceListNo = SupplierVar.FreightPriceListNo;
+      set PickingLeadtime = SupplierVar.PickingLeadtime;
+      set ShipmentType = SupplierVar.ShipmentType;
+      set DeliveryTerms = SupplierVar.DeliveryTerms;
+      set DelTermsLocation = SupplierVar.DelTermsLocation;
+      set VendorName = SupplierVar.VendorName;
+   }
+}
+
+
+@Override
+command BulkValidateTaxIdNumberCommand for CustomerOrder {
+   enabled = [TaxIdNo != null];
+   bulkexecute {
+      stringify(records, "${keyref}TAX_ID_NUMBER=${TaxIdNo}^COUNTRY_CODE=${DeliveryCountryCode}^TAX_ID_TYPE=${TaxIdType}^;") into TaxIdNumberSelectionVar;
+      set ProjectionNameVar = "CustomerOrderHandling";
+      super;
+   }
+}
+
+--------------------------------- SELECTORS ---------------------------------
+
+---------------------------------- GROUPS -----------------------------------
+
+----------------------------------- LISTS -----------------------------------
+
+list CustomerOrdersList for CustomerOrder {
+   field OrderNo;
+   lov ContractRef with ReferenceUserAllowedSiteLovSelector {
+      size = Small;
+   }
+   fieldset CustomerOrderStateFieldSet;
+   field AdditionalDiscount;
+   field OrderIdRef {
+      size = Small;
+   }
+   lov CustomerNoRef with ReferenceCustOrdCust1Selector {
+      contactwidget {
+         enabled = [CustomerNo != null];
+         source = Customer;
+      }
+      search = CustomerNo, Name;
+      description = CustomerName;
+      size = Large;
+   }
+   lov AuthorizeCodeRef with ReferenceOrderCoordinatorLovSelector {
+      contactwidget {
+         enabled = [AuthorizeCode != null];
+         source = Person;
+      }
+   }
+   lov SalesmanCodeRef with ReferenceSalesPartSalesmanLovSelector {
+      contactwidget {
+         enabled = [SalesmanCode != null];
+         source = Person;
+      }
+   }
+   field WantedDeliveryDate {
+      validate command {
+         variable SiteUpdatePriceEffectiveDateVar Text;
+         variable NonIvoicedCancelledLinesExistVar Text;
+         execute {
+            if [WantedDeliveryDate != null and WantedDeliveryDate != original.WantedDeliveryDate] {
+               call GetNonIvoicedCancelledLinesExist(OrderNo) into NonIvoicedCancelledLinesExistVar;
+               if [NonIvoicedCancelledLinesExistVar = "1"] {
+                  messagebox("", question, "Wanted Delivery Date on the order header has been changed. Do you want to change Wanted Delivery Date on all order lines?") {
+                     when "Yes" {
+                        set ChangeLineDate = "Y";
+                        set PlannedDeliveryDate = WantedDeliveryDate;
+                        call GetSiteUpdatePriceEffectiveDate(Contract) into SiteUpdatePriceEffectiveDateVar;
+                        if [SiteUpdatePriceEffectiveDateVar = "TRUE" and Objstate = "Planned"] {
+                           set UpdatePriceEffectiveDate = "TRUE";
+                        }
+                        if [SiteUpdatePriceEffectiveDateVar = "TRUE" and Objstate != "Planned"] {
+                           messagebox("", question, "Changing the price effective date may result in a new price on the order line(s). Do you want to apply new price?") {
+                              when "Yes" {
+                                 set UpdatePriceEffectiveDate = "TRUE";
+                              }
+                              when "No" {
+                                 set UpdatePriceEffectiveDate = "FALSE";
+                              }
+                           }
+                        }
+                     }
+                     when "No" {
+                        exit;
+                     }
+                  }
+               }
+            }
+         }
+      }
+   }
+   lov AgreementIdRef with ReferenceCustomerAgreementLovSelector {
+      size = Small;
+      validate command ValidateAgreementIdCommand;
+   }
+   field CustomerNoPay {
+      size = Small;
+      contactwidget {
+         enabled = [CustomerNoPay != null];
+         source = Customer;
+      }
+   }
+   field CurrencyCode {
+      size = Small;
+   }
+   field PickingLeadtime {
+      size = Small;
+   }
+   field DeliveryLeadtime {
+      size = Small;
+   }
+   field ExtTransportCalendarIdRef {
+      size = Small;
+   }
+   field ExtTransportCalendarIdRef.Description {
+      label = "External Transport Calendar Description";
+   }
+   field DateEntered {
+      showonlydate = [true];
+   }
+   field LanguageCodeRef {
+      size = Small;
+   }
+   field CountryCodeRef {
+      size = Small;
+   }
+   field MarketCodeRef {
+      size = Small;
+   }
+   field DistrictCodeRef {
+      size = Small;
+   }
+   field RegionCodeRef {
+      size = Small;
+   }
+   field ForwardAgentIdRef {
+      size = Small;
+   }
+   field CustCalendarId {
+      size = Small;
+   }
+   field WorkTimeCalendarRef.Description {
+      size = Small;
+      label = "Customer Calendar Description";
+   }
+   field LabelNote;
+   lov TaxLiabilityRef with ReferenceTaxLiabilityLovSelector using TaxLiability(AddrFlagDb, DeliveryCountryCode, CustomerNo, ShipAddrNo) {
+      size = Small;
+   }
+   field TaxIdNo {
+      size = Small;
+      validate command {
+         execute {
+            if [TaxIdNo = null or TaxIdNo != original.TaxIdNo] {
+               set TaxIdValidatedDate = null;
+            }
+         }
+      }
+   }
+   field TaxIdValidatedDate {
+      editable = [false];
+   }
+   lov PayTermIdRef with ReferencePaymentTermSelector {
+      description = PayTermIdRef.Description;
+   }
+   field PayTermBaseDate;
+   lov DeliveryTermsRef with ReferenceOrderDeliveryTermLovSelector {
+      description = DeliveryTermsDesc;
+   }
+   field DelTermsLocation {
+      size = Small;
+   }
+   lov ShipViaCodeRef with ReferenceMpccomShipViaSelector {
+      description = ShipViaCodeDesc;
+      validate command {
+         variable DeliveryVar {
+            type = Structure(DeliveryStructure);
+         }
+         execute {
+            call FetchDeliveryAttributes(OrderNo, Contract, CustomerNo, ShipAddrNo, AddrFlagDb, ShipViaCode, VendorNo, ShipmentType,
+            DeliveryLeadtime, PickingLeadtime, ForwardAgentId, DeliveryTerms, DelTermsLocation, UsePriceInclTaxDb, "TRUE") into DeliveryVar;
+            set DeliveryLeadtime = DeliveryVar.DeliveryLeadtime;
+            set RouteId = DeliveryVar.RouteId;
+            set ForwardAgentId = DeliveryVar.ForwardAgentId;
+            set ExtTransportCalendarId = DeliveryVar.ExtTransportCalendarId;
+            set FreightMapId = DeliveryVar.FreightMapId;
+            set ZoneId = DeliveryVar.ZoneId;
+            set FreightPriceListNo = DeliveryVar.FreightPriceListNo;
+            set PickingLeadtime = DeliveryVar.PickingLeadtime;
+            set ShipmentType = DeliveryVar.ShipmentType;
+            set DeliveryTerms = DeliveryVar.DeliveryTerms;
+            set DelTermsLocation = DeliveryVar.DelTermsLocation;
+         }
+      }
+   }
+   lov ShipmentTypeRef with ShipmentTypeCoLovSelector {
+      advancedview ShipmentTypeCoLovList;
+      size = Small;
+   }
+   lov FreightMapIdRef with ReferenceFreightMapSelector {
+      description = FreightMapDesc;
+   }
+   lov FreightZoneRef with ReferenceFreightZoneSelector {
+      description = FreightZoneDescription;
+   }
+   lov FreightPriceListNoRef with ReferenceFreightPriceListSelector {
+      description = FreightPriceListNoRef.Description;
+   }
+   field ApplyFixDelivFreight {
+      size = Small;
+   }
+   field FixDelivFreight;
+   field BaseCurrency {
+      size = Small;
+   }
+   field CustomerPoNo {
+      size = Small;
+      validate command {
+         variable AlreadyUsedVar {
+            type = Number;
+         }
+         execute {
+            if [CustomerPoNo != null] {
+               call CustomerPoNoAlreadyUsed(CustomerPoNo, CustomerNo) into AlreadyUsedVar;
+               if [AlreadyUsedVar = 1] {
+                  inquire("Customer's purchase order number ${CustomerPoNo} already exists for this customer. Do you still want to use this reference?") {
+                     when NO {
+                        set CustomerPoNo = original.CustomerPoNo;
+                     }
+                  }
+               }
+            }
+         }
+      }
+   }
+   field BlockedType {
+      size = Small;
+      editable = [false];
+   }
+   lov RouteIdRef with ReferenceDeliveryRouteSelector {
+      description = RouteDescription;
+   }
+   field OrderConf {
+      size = Small;
+   }
+   field OrderConfFlag;
+   field PackListFlag;
+   field PrintDeliveredLines {
+      size = Small;
+   }
+   field PickListFlag;
+   field ConfirmDeliveries {
+      size = Small;
+   }
+   field DelayCogsToDelivConf {
+      size = Small;
+   }
+   field CheckSalesGrpDelivConf {
+      size = Small;
+   }
+   field InternalPoNo {
+      size = Small;
+   }
+   field InternalRef {
+      size = Small;
+   }
+   lov BillAddrNoRef with ReferenceCustBillAddressLovSelector {
+      validate command {
+         variable BillAddrNoVar {
+            type = Structure(ReturnStructure);
+         }
+         execute {
+            call ValidateBillAddrNo(CustomerNo, CustomerNoPay, CustomerNoPayAddrNo, BillAddrNo, Company, SupplyCountryDb, DeliveryCountryCode) into BillAddrNoVar;
+            set CustRef = BillAddrNoVar.CustRef;
+            set TaxIdNo = BillAddrNoVar.TaxIdNo;
+         }
+      }
+   }
+   field PrintControlCodeRef {
+      size = Small;
+   }
+   lov ShipAddrNoRef with ReferenceCustAddressShipLovSelector {
+      validate command ValidateShipAddrNoCommand;
+   }
+   field AddrFlag {
+      size = Small;
+   }
+   field SupplyCountry {
+      size = Small;
+      validate command {
+         variable SupplyVar {
+            type = Structure(SupplyCountryStructure);
+         }
+         execute {
+            call GetTaxInfo(CustomerNo, CustomerNoPay, CustomerNoPayAddrNo, BillAddrNo, Company, SupplyCountryDb, DeliveryCountryCode, ShipAddrNo) into SupplyVar;
+            set TaxLiability = SupplyVar.TaxLiability;
+            set TaxIdNo = SupplyVar.TaxIdNo;
+         }
+      }
+   }
+   field BackorderOption;
+   lov CustRefRef with ReferenceCustInfoContactLovPubSelector {
+      description = ReferenceName;
+      details = "page/Customer/AddressInfo?$filter=CustomerId eq $[CustomerNo]";
+   }
+   lov CustomerNoPayAddrNoRef with ReferenceCustBillAddressLovSelector {
+      size = Small;
+   }
+   field NoteText {
+      multiline = true;
+   }
+   field DocumentText {
+      size = Small;
+   }
+   field ProjectId {
+      size = Small;
+   }
+   field CurrencyRateType {
+      size = Small;
+   }
+   field CurrencyRateTypeDescription {
+      searchable = false;
+   }
+   field SmConnection {
+      enumerationtrue = "Connected";
+      enumerationfalse = "NotConnected";
+      truelabel = "Yes";
+      falselabel = "No";
+   }
+   field SchedulingConnection {
+      enumerationtrue = "SchedulingOrder";
+      enumerationfalse = "NotSchedulingOrder";
+      truelabel = "Yes";
+      falselabel = "No";
+   }
+   field StagedBilling {
+      enumerationtrue = "StagedBilling";
+      enumerationfalse = "NotStagedBilling";
+      truelabel = "Yes";
+      falselabel = "No";
+   }
+   field JinsuiInvoice {
+      columnexclude = [JinsuiInstalled = false];
+      size = Small;
+   }
+   field UsePriceInclTaxDb {
+      size = Small;
+   }
+   field AdvancePrepaymInvExists {
+      size = Small;
+   }
+   field Priority {
+      size = Small;
+   }
+   field DescriptionOfBlockingProblem;
+   lov CancelReasonRef with ReferenceOrderCancelReasonSelector {
+      description = CancellationReasonDescription;
+      editable = [Objstate = "Cancelled"];
+   }
+   field ProposedPrepaymentAmount;
+   field SalesContractNo {
+      size = Small;
+   }
+   field ContractRevSeq {
+      size = Small;
+   }
+   field ContractLineNo {
+      size = Small;
+   }
+   field ContractItemNo {
+      size = Small;
+   }
+   field TotalNetBase;
+   field TotalNetAmtCurr;
+   field AddDiscountAmtCurr;
+   field TotTaxAmtCurr;
+   field TotalGrossAmtCurr;
+   field TotalGrossInclChrgCurr;
+   field PickInventoryType {
+      enumerationtrue = "ShipmentInventory";
+      enumerationfalse = "OrdinaryInventory";
+      truelabel = "Yes";
+      falselabel = "No";
+   }
+   field UsePreShipDelNote {
+      size = Small;
+   }
+   field TotChrgNetAmtBase;
+   field Charges {
+      size = Small;
+   }
+   @DynamicComponentDependency PURCH
+   lov VendorNoRef with ReferenceValidSupplierLovSelector {
+      description = VendorName;
+      contactwidget {
+         enabled = [VendorNo != null];
+         source = Supplier;
+      }
+      validate command ValidateSupplierCommand;
+   }
+   field CustomsValueCurrencyRef {
+      size = Small;
+   }
+   field B2bOrder {
+      size = Small;
+   }
+
+   fieldranking OrderNo, ContractRef, Objstate, CustomerNoRef, AuthorizeCodeRef, WantedDeliveryDate, CurrencyCode, LanguageCodeRef, CountryCodeRef, ForwardAgentIdRef, CustCalendarId, PayTermIdRef, ShipViaCodeRef, ShipmentTypeRef, BaseCurrency, CustomerPoNo, InternalPoNo, RouteIdRef, OrderConf, OrderConfFlag, PackListFlag, PrintDeliveredLines, PickListFlag, ConfirmDeliveriesDb, BillAddrNoRef, ShipAddrNoRef, AddrFlag, SupplyCountry, CurrencyRateType, SchedulingConnectionDb, StagedBillingDb, JinsuiInvoice, UsePriceInclTaxDb, AdvancePrepaymInvExists, CustRefRef, CustomerNoPayAddrNoRef, TotalNetAmtCurr, TotTaxAmtCurr, TotalGrossAmtCurr, VendorNoRef;
+   fieldorder = OrderNo, ContractRef, Objstate, CustomerNoRef, AuthorizeCodeRef, WantedDeliveryDate, CurrencyCode, LanguageCodeRef, CountryCodeRef, ForwardAgentIdRef, CustCalendarId, PayTermIdRef, ShipViaCodeRef, ShipmentTypeRef, BaseCurrency, CustomerPoNo, InternalPoNo, RouteIdRef, OrderConf, OrderConfFlag, PackListFlag, PrintDeliveredLines, PickListFlag, ConfirmDeliveriesDb, BillAddrNoRef, ShipAddrNoRef, AddrFlag, SupplyCountry, CurrencyRateType, SchedulingConnectionDb, StagedBillingDb, JinsuiInvoice, UsePriceInclTaxDb, AdvancePrepaymInvExists, CustRefRef, CustomerNoPayAddrNoRef, TotalNetAmtCurr, TotTaxAmtCurr, TotalGrossAmtCurr, VendorNoRef;
+
+   commandgroup OperationsL1CmdGroup {
+
+      commandgroup OperationsCmdGroup {
+         label = "Operations";
+         command ManualCreditCheckCommand {
+            enablefunction IsManualCreditCheckCommandEnabled(OrderNo);
+         }
+         command BulkValidateTaxIdNumberCommand;
+      }
+   }
+   command ShipmentLinesCommand;
+   commandgroup InvoiceL1CmdGroup {
+
+      commandgroup InvoiceCmdGroup {
+         label = "Invoice";
+         command CreateAdvanceInvoiceCommand {
+            enablefunction IsCreateAdvanceInvoiceCommandEnabled(Company, OrderNo);
+         }
+         command HandlePrepaymentBasedInvoiceCommand {
+            enablefunction IsHandlePrepaymentBasedInvoiceCommandEnabled(Company, OrderNo);
+         }
+         command InvoiceInfoCommand {
+            enablefunction IsInvoiceInfoCommandEnabled(OrderNo);
+         }
+      }
+   }
+
+   command BlockedInfoCommand;
+   command SalesContractDetailsCommand;
+
+   commandgroup RMAL1CmdGroup {
+
+      commandgroup RMACmdGroup {
+         label = "RMA";
+         command ReturnMaterialAuthorizeCreateCommand {
+            enabled = [count(CustomerNo) = 1 and count(Contract) = 1 and count(CurrencyCode) = 1 and count(CustomerNoPay) = 1 and count(CustomerNoPayAddrNo) = 1];
+            enablefunction IsCreateReturnMaterialAuthorizationCommandEnabled(OrderNo);
+         }
+         command HandleReturnMaterialAuthorizViewEditCommand {
+            label = "View";
+            enabled = [count(CustomerNo) = 1 and count(Contract) = 1 and count(CurrencyCode) = 1 and count(CustomerNoPay) = 1 and count(CustomerNoPayAddrNo) = 1];
+            enablefunction IsHandleReturnMaterialAuthorizViewEditCommandEnabled(OrderNo);
+         }
+      }
+   }
+
+
+   @DynamicComponentDependency PROJ
+   commandgroup ProjectsL1CmdGroup {
+
+      commandgroup ProjectsCmdGroup {
+         label = "Project";
+         command CreateProjectCommand {
+            enablefunction CheckAnyLineNotProjConnected(OrderNo);
+         }
+         command ProjectDetailsCommand;
+      }
+   }
+   command CopyCustomerOrderCommand;
+   command DocumentTextCommand;
+}
+
+----------------------------------- CARDS -----------------------------------
+
+---------------------------------- DIALOGS ----------------------------------
+
+---------------------------------- CHARTS -----------------------------------
+
+--------------------------------- CALENDARS ---------------------------------
+
+---------------------------------- SHEETS -----------------------------------
+
+----------------------------- STATE INDICATORS ------------------------------
+
+----------------------------------- TREES -----------------------------------
+
+---------------------------------- PLUGINS ----------------------------------
+
+------------------------------- IMAGE VIEWERS -------------------------------
+
+
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+----------------------------- MAIN ENTRY POINTS -----------------------------
+entityset CustomerOrderSet for CustomerOrder;
+
+------------------------------ ENTITY DETAILS -------------------------------
+@Override
+entity CustomerOrder {
+   crud = Read, Update;
+   supportwarnings = [true];
+
+   use attributes = Contract, AdditionalDiscount, OrderId, CustomerNo, AuthorizeCode, SalesmanCode, WantedDeliveryDate, AgreementId, CustomerNoPay,
+   CurrencyCode, PickingLeadtime, DeliveryLeadtime, ExtTransportCalendarId, DateEntered, LanguageCode, CountryCode, MarketCode, DistrictCode,
+   RegionCode, ForwardAgentId, CustCalendarId, LabelNote, TaxLiability, TaxIdNo, TaxIdValidatedDate, PayTermId, PayTermBaseDate, DeliveryTerms,
+   DelTermsLocation, ShipViaCode, ShipmentType, FreightMapId, ZoneId, FreightPriceListNo, FixDelivFreight, CustomerPoNo, BlockedType, RouteId,
+   OrderConf, OrderConfFlag, PackListFlag, PrintDeliveredLines, PickListFlag, InternalPoNo, InternalRef, BillAddrNo, PrintControlCode, ShipAddrNo,
+   AddrFlag, SupplyCountry, BackorderOption, CustRef, CustomerNoPayAddrNo, NoteText, ProjectId, CurrencyRateType, Priority, CancelReason,
+   ProposedPrepaymentAmount, SalesContractNo, ContractRevSeq, ContractLineNo, ContractItemNo, PreAccountingId, InternalDeliveryType, NoteId,
+   VendorNo, CustomsValueCurrency, Company;
+   ludependencies = DocumentText, CustomerOrder, ReturnMaterial, ReturnMaterialLine;
+   attribute OrderNo Text {
+      editable = [false];
+   }
+
+   attribute AdditionalDiscount Number {
+      label = "Additional Discount (%)";
+      editable = [false];
+   }
+   attribute OrderId Text {
+      editable = [false];
+   }
+   attribute CustomerNo Text {
+      editable = [false];
+      label = "Customer";
+   }
+   attribute CustomerName Text {
+      fetch = "Cust_Ord_Customer_API.Get_Name(CUSTOMER_NO)";
+      editable = [false];
+   }
+   attribute AuthorizeCode Text {
+      label = "Coordinator";
+      editable = [ETag != null];
+   }
+   attribute SalesmanCode Text {
+      label = "Salesperson";
+      editable = [ETag != null];
+   }
+   attribute WantedDeliveryDate Timestamp {
+      label = "Wanted Delivery Date/Time";
+      editable = [ETag != null];
+   }
+   attribute AgreementId Text {
+      editable = [ETag != null];
+   }
+   attribute CustomerNoPay Text {
+      label = "Invoice Customer";
+      editable = [false];
+   }
+   attribute CurrencyCode Text {
+      label = "Order Currency";
+      editable = [false];
+   }
+   attribute PickingLeadtime Number {
+      editable = [ETag != null];
+   }
+   attribute DeliveryLeadtime Number {
+      maxlength = 3;
+      editable = [ETag != null];
+   }
+   attribute ExtTransportCalendarId Text {
+      label = "External Transport Calendar";
+   }
+   attribute DateEntered Timestamp {
+      label = "Created";
+      editable = [false];
+   }
+   attribute DateEnteredTruncated Date {
+      fetch = "TRUNC(date_entered)";
+   }
+   attribute LanguageCode Text {
+      editable = [ETag != null];
+   }
+   attribute CountryCode Text {
+      label = "Country";
+      editable = [ETag != null];
+   }
+   attribute MarketCode Text {
+      label = "Market";
+      editable = [ETag != null];
+   }
+   attribute DistrictCode Text {
+      label = "Ordering District";
+      editable = [ETag != null];
+   }
+   attribute RegionCode Text {
+      label = "Ordering Region";
+      editable = [ETag != null];
+   }
+   attribute ForwardAgentId Text {
+      label = "Forwarder ID";
+      editable = [ETag != null];
+   }
+   attribute CustCalendarId Text {
+      label = "Customer Calendar";
+      editable = [false];
+   }
+   attribute LabelNote Text {
+      label = "External CO Label Note";
+      editable = [ETag != null];
+   }
+   attribute TaxIdNo Text {
+      label = "Tax ID";
+   }
+   attribute TaxIdValidatedDate Date {
+      editable = [false];
+   }
+   attribute PayTermId Text {
+      label = "Pay Term";
+      required = [true];
+      editable = [ETag != null];
+   }
+   attribute PayTermBaseDate Date {
+      editable = [false];
+   }
+   attribute DeliveryTerms Text {
+      editable = [ETag != null];
+   }
+   attribute DeliveryTermsDesc Text {
+      fetch = "Order_Delivery_Term_API.Get_Description(DELIVERY_TERMS)";
+      editable = [false];
+   }
+   attribute ShipViaCode Text {
+      label = "Ship-Via";
+      editable = [ETag != null];
+   }
+   attribute ShipViaCodeDesc Text {
+      fetch = "Mpccom_Ship_Via_API.Get_Description(SHIP_VIA_CODE)";
+      editable = [false];
+   }
+   attribute ShipmentType Text {
+      editable = [ETag != null];
+      format = uppercase;
+   }
+   attribute FreightMapId Text {
+      editable = [false];
+   }
+   attribute FreightMapDesc Text {
+      fetch = "Freight_Map_API.Get_Description(FREIGHT_MAP_ID)";
+      editable = [false];
+   }
+   attribute ZoneId Text {
+      editable = [false];
+   }
+   attribute FreightPriceListNo Text {
+      label = "Freight Price List";
+      editable = [false];
+      format = uppercase;
+   }
+   attribute ApplyFixDelivFreight Boolean("TRUE", "FALSE") {
+      label = "Apply Fixed Delivery Freight";
+      fetch = "apply_fix_deliv_freight_db";
+      editable = [false];
+   }
+   attribute FixDelivFreight Number {
+      editable = [false];
+      format = ifscurrency;
+   }
+   attribute BaseCurrency Text {
+      fetch = "Company_Finance_API.Get_Currency_Code(company)";
+      editable = [false];
+      format = uppercase;
+   }
+   attribute CustomerPoNo Text {
+      label = "Customer's PO No";
+      editable = [ETag != null];
+   }
+   attribute BlockedType Enumeration(CustomerOrderBlockType) {
+      label = "Block Type";
+   }
+   attribute RouteId Text {
+      editable = [ETag != null];
+   }
+   attribute RouteDescription Text {
+      fetch = "Delivery_Route_API.Get_Description(ROUTE_ID)";
+      editable = [false];
+   }
+   attribute OrderConf Enumeration(OrderConfirmationPrinted) {
+      label = "Order Confirmation";
+      editable = [false];
+   }
+   attribute OrderConfFlag Enumeration(PrintOrderConfirmation) {
+      label = "Print Order Confirmation";
+      editable = [ETag != null];
+   }
+   attribute PackListFlag Enumeration(PrintPackList) {
+      label = "Print Delivery Note";
+      editable = [ETag != null];
+   }
+   attribute PrintDeliveredLines Enumeration(DeliveryNoteOptions) {
+      label = "Show Only Delivered Lines in Delivery Note for";
+   }
+   attribute PickListFlag Enumeration(PrintPickList) {
+      editable = [ETag != null];
+      label = "Print Pick List";
+   }
+   attribute ConfirmDeliveries Boolean("TRUE", "FALSE") {
+      label = "Confirm Deliveries";
+      fetch = "confirm_deliveries_db";
+      required = [true];
+   }
+   attribute DelayCogsToDelivConf Boolean("TRUE", "FALSE") {
+      label = "Delay Cost of Goods Sold to Delivery Confirmation";
+      fetch = "delay_cogs_to_deliv_conf_db";
+      editable = [false];
+   }
+   attribute CheckSalesGrpDelivConf Boolean("TRUE", "FALSE") {
+      label = "Check Sales Group Setting";
+      fetch = "check_sales_grp_deliv_conf_db";
+      required = [true];
+   }
+   attribute InternalPoNo Text {
+      editable = [false];
+   }
+   attribute InternalRef Text {
+      label = "Internal PO Ref";
+      editable = [false];
+   }
+   attribute BillAddrNo Text {
+      label = "Document Address";
+   }
+   attribute PrintControlCode Text {
+      label = "Print Code";
+      editable = [false];
+   }
+   attribute ShipAddrNo Text {
+      label = "Delivery Address";
+   }
+   attribute AddrFlag Enumeration(GenYesNo) {
+      label = "Single Occurrence Address";
+      editable = [false];
+   }
+   attribute CustRef Text {
+      label = "Reference";
+      editable = [ETag != null];
+   }
+   attribute ReferenceName Text {
+      fetch = "Contact_Util_API.Get_Cust_Contact_Name(customer_no, bill_addr_no, cust_ref)";
+      editable = [false];
+      updatable = [false];
+   }
+   attribute CustomerNoPayAddrNo Text {
+      label = "Inv Cust Addr ID";
+      editable = [ETag = null];
+   }
+   attribute DocumentText Boolean("TRUE", "FALSE") {
+      fetch = "DECODE(Document_Text_API.Note_Id_Exist(NOTE_ID), '1', 'TRUE', 'FALSE')";
+      editable = [false];
+   }
+   attribute ProjectId Text {
+      editable = [false];
+   }
+   attribute CurrencyRateType Text {
+      editable = [false];
+   }
+   attribute CurrencyRateTypeDescription Text {
+      fetch = "Currency_Type_API.Get_Description(company, currency_rate_type)";
+      editable = [false];
+   }
+   attribute SmConnection Enumeration(ServiceManagementConnect) {
+      fetch = "sm_connection_db";
+      label = "SM Connection";
+      editable = [false];
+      required = [true];
+   }
+   attribute SchedulingConnection Enumeration(ScheduleAgreementOrder) {
+      fetch = "scheduling_connection_db";
+      label = "Schedule Order";
+      editable = [false];
+      required = [true];
+   }
+   attribute StagedBilling Enumeration(StagedBillingType) {
+      fetch = "staged_billing_db";
+      label = "Staged Billing";
+      editable = [false];
+      required = [true];
+   }
+   attribute JinsuiInvoice Boolean("TRUE", "FALSE") {
+      label = "Jinsui Invoice";
+      fetch = "jinsui_invoice_db";
+      required = [true];
+   }
+   attribute UsePriceInclTaxDb Boolean("TRUE", "FALSE") {
+      label = "Use Price Incl Tax";
+      editable = [false];
+   }
+   attribute AdvancePrepaymInvExists Boolean("TRUE", "FALSE") {
+      fetch = "Customer_Invoice_Pub_Util_API.Has_Adv_Or_Prepaym_Inv(order_no)";
+      label = "Advance/Prepaym Inv. Exists";
+      editable = [false];
+   }
+   attribute DescriptionOfBlockingProblem Text {
+      fetch = "Customer_Order_API.Get_Blocked_Reason_Desc(order_no)";
+      label = "Description of Blocking Problem";
+      editable = [false];
+   }
+   attribute CancelReason Text {
+      editable = [ETag != null];
+   }
+   attribute CancellationReasonDescription Text {
+      fetch = "Order_Cancel_Reason_API.Get_Reason_Description(cancel_reason)";
+      editable = [false];
+   }
+   attribute ProposedPrepaymentAmount Number {
+      label = "Required Prepay Amt";
+      editable = [false];
+      format = ifscurrency;
+   }
+   attribute SalesContractNo Text {
+      editable = [false];
+   }
+   attribute ContractRevSeq Number {
+      label = "Revision No";
+      editable = [false];
+   }
+   attribute ContractLineNo Number {
+      label = "Line No";
+      editable = [false];
+   }
+   attribute ContractItemNo Number {
+      label = "Contract Line Item Number";
+      editable = [false];
+   }
+   attribute TotalNetBase Number {
+      fetch = "Customer_Order_API.Get_Total_Base_Price(order_no)";
+      label = "Total Net/Base";
+      editable = [false];
+      format = ifscurrency;
+   }
+   attribute TotalNetAmtCurr Number {
+      fetch = "Customer_Order_API.Get_Total_Sale_Price__(order_no)";
+      label = "Total Net Amt/Curr";
+      editable = [false];
+      format = ifscurrency;
+   }
+   attribute AddDiscountAmtCurr Number {
+      fetch = "Customer_Order_API.Get_Total_Add_Discount_Amount(order_no)";
+      label = "Add Discount Amt/Curr";
+      editable = [false];
+      format = ifscurrency;
+   }
+   attribute TotTaxAmtCurr Number {
+      fetch = "Customer_Order_API.Get_Ord_Total_Tax_Amount(order_no)";
+      label = "Tot Tax Amt/Curr";
+      editable = [false];
+      format = ifscurrency;
+   }
+   attribute TotalGrossAmtCurr Number {
+      fetch = "Customer_Order_API.Get_Ord_Gross_Amount(order_no)";
+      label = "Total Gross Amt/Curr";
+      editable = [false];
+      format = ifscurrency;
+   }
+   attribute TotalGrossInclChrgCurr Number {
+      fetch = "Customer_Order_API.Get_Ord_Gross_Amount(order_no)+Customer_Order_API.Get_Total_Sale_Charge__(order_no)+Customer_Order_API.Get_Tot_Charge_Sale_Tax_Amt(order_no)";
+      label = "Total Gross incl Chrg/Curr";
+      editable = [false];
+      format = ifscurrency;
+   }
+   attribute PickInventoryType Enumeration(PickInventoryType) {
+      fetch = "pick_inventory_type_db";
+      label = "Use Shipment Inventory";
+      editable = [false];
+      required = [true];
+   }
+   attribute UsePreShipDelNote Boolean("TRUE", "FALSE") {
+      label = "Use Two-Stage Picking";
+      fetch = "use_pre_ship_del_note_db";
+      editable = [false];
+   }
+   attribute PreAccountingId Number {
+      label = "Pre-Posting ID";
+      editable = [false];
+   }
+   attribute InternalDeliveryType Enumeration(OrderDeliveryType) {
+      editable = [ETag = null];
+   }
+   attribute TotChrgNetAmtBase Number {
+      fetch = "Customer_Order_API.Get_Total_Base_Charge__(order_no)";
+      label = "Tot Chrg Net Amt/Base";
+      editable = [false];
+      format = ifscurrency;
+   }
+   attribute ShipmentInfo Number {
+      fetch = "Shipment_Line_API.Shipment_Connected_Lines_Exist(order_no, 'CUSTOMER_ORDER')";
+      editable = [false];
+   }
+   attribute NoteId Number {
+      editable = [false];
+   }
+   attribute Charges Boolean {
+      fetch = "DECODE(Customer_Order_API.Exist_Charges__(order_no), 1, 'TRUE', 'FALSE')";
+      editable = [false];
+   }
+   attribute VendorNo Text {
+      label = "Deliver-from Supplier";
+   }
+   attribute DeliveryCountryCode Text {
+      fetch = "Customer_Order_Address_API.Get_Country_Code(order_no)";
+      editable = [false];
+   }
+   attribute AddrFlagDb Text {
+      label = "Single Occurrence";
+      editable = [false];
+   }
+   attribute B2bOrder Boolean("TRUE", "FALSE") {
+      label = "B2B Order";
+      fetch = "b2b_order_db";
+      editable = [false];
+   }
+   attribute JinsuiInstalled Boolean {
+      fetch = "DECODE(Module_API.Get_Name('JINSUI'), NULL, 'FALSE', 'TRUE')";
+   }
+   attribute ChangeLineDate Text {
+      fetch = "NULL";
+   }
+   attribute PlannedDeliveryDate Timestamp {
+      fetch = "NULL";
+   }
+   attribute UpdatePriceEffectiveDate Text {
+      fetch = "NULL";
+   }
+   attribute SupplyCountryDb Text {
+      maxlength = 2;
+   }
+   attribute VendorName Text {
+      fetch = "Supplier_Info_API.Get_Name(vendor_no)";
+      editable = [false];
+      insertable = [false];
+      updatable = [false];
+   }
+   attribute FreightZoneDescription Text {
+      fetch = "Freight_Zone_API.Get_Description(freight_map_id, zone_id)";
+   }
+   attribute TaxIdType Text {
+      fetch = "Customer_Order_API.Get_Tax_Id_Type(order_no)";
+      label = "Tax Id Type";
+      editable = [false];
+   }
+   reference WorkTimeCalendarRef(CustCalendarId) to WorkTimeCalendar(CalendarId);
+   reference ExtTransportCalendarIdRef(ExtTransportCalendarId) to WorkTimeCalendar(CalendarId) {
+      label = "External Transport Calendar";
+   }
+   reference FreightZoneRef(FreightMapId, ZoneId) to FreightZone(FreightMapId, ZoneId) {
+      label = "Freight Zone";
+   }
+   reference ContractRef(Contract) to UserAllowedSiteLov(Contract) {
+      label = "Site";
+   }
+   reference OrderIdRef(OrderId) to CustOrderType(OrderId) {
+      label = "Order Type";
+   }
+   reference CustomerNoRef(CustomerNo) to CustOrdCust1(CustomerNo) {
+      label = "Customer";
+   }
+   reference AuthorizeCodeRef(AuthorizeCode) to OrderCoordinatorLov(AuthorizeCode) {
+      label = "Coordinator";
+   }
+   reference SalesmanCodeRef(SalesmanCode) to SalesPartSalesmanLov(SalesmanCode) {
+      label = "Salesperson";
+   }
+   reference AgreementIdRef(CustomerNo, Contract, CurrencyCode, AgreementId) to CustomerAgreementLov(CustomerNo, Contract, CurrencyCode, AgreementId) {
+      label = "Agreement ID";
+   }
+
+   reference LanguageCodeRef(LanguageCode) to ApplicationLanguage(LanguageCode) {
+      label = "Language Code";
+   }
+   reference CountryCodeRef(CountryCode) to IsoCountry(CountryCode) {
+      label = "Country";
+   }
+   reference MarketCodeRef(MarketCode) to SalesMarket(MarketCode) {
+      label = "Market";
+   }
+   reference DistrictCodeRef(DistrictCode) to SalesDistrict(DistrictCode) {
+      label = "Ordering District";
+   }
+   reference RegionCodeRef(RegionCode) to SalesRegion(RegionCode) {
+      label = "Ordering Region";
+   }
+   reference ForwardAgentIdRef(ForwardAgentId) to ForwarderInfo(ForwarderId) {
+      label = "Forwarder ID";
+   }
+   reference TaxLiabilityRef(TaxLiability) to TaxLiabilityLov(TaxLiability) {
+      label = "Tax Liability";
+   }
+   reference PayTermIdRef(Company, PayTermId) to PaymentTerm(Company, PayTermId) {
+      label = "Pay Term";
+   }
+   reference DeliveryTermsRef(DeliveryTerms) to OrderDeliveryTermLov(DeliveryTerms) {
+      label = "Delivery Terms";
+   }
+   reference ShipViaCodeRef(ShipViaCode) to MpccomShipVia(ShipViaCode) {
+      label = "Ship-Via";
+   }
+   reference ShipmentTypeRef(ShipmentType) to ShipmentType(ShipmentType) {
+      label = "Shipment Type";
+   }
+   reference FreightMapIdRef(FreightMapId) to FreightMap(FreightMapId) {
+      label = "Freight Map";
+   }
+   reference FreightPriceListNoRef(FreightPriceListNo) to FreightPriceList(PriceListNo) {
+      label = "Freight Price List";
+   }
+   reference RouteIdRef(RouteId) to DeliveryRoute(RouteId) {
+      label = "Route";
+   }
+   reference BillAddrNoRef(CustomerNo, BillAddrNo) to CustBillAddressLov(CustomerNo, AddrNo) {
+      label = "Document Address";
+   }
+   reference PrintControlCodeRef(PrintControlCode) to CustOrdPrintControl(PrintControlCode) {
+      label = "Print Code";
+   }
+   reference ShipAddrNoRef(CustomerNo, ShipAddrNo) to CustAddressShipLov(CustomerNo, AddrNo) {
+      label = "Delivery Address";
+   }
+   reference CustRefRef(CustomerNo, BillAddrNo, CustRef) to CustInfoContactLovPub(CustomerId, AddressId, PersonId) {
+      label = "Reference";
+   }
+   reference CustomerNoPayAddrNoRef(CustomerNoPay, CustomerNoPayAddrNo) to CustBillAddressLov(CustomerNo, AddrNo) {
+      label = "Inv Cust Addr ID";
+   }
+   reference CancelReasonRef(CancelReason) to OrderCancelReason(CancelReason) {
+      label = "Cancellation Reason";
+   }
+   reference CustomsValueCurrencyRef(CustomsValueCurrency) to IsoCurrency(CurrencyCode) {
+      label = "Customs Value Currency";
+   }
+   @DynamicComponentDependency PURCH
+   reference VendorNoRef(VendorNo) to ValidSupplierLov(VendorNo) {
+      label = "Deliver-from Supplier";
+   }
+   action ManualCreditCheck Structure(CreditCheckStructure);
+
+   action SetOrderBlocked {
+      parameter CreditBlockReason Text;
+   }
+
+   action LogManualCreditCheckHist;
+
+   action ManualCreditCheckHist {
+      parameter LogReason Text;
+      parameter ReleasedFromCreditCheck Text;
+      parameter CheckRelease Text;
+   }
+}
+
+------------------------------- ENUMERATIONS --------------------------------
+
+---------------------------------- QUERIES ----------------------------------
+
+---------------------------------- ACTIONS ----------------------------------
+
+--------------------------------- FUNCTIONS ---------------------------------
+function TaxLiability List < Entity(TaxLiabilityLov) > {
+   parameter AddrFlag Text;
+   parameter DeliveryCountryCode Text;
+   parameter CustomerNo Text;
+   parameter ShipAddrNo Text;
+
+   where = "(:AddrFlag = 'Y' AND (country_code = :DeliveryCountryCode OR country_code = '*')) OR
+            ((:AddrFlag IS NULL OR :AddrFlag = 'N') AND (country_code = Cust_Ord_Customer_Address_API.Get_Country_Code(:CustomerNo, :ShipAddrNo) OR country_code = '*'))";
+}
+
+function ValidateAddressNo Structure(AddressStructure) {
+   parameter DeliveryAddress Boolean;
+   parameter CustomerNo Text;
+   parameter ShipAddrNo Text;
+   parameter Company Text;
+   parameter SupplyCountryDb Text;
+   parameter LanguageCode Text;
+   parameter AgreementId Text;
+   parameter Contract Text;
+   parameter AddrFlagDb Text;
+   parameter DeliveryTerms Text;
+   parameter ShipmentType Text;
+   parameter VendorNo Text;
+   parameter ShipViaCode Text;
+   parameter DelTermsLocation Text;
+   parameter OrderNo Text;
+   parameter WantedDeliveryDate Timestamp;
+   parameter UsePriceInclTaxDb Boolean;
+   parameter PickingLeadtime Number;
+   parameter DeliveryLeadtime Number;
+   parameter ShipAddrNoChanged Boolean;
+}
+
+function FetchDeliveryAttributes Structure(DeliveryStructure) {
+   parameter OrderNo Text;
+   parameter Contract Text;
+   parameter CustomerNo Text;
+   parameter ShipAddrNo Text;
+   parameter AddrFlagDb Text;
+   parameter ShipViaCode Text;
+   parameter VendorNo Text;
+   parameter ShipmentType Text;
+   parameter DeliveryLeadtime Number;
+   parameter PickingLeadtime Number;
+   parameter ForwardAgentId Text;
+   parameter DeliveryTerms Text;
+   parameter DelTermsLocation Text;
+   parameter UsePriceInclTaxDb Boolean;
+   parameter ShipViaCodeChanged Text;
+}
+
+function ValidateSupplier Structure(DeliveryStructure) {
+   parameter OrderNo Text;
+   parameter Contract Text;
+   parameter CustomerNo Text;
+   parameter ShipAddrNo Text;
+   parameter AddrFlagDb Text;
+   parameter ShipViaCode Text;
+   parameter VendorNo Text;
+   parameter AgreementId Text;
+   parameter DeliveryTerms Text;
+   parameter DelTermsLocation Text;
+   parameter UsePriceInclTaxDb Boolean;
+}
+
+function GetCustRef Text {
+   parameter CustomerNo Text;
+   parameter BillAddrNo Text;
+}
+
+function GetTaxIdNo Text {
+   parameter CustomerNo Text;
+   parameter CustomerNoPay Text;
+   parameter CustomerNoPayAddrNo Text;
+   parameter BillAddrNo Text;
+   parameter Company Text;
+   parameter SupplyCountryDb Text;
+   parameter DeliveryCountryCode Text;
+}
+
+function ValidateBillAddrNo Structure(ReturnStructure) {
+   parameter CustomerNo Text;
+   parameter CustomerNoPay Text;
+   parameter CustomerNoPayAddrNo Text;
+   parameter BillAddrNo Text;
+   parameter Company Text;
+   parameter SupplyCountryDb Text;
+   parameter DeliveryCountryCode Text;
+}
+
+function GetShipAddrNo Text {
+   parameter OrderNo Text;
+}
+
+function GetTaxInfo Structure(SupplyCountryStructure) {
+   parameter CustomerNo Text;
+   parameter CustomerNoPay Text;
+   parameter CustomerNoPayAddrNo Text;
+   parameter BillAddrNo Text;
+   parameter Company Text;
+   parameter SupplyCountryDb Text;
+   parameter DeliveryCountryCode Text;
+   parameter ShipAddrNo Text;
+}
+
+function CustomerPoNoAlreadyUsed Number {
+   parameter CustomerPoNo Text;
+   parameter CustomerNo Text;
+}
+
+function IsCreateAdvanceInvoiceCommandEnabled Boolean {
+   parameter Company Text;
+   parameter OrderNo Text;
+}
+
+function IsHandlePrepaymentBasedInvoiceCommandEnabled Boolean {
+   parameter Company Text;
+   parameter OrderNo Text;
+}
+
+function IsInvoiceInfoCommandEnabled Boolean {
+   parameter OrderNo Text;
+}
+
+function IsHandleReturnMaterialAuthorizViewEditCommandEnabled Boolean {
+   parameter OrderNo Text;
+}
+
+function IsManualCreditCheckCommandEnabled Boolean {
+   parameter OrderNo Text;
+}
+
+function IsCreateReturnMaterialAuthorizationCommandEnabled Boolean {
+   parameter OrderNo Text;
+}
+
+function GetAdvanceInvoiceData Structure(AdvanceInvoiceInfoStructure) {
+   parameter Company Text;
+   parameter CustomerNo Text;
+}
+
+function GetCollectiveCustomer Text {
+   parameter CustomerNo Text;
+}
+
+function GetSiteUpdatePriceEffectiveDate Text {
+   parameter Contract Text;
+}
+
+function GetNonIvoicedCancelledLinesExist Text {
+   parameter OrderNo Text;
+}
+
+function CheckAnyLineNotProjConnected Boolean {
+   parameter OrderNo Text;
+}
+-------------------------------- STRUCTURES ---------------------------------
+structure CreditCheckStructure {
+   attribute Message Text;
+   attribute MessageType Text;
+   attribute CreditBlockReason Text;
+}
+
+structure AddressStructure {
+   attribute ShipViaCode Text;
+   attribute DelivTerm Text;
+   attribute Leadtime Number;
+   attribute ExtTransportCalendarId Text;
+   attribute DelTermsLocation Text;
+   attribute FreightMapId Text;
+   attribute ZoneId Text;
+   attribute CustCalendarId Text;
+   attribute RouteId Text;
+   attribute ForwardAgentId Text;
+   attribute PickingLeadtime Number;
+   attribute ShipmentType Text;
+   attribute DistrictCode Text;
+   attribute RegionCode Text;
+   attribute TaxLiability Text;
+   attribute CountryCode Text;
+   attribute CountryDesc Text;
+   attribute WantedDeliveryDate Timestamp;
+   attribute FreightPriceListNo Text;
+}
+
+structure DeliveryStructure {
+   attribute DeliveryLeadtime Number;
+   attribute RouteId Text;
+   attribute ForwardAgentId Text;
+   attribute ExtTransportCalendarId Text;
+   attribute FreightMapId Text;
+   attribute ZoneId Text;
+   attribute FreightPriceListNo Text;
+   attribute PickingLeadtime Number;
+   attribute ShipmentType Text;
+   attribute DeliveryTerms Text;
+   attribute DelTermsLocation Text;
+   attribute VendorName Text;
+}
+
+structure ReturnStructure {
+   attribute CustRef Text;
+   attribute TaxIdNo Text;
+}
+
+structure SupplyCountryStructure {
+   attribute TaxLiability Text;
+   attribute TaxIdNo Text;
+}
+
+structure AdvanceInvoiceInfoStructure {
+   attribute AllowWithDelivConfDb Text;
+   attribute BaseForAdvInvoice Text;
+   attribute CollectiveCustomer Text;
+}
+--------------------------------- VIRTUALS ----------------------------------
+
+--------------------------------- SUMMARIES ---------------------------------
+
+-------------------------------- SINGLETONS ---------------------------------
+

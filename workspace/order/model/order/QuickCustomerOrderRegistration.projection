@@ -1,0 +1,481 @@
+-------------------------------------------------------------------------------------------------------
+--  Date        Sign    History
+--  ----------  ------  --------------------------------------------------------------------------------
+--  2022-02-02  NiDalk  SC21R2-7473, Added ValidateSupplyCode.
+--  2022-01-28  ChBnlk  SC21R2-7345, Corrected issues identified through system testing.
+--  2022-01-27  ChBnlk  SC21R2-7346, Comment added since the client files are not fetched to  build without committing projection.
+--  2021-11-15  ChBnlk  SC21R2-5075, Added implementation related to QuickCustOrdAddFromOrderAssistant.
+--  2021-11-02  ChBnlk  SC21R2-1083, Added temparary documentation.
+--  2021-10-22  ChBnlk  SC21R2-1083, Created.
+--  ----------  ------  --------------------------------------------------------------------------------
+
+projection QuickCustomerOrderRegistration;
+component ORDER;
+layer Core;
+description " Designed to create customer order header and lines using minimum number of attributes.";
+category Users;
+
+--------------------------------- FRAGMENTS ---------------------------------
+include fragment OrderCoordinatorLovSelector;
+include fragment UserAllowedSiteLovSelector;
+include fragment CustOrdCust6Selector;
+include fragment CustOrdCust7Selector;
+include fragment CustAddressShipLovSelector;
+@DynamicComponentDependency PURCH
+include fragment PurchasePartSupplierLovSelector;
+include fragment SalesPartActiveLovSelector;
+include fragment QuickCustOrdRegUtil;
+include fragment QuickCustOrdAddMultiplePartsAssistant;
+include fragment QuickCustOrdAddFromTemplateAssistant;
+include fragment QuickCustOrdAddFromOrderAssistant;
+include fragment LimitToAssortSalesPartLovSelector;
+
+----------------------------- MAIN ENTRY POINTS -----------------------------
+
+
+------------------------------ ENTITY DETAILS -------------------------------
+
+entityset CreateCustomerOrderSet for CreateCustomerOrderVirtual;
+
+@DynamicComponentDependency PURCH
+entityset PurchasePartSupplierLovSet for PurchasePartSupplierLov;
+
+------------------------------- ENUMERATIONS --------------------------------
+
+
+---------------------------------- QUERIES ----------------------------------
+
+
+---------------------------------- ACTIONS ----------------------------------
+
+@apidoc {
+   @description : This operation is used to create customer orders internally through quick customer order registration.
+   @param ParentObjkey : Parent key of the virtual table
+   @param ReleasedOrderCreation : Indicate if the order should be created in released or planned status.
+   @param PrintOrderConfirmation : Indicate if the order confirmation should be printed or not.
+   @param EmailOrderConfirmation : Indicate if the order confirmation should be emailed or not.
+   @param EmailAddress : Indicates the email address to which the customer order should be sent.
+   @return : OrderNo - The customer order number from which the goods are delivered to the customer.
+}
+action CreateOrderInternal Text {
+   initialcheck implementation;
+   supportwarnings = [true];
+   parameter ParentObjkey Text;
+   parameter ReleasedOrderCreation Boolean;
+   parameter PrintOrderConfirmation Boolean;
+   parameter EmailOrderConfirmation Boolean;
+   parameter EmailAddress Text;
+}
+
+@apidoc {
+   @description : This operation is used to create customer orders externally.
+   @param OrderStruct :  Includes order information.
+   @param ReleasedOrderCreation : Indicate if the order should be created in released or planned status.
+   @param PrintOrderConfirmation : Indicate if the order confirmation should be printed or not.
+   @param EmailOrderConfirmation : Indicate if the order confirmation should be emailed or not.
+   @param EmailAddress :  Indicates the email address to which the customer order should be sent.
+   @return : OrderNo - The customer order number from which the goods are delivered to the customer.
+}
+action CreateOrder Text {
+   initialcheck implementation;
+   supportwarnings = [true];
+   parameter OrderStruct Structure(QuickCustOrdStruct);
+   parameter ReleasedOrderCreation Boolean;
+   parameter PrintOrderConfirmation Boolean;
+   parameter EmailOrderConfirmation Boolean;
+   parameter EmailAddress Text;
+}
+
+@apidoc {
+   @description : Internally used action to add customer order lines to the customer order header.
+   @param ParentObjkey : Internal attribute
+   @param SourceObjkey : Internal attribute
+   @param LanguageCode : Internal attribute
+   @param CustomerNo : Internal attribute
+   @param Source : Internal attribute
+}
+action AddQuickCustOrdLine {
+   initialcheck implementation;
+   ludependencies = CreateCustomerOrderLinesVirtual;
+   parameter ParentObjkey Text;
+   parameter SourceObjkey Text;
+   parameter LanguageCode Text;
+   parameter CustomerNo Text;
+   parameter Source Text;
+}
+
+--------------------------------- FUNCTIONS ---------------------------------
+
+@apidoc {
+   @description : Internally used function to get the default values related to the customer.
+   @param CustomerNo : Internal attribute
+   @param Contract : Internal attribute
+   @param WantedDeliveryDate : Internal attribute
+   @param CurrencyCode : Internal attribute
+   @param OrderId : Internal attribute
+   @param ShipAddrNo : Internal attribute
+   @return : CustomerDefaultsStructure - Internal attribute
+}
+function GetCustomerDefaults Structure(CustomerDefaultsStructure) {
+   parameter CustomerNo Text;
+   parameter Contract Text;
+   parameter WantedDeliveryDate Timestamp;
+   parameter CurrencyCode Text;
+   parameter OrderId Text;
+   parameter ShipAddrNo Text;
+}
+
+@apidoc {
+   @description : Internally used attribute to get the user default values.
+   @return : UserDefaultStructure - Internal attribute
+}
+function GetUserDefaults Structure(UserDefaultStructure) {
+}
+
+@apidoc {
+   @description : Internally used function to get the supplier no.
+   @param SupplyCode : Internal attribute
+   @param PurchasePartNo : Internal attribute
+   @return : returns an internally used attribute
+}
+@DynamicComponentDependency PURCH
+function GetSupplierNo List<Entity(PurchasePartSupplierLov)> {
+   parameter SupplyCode Enumeration(OrderSupplyType.Subset6);
+   parameter PurchasePartNo Text;
+   where = "PART_NO = :PurchasePartNo AND (VENDOR_CATEGORY = Supplier_Category_API.Decode(DECODE(:SupplyCode,'PT', 'E','PD', 'E', 'IPT', 'I','IPD', 'I', '')) OR (:SupplyCode NOT IN ('PT', 'PD', 'IPT', 'IPD')))";
+
+   basedon PurchasePartSupplierLovSet;
+}
+
+@apidoc {
+   @description : Internally used function to get the default values related to the catalog no.
+   @param CatalogNo : Internal attribute
+   @param Contract : Internal attribute
+   @param LanguageCode : Internal attribute
+   @param CustomerNo : Internal attribute
+   @return : returns an internal attribtue
+}
+function GetCatalogNoDefaults Structure(CatalogNoDefautlsStructure) {
+   parameter CatalogNo Text;
+   parameter Contract Text;
+   parameter LanguageCode Text;
+   parameter CustomerNo Text;
+}
+
+
+@apidoc {
+   @description : Internal function to get the Supply Site.
+   @param VendorNo : Internal attribute
+   @return : returns an internal attribtue
+}
+function GetSupplySite Text {
+   parameter VendorNo Text;
+}
+
+
+@apidoc {
+   @description : Intenally used function
+   @param Contract : Internal attribute
+   @return : returns an internal attribute
+}
+function FetchCompany Text {
+   parameter Contract Text;
+}
+
+@apidoc {
+   @description : Internally used function
+   @param Contract : Internal attribute
+   @param CurrencyCode : Internal attribute
+   @param CustomerNo : Internal attribute
+   @return : returns an internal attribute
+}
+function AgreementIdFilter List<Entity(CustomerAgreementLov)> {
+   parameter Contract Text;
+   parameter CurrencyCode Text;
+   parameter CustomerNo Text;
+   where = "CONTRACT = :Contract AND CURRENCY_CODE = :CurrencyCode AND Customer_Agreement_API.Validate_Hierarchy_Customer( agreement_id, :CustomerNo) = 1";
+}
+
+@apidoc {
+   @description : Internally used fucntion
+   @param ParentObjkey : internal attribute
+   @param ReleasedOrderCreation : internal attribute
+   @return : returns an internal attribute
+}
+function ResetReleaseOrderCreation Boolean {
+   initialcheck implementation;
+   parameter ParentObjkey Text;
+   parameter ReleasedOrderCreation Boolean;
+}
+
+@apidoc {
+   @description : Internally used fucntion
+   @param ValidationRec : parameter_description
+   @return : Internally used
+}
+function ValidateSupplyCode Structure(CustOrdLineValidationStructure) {
+   parameter ValidationRec    Structure(CustOrdLineValidationStructure);
+}
+-------------------------------- STRUCTURES ---------------------------------
+
+@apidoc {
+   @description : Internally used structure
+}
+structure CustomerDefaultsStructure {
+   attribute OrderId Text;
+   attribute CurrencyCode Text;
+   attribute ShipAddrNo Text;
+   attribute WantedDeliveryDate Timestamp;
+   attribute CustomerName Text;
+   attribute LanguageCode Text;
+   attribute CustRef Text;
+   attribute ReleasedOrderCreation Boolean;
+   attribute PrintOrderConfirmation Boolean;
+   attribute EmailOrderConfirmation Boolean;
+   attribute EmailAddress Text;
+   attribute LimitSalesToAssortExist Boolean;
+}
+
+@apidoc {
+   @description : Internally used structure
+}
+structure UserDefaultStructure {
+   attribute Contract Text;
+   attribute AuthorizeCode Text;
+   attribute Company Text;
+}
+
+@apidoc {
+   @description : Internally used structure
+}
+structure CatalogNoDefautlsStructure {
+   attribute CatalogNo Text;
+   attribute CatalogDescription Text;
+   attribute SalesUnitMeas Text;
+   attribute ConditionCode Text;
+   attribute SupplyCode Enumeration(OrderSupplyType.Subset6);
+   attribute VendorNo Text;
+   attribute SupplySite Text;
+   attribute PurchasePartNo Text;
+   attribute Configurable Boolean;
+}
+
+@apidoc {
+   @description : Internally used structure
+}
+structure CustomerOrderStruct {
+   attribute Company Text;
+   attribute CustomerNo Text;
+   attribute Contract Text;
+   attribute OrderId Text;
+   attribute AuthorizeCode Text;
+   attribute CurrencyCode Text;
+   attribute WantedDeliveryDate Timestamp;
+   attribute LanguageCode Text;
+}
+
+@apidoc {
+   @description : Internally used structure
+}
+structure LinesStruct {
+   attribute CustomerNo Text;
+   attribute Contract Text;
+   attribute CatalogNo Text;
+   attribute Quantity Text;
+}
+
+structure CustOrdLineValidationStructure {
+   attribute Contract Text;
+   attribute VendorNo Text;
+   attribute SupplySite Text;
+   attribute PurchasePartNo Text;
+   attribute SupplyCode Enumeration(OrderSupplyType.Subset6);
+}
+
+--------------------------------- VIRTUALS ----------------------------------
+virtual CreateCustomerOrderVirtual
+   {
+   ludependencies = CreateCustomerOrderLinesVirtual;
+
+   attribute Company Text {
+      maxlength = 20;
+      format = uppercase;
+   }
+   attribute CustomerNo Text {
+      label = "Customer";
+      maxlength = 20;
+      required = [true];
+      format = uppercase;
+   }
+   attribute CustomerName Text {
+      fetch = "Customer_Info_API.Get_Name(customer_no)";
+      required = [true];
+   }
+   attribute Contract Text {
+      label = "Site";
+      maxlength = 5;
+      format = uppercase;
+      required = [true];
+   }
+   attribute OrderId Text {
+      label = "Order Type";
+      maxlength = 3;
+      format = uppercase;
+      required = [true];
+   }
+   attribute AuthorizeCode Text {
+      label = "Coordinator";
+      maxlength = 20;
+      format = uppercase;
+      required = [true];
+   }
+   attribute CurrencyCode Text {
+      label = "Currency";
+      maxlength = 3;
+      format = uppercase;
+      required = [true];
+   }
+   attribute ShipAddrNo Text {
+      label = "Delivery Address";
+      maxlength = 50;
+      required = [true];
+   }
+   attribute DelAddrName Text {
+      label = "Delivery Address Name";
+      fetch = "Customer_Info_Address_API.Get_Name(customer_no, ship_addr_no)";
+   }
+   attribute WantedDeliveryDate Timestamp {
+      label = "Wanted Delivery Date/Time";
+      required = [true];
+   }
+   attribute LanguageCode Text {
+      maxlength = 2;
+   }
+   attribute ReleasedOrderCreation Boolean("TRUE", "FALSE") {
+      label = "Create Order in Released Status";
+      required = [true];
+   }
+   attribute PrintOrderConfirmation Boolean("TRUE", "FALSE") {
+      label = "Print Order Confirmation";
+      required = [true];
+   }
+   attribute EmailOrderConfirmation Boolean("TRUE", "FALSE") {
+      label = "Email Order Confirmation";
+      required = [true];
+   }
+   attribute EmailAddress Text;
+   attribute LimitSalesToAssortExist Boolean;
+
+   attribute CustRef Text {
+      maxlength = 100;
+   }
+   reference AuthorizeCodeRef(AuthorizeCode) to OrderCoordinatorLov(AuthorizeCode) {
+      label = "Coordinator";
+   }
+   reference OrderIdRef(OrderId) to CustOrderType(OrderId) {
+      label = "Order Type";
+   }
+   reference CustomerNoWithoutCompanyRef(CustomerNo) to CustOrdCust7(CustomerNo) {
+      label = "Customer";
+   }
+   reference CustomerNoRef(Company, CustomerNo) to CustOrdCust6(Company, CustomerNo) {
+      label = "Customer";
+   }
+   reference ContractRef(Contract) to UserAllowedSiteLov(Contract) {
+      label = "Site";
+   }
+   reference CurrencyCodeRef(CurrencyCode) to IsoCurrency(CurrencyCode) {
+      label = "Currency";
+   }
+   reference ShipAddrNoRef(CustomerNo, ShipAddrNo) to CustAddressShipLov(CustomerNo, AddrNo) {
+      label = "Delivery Address";
+   }
+   array CustomerOrderLines(Contract, CustomerNo) to CreateCustomerOrderLinesVirtual(Contract, CustomerNo);
+
+}
+
+
+virtual CreateCustomerOrderLinesVirtual {
+   crud = Create, Read, Update, Delete;
+
+   attribute CustomerNo Text {
+      maxlength = 20;
+   }
+
+   attribute Contract Text {
+      maxlength = 5;
+   }
+   attribute CatalogNo Text {
+      label = "Sales Part No";
+      maxlength = 25;
+      format = uppercase;
+      required = [true];
+
+   }
+   attribute CatalogDescription Text {
+      label = "Sales Part Description";
+      maxlength = 200;
+   }
+   attribute BuyQtyDue Number {
+      label = "Sales Qty";
+      required = [true];
+
+   }
+   attribute SalesUnitMeas Text {
+      label = "Sales UoM";
+      maxlength = 10;
+      editable = [false];
+   }
+   attribute SupplyCode Enumeration(OrderSupplyType.Subset6) {
+      label = "Supply Code";
+      maxlength = 20;
+   }
+   attribute VendorNo Text {
+      label = "Supplier";
+      maxlength = 20;
+   }
+   attribute SupplySite Text {
+      maxlength = 5;
+      format = uppercase;
+      editable = [false];
+   }
+   attribute Configurable Boolean("TRUE", "FALSE") {
+      fetch = "DECODE(Sales_Part_API.Get_Configurable_Db(contract, catalog_no), 'CONFIGURED', 'TRUE', 'FALSE')";
+      label = "Configurable";
+      editable = [false];
+   }
+   attribute ConditionCode Text {
+      maxlength = 10;
+      format = uppercase;
+   }
+   attribute PurchasePartNo Text {
+      maxlength = 25;
+      format = uppercase;
+   }
+
+   attribute BlockedForInvoicing Boolean("TRUE", "FALSE") {
+      label = "Invoice Blocked";
+      required = [true];
+   }
+
+   reference CatalogNoRef(Contract, CatalogNo) to SalesPartActiveLov(Contract, CatalogNo);
+
+   reference CatalogNoAssortmentRef(Contract, CatalogNo, CustomerNo) to LimitToAssortSalesPartLov(Contract, CatalogNo, CustomerNo);
+
+   reference ConditionCodeRef(ConditionCode) to ConditionCode(ConditionCode) {
+      label = "Condition Code";
+   }
+   @DynamicComponentDependency PURCH
+   reference VendorNoRef(PurchasePartNo, Contract, VendorNo) to PurchasePartSupplierLov(PartNo, Contract, VendorNo) {
+      label = "Supplier";
+   }
+
+}
+
+
+---------------------------------- QUERIES ----------------------------------
+
+--------------------------------- SUMMARIES ---------------------------------
+
+
+-------------------------------- SINGLETONS ---------------------------------

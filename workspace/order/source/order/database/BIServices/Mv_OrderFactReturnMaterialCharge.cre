@@ -1,0 +1,158 @@
+---------------------------------------------------------------
+-- Component:  ORDER
+-- File     :  Mv_OrderFactReturnMaterialCharge.cre
+-- Purpose  :  Create materialized view RETURN_MATERIAL_CHARGE_MV serving as a
+--             fact source
+-- Note     :  The Materialized View is created as COMPLETE
+--             refreshable and will be empty and have the state
+--             UNUSABLE after creation.
+--             True/natual join columns are defined to synchronize
+--             DataMart and Online definitions.
+---------------------------------------------------------------
+--  Date    Sign   History
+--  ------  ----   --------------------------------------------
+--  201119  MalLlk SC2020R1-11295, Modified the view RETURN_MATERIAL_CHARGE_MV, to include CAST function correctly.
+----------------------------------------------------------------
+
+DEFINE TAB    = RETURN_MATERIAL_CHARGE_TAB
+DEFINE MV     = RETURN_MATERIAL_CHARGE_MV
+DEFINE MODULE = ORDER
+
+-------------------------------------------------------------------
+
+PROMPT ********* Component &MODULE, definition begins ***********
+
+SET SERVEROUTPUT ON
+DECLARE
+   stmt_                    VARCHAR2(32000);
+   columns_                 Database_SYS.ColumnTabType;
+   table_name_              VARCHAR2(30) := '&MV';
+   index_name_              VARCHAR2(30);
+   constraint_name_         VARCHAR2(30);
+BEGIN
+
+   dbms_output.put_line('Primary key cascade drop ON &MV');
+   Database_SYS.Remove_All_Cons_And_Idx('&MV', TRUE);
+
+   dbms_output.put_line('Drop Materialized View &MV');
+   Database_SYS.Remove_Materialized_View('&MV', TRUE);
+
+   dbms_output.put_line('Create Materialized View &MV');
+   stmt_ :=
+   'CREATE MATERIALIZED VIEW &MV
+    TABLESPACE &IFSAPP_DATA
+    BUILD DEFERRED
+    USING INDEX TABLESPACE &IFSAPP_INDEX
+    REFRESH COMPLETE ON DEMAND
+    EVALUATE USING CURRENT EDITION
+    AS
+    SELECT TO_CHAR(c.rma_no)||''^''||TO_CHAR(c.rma_charge_no)                                                                                      id,
+           c.rma_no                                                                                                                                rma_no_key,
+           c.rma_charge_no                                                                                                                         rma_charge_no_key,
+           CAST (c.base_charge_amount AS NUMBER)                                                                                                   charge_amount_base,
+           CAST (c.base_charge_amt_incl_tax AS NUMBER)                                                                                             charge_amount_incl_tax_base,
+           CAST (c.charge_amount AS NUMBER)                                                                                                        charge_amount_curr,
+           CAST (c.charge_amount_incl_tax AS NUMBER)                                                                                               charge_amount_incl_tax_curr,
+           CAST (c.charge AS NUMBER)                                                                                                               charge,
+           CAST (c.charged_qty AS NUMBER)                                                                                                          charged_qty,
+           CAST (c.credited_qty AS NUMBER)                                                                                                         credited_qty,
+           CAST (c.base_charge_percent_basis AS NUMBER)                                                                                            base_charge_percent_basis,
+           CAST (c.charge_percent_basis AS NUMBER)                                                                                                 charge_percent_basis,
+           CAST (c.charge_cost AS NUMBER)                                                                                                          charge_cost,
+           CAST (c.charge_cost_percent AS NUMBER)                                                                                                  charge_cost_percent,
+           CAST (Return_Material_Charge_API.Get_Total_Base_Charged_Amount(c.rma_no,c.rma_charge_no)  AS NUMBER)                                    net_amount_base,
+           CAST (Return_Material_Charge_API.Get_Tot_Charged_Amt_Incl_Tax(c.rma_no,c.rma_charge_no) AS NUMBER)                                      gross_amount_base,
+           CAST (Return_Material_Charge_API.Get_Total_Charged_Amount(c.rma_no,c.rma_charge_no) AS NUMBER)                                          net_amount_curr,
+           CAST (Return_Material_Charge_API.Get_Total_Charged_Amt_Incl_Tax(c.rma_no,c.rma_charge_no) AS NUMBER)                                    gross_amount_curr,
+           CAST (DECODE(c.rowstate,''Denied'',0,1) AS NUMBER)                                                                                      count_charge_line,
+           CAST (DECODE(c.rowstate,''Credited'',1,0) AS NUMBER)                                                                                    count_credited_charge_line,
+           CAST (DECODE(c.rowstate,''Denied'',1,0) AS NUMBER)                                                                                      count_denied_charge_line,
+           CAST (DECODE(c.rowstate,''Planned'',1,0) AS NUMBER)                                                                                     count_planned_charge_line,
+           CAST (DECODE(c.rowstate,''Released'',1,0) AS NUMBER)                                                                                    count_released_charge_line,
+           c.rma_no                                                                                                                                rma_no,
+           c.rma_charge_no                                                                                                                         rma_charge_no,
+           c.rma_line_no                                                                                                                           rma_line_no,
+           c.order_no                                                                                                                              order_no,
+           c.sequence_no                                                                                                                           sequence_no,
+           c.rowstate                                                                                                                              state,
+           Return_Material_Charge_Api.Finite_State_Decode__(c.rowstate)                                                                            state_desc,
+           c.credit_invoice_no                                                                                                                     credit_invoice_no,
+           c.credit_invoice_item_id                                                                                                                credit_invoice_item_id,
+           r.cust_ref                                                                                                                              cust_ref,
+           r.customer_no_credit                                                                                                                    customer_no_credit,
+           c.sales_unit_meas                                                                                                                       sales_unit_meas,
+           NVL(c.delivery_type,''#'')                                                                                                              dim_customer_id,
+           c.delivery_type                                                                                                                         dim_delivery_type_id,
+           NVL(r.return_approver_id,''#'')                                                                                                         dim_return_approver_id,
+           NVL(c.credit_approver_id,''#'')                                                                                                         dim_credit_approver_id,
+           c.contract || ''^'' || c.charge_type                                                                                                    dim_sales_charge_type_id,
+           Sales_Charge_Type_API.Get_Charge_Group(c.contract,c.charge_type)                                                                        dim_sales_charge_group_id,
+           c.company||''^''||r.currency_code                                                                                                       dim_currency_code_id,
+           TRUNC(c.date_entered)                                                                                                                   dim_rmc_date_entered_id,
+           NVL(TRUNC(NVL(Return_Material_Line_API.Get_Date_Returned(c.rma_no,c.rma_line_no),c.date_entered)),
+              TO_DATE(''1900-01-01'',''YYYY-MM-DD'',''NLS_CALENDAR=Gregorian''))                                                                   dim_rml_date_returned_id,
+           c.company||''^''||TO_CHAR(TRUNC(NVL(Return_Material_Line_API.Get_Date_Returned(c.rma_no,c.rma_line_no),c.date_entered)),''YYYY-MM-DD'') dim_rpd_company_period_id,
+           TRUNC(NVL(Return_Material_Line_API.Get_Date_Returned(c.rma_no,c.rma_line_no),c.date_entered))                                           dim_rpd_period_id,
+           TO_CHAR(c.rma_no) || ''^'' || TO_CHAR(c.rma_charge_no)                                                                                  objid,
+           NVL(Customer_Order_Charge_API.Get_Co_Line_Activity_Seq(c.order_no,c.sequence_no),0)                                                     dim_activity_id,
+           c.company                                                                                                                               company,
+           c.contract                                                                                                                              site,
+           r.customer_no                                                                                                                           customer,
+           c.delivery_type                                                                                                                         delivery_type,
+           r.return_approver_id                                                                                                                    return_approver,
+           c.credit_approver_id                                                                                                                    credit_approver,
+           c.charge_type                                                                                                                           sales_charge_type,
+           Sales_Charge_Type_API.Get_Charge_Group(c.contract,c.charge_type)                                                                        sales_charge_group,
+           r.currency_code                                                                                                                         currency_code,
+           TRUNC(c.date_entered)                                                                                                                   rmc_date_entered,
+           TRUNC(NVL(Return_Material_Line_API.Get_Date_Returned(c.rma_no,c.rma_line_no),c.date_entered))                                           rml_date_returned,
+           TRUNC(NVL(Return_Material_Line_API.Get_Date_Returned(c.rma_no,c.rma_line_no),c.date_entered))                                           reporting_date,
+           Customer_Order_Charge_API.Get_Co_Line_Project_Id(c.order_no,c.sequence_no)                                                              project,
+           Customer_Order_Charge_API.Get_Co_Line_Activity_Seq(c.order_no,c.sequence_no)                                                            activity,
+           c.contract                                                                                                                              dim_site_id,
+           c.company                                                                                                                               dim_company_id,
+           NVL(Customer_Order_Charge_API.Get_Co_Line_Project_Id(c.order_no,c.sequence_no),''#'')                                                   dim_project_id
+    FROM &TAB c, RETURN_MATERIAL_TAB r
+    WHERE c.rma_no = r.rma_no';
+   EXECUTE IMMEDIATE stmt_;
+
+   /*
+   ----------------------------------------------------------------------------------
+   Template section for creation of indexes on a fact based MV.
+   It is suggested to create one primary key (or maybe unique) contraint on the key
+   columns. It is also suggested to create indexes on dimension identity columns for
+   the most commonly used dimensions. Indexes with combination of id columns are
+   preferred compared to adding single id column indexes.
+   ----------------------------------------------------------------------------------
+   */
+   dbms_output.put_line('Create constraints and indexes on Materialized View &MV');
+
+   constraint_name_ := table_name_ || '_PK';
+   Database_SYS.Set_Table_Column (columns_ , 'RMA_NO_KEY');
+   Database_SYS.Set_Table_Column (columns_ , 'RMA_CHARGE_NO_KEY');
+   Database_Sys.Create_Constraint(table_name_,
+                                  constraint_name_,
+                                  columns_,
+                                  'P',
+                                  '&IFSAPP_INDEX',
+                                  NULL,
+                                  TRUE,
+                                  TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+EXCEPTION
+   WHEN OTHERS THEN
+   dbms_output.put_line('Error when creating MV &MV');
+   dbms_output.put_line(SQLERRM);
+END;
+/
+
+PROMPT ********* Component &MODULE, definition ends ***********
+
+-------------------------------------------------------------------
+
+UNDEFINE TAB
+UNDEFINE MV
+UNDEFINE MODULE
+
+-------------------------------------------------------------------

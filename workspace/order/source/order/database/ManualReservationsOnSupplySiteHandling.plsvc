@@ -1,0 +1,125 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: ManualReservationsOnSupplySiteHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  190707  RoJalk  SCUXXW4-22489, Modified Reserve_Manually___ and added code to return if qty_reserve_diff_ IS NULL.
+--  190722  RoJalk  SCUXXW4-22002, Moved Calculated_Quantity___ to ManualReservationsOnSupplySiteBase.plsvc
+--  190620  RoJalk  SCUXXW4-22758, Passed NULL for input uom values when calling
+--  190620          Reserve_Customer_Order_API.Reserve_Manually__.
+--  190215  KuBalk  SCUXXW4-1577,  Added code review corrections.
+--  181210  RoJalk  SCUXXW4-9570, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Get_Manual_Reservations_On_Supply_Site_Line___(
+   order_no_              IN VARCHAR2,
+   line_no_               IN VARCHAR2,
+   rel_no_                IN VARCHAR2,
+   line_item_no_          IN NUMBER,
+   condition_code_        IN VARCHAR2,
+   part_ownership_db_     IN VARCHAR2,
+   owner_                 IN VARCHAR2,
+   supply_site_           IN VARCHAR2,
+   part_no_               IN VARCHAR2,
+   configuration_id_      IN VARCHAR2,
+   confirm_deliveries_db_ IN VARCHAR2,
+   consignment_stock_db_  IN VARCHAR2,
+   rental_db_             IN VARCHAR2,
+   qty_to_reserve_        IN NUMBER,
+   qty_reserved_          IN NUMBER )  RETURN Objid_Arr
+IS
+   base_collection_        Objid_Arr := Objid_Arr();
+  
+   CURSOR get_inventory_part_in_stock_info IS
+      SELECT objid
+        FROM INVENTORY_PART_IN_STOCK_RES
+       WHERE qty_onhand > 0 
+         AND location_type_db IN ('PICKING', 'F') 
+         AND activity_seq     = 0
+         AND part_no          = part_no_
+         AND contract         = supply_site_
+         AND configuration_id = configuration_id_
+         AND ((condition_code_ IS NOT NULL AND condition_code = condition_code_) OR (condition_code_ IS NULL))
+         AND (((part_ownership_db_ = Part_Ownership_API.DB_COMPANY_OWNED) 
+              AND (((confirm_deliveries_db_ = 'TRUE' OR consignment_stock_db_ = 'CONSIGNMENT STOCK') AND (part_ownership_db = Part_Ownership_API.DB_COMPANY_OWNED))
+                  OR ((confirm_deliveries_db_ = 'FALSE' OR consignment_stock_db_ != 'CONSIGNMENT STOCK') AND (part_ownership_db IN (Part_Ownership_API.DB_COMPANY_OWNED, Part_Ownership_API.DB_CONSIGNMENT)))))
+             OR (part_ownership_db_ = Part_Ownership_API.DB_CUSTOMER_OWNED AND part_ownership_db = Part_Ownership_API.DB_CUSTOMER_OWNED AND owning_customer_no = owner_)
+             OR (part_ownership_db_ = Part_Ownership_API.DB_SUPPLIER_LOANED AND part_ownership_db = Part_Ownership_API.DB_SUPPLIER_LOANED  AND owning_vendor_no = owner_) 
+             OR (part_ownership_db_ IN (Part_Ownership_API.DB_COMPANY_RENTAL_ASSET, Part_Ownership_API.DB_SUPPLIER_RENTED) 
+                 AND ((rental_db_ = 'TRUE' AND (part_ownership_db IN (Part_Ownership_API.DB_COMPANY_RENTAL_ASSET, Part_Ownership_API.DB_SUPPLIER_RENTED)))
+                      OR (rental_db_ = 'FALSE' AND part_ownership_db = Part_Ownership_API.DB_COMPANY_RENTAL_ASSET))));
+BEGIN
+   FOR rec_ IN get_inventory_part_in_stock_info LOOP
+      base_collection_.extend;
+      base_collection_(base_collection_.last) := rec_.objid;
+   END LOOP;
+   RETURN base_collection_;
+END Get_Manual_Reservations_On_Supply_Site_Line___;
+
+PROCEDURE Reserve_Manually___ (
+   key_                        IN  Inventory_Part_In_Stock_Key,
+   qty_reserved_               IN  NUMBER,
+   qty_reserve_diff_           IN  NUMBER,
+   parent_order_no_temp_       IN  VARCHAR2,
+   parent_line_no_temp_        IN  VARCHAR2,
+   parent_rel_no_temp_         IN  VARCHAR2,
+   parent_line_item_no_temp_   IN  NUMBER,
+   info$_                      OUT VARCHAR2)
+IS
+   info_                          VARCHAR2(2000);
+   validate_info_                 VARCHAR2(2000);
+   owner_                         VARCHAR2(20);
+   inventory_part_in_stock_rec_   Inventory_Part_In_Stock_API.Public_Rec;
+   state_                         VARCHAR2(2000);
+   
+BEGIN
+   -- for the lines with errors (captured during validate action) qty_reserve_diff_ will be null and no need to continue with save
+   IF (qty_reserve_diff_ IS NULL) THEN
+      RETURN;
+   END IF;
+   
+   inventory_part_in_stock_rec_ := Inventory_Part_In_Stock_API.Get(key_.contract, key_.part_no, key_.configuration_id, key_.location_no, 
+                                                                   key_.lot_batch_no, key_.serial_no, key_.eng_chg_level, key_.waiv_dev_rej_no, key_.activity_seq, key_.handling_unit_id );
+   
+   IF (inventory_part_in_stock_rec_.part_ownership = 'CUSTOMER OWNED') THEN
+      owner_ := inventory_part_in_stock_rec_.owning_customer_no;
+   ELSIF (inventory_part_in_stock_rec_.part_ownership IN ('CONSIGNMENT', 'SUPPLIER LOANED', 'SUPPLIER RENTED')) THEN  
+      owner_ := inventory_part_in_stock_rec_.owning_vendor_no;   
+   END IF;   
+   
+   Customer_Order_Flow_API.Validate_Struc_Ownership(validate_info_, parent_order_no_temp_, key_.part_no, 
+                                                    key_.serial_no, key_.lot_batch_no, 
+                                                    Part_Ownership_API.Decode(inventory_part_in_stock_rec_.part_ownership), owner_);
+   
+   Reserve_Customer_Order_API.Reserve_Manually__(info_                  => info_, 
+                                                 state_                 => state_,    
+                                                 order_no_              => parent_order_no_temp_,
+                                                 line_no_               => parent_line_no_temp_,
+                                                 rel_no_                => parent_rel_no_temp_,
+                                                 line_item_no_          => parent_line_item_no_temp_,
+                                                 contract_              => key_.contract,
+                                                 part_no_               => key_.part_no,
+                                                 location_no_           => key_.location_no,
+                                                 lot_batch_no_          => key_.lot_batch_no,
+                                                 serial_no_             => key_.serial_no,
+                                                 eng_chg_level_         => key_.eng_chg_level,
+                                                 waiv_dev_rej_no_       => key_.waiv_dev_rej_no,                   
+                                                 activity_seq_          => 0,                        
+                                                 handling_unit_id_      => key_.handling_unit_id,
+                                                 qty_to_reserve_        => qty_reserve_diff_,                           
+                                                 input_qty_             => NULL, 
+                                                 input_unit_meas_       => NULL,
+                                                 input_conv_factor_     => NULL,
+                                                 input_variable_values_ => NULL,
+                                                 shipment_id_           => 0);     
+   
+   info$_ := validate_info_||info_; 
+   
+END Reserve_Manually___;
+

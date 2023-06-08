@@ -1,0 +1,567 @@
+-----------------------------------------------------------------------------
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  190325  chanlk  Moved DetachedSparePartList to a fragment.
+--  200103  LASSLK  SAXTEND-1244 Implement LOV Filtering
+-----------------------------------------------------------------------------
+fragment DetachedSparePart;
+component EQUIP;
+layer Core;
+description "Fragment to handle Detached Sparepart List";
+
+@DynamicComponentDependency PURCH
+include fragment PurchasePartLovSelector;
+include fragment SparePartCommon;
+include fragment SelectPartNoAssistant;
+@DynamicComponentDependency INVENT
+include fragment InventoryPartWoLovSelector;
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+--------------------------------- COMMANDS ----------------------------------
+
+command PreviousLevelCommandGroup for EquipmentSpareStructureQuery {
+   label = "Previous Level";
+   variable PreviousPartNo;
+   variable PreviousContarct;
+   variable SearchString;
+   mode = Global;
+   enabled = [NumberOfParentsForGroup != 0];
+   execute {
+
+      if[NumberOfParentsForGroup = 1] {
+         call GetPreviousPartNo(SpareId) into PreviousPartNo;
+         call GetPreviousContract(SpareContract) into PreviousContarct;
+         navigate "page/DetachedSparePartList/Form?$filter=SpareId eq $[PreviousPartNo] and SpareContract eq $[PreviousContarct]";
+      }
+      if[NumberOfParentsForGroup > 1] {
+         assistant SelectPartNoAssistant(SpareId, SpareContract, "FALSE") into(SearchString) {
+            when OK {
+               navigate  "page/DetachedSparePartList/Form?$filter=${SearchString}";
+            }
+            when CANCEL {
+               exit;
+            }
+         }
+      }
+   }
+}
+command CopySparePartListCommand for EquipmentSpareStructureQuery {
+   label = "Copy Spare Part List";
+   mode = Global;
+//   enabled = [component.SparePartStructureList.RowCount > 0];
+   enabled = [(not component.SparePartStructureList.IsEmpty)];
+   execute {
+      dialog CopySparePartListDialog(SpareContract, SpareId, Description) {
+         when OK {
+            exit OK;
+         }
+         when CANCEL {
+            exit CANCEL;
+         }
+      }
+   }
+}
+
+command NextLevelCommand for EquipmentSpareStructure {
+   label = "Next Level";
+   enabled = [ComponentSpareId != null and ComponentSpareContract != null];
+   execute {
+      navigate "page/DetachedSparePartList/Form?$filter=SpareId eq $[ComponentSpareId] and SpareContract eq $[ComponentSpareContract]";
+
+   }
+}
+
+@DynamicComponentDependency INVENT
+command CurrentQuantityonHandCommand for EquipmentSpareStructure {
+   label = "Current Quantity on Hand";
+   enabled = [ComponentSpareId != null and ComponentSpareContract != null and InventoryPart = "InventoryPart"];
+   mode = SelectedRecords;
+   bulkexecute {
+      bulknavigate "page/InventoryPartCurrentlyOnHand/Form?$filter=PartNo eq $[ComponentSpareId] and Contract eq $[ComponentSpareContract]";
+   }
+}
+
+@DynamicComponentDependency INVENT
+command InventoryPartAvailabilityPlaCommand for EquipmentSpareStructure {
+   label = "Inventory Part Availability Planning";
+   enabled = [ComponentSpareId != null and ComponentSpareContract != null and InventoryPart = "InventoryPart"];
+   mode = SelectedRecords;
+   bulkexecute {
+      bulknavigate "page/InventoryPartAvailabilityPlanning/Form?$filter=PartNo eq $[ComponentSpareId] and Contract eq $[ComponentSpareContract]";
+   }
+}
+
+@DynamicComponentDependency INVENT
+command InventoryPartCommand for  EquipmentSpareStructure {
+   label = "Inventory Part";
+   enabled = [ComponentSpareId != null and ComponentSpareContract != null and InventoryPart = "InventoryPart"];
+   mode = SelectedRecords;
+   bulkexecute {
+      bulknavigate "page/InventoryPart/Form?$filter=PartNo eq $[ComponentSpareId] and Contract eq $[ComponentSpareContract]";
+   }
+}
+
+@DynamicComponentDependency PURCH
+command SupplierperPartCommand for EquipmentSpareStructure {
+   label = "Supplier per Part";
+   enabled = [ComponentSpareId != null and ComponentSpareContract != null];
+   mode = SelectedRecords;
+   bulkexecute {
+      bulknavigate "page/SupplierForPurchasePart/Form?$filter=PartNo eq $[ComponentSpareId] and Contract eq $[ComponentSpareContract]";
+   }
+}
+
+---------------------------------- GROUPS -----------------------------------
+group SparePartStructureGroup for EquipmentSpareStructureQuery {
+   label = "";
+   field SpareId;
+   field Description;
+   field SpareContract;
+   @DynamicComponentDependency INVENT
+   field InventoryPart {
+      size = Small;
+   }
+
+}
+----------------------------------- LISTS -----------------------------------
+list SparePartStructureHeaderList for EquipmentSpareStructureQuery {
+   label = "";
+   field SpareId;
+   field Description;
+   field SpareContract;
+   @DynamicComponentDependency INVENT
+   field InventoryPart {
+      size = Small;
+   }
+
+}
+
+list SparePartStructureList for EquipmentSpareStructure {
+   label = "Spare Part Structure";
+   orderby = ComponentSpareId;
+
+   field HasStructure {
+      size = Small;
+   }
+   field PurchasePartSlider {
+      label = "Purchase Part Only";
+      editable = [ETag = null];
+      size = Small;
+      searchable = false;
+   }
+
+   @DynamicComponentDependency INVENT
+   field ComponentSpareId {
+      size = Medium;
+      lovswitch {
+         when [PurchasePartSlider = false] {
+            lov ComponentSpareIdRef with ReferenceInventoryPartWoLovSelector {
+               search = PartNo, PartDescriptionInUse;
+            }
+         }
+         when [PurchasePartSlider = true] {
+            @DynamicComponentDependency PURCH
+            lov PurchaseSpareIdRef with ReferencePurchasePartLovSelector using DetSparePurchasePartSelect(SpareContract) {
+               search = PartNo, PurchasePartDescription;
+            }
+
+         }
+      }
+      validate command {
+         variable WarningTextVar Text;
+         execute {
+            if [ComponentSpareId != null] {
+               call GetInfoMessage(WarningText, PartDescription, UoM, SpareId, SpareContract) into WarningTextVar;
+               if [WarningTextVar != null] {
+                  messagebox("Warning Message",
+                  information, "The part ${SpareId} is not connected to a supplier") {
+                     when OK {
+                        call GetComponentPartDescription(SpareContract, ComponentSpareId) into ComponentPartDescription;
+                        call GetUnitMeas(UoM, ComponentSpareId, SpareContract) into UoM;
+                        call GetInventoryQtyOnhand(SpareContract, ComponentSpareId) into QuantityOnHand;
+                        call GetConditionCode(ComponentSpareId, ConditionCode) into ConditionCode;
+                     }
+                     when "Cancel" {
+                        set ComponentSpareId = null;
+                        set ComponentPartDescription = null;
+                        set UoM = null;
+                        set QuantityOnHand = null;
+                        set ConditionCode = null;
+                        exit;
+                     }
+                  }
+               }
+               else {
+                  call GetComponentPartDescription(SpareContract, ComponentSpareId) into ComponentPartDescription;
+                  call GetUnitMeas(UoM, ComponentSpareId, SpareContract) into UoM;
+                  call GetInventoryQtyOnhand(SpareContract, ComponentSpareId) into QuantityOnHand;
+                  call GetConditionCode(ComponentSpareId, ConditionCode) into ConditionCode;
+               }
+            }
+         }
+      }
+   }
+   field ComponentPartDescription {
+      size = Medium;
+   }
+
+   field AllowDetachedWoMatSite {
+      size = Small;
+   }
+
+   field ComponentSpareContract {
+      size = Small;
+
+   }
+   lov ConditionCodeRef with ConditionCodeSelectLov {
+      search = ConditionCode, Description;
+      size = Large;
+      description = ConditionCodeRef.Description;
+   }
+   field PartOwnership {
+      size = Medium;
+      validate command {
+         execute {
+            if[(PartOwnership = "CompanyOwned") and Owner != null] {
+               set Owner = null;
+            }
+         }
+      }
+   }
+   field Owner {
+      editable = [PartOwnership != "CompanyOwned"];
+      lovswitch {
+         when[PartOwnership = "CustomerOwned"] {
+            lov OwnerRef with ReferenceCustomerInfoCustcategoryPubSelector {
+               search = CustomerId, Name;
+               contactwidget {
+                  enabled = [true];
+                  source = Supplier;
+               }
+               size = Large;
+               description = OwnerRef.Name;
+            }
+         }
+         when[PartOwnership = "CompanyRentalAsset"] {
+            lov Owner2Ref with ReferenceCustomerInfoCustcategoryPubSelector2 {
+               search = CustomerId, Name;
+               freeinput = [true];
+            }
+         }
+      }
+   }
+   @DynamicComponentDependency INVENT
+   field InventoryPart {
+      size = Medium;
+   }
+   @DynamicComponentDependency INVENT
+   field InventoryPartRef.DimQuality {
+      size = Medium;
+      label = "Dimension/Quality";
+   }
+   @DynamicComponentDependency INVENT
+   field InventoryPartRef.TypeDesignation {
+      size = Medium;
+      label = "Type Designation";
+   }
+   @DynamicComponentDependency INVENT
+   field QuantityOnHand {
+      size = Small;
+   }
+   field UoM {
+      size = Small;
+   }
+   field Qty {
+      size = Small;
+   }
+   field DrawingNo {
+      size = Small;
+   }
+   field DrawingPos {
+      size = Small;
+   }
+   field MchPart {
+      size = Small;
+   }
+   field Note {
+      size = Large;
+      multiline = true;
+   }
+
+   commandgroup CommandGroup1CmdGroup {
+      command NextLevelCommand;
+   }
+
+   commandgroup CommandGroup3CmdGroup {
+      @DynamicComponentDependency INVENT
+      command CurrentQuantityonHandCommand;
+      @DynamicComponentDependency INVENT
+      command InventoryPartAvailabilityPlaCommand;
+      @DynamicComponentDependency INVENT
+      command InventoryPartCommand;
+      @DynamicComponentDependency PURCH
+      command SupplierperPartCommand;
+   }
+}
+
+--------------------------------- SELECTORS ---------------------------------
+@Overtake Core
+selector EquipmentSpareStructureSelectorNew for EquipmentSpareStructureQuery {
+   label = "${SpareId} - ${Description} - ${SpareContract}";
+   static SpareId;
+   static Description;
+   static SpareContract;
+}
+
+selector ReferenceCustomerInfoCustcategoryPubSelector2 for CustomerInfoCustcategoryPub {
+   static CustomerId {
+      visible = [false];
+   }
+   static Name {
+      visible = [false];
+   }
+}
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+----------------------------- MAIN ENTRY POINTS -----------------------------
+entityset EquipmentSpareStructureQuerySet for EquipmentSpareStructureQuery;
+
+------------------------------ ENTITY DETAILS -------------------------------
+@Override
+entity EquipmentSpareStructure {
+   crud = Create, Read, Update, Delete;
+   from = "equipment_spare_structure";
+   exec = "EQUIPMENT_SPARE_STRUCTURE_API";
+   ludependencies = EquipmentSpareStructure;
+   supportwarnings = [true];
+   keys = SpareContract, SpareId, ComponentSpareId, ComponentSpareContract, SpareSeq {
+      where = "SPARE_CONTRACT = :SpareContract and SPARE_ID = :SpareId and COMPONENT_SPARE_ID = :ComponentSpareId and COMPONENT_SPARE_CONTRACT = :ComponentSpareContract and SPARE_SEQ =:SpareSeq";
+   }
+
+   attribute SpareContract Text {
+      fetch = "SPARE_CONTRACT";
+      label = "Site";
+      maxlength = 5;
+      required = [true];
+      //editable = [false];
+      format = uppercase;
+   }
+
+   attribute SpareId Text {
+      fetch = "SPARE_ID";
+      label = "Part No";
+      maxlength = 25;
+      required = [true];
+      format = uppercase;
+   }
+   attribute SpareDescription Text {
+      fetch = "MAINTENANCE_SPARE_API.Get_Description(SPARE_CONTRACT, SPARE_ID)";
+      label = "Description";
+      maxlength = 2000;
+      editable = [ETag = null];
+   }
+
+   attribute HasStructure Boolean("TRUE", "FALSE") {
+      fetch = "Equipment_Spare_Structure_API.Has_Spare_Structure(COMPONENT_SPARE_ID ,COMPONENT_SPARE_CONTRACT)";
+      label = "Structure";
+      editable = [false];
+   }
+
+   attribute ComponentSpareId Text {
+      fetch = "Equipment_Spare_Structure_API.Get_Component_Spare_Id(SPARE_SEQ , SPARE_CONTRACT , SPARE_ID , COMPONENT_SPARE_ID , COMPONENT_SPARE_CONTRACT)";
+      fetch = "COMPONENT_SPARE_ID";
+      label = "Component Part No";
+      maxlength = 25;
+      required = [true];
+      editable = [ETag = null];
+      format = uppercase;
+   }
+   attribute ComponentPartDescription Text {
+      fetch = "MAINTENANCE_SPARE_API.Get_Description(COMPONENT_SPARE_CONTRACT, COMPONENT_SPARE_ID)";
+      label = "Component Part Description";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute AllowDetachedWoMatSite Boolean("Y", "N") {
+      fetch = "ALLOW_DETACHED_WO_MAT_SITE";
+      label = "Allow Detached WO Material Site";
+      required = [true];
+      editable = [true];
+   }
+   attribute ComponentSpareContract Text {
+      fetch = "Equipment_Spare_Structure_API.Get_Component_Spare_Contract(SPARE_SEQ , SPARE_CONTRACT , SPARE_ID , COMPONENT_SPARE_ID , COMPONENT_SPARE_CONTRACT)";
+      label = "Component Site";
+      maxlength = 5;
+      editable = [false];
+      format = uppercase;
+   }
+   attribute ConditionCode Text {
+      fetch = "CONDITION_CODE";
+      label = "Condition Code";
+      maxlength = 10;
+   }
+   attribute PartOwnership Enumeration(PartOwnership.CompCustRent) {
+      fetch = "PART_OWNERSHIP_DB";
+      label = "Ownership";
+   }
+   attribute Owner Text {
+      fetch = "OWNER";
+      label = "Owner";
+      maxlength = 20;
+      format = uppercase;
+   }
+   @DynamicComponentDependency ORDER
+   attribute OwnerName Text {
+      fetch = "CUST_ORD_CUSTOMER_API.Get_Name(OWNER)";
+      label = "Owner Name";
+      maxlength = 2000;
+      editable = [false];
+   }
+   @DynamicComponentDependency INVENT
+   attribute InventoryPart Enumeration(InventoryFlag) {
+      fetch = "MAINTENANCE_SPARE_API.Get_Inventory_Flag(SPARE_CONTRACT, COMPONENT_SPARE_ID)";
+      label = "Inventory Part";
+      editable = [false];
+   }
+   @DynamicComponentDependency INVENT
+   attribute QuantityOnHand Number {
+      fetch = "Inventory_Part_In_Stock_API.Get_Inventory_Qty_Onhand(SPARE_CONTRACT,COMPONENT_SPARE_ID,NULL)";
+      label = "Quantity On Hand";
+      editable = [false];
+   }
+   attribute UoM Text {
+      fetch = "Equipment_Spare_Structure_API.Get_Unit_Of_Measure(NULL,COMPONENT_SPARE_ID,SPARE_CONTRACT)";
+      label = "UoM";
+      maxlength = 2000;
+      editable = [false];
+      editable = [ETag != null];
+   }
+   attribute Qty Number {
+      fetch = "QTY";
+      label = "Quantity";
+      required = [true];
+   }
+   attribute DrawingNo Text {
+      fetch = "DRAWING_NO";
+      label = "Drawing No";
+      maxlength = 16;
+      format = uppercase;
+   }
+   attribute DrawingPos Text {
+      fetch = "DRAWING_POS";
+      label = "Drawing Position";
+      maxlength = 6;
+      format = uppercase;
+   }
+   attribute MchPart Text {
+      fetch = "MCH_PART";
+      label = "Object Part";
+      maxlength = 4;
+      format = uppercase;
+   }
+   attribute Note Text {
+      fetch = "NOTE";
+      label = "Note";
+      maxlength = 2000;
+   }
+
+   attribute PurchasePartSlider Boolean("TRUE", "FALSE") {
+      fetch = "'FALSE'";
+      editable = [true];
+      required = [true];
+   }
+   attribute NumberOfParentsForList Number {
+      fetch = "Equipment_Spare_Structure_API.Get_Number_Of_Parents(SPARE_ID,SPARE_CONTRACT)";
+   }
+   attribute SpareSeq Text {
+      fetch = "SPARE_SEQ";
+   }
+
+   @DynamicComponentDependency INVENT
+   reference InventoryPartRef(SpareContract, ComponentSpareId) to InventoryPart(Contract, PartNo);
+   @DynamicComponentDependency INVENT
+   reference ComponentSpareIdRef(SpareContract, ComponentSpareId) to InventoryPartWoLov(Contract, PartNo) {
+      label = "Component Part No";
+   }
+   reference ConditionCodeRef(ConditionCode) to ConditionCode(ConditionCode) {
+      label = "Condition Code";
+   }
+   reference OwnerRef(Owner) to CustomerInfoCustcategoryPub(CustomerId) {
+      label = "Owner";
+   }
+   //This reference is used as a work arround to
+   reference Owner2Ref(SpareContract, ConditionCode, Owner) to CustomerInfoCustcategoryPub(AssociationNo, Name, CustomerId) {
+      label = "Owner";
+   }
+   @DynamicComponentDependency PURCH
+   reference SupplierRef(SpareId, Owner) to PurchasePartSupplierLov(PartNo, VendorNo);
+   @DynamicComponentDependency PURCH
+   reference PurchaseSpareIdRef(SpareContract, ComponentSpareId) to PurchasePartLov(Contract, PartNo);
+}
+--------------------------------- FUNCTIONS ---------------------------------
+function GetPreviousPartNo Text {
+   parameter ComponentSpareId Text;
+}
+
+function GetPreviousContract Text {
+   parameter ComponentSpareContract Text;
+}
+
+function GetComponentPartDescription Text {
+   parameter ComponentSpareContract Text;
+   parameter ComponentSpareId Text;
+}
+
+@DynamicComponentDependency PURCH
+function DetSparePurchasePartSelect List < Entity(PurchasePartLov) > {
+   parameter SpareContract Text;
+   where = "PART_NO NOT IN (select part_no from INVENTORY_PART_WO_LOV where contract = :SpareContract)";
+}
+
+function GetNumOfParents Number {
+   parameter SpareId Text;
+   parameter SpareContract Text;
+}
+---------------------------------- QUERIES ----------------------------------
+query EquipmentSpareStructureQuery {
+   from = "EQUIP_INV_PUR_PART";
+   lu = EquipmentSpareStructure;
+   keys = SpareContract, SpareId {
+      where = "SPARE_CONTRACT = :SpareContract and SPARE_ID = :SpareId";
+   }
+   ludependencies = EquipmentSpareStructure;
+
+   attribute SpareId Text {
+      fetch = "SPARE_ID";
+      label = "Part No";
+      maxlength = 100;
+      required = [true];
+      editable = [ETag = null];
+      format = uppercase;
+   }
+   attribute Description Text {
+      fetch = "MAINTENANCE_SPARE_API.Get_Description(SPARE_CONTRACT, SPARE_ID)";
+      label = "Description";
+      maxlength = 2000;
+      required = [true];
+      editable = [ETag = null];
+   }
+   attribute SpareContract Text {
+      fetch = "SPARE_CONTRACT";
+      label = "Site";
+      maxlength = 5;
+      required = [true];
+      editable = [ETag = null];
+      format = uppercase;
+   }
+   @DynamicComponentDependency INVENT
+   attribute InventoryPart Enumeration(InventoryFlag) {
+      fetch = "SUBSTR(Maintenance_Spare_API.Get_Inventory_Flag(SPARE_CONTRACT,SPARE_ID),1,200)";
+      label = "Inventory Part";
+      editable = [false];
+   }
+
+   attribute NumberOfParentsForGroup Number {
+      fetch = "Equipment_Spare_Structure_API.Get_Number_Of_Parents(SPARE_ID,SPARE_CONTRACT)";
+   }
+   array SparePartStructureArray(SpareContract, SpareId) to EquipmentSpareStructure(SpareContract, SpareId);
+}

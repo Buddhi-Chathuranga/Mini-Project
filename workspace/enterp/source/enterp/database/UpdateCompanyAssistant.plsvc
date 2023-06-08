@@ -1,0 +1,558 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     UpdateCompanyAssistant
+--  Component:    ENTERP
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Init_Command___ (
+   company_ IN VARCHAR2 ) RETURN Update_Company_Init_Structure_Rec
+IS
+   rec_ Update_Company_Init_Structure_Rec;
+BEGIN
+   rec_.name := Company_API.Get_Name(company_);
+   rec_.source_company := Company_API.Get_From_Company(company_);
+   rec_.source_company_description := Company_API.Get_Name(rec_.source_company);
+   rec_.source_template_id := Company_API.Get_From_Template_Id(company_);   
+   $IF Component_Accrul_SYS.INSTALLED $THEN   
+      rec_.currency_code := Company_Finance_API.Get_Currency_Code(company_); 
+      rec_.valid_from := Company_Finance_API.Get_Valid_From(company_);
+   $END
+   RETURN rec_;
+END Init_Command___;
+
+
+FUNCTION Init_Values___ RETURN VARCHAR2
+IS
+   update_id_ VARCHAR2(64);
+BEGIN
+   Update_Company_Select_Lu_API.Initiate_Values__(update_id_);
+   RETURN update_id_;
+END Init_Values___;
+
+
+PROCEDURE Remove_For_Id___ (
+   update_id_ IN VARCHAR2 ) 
+IS   
+BEGIN
+   Update_Company_Select_Lu_API.Remove_For_Id__(update_id_);
+END Remove_For_Id___;
+
+
+PROCEDURE Select_All_Command___ (
+   selection_ IN VARCHAR2 )  
+IS
+BEGIN
+   Selected_Or_Not_Selected___(selection_, 'TRUE');
+END Select_All_Command___;
+
+
+PROCEDURE Deselect_All_Command___ (
+   selection_ IN VARCHAR2 ) 
+IS  
+BEGIN
+   Selected_Or_Not_Selected___(selection_, 'FALSE');
+END Deselect_All_Command___;
+
+
+PROCEDURE Selected_Or_Not_Selected___ (
+   selection_ IN VARCHAR2,
+   action_    IN VARCHAR2 ) 
+IS
+   update_id_  VARCHAR2(64);
+   module_     VARCHAR2(6);
+   lu_         VARCHAR2(30);
+   info_       VARCHAR2(2000);
+   objversion_ VARCHAR2(100);
+   attr_       VARCHAR2(2000);  
+   ptr_        NUMBER;
+   value_      VARCHAR2(2000);   
+   CURSOR get_rec IS
+      SELECT objid, objversion
+      FROM   update_company_select_lu
+      WHERE  update_id = update_id_
+      AND    module = module_
+      AND    lu = lu_
+      AND    selected != action_;
+BEGIN
+   WHILE (Client_SYS.Get_Next_From_List(selection_, ptr_, value_)) LOOP
+      update_id_ := Client_SYS.Get_Key_Reference_Value(value_, 'UPDATE_ID'); 
+      module_ := Client_SYS.Get_Key_Reference_Value(value_, 'MODULE');
+      lu_ := Client_SYS.Get_Key_Reference_Value(value_, 'LU');      
+      FOR c1 IN get_rec LOOP 
+         info_ := NULL;      
+         Client_SYS.Clear_Attr(attr_);
+         Client_SYS.Add_To_Attr('SELECTED', action_, attr_);      
+         objversion_ := c1.objversion;
+         Update_Company_Select_Lu_API.Modify__(info_, c1.objid, objversion_, attr_, 'DO');
+      END LOOP;
+   END LOOP;
+END Selected_Or_Not_Selected___;
+
+
+FUNCTION Boolean_To_Char___ (
+   boolean_value_ IN BOOLEAN ) RETURN VARCHAR2 
+IS
+BEGIN
+   RETURN
+      CASE boolean_value_
+         WHEN TRUE THEN 'TRUE'
+         WHEN FALSE THEN 'FALSE'
+         ELSE 'NULL'
+      END;
+END Boolean_To_Char___;  
+
+
+FUNCTION Update_Company___ (
+   company_            IN VARCHAR2,
+   valid_from_         IN DATE,
+   source_company_     IN VARCHAR2,
+   source_template_id_ IN VARCHAR2,
+   non_acc_rel_data_   IN BOOLEAN,
+   acc_rel_data_       IN BOOLEAN,
+   template_as_source_ IN BOOLEAN,
+   update_template_id_ IN VARCHAR2,
+   update_id_          IN VARCHAR2,
+   objkey_             IN VARCHAR2,
+   run_in_background_  IN BOOLEAN ) RETURN VARCHAR2
+IS
+   error_created_    VARCHAR2(2000);
+   newrec_           create_company_tem_detail_tab%ROWTYPE;
+   CURSOR get_header IS
+      SELECT *
+      FROM   ${PROJECTION}_generate_difference_header_virtual_vrt
+      WHERE  parent_objkey = objkey_;
+   CURSOR get_details(objkey_ VARCHAR2) IS
+      SELECT *
+      FROM   ${PROJECTION}_generate_difference_detail_virtual_vrt
+      WHERE  parent_objkey = objkey_
+      AND    selected = 'FALSE';
+BEGIN
+   FOR rec_header IN get_header LOOP
+      FOR rec_details IN get_details(rec_header.objkey) LOOP
+         newrec_.template_id := rec_details.template_id;
+         newrec_.component   := rec_details.component;
+         newrec_.lu          := rec_details.lu;
+         newrec_.item_id     := rec_details.item_id;
+         Create_Company_Tem_Detail_API.Modify_Create_Comp_Tem_Detail(newrec_);
+      END LOOP;   
+   END LOOP;
+   Create_Company_API.Update_Company__(error_created_,
+                                       company_,
+                                       valid_from_,
+                                       source_company_,
+                                       source_template_id_,
+                                       Boolean_To_Char___(non_acc_rel_data_),
+                                       Boolean_To_Char___(acc_rel_data_),
+                                       Boolean_To_Char___(template_as_source_),
+                                       update_template_id_,
+                                       update_id_,
+                                       Boolean_To_Char___(run_in_background_));  
+   --Return status from creation process.
+   RETURN (error_created_);
+END Update_Company___;
+
+
+FUNCTION Generate_Diff___ (
+   key_                     IN Update_Company_Virtual_Key,
+   company_                 IN VARCHAR2,
+   valid_from_              IN DATE,
+   source_company_          IN VARCHAR2,
+   source_template_id_      IN VARCHAR2,
+   old_source_template_id_  IN VARCHAR2,
+   temp_source_template_id_ IN VARCHAR2,
+   temp_target_template_id_ IN VARCHAR2,
+   diff_template_id_        IN VARCHAR2,
+   update_id_               IN VARCHAR2 ) RETURN Generate_Diff_Structure_Rec
+IS
+   master1_        Generate_Difference_Header_Virtual_Key;
+   new_rec_        Generate_Difference_Header_Virtual_Rec;
+   new_detail_rec_ Generate_Difference_Detail_Virtual_Rec;
+   rec_            Generate_Diff_Structure_Rec;
+   attr_           VARCHAR2(2000);
+   count_          INTEGER;
+   count1_         INTEGER;
+   name_           Message_SYS.name_table;
+   value_          Message_SYS.line_table;
+   name1_          Message_SYS.name_table;
+   value1_         Message_SYS.line_table;
+   diff_template_  VARCHAR2(200);
+   step_text_      VARCHAR2(200);
+   step_           VARCHAR2(200);
+   step_msg_       VARCHAR2(2000);
+   CURSOR get_rec IS
+      SELECT template_id, create_company_tem_api.get_description(template_id)  description, component, create_company_tem_comp_api.get_version(template_id,component)  version,lu
+      FROM   create_company_tem_lu_diff
+      WHERE  update_id = update_id_
+      AND    template_id = diff_template_;
+   CURSOR get_details_rec(template_ VARCHAR2, component_ VARCHAR2, lu_ VARCHAR2) IS
+      SELECT objid, objversion, template_id, component, lu, item_id, version, selected, update_id,
+      c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16, c17, c18, c19, c20, c21,
+      c22, c23, c24, c25, c26, c27, c28, c29, c30, c31, c32, c33, c34, c35, c36, c37, c38, c39, c40, c41,
+      c42, c43, c44, c45, c46, c47, c48, c49, c50, c51, c52, c53, c54, c55, c56, c57, c58, c59, c60, c61, c62,
+      c63, c64, c65, c66, c67, c68, c69, c70, ext_c1, ext_c2, ext_c3, ext_c4, ext_c5, ext_c6, ext_c7, ext_c8, ext_c9,
+      ext_c10, ext_c11, ext_c12, ext_c13, ext_c14, ext_c15, ext_c16, ext_c17, ext_c18, ext_c19, ext_c20, ext_c21, ext_c22,
+      ext_c23, ext_c24, ext_c25, ext_c26, ext_c27, ext_c28, ext_c29, ext_c30, d1, d2, d3, d4, d5, ext_d1, ext_d2, ext_d3, ext_d4,
+      ext_d5, n1, n2, n3, n4, n5, n6, n7, n8, n9, n10, n11, n12, n13, n14, n15, n16, n17, n18, n19, n20, ext_n1, ext_n2, ext_n3, ext_n4,
+      ext_n5, ext_n6, ext_n7, ext_n8, ext_n9, ext_n10, ext_n11, ext_n12, ext_n13, ext_n14, ext_n15, ext_n16, ext_n17, ext_n18, ext_n19, ext_n20
+      FROM   create_company_tem_detail_diff
+      WHERE  component = component_
+      AND    template_id = template_
+      AND    lu = lu_
+      AND    update_id = update_id_;
+BEGIN 
+   Client_SYS.Add_To_Attr('COMPANY', company_, attr_); 
+   Client_SYS.Add_To_Attr('VALID_FROM', valid_from_, attr_); 
+   IF (source_template_id_ IS NOT NULL) THEN
+      Client_SYS.Add_To_Attr('SOURCE_TEMPLATE', source_template_id_, attr_); 
+   ELSE      
+      Client_SYS.Add_To_Attr('SOURCE_COMPANY', source_company_, attr_); 
+   END IF;
+   Client_SYS.Add_To_Attr('OLD_SOURCE_TEMPLATE', old_source_template_id_, attr_); 
+   Client_SYS.Add_To_Attr('TEMP_SOURCE_TEMPLATE', temp_source_template_id_, attr_); 
+   Client_SYS.Add_To_Attr('TEMP_TARGET_TEMPLATE', temp_target_template_id_, attr_); 
+   Client_SYS.Add_To_Attr('DIFF_TEMPLATE', diff_template_id_, attr_); 
+   Client_SYS.Add_To_Attr('UPDATE_ID', update_id_, attr_); 
+   IF (source_template_id_ IS NOT NULL) THEN
+      Company_Template_Diff_Util_API.Return_Diff_Steps__(step_msg_, attr_);
+      Create_Company_Tem_API.Exist(source_template_id_);
+   ELSE
+      Company_Template_Diff_Util_API.Return_Diff_Steps__(step_msg_, attr_);
+   END IF;
+    Message_SYS.Get_Attributes(step_msg_, count_, name_, value_); 
+   FOR i_  IN 1..count_ LOOP
+      Message_SYS.Get_Attributes(value_(i_), count1_, name1_, value1_); 
+      FOR j_ IN 1..count1_ LOOP
+         IF (name1_(j_) = 'STEP')  THEN
+            step_ := value1_(j_);
+         END IF;
+         IF (name1_(j_) = 'STEP_TXT')  THEN
+            step_text_ := value1_(j_);									
+         END IF;
+      END LOOP;
+      Company_Template_Diff_Util_API.Generate_Diff_Template__(attr_, step_);
+   END LOOP;
+   rec_.company := Client_SYS.Get_Item_Value('COMPANY', attr_);
+   rec_.diff_template_id := Client_SYS.Get_Item_Value('DIFF_TEMPLATE', attr_);
+   diff_template_ := rec_.diff_template_id;
+   FOR rec1_ IN get_rec LOOP       
+      new_rec_.template_id := rec1_.template_id;
+      new_rec_.description := rec1_.description;
+      new_rec_.component := rec1_.component;
+      new_rec_.version := rec1_.version;
+      new_rec_.lu := rec1_.lu;
+      new_rec_.c1 := Client_SYS.Get_Item_Value('C1', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c2 := Client_SYS.Get_Item_Value('C2', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c3 := Client_SYS.Get_Item_Value('C3', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c4 := Client_SYS.Get_Item_Value('C4', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c5 := Client_SYS.Get_Item_Value('C5', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.c6 := Client_SYS.Get_Item_Value('C6', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.c7 := Client_SYS.Get_Item_Value('C7', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c8 := Client_SYS.Get_Item_Value('C8', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.c9 := Client_SYS.Get_Item_Value('C9', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c10 := Client_SYS.Get_Item_Value('C10', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c11 := Client_SYS.Get_Item_Value('C11', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c12 := Client_SYS.Get_Item_Value('C12', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c13 := Client_SYS.Get_Item_Value('C13', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c14 := Client_SYS.Get_Item_Value('C14', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c15 := Client_SYS.Get_Item_Value('C15', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c16 := Client_SYS.Get_Item_Value('C16', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c17 := Client_SYS.Get_Item_Value('C17', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c18 := Client_SYS.Get_Item_Value('C18', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.c19 := Client_SYS.Get_Item_Value('C19', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.c20 := Client_SYS.Get_Item_Value('C20', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c21 := Client_SYS.Get_Item_Value('C21', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.c22 := Client_SYS.Get_Item_Value('C22', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c23 := Client_SYS.Get_Item_Value('C23', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c24 := Client_SYS.Get_Item_Value('C24', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c25 := Client_SYS.Get_Item_Value('C25', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c26 := Client_SYS.Get_Item_Value('C26', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c27 := Client_SYS.Get_Item_Value('C27', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c28 := Client_SYS.Get_Item_Value('C28', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c29 := Client_SYS.Get_Item_Value('C29', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c30 := Client_SYS.Get_Item_Value('C30', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c31 := Client_SYS.Get_Item_Value('C31', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.c32 := Client_SYS.Get_Item_Value('C32', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.c33 := Client_SYS.Get_Item_Value('C33', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c34 := Client_SYS.Get_Item_Value('C34', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.c35 := Client_SYS.Get_Item_Value('C35', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c36 := Client_SYS.Get_Item_Value('C36', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c37 := Client_SYS.Get_Item_Value('C37', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c38 := Client_SYS.Get_Item_Value('C38', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c39 := Client_SYS.Get_Item_Value('C39', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c40 := Client_SYS.Get_Item_Value('C40', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c41 := Client_SYS.Get_Item_Value('C41', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c42 := Client_SYS.Get_Item_Value('C42', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c43 := Client_SYS.Get_Item_Value('C43', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c44 := Client_SYS.Get_Item_Value('C44', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.c45 := Client_SYS.Get_Item_Value('C45', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.c46 := Client_SYS.Get_Item_Value('C46', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c47 := Client_SYS.Get_Item_Value('C47', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.c48 := Client_SYS.Get_Item_Value('C48', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c49 := Client_SYS.Get_Item_Value('C49', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c50 := Client_SYS.Get_Item_Value('C50', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c51 := Client_SYS.Get_Item_Value('C51', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c52 := Client_SYS.Get_Item_Value('C52', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c53 := Client_SYS.Get_Item_Value('C53', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c54 := Client_SYS.Get_Item_Value('C54', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c55 := Client_SYS.Get_Item_Value('C55', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c56 := Client_SYS.Get_Item_Value('C56', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c57 := Client_SYS.Get_Item_Value('C57', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.c58 := Client_SYS.Get_Item_Value('C58', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.c59 := Client_SYS.Get_Item_Value('C59', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c60 := Client_SYS.Get_Item_Value('C60', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.c61 := Client_SYS.Get_Item_Value('C61', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c62 := Client_SYS.Get_Item_Value('C62', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c63 := Client_SYS.Get_Item_Value('C63', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c64 := Client_SYS.Get_Item_Value('C64', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c65 := Client_SYS.Get_Item_Value('C65', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c66 := Client_SYS.Get_Item_Value('C66', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c67 := Client_SYS.Get_Item_Value('C67', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c68 := Client_SYS.Get_Item_Value('C68', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c69 := Client_SYS.Get_Item_Value('C69', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.c70 := Client_SYS.Get_Item_Value('C70', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_c1 := Client_SYS.Get_Item_Value('Ext_C1', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_c2 := Client_SYS.Get_Item_Value('Ext_C2', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_c3 := Client_SYS.Get_Item_Value('Ext_C3', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_c4 := Client_SYS.Get_Item_Value('Ext_C4', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_c5 := Client_SYS.Get_Item_Value('Ext_C5', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_c6 := Client_SYS.Get_Item_Value('Ext_C6', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_c7 := Client_SYS.Get_Item_Value('Ext_C7', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_c8 := Client_SYS.Get_Item_Value('Ext_C8', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_c9 := Client_SYS.Get_Item_Value('Ext_C9', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_c10 := Client_SYS.Get_Item_Value('Ext_C10', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.ext_c11 := Client_SYS.Get_Item_Value('Ext_C11', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_c12 := Client_SYS.Get_Item_Value('Ext_C12', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_c13 := Client_SYS.Get_Item_Value('Ext_C13', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_c14 := Client_SYS.Get_Item_Value('Ext_C14', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_c15 := Client_SYS.Get_Item_Value('Ext_C15', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_c16 := Client_SYS.Get_Item_Value('Ext_C16', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_c17 := Client_SYS.Get_Item_Value('Ext_C17', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_c18 := Client_SYS.Get_Item_Value('Ext_C18', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_c19 := Client_SYS.Get_Item_Value('Ext_C19', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_c20 := Client_SYS.Get_Item_Value('Ext_C20', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_c21 := Client_SYS.Get_Item_Value('Ext_C21', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_c22 := Client_SYS.Get_Item_Value('Ext_C22', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_c23 := Client_SYS.Get_Item_Value('Ext_C23', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_c24 := Client_SYS.Get_Item_Value('Ext_C24', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_c25 := Client_SYS.Get_Item_Value('Ext_C25', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_c26 := Client_SYS.Get_Item_Value('Ext_C26', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_c27 := Client_SYS.Get_Item_Value('Ext_C27', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_c28 := Client_SYS.Get_Item_Value('Ext_C28', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_c29 := Client_SYS.Get_Item_Value('Ext_C29', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_c30 := Client_SYS.Get_Item_Value('Ext_C30', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 	  
+      new_rec_.d1 := Client_SYS.Get_Item_Value('D1', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.d2 := Client_SYS.Get_Item_Value('D2', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.d3 := Client_SYS.Get_Item_Value('D3', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.d4 := Client_SYS.Get_Item_Value('D4', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.d5 := Client_SYS.Get_Item_Value('D5', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.n1 := Client_SYS.Get_Item_Value('N1', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.n2 := Client_SYS.Get_Item_Value('N2', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.n3 := Client_SYS.Get_Item_Value('N3', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.n4 := Client_SYS.Get_Item_Value('N4', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.n5 := Client_SYS.Get_Item_Value('N5', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.n6 := Client_SYS.Get_Item_Value('N6', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.n7 := Client_SYS.Get_Item_Value('N7', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.n8 := Client_SYS.Get_Item_Value('N8', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.n9 := Client_SYS.Get_Item_Value('N9', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.n10 := Client_SYS.Get_Item_Value('N10', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.n11 := Client_SYS.Get_Item_Value('N11', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.n12 := Client_SYS.Get_Item_Value('N12', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.n13 := Client_SYS.Get_Item_Value('N13', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.n14 := Client_SYS.Get_Item_Value('N14', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.n15 := Client_SYS.Get_Item_Value('N15', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.n16 := Client_SYS.Get_Item_Value('N16', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.n17 := Client_SYS.Get_Item_Value('N17', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.n18 := Client_SYS.Get_Item_Value('N18', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.n19 := Client_SYS.Get_Item_Value('N19', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.n20 := Client_SYS.Get_Item_Value('N20', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));	
+      new_rec_.ext_n1 := Client_SYS.Get_Item_Value('Ext_N1', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_n2 := Client_SYS.Get_Item_Value('Ext_N2', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_n3 := Client_SYS.Get_Item_Value('Ext_N3', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_n4 := Client_SYS.Get_Item_Value('Ext_N4', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_n5 := Client_SYS.Get_Item_Value('Ext_N5', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_n6 := Client_SYS.Get_Item_Value('Ext_N6', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_n7 := Client_SYS.Get_Item_Value('Ext_N7', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_n8 := Client_SYS.Get_Item_Value('Ext_N8', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_n9 := Client_SYS.Get_Item_Value('Ext_N9', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_n10 := Client_SYS.Get_Item_Value('Ext_N10', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));
+      new_rec_.ext_n11 := Client_SYS.Get_Item_Value('Ext_N11', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_n12 := Client_SYS.Get_Item_Value('Ext_N12', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_n13 := Client_SYS.Get_Item_Value('Ext_N13', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_n14 := Client_SYS.Get_Item_Value('Ext_N14', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_n15 := Client_SYS.Get_Item_Value('Ext_N15', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_n16 := Client_SYS.Get_Item_Value('Ext_N16', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_n17 := Client_SYS.Get_Item_Value('Ext_N17', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_n18 := Client_SYS.Get_Item_Value('Ext_N18', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_n19 := Client_SYS.Get_Item_Value('Ext_N19', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu )); 
+      new_rec_.ext_n20 := Client_SYS.Get_Item_Value('Ext_N20', Create_Company_API.Get_Field_Labels(new_rec_.template_id, new_rec_.component, new_rec_.lu ));	
+      New_Detail___(key_, new_rec_);
+      master1_.objkey := new_rec_.objkey;
+      FOR rec2_ IN get_details_rec(new_rec_.template_id, new_rec_.component, new_rec_.lu) LOOP 
+         new_detail_rec_.template_id := rec2_.template_id;
+         new_detail_rec_.component := rec2_.component;
+         new_detail_rec_.version := rec2_.version;
+         new_detail_rec_.lu := rec2_.lu;
+         new_detail_rec_.item_id := rec2_.item_id;
+         IF (rec2_.selected = 'TRUE') THEN 
+            new_detail_rec_.selected := true;
+         ELSE
+            new_detail_rec_.selected := false;
+         END IF ;
+         new_detail_rec_.c1 := rec2_.c1;
+         new_detail_rec_.c2 := rec2_.c2;
+         new_detail_rec_.c3 := rec2_.c3;
+         new_detail_rec_.c4 := rec2_.c4;
+         new_detail_rec_.c5 := rec2_.c5;
+         new_detail_rec_.c6 := rec2_.c6;
+         new_detail_rec_.c7 := rec2_.c7;
+         new_detail_rec_.c8 := rec2_.c8;
+         new_detail_rec_.c9 := rec2_.c9;
+         new_detail_rec_.c10 := rec2_.c10;
+         new_detail_rec_.c11 := rec2_.c11;
+         new_detail_rec_.c12 := rec2_.c12;
+         new_detail_rec_.c13 := rec2_.c13;
+         new_detail_rec_.c14 := rec2_.c14;
+         new_detail_rec_.c15 := rec2_.c15;
+         new_detail_rec_.c16 := rec2_.c16;
+         new_detail_rec_.c17 := rec2_.c17;
+         new_detail_rec_.c18 := rec2_.c18;
+         new_detail_rec_.c19 := rec2_.c19;
+         new_detail_rec_.c20 := rec2_.c20;
+         new_detail_rec_.c21 := rec2_.c21;
+         new_detail_rec_.c22 := rec2_.c22;
+         new_detail_rec_.c23 := rec2_.c23;
+         new_detail_rec_.c24 := rec2_.c24;
+         new_detail_rec_.c25 := rec2_.c25;
+         new_detail_rec_.c26 := rec2_.c26;
+         new_detail_rec_.c27 := rec2_.c27;
+         new_detail_rec_.c28 := rec2_.c28;
+         new_detail_rec_.c29 := rec2_.c29;
+         new_detail_rec_.c30 := rec2_.c30;
+         new_detail_rec_.c31 := rec2_.c31;
+         new_detail_rec_.c32 := rec2_.c32;
+         new_detail_rec_.c33 := rec2_.c33;
+         new_detail_rec_.c34 := rec2_.c34;
+         new_detail_rec_.c35 := rec2_.c35;
+         new_detail_rec_.c36 := rec2_.c36;
+         new_detail_rec_.c37 := rec2_.c37;
+         new_detail_rec_.c38 := rec2_.c38;
+         new_detail_rec_.c39:= rec2_.c39;
+         new_detail_rec_.c40 := rec2_.c40;
+         new_detail_rec_.c41 := rec2_.c41;
+         new_detail_rec_.c42 := rec2_.c42;
+         new_detail_rec_.c43 := rec2_.c43;
+         new_detail_rec_.c44 := rec2_.c44;
+         new_detail_rec_.c45 := rec2_.c45;
+         new_detail_rec_.c46 := rec2_.c46;
+         new_detail_rec_.c47 := rec2_.c47;
+         new_detail_rec_.c48 := rec2_.c48;
+         new_detail_rec_.c49 := rec2_.c49;
+         new_detail_rec_.c50 := rec2_.c50;
+         new_detail_rec_.c51 := rec2_.c51;
+         new_detail_rec_.c52 := rec2_.c52;
+         new_detail_rec_.c53 := rec2_.c53;
+         new_detail_rec_.c54 := rec2_.c54;
+         new_detail_rec_.c55 := rec2_.c55;
+         new_detail_rec_.c56 := rec2_.c56;
+         new_detail_rec_.c57 := rec2_.c57;
+         new_detail_rec_.c58 := rec2_.c58;
+         new_detail_rec_.c59 := rec2_.c59;
+         new_detail_rec_.c60 := rec2_.c60;
+         new_detail_rec_.c61 := rec2_.c61;
+         new_detail_rec_.c62 := rec2_.c62;
+         new_detail_rec_.c63 := rec2_.c63;
+         new_detail_rec_.c64 := rec2_.c64;
+         new_detail_rec_.c65 := rec2_.c65;
+         new_detail_rec_.c66 := rec2_.c66;
+         new_detail_rec_.c67 := rec2_.c67;
+         new_detail_rec_.c68 := rec2_.c68;
+         new_detail_rec_.c69 := rec2_.c69;
+         new_detail_rec_.c70 := rec2_.c70;
+         new_detail_rec_.ext_c1 := rec2_.ext_c1;
+         new_detail_rec_.ext_c2 := rec2_.ext_c2;
+         new_detail_rec_.ext_c3 := rec2_.ext_c3;
+         new_detail_rec_.ext_c4 := rec2_.ext_c4;
+         new_detail_rec_.ext_c5 := rec2_.ext_c5;
+         new_detail_rec_.ext_c6 := rec2_.ext_c6;         
+         new_detail_rec_.ext_c7 := rec2_.ext_c7;
+         new_detail_rec_.ext_c8 := rec2_.ext_c8;
+         new_detail_rec_.ext_c9 := rec2_.ext_c9;
+         new_detail_rec_.ext_c10 := rec2_.ext_c10;
+         new_detail_rec_.ext_c11 := rec2_.ext_c11;
+         new_detail_rec_.ext_c12 := rec2_.ext_c12;
+         new_detail_rec_.ext_c13 := rec2_.ext_c13;
+         new_detail_rec_.ext_c14 := rec2_.ext_c14;
+         new_detail_rec_.ext_c15 := rec2_.ext_c15;
+         new_detail_rec_.ext_c16 := rec2_.ext_c16;         
+         new_detail_rec_.ext_c17 := rec2_.ext_c17;
+         new_detail_rec_.ext_c18 := rec2_.ext_c18;
+         new_detail_rec_.ext_c19 := rec2_.ext_c19;
+         new_detail_rec_.ext_c20 := rec2_.ext_c20;
+         new_detail_rec_.ext_c21 := rec2_.ext_c21;
+         new_detail_rec_.ext_c22 := rec2_.ext_c22;
+         new_detail_rec_.ext_c23 := rec2_.ext_c23;
+         new_detail_rec_.ext_c24 := rec2_.ext_c24;
+         new_detail_rec_.ext_c25 := rec2_.ext_c25;
+         new_detail_rec_.ext_c26 := rec2_.ext_c26;         
+         new_detail_rec_.ext_c27 := rec2_.ext_c27;
+         new_detail_rec_.ext_c28 := rec2_.ext_c28;
+         new_detail_rec_.ext_c29 := rec2_.ext_c29;
+         new_detail_rec_.ext_c30 := rec2_.ext_c30;
+         new_detail_rec_.d1 := rec2_.d1;
+         new_detail_rec_.d2 := rec2_.d2;
+         new_detail_rec_.d3 := rec2_.d3;
+         new_detail_rec_.d4 := rec2_.d4;
+         new_detail_rec_.d5 := rec2_.d5;
+         new_detail_rec_.n1 := rec2_.n1;
+         new_detail_rec_.n2 := rec2_.n2;
+         new_detail_rec_.n3 := rec2_.n3;
+         new_detail_rec_.n4 := rec2_.n4;
+         new_detail_rec_.n5 := rec2_.n5;
+         new_detail_rec_.n6 := rec2_.n6;
+         new_detail_rec_.n7 := rec2_.n7;
+         new_detail_rec_.n8 := rec2_.n8;
+         new_detail_rec_.n9 := rec2_.n9;
+         new_detail_rec_.n10 := rec2_.n10;
+         new_detail_rec_.n11 := rec2_.n11;
+         new_detail_rec_.n12 := rec2_.n12;
+         new_detail_rec_.n13 := rec2_.n13;
+         new_detail_rec_.n14 := rec2_.n14;
+         new_detail_rec_.n15 := rec2_.n15;
+         new_detail_rec_.n16 := rec2_.n16;
+         new_detail_rec_.n17 := rec2_.n17;
+         new_detail_rec_.n18 := rec2_.n18;
+         new_detail_rec_.n19 := rec2_.n19;
+         new_detail_rec_.n20 := rec2_.n20;
+         new_detail_rec_.ext_n1 := rec2_.ext_n1;
+         new_detail_rec_.ext_n2 := rec2_.ext_n2;
+         new_detail_rec_.ext_n3 := rec2_.ext_n3;
+         new_detail_rec_.ext_n4 := rec2_.ext_n4;
+         new_detail_rec_.ext_n5 := rec2_.ext_n5;
+         new_detail_rec_.ext_n6 := rec2_.ext_n6;         
+         new_detail_rec_.ext_n7 := rec2_.ext_n7;
+         new_detail_rec_.ext_n8 := rec2_.ext_n8;
+         new_detail_rec_.ext_n9 := rec2_.ext_n9;
+         new_detail_rec_.ext_n10 := rec2_.ext_n10;
+         new_detail_rec_.ext_n11 := rec2_.ext_n11;
+         new_detail_rec_.ext_n12 := rec2_.ext_n12;
+         new_detail_rec_.ext_n13 := rec2_.ext_n13;
+         new_detail_rec_.ext_n14 := rec2_.ext_n14;
+         new_detail_rec_.ext_n15 := rec2_.ext_n15;
+         new_detail_rec_.ext_n16 := rec2_.ext_n16;         
+         new_detail_rec_.ext_n17 := rec2_.ext_n17;
+         new_detail_rec_.ext_n18 := rec2_.ext_n18;
+         new_detail_rec_.ext_n19 := rec2_.ext_n19;
+         new_detail_rec_.ext_n20 := rec2_.ext_n20;
+         new_detail_rec_.parent_objkey := new_rec_.objkey;
+         New_Detail___(master1_, new_detail_rec_);
+      END LOOP;
+   END LOOP;
+   RETURN rec_;
+END Generate_Diff___;

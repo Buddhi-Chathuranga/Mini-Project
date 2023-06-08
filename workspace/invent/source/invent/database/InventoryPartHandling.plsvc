@@ -1,0 +1,365 @@
+--------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  ---------------------------------------------------------------
+-- 2021-12-06  NiRalk  SC21R2-5524, Added Validate_Contract___ to get enabled company LCC parameters and added COMPANY to CRUD_Default___ method.
+-- 2021-07-10  WaSalk  SC21R2-835, Modified Get_Part_Defaults___ by adding cust_warranty_id and sup_warranty_id to get values from partcatrec_.
+-- 2020-02-21  DaZase  SCXTEND-2282, Added CRUD_Default_Copy___ to handle IEE duplicate re-implementation here.
+-- 2019-10-31  NISMLK  MFSPRING20-88, Modified Create_Part_Catalog___() by adding parameter technical_drawing_no_.
+-- 2019-07-25  CKumlk  SCUXXW4-23177, Modified Save_Characteristics___ to handle server error.
+-- 2019-05-26  NiDalk  SCUXXW4-20681, Added Get_Project_Id___.
+-- 2018-03-13  ChFolk  SCUXXW4-17188, Added Dynamic Dependency for Delete_Forecast_Parts___.
+-- 2018-12-01  SWiclk  SCUXXW4-14234, Added validations for Density, Weight and Volume.
+-- 2018-11-27  INROLK  SAUXXW4-3269, Added  Maint_Info_Exists___ and Create_Maint_Info___
+-- 2018-09-13  SWiclk  SCUXXW4-6204, Created.
+--------------------------------------------------------------------------------------
+
+layer Core;
+
+@Override
+PROCEDURE CRUD_Default___ (
+   key_  IN  Inventory_Part_Key,
+   attr_ IN OUT VARCHAR2,
+   info_ OUT VARCHAR2 )
+IS
+   contract_                    VARCHAR2(5);
+   use_partca_desc_invent_db_   VARCHAR2(5);
+   -- gelr:localization_control_center, begin
+   company_                     VARCHAR2(20);
+   -- gelr:localization_control_center, end
+BEGIN
+   --Add pre-processing code here   
+   contract_ := User_Allowed_Site_API.Get_Default_Site;   
+   use_partca_desc_invent_db_ := Get_Use_Partca_Desc_Invent_Db___(contract_);    
+   super(key_, attr_, info_);    
+   Client_SYS.Add_To_Attr('USE_PARTCA_DESC_INVENT_DB', use_partca_desc_invent_db_, attr_);   
+   --Add post-processing code here
+   -- gelr:localization_control_center, begin
+   company_ := Site_API.Get_Company(contract_);
+   Client_SYS.Add_To_Attr('COMPANY', company_, attr_);
+   -- gelr:localization_control_center, end
+END CRUD_Default___;
+
+FUNCTION Get_Use_Partca_Desc_Invent_Db___ (
+   contract_ IN VARCHAR2) RETURN VARCHAR2
+IS
+BEGIN
+   RETURN Site_Invent_Info_API.Get_Use_Partca_Desc_Invent_Db(contract_);
+END Get_Use_Partca_Desc_Invent_Db___;
+
+FUNCTION Get_Name_Via_Contract___ (
+   contract_         IN VARCHAR2, 
+   region_of_origin_ IN VARCHAR2) RETURN VARCHAR2
+IS
+BEGIN
+   RETURN Country_Region_API.Get_Name_Via_Contract(contract_, region_of_origin_);
+END Get_Name_Via_Contract___;
+
+FUNCTION Get_Std_Name___ (
+   std_name_id_ IN NUMBER) RETURN VARCHAR2
+IS
+BEGIN
+   RETURN Standard_Names_Language_API.Get_Std_Name(NULL, std_name_id_);
+END Get_Std_Name___;
+
+FUNCTION Get_Part_Defaults___(
+   part_no_    IN VARCHAR2,
+   contract_   IN VARCHAR2) RETURN Inventory_Part_Structure_Rec
+IS  
+   partcatrec_           Part_Catalog_API.Public_Rec;
+   part_default_details_ Inventory_Part_Structure_Rec;
+BEGIN	
+   partcatrec_ := Part_Catalog_API.Get(part_no_);   
+   part_default_details_.unit_of_measure := partcatrec_.unit_code;
+   part_default_details_.input_unit_meas_group_id := partcatrec_.input_unit_meas_group_id;
+   part_default_details_.catch_unit_enabled := partcatrec_.catch_unit_enabled;
+   part_default_details_.part_description := Part_Catalog_API.Get_Description(part_no_);
+   part_default_details_.expense_part_client := Inventory_Part_Type_API.Decode(6);
+   part_default_details_.qty_calc_rounding := Site_Invent_Info_API.Get_Default_Qty_Calc_Round(contract_);
+   part_default_details_.cust_warranty_id := partcatrec_.cust_warranty_id;
+   part_default_details_.sup_warranty_id := partcatrec_.sup_warranty_id;
+   $IF Component_Order_SYS.INSTALLED $THEN
+      part_default_details_.catalog_type := Sales_Part_API.Get_Catalog_Type_Db(contract_, part_no_);
+   $END       
+   
+   RETURN part_default_details_;   
+END Get_Part_Defaults___;
+
+@DynamicComponentDependency DEMAND
+PROCEDURE Delete_Forecast_Parts___ (
+   part_no_  IN  VARCHAR2,
+   contract_ IN  VARCHAR2,
+   info$_    OUT VARCHAR2 ) 
+IS
+   info_  VARCHAR2(32000);   
+BEGIN   
+   Forecast_Part_Util_API.Delete_Forecast_Parts__(info_, part_no_, contract_);
+   info$_ := info_;
+END Delete_Forecast_Parts___;
+
+
+PROCEDURE Remove_Actual_Cost_Difference___ (
+   contract_ IN VARCHAR2,
+   part_no_  IN VARCHAR2 ) 
+IS
+   
+BEGIN
+   Inventory_Part_Config_API.Remove_Actual_Cost_Difference(contract_, part_no_, null);
+END Remove_Actual_Cost_Difference___;
+
+
+PROCEDURE Save_Characteristics___ (
+   objkey_ IN VARCHAR2 ) 
+IS
+   parent_key_    Inventory_Part_Virtual_Key;
+   attr_          VARCHAR2(32000);
+   info_          VARCHAR2(50);
+   objid_         VARCHAR2(50);
+   objversion_    VARCHAR2(20);
+BEGIN
+   parent_key_.objkey := objkey_;
+   FOR line_rec_ IN Get_Characteristics_Template_Set___(parent_key_) LOOP
+      Client_SYS.Clear_Attr(attr_);
+      User_Allowed_Site_API.Is_Authorized(line_rec_.contract);
+      Client_SYS.Add_To_Attr('CONTRACT', line_rec_.contract, attr_);
+      Client_SYS.Add_To_Attr('PART_NO', line_rec_.part_no, attr_);
+      Client_SYS.Add_To_Attr('CHARACTERISTIC_CODE', line_rec_.characteristic_code, attr_);
+      Client_SYS.Add_To_Attr('UNIT_MEAS', line_rec_.unit_meas, attr_);
+      IF line_rec_.attr_value_numeric IS null THEN
+         Client_SYS.Add_To_Attr('ATTR_VALUE', line_rec_.attr_value_alpha, attr_);      
+      ELSE 
+         Client_SYS.Add_To_Attr('ATTR_VALUE', line_rec_.attr_value_numeric, attr_);
+      END IF;
+
+      INVENTORY_PART_CHAR_API.NEW__(info_, objid_, objversion_, attr_, 'DO');
+      
+   END LOOP;   
+   
+END Save_Characteristics___;
+
+FUNCTION Part_Catalog_Exists___(
+	part_no_ IN VARCHAR2) RETURN BOOLEAN
+IS
+part_exists_ NUMBER;
+BEGIN
+	part_exists_ := Part_Catalog_API.Check_Part_Exists2(part_no_);
+   IF (part_exists_ = 1) THEN
+      RETURN TRUE;
+   ELSE
+      RETURN FALSE;
+   END IF;
+END Part_Catalog_Exists___;
+
+
+PROCEDURE Create_Part_Catalog___(
+   part_no_                    IN VARCHAR2,
+   description_                IN VARCHAR2,
+   unit_code_                  IN VARCHAR2,
+   lot_tracking_code_          IN VARCHAR2,
+   eng_serial_tracking_code_   IN BOOLEAN,
+   serial_tracking_code_       IN BOOLEAN,
+   net_weight_                 IN NUMBER,
+   net_volume_                 IN NUMBER,
+   net_density_                IN NUMBER,
+   uom_for_weight_net_         IN VARCHAR2,
+   uom_for_volume_net_         IN VARCHAR2,
+   uom_for_density_net_        IN VARCHAR2,
+   gtin_no_                    IN VARCHAR2,
+   gtin_series_                IN VARCHAR2,
+   receipt_issue_serial_track_ IN BOOLEAN,
+   condition_code_usage_       IN BOOLEAN,
+   configurable_               IN BOOLEAN,
+   catch_unit_enabled_         IN BOOLEAN,
+   multilevel_tracking_        IN BOOLEAN,
+   type_code_                  IN VARCHAR2,
+   technical_drawing_no_       IN VARCHAR2,
+   info$_ OUT VARCHAR2 )  
+IS
+allow_as_not_consumed_db_           VARCHAR2(5);
+   eng_serial_tracking_code_db_     VARCHAR2(100);
+   serial_tracking_code_db_         VARCHAR2(100);
+   receipt_issue_serial_track_db_   VARCHAR2(100);
+   configurable_db_                 VARCHAR2(100);
+   condition_code_usage_db_         VARCHAR2(100);
+   catch_unit_enabled_db_           VARCHAR2(100);
+   multilevel_tracking_db_          VARCHAR2(100);
+   part_serial_tracking_decoded_     VARCHAR2(100);
+   part_serial_not_tracking_decoded_ VARCHAR2(100);
+   lot_tracking_code_db_ VARCHAR2(100);
+BEGIN
+   part_serial_tracking_decoded_ := Part_Serial_Tracking_API.Decode(Part_Serial_Tracking_API.DB_SERIAL_TRACKING);
+   part_serial_not_tracking_decoded_ :=  Part_Serial_Tracking_API.Decode(Part_Serial_Tracking_API.DB_NOT_SERIAL_TRACKING);
+   
+   IF (type_code_ = 'Expense') THEN
+      allow_as_not_consumed_db_ := Fnd_Boolean_API.db_true;
+   ELSE 
+      allow_as_not_consumed_db_ := Fnd_Boolean_API.db_false;
+   END IF;
+   
+   IF eng_serial_tracking_code_ THEN
+      eng_serial_tracking_code_db_ := part_serial_tracking_decoded_;
+   ELSE
+      eng_serial_tracking_code_db_ := part_serial_not_tracking_decoded_;
+   END IF;
+   
+   IF serial_tracking_code_ THEN
+      serial_tracking_code_db_ := part_serial_tracking_decoded_;
+   ELSE
+      serial_tracking_code_db_ := part_serial_not_tracking_decoded_;
+   END IF;
+   
+   IF receipt_issue_serial_track_ THEN
+      receipt_issue_serial_track_db_ := Fnd_Boolean_API.db_true;
+   ELSE
+      receipt_issue_serial_track_db_ := Fnd_Boolean_API.db_false;
+   END IF;
+   
+   IF configurable_ THEN
+      configurable_db_ := Part_Configuration_API.DB_CONFIGURED;
+   ELSE
+      configurable_db_ := Part_Configuration_API.DB_NOT_CONFIGURED;
+   END IF;
+   
+   IF condition_code_usage_ THEN
+      condition_code_usage_db_ := Condition_Code_Usage_API.DB_ALLOW_CONDITION_CODE;
+   ELSE
+      condition_code_usage_db_ := Condition_Code_Usage_API.DB_NOT_ALLOW_CONDITION_CODE;
+   END IF;
+   
+   IF catch_unit_enabled_ THEN
+      catch_unit_enabled_db_ := Fnd_Boolean_API.db_true;
+   ELSE
+      catch_unit_enabled_db_ := Fnd_Boolean_API.db_false;
+   END IF;
+   
+   IF multilevel_tracking_ THEN
+      multilevel_tracking_db_ := Multilevel_Tracking_API.DB_TRACKING_ON;
+   ELSE
+      multilevel_tracking_db_ := Multilevel_Tracking_API.DB_TRACKING_OFF;
+   END IF;
+   
+   CASE lot_tracking_code_ 
+      WHEN 'LotTracking' THEN lot_tracking_code_db_ := Part_Lot_Tracking_API.DB_LOT_TRACKING; 
+      WHEN 'NotLotTracking' THEN lot_tracking_code_db_ := Part_Lot_Tracking_API.DB_NOT_LOT_TRACKING;  
+      WHEN 'OrderBased' THEN lot_tracking_code_db_ := Part_Lot_Tracking_API.DB_ORDER_BASED;      
+   END CASE;  
+   
+   IF (uom_for_density_net_ IS NOT NULL) AND (net_density_ IS NULL) THEN
+      Error_SYS.Record_General(lu_name_, 'NODENSITY: Field Density requires a value.');         
+   END IF;
+   IF (net_density_ IS NOT NULL) AND (uom_for_density_net_ IS NULL) THEN
+      Error_SYS.Record_General(lu_name_, 'NOUOMDENSITY: Field UoM for Density requires a value.');         
+   END IF;
+     
+	Part_Catalog_API.Create_Part(part_no_, description_, unit_code_, 0, NULL, NULL, eng_serial_tracking_code_db_, serial_tracking_code_db_, configurable_db_,
+                                condition_code_usage_db_, lot_tracking_code_db_, NULL, catch_unit_enabled_db_, multilevel_tracking_db_, gtin_no_, gtin_series_,
+                                net_weight_,uom_for_weight_net_, net_volume_, uom_for_volume_net_, NULL, allow_as_not_consumed_db_, 
+                                Fnd_Boolean_API.db_false, receipt_issue_serial_track_db_, technical_drawing_no_ => technical_drawing_no_);
+   
+  
+   
+   IF (net_density_ IS NOT NULL) THEN      
+      $IF Component_Mfgstd_SYS.INSTALLED $THEN
+         Part_Material_Formulation_API.New(part_no_, net_density_, uom_for_density_net_);
+      $ELSE
+         NULL;
+      $END     
+   END IF;
+                                
+END Create_Part_Catalog___;
+
+FUNCTION Maint_Info_Exists___(
+   contract_ IN VARCHAR2,
+   part_no_  IN VARCHAR2 )  RETURN BOOLEAN
+IS
+   maint_info_exists_ BOOLEAN;
+BEGIN
+    $IF Component_Wo_SYS.INSTALLED $THEN
+      maint_info_exists_ := Maintenance_Inv_Part_API.Exists(contract_, part_no_);
+   $ELSE
+      NULL;
+   $END   
+   RETURN maint_info_exists_;
+END Maint_Info_Exists___;
+
+PROCEDURE Create_Maint_Info___ (
+   contract_ IN VARCHAR2,
+   part_no_  IN VARCHAR2,
+   info$_ OUT VARCHAR2 ) 
+IS
+   attr_          VARCHAR2(32000);
+   info_          VARCHAR2(50);
+   objid_         VARCHAR2(50);
+   objversion_    VARCHAR2(20);
+   
+BEGIN
+   Client_SYS.Clear_Attr(attr_);
+   Client_SYS.Add_To_Attr('CONTRACT', contract_, attr_);
+   Client_SYS.Add_To_Attr('PART_NO', part_no_, attr_);
+   $IF Component_Wo_SYS.INSTALLED $THEN
+      MAINTENANCE_INV_PART_API.NEW__(info_, objid_, objversion_, attr_, 'DO');
+   $ELSE
+      NULL;
+   $END 
+END Create_Maint_Info___;
+
+FUNCTION Fetch_Char_Type___ (
+	characteristic_code_ IN VARCHAR2) RETURN Char_Type_Structure_Rec
+IS
+   value_rec_   Char_Type_Structure_Rec;
+BEGIN
+	value_rec_.char_type := Characteristic_API.Get_Row_Type_Translated(characteristic_code_);
+   value_rec_.char_type_db := Characteristic_API.Get_Row_Type(characteristic_code_);
+   
+   RETURN value_rec_;
+END Fetch_Char_Type___;
+
+FUNCTION Get_Project_Id___(
+   contract_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   open_projects_exist_    VARCHAR2(5) := 'FALSE';
+BEGIN
+   open_projects_exist_ := Order_Supply_Demand_API.Open_Projects_Exist(contract_);
+   
+   IF open_projects_exist_ = 'TRUE' THEN
+      RETURN '#';
+   ELSE
+      return '*';
+   END IF;
+END Get_Project_Id___;
+
+@Override
+PROCEDURE CRUD_Default_Copy___ (
+   objid_  IN     VARCHAR2,
+   key_    IN     Inventory_Part_Key,
+   values_ IN     Copy_Values_Rec,
+   attr_      OUT VARCHAR2,
+   info_      OUT VARCHAR2 )
+IS
+   old_contract_ VARCHAR2(5);
+   use_partca_desc_invent_db_ VARCHAR2(20);
+BEGIN
+   old_contract_ := key_.contract;
+   super(objid_, key_, values_, attr_, info_);
+   IF (old_contract_ IS NOT NULL) THEN
+      Client_SYS.Set_Item_Value('CONTRACT', old_contract_, attr_);
+   END IF;
+   use_partca_desc_invent_db_ := Site_Invent_Info_API.Get_Use_Partca_Desc_Invent_Db(NVL(old_contract_, key_.contract));
+   IF (use_partca_desc_invent_db_ = Fnd_Boolean_API.DB_TRUE) THEN
+      Client_SYS.Set_Item_Value('USE_PARTCA_DESC_INVENT_DB', 'TRUE', attr_);
+   ELSE
+      Client_SYS.Set_Item_Value('USE_PARTCA_DESC_INVENT_DB', 'FALSE', attr_);
+   END IF;
+END CRUD_Default_Copy___;   
+
+FUNCTION Validate_Contract___ (
+   contract_ IN VARCHAR2) RETURN Contract_Info_Rec
+IS
+   contract_info_rec_  Contract_Info_Rec;
+BEGIN
+   contract_info_rec_.use_partca_description := Site_Invent_Info_API.Get_Use_Partca_Desc_Invent_Db(contract_);
+   -- gelr:localization_control_center, begin
+   contract_info_rec_.company                := Site_API.Get_Company(contract_);
+   contract_info_rec_.enabled_lcc_params     := Company_Localization_Info_API.Get_Enabled_Params_per_Company(contract_info_rec_.company);
+   -- gelr:localization_control_center, end
+   RETURN contract_info_rec_;
+END Validate_Contract___;

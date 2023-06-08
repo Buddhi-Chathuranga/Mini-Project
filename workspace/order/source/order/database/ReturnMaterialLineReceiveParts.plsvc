@@ -1,0 +1,615 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: ReturnMaterialLineReceiveParts
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  211206  Hahalk  Bug 161816 (SC21R2-6440), Modified CRUD_Default___ to auto populate the value for revision no.
+--  210710  WaSalk  Bug 159999 (SCZ-15462), Modified demand_code_ to demand_code_db_ fetching db value in Check_Source_Order_Comsumption___.
+--  201014  ChBnlk  SCZ-11881, Corrected to get the quantities correctly in Validate_Total_Qty_To_Return___.
+--  200303  Kagalk  GESPRING20-1797, Added warehouse_journal functionality.
+--  200131  Kagalk  GESPRING20-1624, Added modify_date_applied functionality.
+--  190731  RaVdlk  SCUXXW4-21758, Modified the Execute_Ok method
+--  190620  MaEelk  SCUXXW4-13507, Merged LCS Bugs 143062 and 147914.
+--  190312  ErRalk  SCUXXW4-17216, Added Dependency Annotation for the relevant fields. 
+--  180601  MAHPLK  SCUXXW4-8757, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Return_Material_Line_Receive_Parts_Virtual_Rec )
+IS
+   line_rec_   Return_Material_Line_Received_Quantities_Virtual_Rec;
+   CURSOR get_inventory_part_in_stock_lines IS
+      SELECT contract, part_no, configuration_id, location_no, lot_batch_no, serial_no, eng_chg_level, waiv_dev_rej_no, activity_seq, handling_unit_id, 
+            owning_vendor_no, qty_onhand, catch_qty_onhand, expiration_date, condition_code, 
+            part_ownership_db, owning_customer_no
+      FROM INVENTORY_PART_IN_STOCK_DELIV 
+      WHERE CONFIGURATION_ID = rec_.configuration_id AND contract = rec_.contract and FREEZE_FLAG_DB = 'N' 
+      AND NOT (SERIAL_NO !='*' 
+              AND (qty_onhand = 1 OR Part_Serial_Catalog_API.Get_Objstate(PART_NO, SERIAL_NO) 
+              IN ('Unlocated', 'InRepairWorkshop', 'InInventory', 'InFacility', 'Contained'))) 
+      AND PART_OWNERSHIP_DB = DECODE(rec_.co_line_part_ownership_db ,'COMPANY RENTAL ASSET', 'COMPANY RENTAL ASSET','COMPANY OWNED') 
+      AND ACTIVITY_SEQ = 0 AND PART_NO = rec_.part_no 
+      ORDER BY expiration_date DESC, receipt_date DESC;
+BEGIN   
+   super(rec_);
+   FOR inv_part_in_stock_rec_ IN get_inventory_part_in_stock_lines LOOP
+      line_rec_.objkey                         := sys_guid();
+      line_rec_.parent_objkey                  := rec_.objkey;
+      line_rec_.return_total_qty               := FALSE;
+      line_rec_.contract                       := inv_part_in_stock_rec_.contract;
+      line_rec_.part_no                        := inv_part_in_stock_rec_.part_no;
+      line_rec_.configuration_id               := inv_part_in_stock_rec_.configuration_id;
+      line_rec_.location_no                    := inv_part_in_stock_rec_.location_no;
+      line_rec_.lot_batch_no                   := inv_part_in_stock_rec_.lot_batch_no;
+      line_rec_.serial_no                      := inv_part_in_stock_rec_.serial_no;
+      line_rec_.eng_chg_level                  := inv_part_in_stock_rec_.eng_chg_level;
+      line_rec_.waiv_dev_rej_no                := inv_part_in_stock_rec_.waiv_dev_rej_no;
+      line_rec_.activity_seq                   := inv_part_in_stock_rec_.activity_seq;
+      line_rec_.handling_unit_id               := inv_part_in_stock_rec_.handling_unit_id;
+      line_rec_.owning_vendor_no               := inv_part_in_stock_rec_.owning_vendor_no;
+      line_rec_.qty_onhand                     := inv_part_in_stock_rec_.qty_onhand;
+      line_rec_.catch_qty_onhand               := inv_part_in_stock_rec_.catch_qty_onhand;
+      line_rec_.expiration_date                := inv_part_in_stock_rec_.expiration_date;
+      line_rec_.sscc                           := Handling_Unit_API.Get_Sscc(inv_part_in_stock_rec_.handling_unit_id);
+      line_rec_.condition_code                 := inv_part_in_stock_rec_.condition_code;
+      line_rec_.top_parent_handling_unit_type  := Handling_Unit_API.Get_Top_Parent_Hu_Type_Id(inv_part_in_stock_rec_.handling_unit_id);
+      line_rec_.top_parent_type_description    := Handling_Unit_Type_API.Get_Description(line_rec_.top_parent_handling_unit_type);
+      line_rec_.top_parent_s_s_c_c             := Handling_Unit_API.Get_Top_Parent_Sscc(inv_part_in_stock_rec_.handling_unit_id);
+      line_rec_.top_parent_alt_h_u_label_i_d   := Handling_Unit_API.Get_Top_Parent_Alt_Hu_Label_Id(inv_part_in_stock_rec_.handling_unit_id);
+      line_rec_.part_ownership_db              := inv_part_in_stock_rec_.part_ownership_db;
+      line_rec_.stock_exist                    := TRUE;
+      CRUD_Create___(line_rec_);
+   END LOOP; 
+END CRUD_Create___;
+
+
+@Override
+PROCEDURE CRUD_Default___ (
+   rec_ IN OUT Return_Material_Line_Received_Quantities_Virtual_Rec )
+IS
+   parent_rec_    Return_Material_Line_Receive_Parts_Virtual_Rec;
+   parent_key_    Return_Material_Line_Receive_Parts_Virtual_Key;
+   child_rec_     Return_Material_Line_Received_Quantities_Virtual_Rec;
+   child_key_     Return_Material_Line_Received_Quantities_Virtual_Key;
+   temp_location_no_    VARCHAR2(35);
+   temp_eng_chg_level_  VARCHAR2(6);
+   return_all_rows_     NUMBER := 0;
+   stock_rec_  Inventory_Part_In_Stock_API.Public_Rec;
+BEGIN   
+   super(rec_);
+   parent_key_.objkey := rec_.parent_objkey;
+   parent_rec_   := Get_record___(parent_key_);
+   FOR received_quantitis_rec_ IN Get_Receive_Part_Array___(parent_key_) LOOP  
+      child_key_.objkey := received_quantitis_rec_.objkey;
+      child_rec_        := Get_Record___(child_key_);      
+      IF (child_rec_.sales_qty_to_return IS NOT NULL AND child_rec_.sales_qty_to_return > 0) OR 
+         (child_rec_.qty_to_return IS NOT NULL AND child_rec_.qty_to_return > 0 ) THEN         
+         IF (child_rec_.return_total_qty) THEN
+            return_all_rows_ := return_all_rows_ +1;
+         END IF;
+      END IF;
+   END LOOP;
+   
+   IF (return_all_rows_ > 0) THEN
+      Error_SYS.Record_General(lu_name_, 'CANNOTADDNEWLINE: You cannot add a new line when the return total quantity check box is selected.');      
+   END IF;
+   
+   temp_location_no_ := Inventory_Part_Def_Loc_API.Get_Location_No( parent_rec_.contract, parent_rec_.part_no);
+   temp_eng_chg_level_ :=  Inventory_Part_Revision_API.Get_Eng_Chg_Level(parent_rec_.contract, parent_rec_.part_no, Site_API.Get_Site_Date(parent_rec_.contract));
+   stock_rec_ := Inventory_Part_In_Stock_API.Get(parent_rec_.contract, parent_rec_.part_no, parent_rec_.configuration_id, 
+                                               temp_location_no_, '*', '*',
+                                               temp_eng_chg_level_,
+                                               '*', 0, 0);
+   IF (stock_rec_.part_no IS NOT NULL) THEN
+      rec_.stock_exist := TRUE;
+      rec_.expiration_date := stock_rec_.expiration_date;
+   ELSE
+      rec_.stock_exist := FALSE;
+   END IF;
+   
+   IF temp_location_no_ IS NOT NULL THEN
+      rec_.location_no:= temp_location_no_;
+   END IF;
+   rec_.contract:= parent_rec_.contract;
+   rec_.part_no:= parent_rec_.part_no;
+   rec_.eng_chg_level:= temp_eng_chg_level_;
+   rec_.qty_onhand:= 0;
+   rec_.lot_batch_no:= '*';
+   rec_.serial_no:= '*';
+   rec_.waiv_dev_rej_no:= '*';
+   rec_.configuration_id := parent_rec_.configuration_id;
+   rec_.part_ownership_db:= 'COMPANY OWNED';
+   rec_.condition_code:= parent_rec_.condition_code;
+   rec_.activity_seq:= 0;  
+   rec_.handling_unit_id := 0;
+END CRUD_Default___;
+
+
+FUNCTION Fetch_Rma_Line_Details___(
+   rma_no_      IN NUMBER,
+   rma_line_no_ IN NUMBER) RETURN Rma_Line_Details_Struc_Rec
+IS
+   rec_           Rma_Line_Details_Struc_Rec;
+   line_item_no_  NUMBER;
+   CURSOR get_rma_line_info IS
+      SELECT contract, part_no, catalog_no, configuration_id, condition_code,
+             qty_to_return - DECODE(qty_received, NULL, 0, qty_received) sales_qty_to_return,
+             DECODE(part_no, NULL, NULL, qty_to_return_inv_uom - DECODE(qty_received_inv_uom, NULL, 0, qty_received_inv_uom)) inventory_qty_to_return,
+             credit_invoice_no, order_no, rel_no, line_no, line_item_no, conv_factor, inverted_conv_factor, arrival_date
+      FROM return_material_line_tab
+      WHERE rma_no = rma_no_
+      AND   rma_line_no = rma_line_no_;
+   
+BEGIN
+   OPEN get_rma_line_info;
+   FETCH get_rma_line_info INTO rec_.contract, rec_.part_no, rec_.catalog_no, rec_.configuration_id, rec_.condition_code,
+                                   rec_.sales_qty_to_return, rec_.inventory_qty_to_return, rec_.credit_invoice_no,  
+                                   rec_.order_no, rec_.rel_no, rec_.line_no, line_item_no_, rec_.conversion_factor, rec_.inverted_conversion_factor, rec_.arrival_date;
+   CLOSE get_rma_line_info;
+   
+   rec_.sales_unit_meas           :=  Return_Material_Line_API.Get_Sales_Unit_Meas(rma_no_, rma_line_no_);
+   rec_.inventory_unit_meas       :=  Inventory_Part_API.Get_Unit_Meas(rec_.contract, rec_.part_no);
+   rec_.site_date                 :=  Site_API.Get_Site_Date(rec_.contract);
+   rec_.return_unit_meas          :=  Sales_Part_API.Get_Return_Unit_Meas(rec_.contract,rec_.catalog_no);
+   rec_.stop_new_serial_in_rma_db :=  Part_Catalog_API.Get_Stop_New_Serial_In_Rma_Db(rec_.part_no);
+   rec_.latest_return_date        :=  Return_Material_API.Get_Latest_Return_Date(rma_no_);
+   rec_.co_line_part_ownership_db :=  Customer_Order_Line_API.Get_Part_Ownership_Db(rec_.order_no, rec_.rel_no, rec_.line_no, line_item_no_);
+   rec_.durability_days           :=  Inventory_Part_API.Get_Durability_Day(rec_.contract, rec_.part_no);
+   RETURN rec_;
+END Fetch_Rma_Line_Details___;
+
+
+FUNCTION Validate_Ok___(
+   parent_objkey_ IN VARCHAR2 ) RETURN Validate_Ok_Struc_Rec
+IS
+   parent_rec_  Return_Material_Line_Receive_Parts_Virtual_Rec;
+   parent_key_  Return_Material_Line_Receive_Parts_Virtual_Key;   
+   child_rec_   Return_Material_Line_Received_Quantities_Virtual_Rec;
+   child_key_   Return_Material_Line_Received_Quantities_Virtual_Key;
+   
+   validate_rec_  Validate_Ok_Struc_Rec;
+   originating_rma_no_     NUMBER;  
+   lot_serial_qty_allowed_ VARCHAR2(5);
+   qty_can_return_on_lot_  NUMBER;
+   wo_exist_               VARCHAR2(5);
+   sales_qty_to_return_    NUMBER :=0;
+   qty_to_return_          NUMBER :=0;
+BEGIN
+   parent_key_.objkey := parent_objkey_;
+   parent_rec_   := Get_Record___(parent_key_);
+   
+   IF (parent_rec_.latest_return_date IS NOT NULL) THEN
+      IF (parent_rec_.latest_return_date < parent_rec_.site_date) THEN
+         validate_rec_.latest_return_date := TRUE;
+      END IF;      
+   END IF;
+   
+   FOR received_quantitis_rec_ IN Get_Receive_Part_Array___(parent_key_) LOOP  
+      child_key_.objkey := received_quantitis_rec_.objkey;
+      child_rec_        := Get_Record___(child_key_);
+      
+      IF (child_rec_.sales_qty_to_return IS NOT NULL AND child_rec_.sales_qty_to_return < 0) OR 
+         (child_rec_.qty_to_return IS NOT NULL AND child_rec_.qty_to_return < 0 ) OR 
+         (child_rec_.catch_qty_to_return IS NOT NULL AND child_rec_.catch_qty_to_return < 0) THEN
+         Raise_Negative_Qty_Error___;
+      END IF;
+      
+      IF (child_rec_.sales_qty_to_return IS NOT NULL AND child_rec_.sales_qty_to_return >= 0) OR 
+         (child_rec_.qty_to_return IS NOT NULL AND child_rec_.qty_to_return > 0 ) THEN
+         
+         IF (parent_rec_.part_no IS NOT NULL) AND (NOT Validate_Catch_Qty___(child_rec_)) THEN
+            validate_rec_.qty_to_return_null_err := TRUE;
+            Error_SYS.Record_General(lu_name_, 'QTYRETURNMANDATORY: The quantity to be returned must have a value.');
+         END IF;
+         
+         IF (child_rec_.sales_qty_to_return IS NOT NULL AND child_rec_.sales_qty_to_return > 0) THEN
+            sales_qty_to_return_ := sales_qty_to_return_ + child_rec_.sales_qty_to_return;
+         END IF;
+         IF (child_rec_.qty_to_return IS NOT NULL AND child_rec_.qty_to_return > 0 ) THEN         
+            qty_to_return_ := qty_to_return_ + child_rec_.qty_to_return;
+         END IF;
+         
+         IF (child_rec_.sales_qty_to_return IS NOT NULL AND child_rec_.sales_qty_to_return > 0) THEN
+            IF (NOT parent_rec_.order_connected) THEN  
+               originating_rma_no_ := Return_Material_API.Get_Originating_Rma_No(parent_rec_.rma_no);
+               IF (originating_rma_no_ IS NULL) THEN
+                  validate_rec_.no_order_warning := TRUE;
+               END IF;         
+            END IF;
+            
+            IF (parent_rec_.part_no IS NOT NULL) THEN
+               IF (parent_rec_.condition_code IS NOT NULL) AND (parent_rec_.condition_code != child_rec_.condition_code) THEN
+                  IF (child_rec_.serial_no != '*') THEN
+                     validate_rec_.serial_condition_code_diff := TRUE;
+                     validate_rec_.condition_code := parent_rec_.condition_code;               
+                  END IF;
+               END IF; 
+               Return_Material_Line_API.Return_Lot_Serial_Allowed(lot_serial_qty_allowed_, 
+                                                                  qty_can_return_on_lot_, 
+                                                                  parent_rec_.rma_no, 
+                                                                  parent_rec_.rma_line_no, 
+                                                                  child_rec_.lot_batch_no, 
+                                                                  child_rec_.serial_no, 
+                                                                  child_rec_.eng_chg_level, 
+                                                                  child_rec_.qty_to_return);
+               
+               IF (lot_serial_qty_allowed_ = 'FALSE') THEN
+                  validate_rec_.diff_l_s_r_no := TRUE;
+                  
+                  validate_rec_.lot_batch_no          := child_rec_.lot_batch_no;
+                  validate_rec_.qty_can_return_on_lot := TRUNC(qty_can_return_on_lot_, Count_Decimals___(qty_can_return_on_lot_));
+                  validate_rec_.qty_to_return         := TRUNC(child_rec_.qty_to_return, Count_Decimals___(child_rec_.qty_to_return));
+                  validate_rec_.serial_no             := child_rec_.serial_no;
+                  validate_rec_.return_unit_meas      := parent_rec_.return_unit_meas;
+                  validate_rec_.eng_chg_level         := child_rec_.eng_chg_level;               
+               END IF;
+               
+               IF (child_rec_.serial_no != '*') THEN
+                  $IF Component_Wo_SYS.INSTALLED $THEN
+                     wo_exist_ := Active_Separate_API.Exist_Wo_For_Rma_Obj(parent_rec_.rma_no, 
+                                                                           parent_rec_.rma_line_no, 
+                                                                           child_rec_.contract, 
+                                                                           child_rec_.part_no, 
+                                                                           child_rec_.serial_no); 
+                     
+                  $END
+                  IF (wo_exist_ = 'TRUE') THEN
+                     validate_rec_.wo_exist_for_serial_object  := TRUE;
+                     validate_rec_.serial_no                   := child_rec_.serial_no;
+                     validate_rec_.part_no                     := child_rec_.part_no;
+                  END IF;
+               END IF;            
+            END IF;
+         ELSIF (child_rec_.sales_qty_to_return IS NOT NULL AND child_rec_.sales_qty_to_return = 0) THEN
+            Error_SYS.Record_General(lu_name_, 'CANNOTRETURNZEROQTY: You cannot return zero quantity.');
+         END IF;
+      END IF;
+   END LOOP;
+   
+   IF (parent_rec_.part_no IS NOT NULL) THEN
+      IF NOT(parent_rec_.inventory_qty_to_return >= qty_to_return_) THEN
+         Raise_Remaining_Qty_Error___;
+      END IF;
+   ELSE
+      IF NOT(parent_rec_.sales_qty_to_return >= sales_qty_to_return_) THEN
+         Raise_Remaining_Qty_Error___;
+      END IF;
+   END IF;
+   
+   -- gelr:warehouse_journal, begin  
+   IF (Company_Localization_Info_API.Get_Parameter_Val_From_Site_Db(parent_rec_.contract, 'WAREHOUSE_JOURNAL') =  Fnd_Boolean_API.DB_TRUE) THEN
+      IF (parent_rec_.part_no IS NOT NULL AND Sales_Part_API.Get_Non_Inv_Part_Type_Db(parent_rec_.contract, parent_rec_.catalog_no) != 'SERVICE') THEN
+         IF (parent_rec_.external_delivery_note_ref IS NULL) THEN
+            Error_SYS.Check_Not_Null(lu_name_, 'External Delivery Note Reference', parent_rec_.external_delivery_note_ref);
+         END IF;
+         IF (parent_rec_.external_delivery_note_date IS NULL) THEN
+            Error_SYS.Check_Not_Null(lu_name_, 'External Delivery Note Date', parent_rec_.external_delivery_note_date);
+         END IF;
+         IF (parent_rec_.delivery_reason_id IS NULL) THEN
+            Error_SYS.Check_Not_Null(lu_name_, 'Delivery Reason ID', parent_rec_.delivery_reason_id);
+         END IF;         
+      END IF;            
+   END IF;
+   -- gelr:warehouse_journal, end
+   RETURN validate_rec_;
+   
+END Validate_Ok___;
+
+
+FUNCTION Validate_Catch_Qty___(
+   rec_   Return_Material_Line_Received_Quantities_Virtual_Rec) RETURN BOOLEAN
+IS
+BEGIN
+   IF (rec_.catch_qty_to_return IS NOT NULL) THEN
+      IF (rec_.qty_to_return IS NULL) THEN
+         RETURN FALSE;
+      END IF;     
+   END IF;
+   RETURN TRUE;   
+END Validate_Catch_Qty___;
+
+
+FUNCTION Count_Decimals___ (
+   number_  NUMBER) RETURN NUMBER
+IS
+   decimal_ NUMBER := 0;
+   counter_ NUMBER := 0;
+BEGIN
+   decimal_ := number_;
+   counter_ := 0;
+   WHILE (mod(decimal_, 1) != 0) 
+   LOOP
+      decimal_ := decimal_ * 10;
+      counter_ := counter_ + 1;
+   END LOOP;
+   RETURN counter_;   
+END Count_Decimals___;
+
+
+FUNCTION Execute_Ok___ (
+   parent_objkey_ IN VARCHAR2 ) RETURN NUMBER
+IS
+   parent_rec_  Return_Material_Line_Receive_Parts_Virtual_Rec;
+   parent_key_  Return_Material_Line_Receive_Parts_Virtual_Key;
+   
+   child_rec_   Return_Material_Line_Received_Quantities_Virtual_Rec;
+   child_key_   Return_Material_Line_Received_Quantities_Virtual_Key;
+   msg_         CLOB; 
+   source_consumption_  NUMBER := 0;
+   
+BEGIN
+   parent_key_.objkey := parent_objkey_;
+   parent_rec_   := Get_Record___(parent_key_); 
+   Message_SYS.Add_Attribute(msg_,'PACK_START', 'TRUE');
+   
+   FOR received_quantitis_rec_ IN Get_Receive_Part_Array___(parent_key_) LOOP  
+      child_key_.objkey := received_quantitis_rec_.objkey;
+      child_rec_        := Get_Record___(child_key_);
+      
+      IF (child_rec_.sales_qty_to_return IS NOT NULL AND child_rec_.sales_qty_to_return > 0) OR 
+         (child_rec_.qty_to_return IS NOT NULL AND child_rec_.qty_to_return > 0 ) THEN
+         
+         Message_SYS.Add_Attribute(msg_,'RMA_NO', parent_rec_.rma_no);
+         Message_SYS.Add_Attribute(msg_,'RMA_LINE_NO', parent_rec_.rma_line_no);
+         Message_SYS.Add_Attribute(msg_,'PART_NO', parent_rec_.part_no);
+         Message_SYS.Add_Attribute(msg_,'CONTRACT', parent_rec_.contract);
+         Message_SYS.Add_Attribute(msg_,'CONFIGURATION_ID', child_rec_.configuration_id);
+         Message_SYS.Add_Attribute(msg_,'EXPIRATION_DATE', child_rec_.expiration_date);
+         Message_SYS.Add_Attribute(msg_,'LOCATION_NO', child_rec_.location_no);
+         Message_SYS.Add_Attribute(msg_,'LOT_BATCH_NO', child_rec_.lot_batch_no);
+         Message_SYS.Add_Attribute(msg_,'SERIAL_NO', child_rec_.serial_no);
+         Message_SYS.Add_Attribute(msg_,'ENG_CHG_LEVEL', child_rec_.eng_chg_level);
+         Message_SYS.Add_Attribute(msg_,'WAIV_DEV_REJ_NO', child_rec_.waiv_dev_rej_no);         
+         Message_SYS.Add_Attribute(msg_,'HANDLING_UNIT_ID', child_rec_.handling_unit_id);
+         Message_SYS.Add_Attribute(msg_,'CONDITION_CODE', child_rec_.condition_code);
+         Message_SYS.Add_Attribute(msg_,'PART_OWNERSHIP', child_rec_.part_ownership_db);
+         Message_SYS.Add_Attribute(msg_,'OWNING_VENDOR_NO', child_rec_.owning_vendor_no);
+         Message_SYS.Add_Attribute(msg_,'QTY_RECEIPT', child_rec_.sales_qty_to_return);
+         Message_SYS.Add_Attribute(msg_,'QTY_RECEIPT_INV', child_rec_.qty_to_return);
+         Message_SYS.Add_Attribute(msg_,'CATCH_QTY_RECEIPT', child_rec_.catch_qty_to_return);
+         -- gelr:modify_date_applied, begin
+         Message_SYS.Add_Attribute(msg_,'DATE_APPLIED', parent_rec_.arrival_date);
+         -- gelr:modify_date_applied, end
+         -- gelr:warehouse_journal, begin         
+         Message_SYS.Add_Attribute(msg_,'EXTERNAL_DELNOTE_REF', parent_rec_.external_delivery_note_ref);         
+         Message_SYS.Add_Attribute(msg_,'EXTERNAL_DELNOTE_DATE', parent_rec_.external_delivery_note_date);         
+         Message_SYS.Add_Attribute(msg_,'DELIV_REASON_ID', parent_rec_.delivery_reason_id);
+         -- gelr:warehouse_journal, end
+         IF (child_rec_.return_total_qty) THEN
+            Message_SYS.Add_Attribute(msg_,'RECEIPT_ALL', 'TRUE');
+         ELSE
+            Message_SYS.Add_Attribute(msg_,'RECEIPT_ALL', 'FALSE');
+         END IF;
+
+                  
+         Return_Material_Line_Initial_Check___(parent_rec_.rma_no, parent_rec_.rma_line_no);
+         
+      END IF;
+   END LOOP;
+   Message_SYS.Add_Attribute(msg_,'PACK_COMPLETE', 'TRUE');
+   Return_Material_Line_API.Unpack_Cust_Receipt(msg_, 'RETURN');
+   source_consumption_ := Check_Source_Order_Comsumption___(parent_rec_.rma_no, parent_rec_.order_no, parent_rec_.line_no, parent_rec_.rel_no);
+   RETURN source_consumption_;
+END Execute_Ok___;
+
+
+FUNCTION Check_Source_Order_Comsumption___(
+   rma_no_    IN NUMBER,
+   order_no_  IN VARCHAR2,
+   line_no_   IN VARCHAR2,
+   rel_no_    IN VARCHAR2) RETURN NUMBER
+IS
+   
+   license_enabled_     VARCHAR2(10);
+   demand_code_db_      VARCHAR2(20);
+   demand_order_ref1_   VARCHAR2(15);
+   demand_order_ref2_   VARCHAR2(10);
+   demand_order_ref3_   VARCHAR2(4);
+   demand_order_ref4_   NUMBER;
+   source_consumption_  NUMBER := 0;
+BEGIN 
+   license_enabled_ := Customer_Order_Flow_API.Get_License_Enabled(rma_no_, 'INTERACT_RMA'); 
+   
+   IF (license_enabled_ = 'TRUE') THEN
+      demand_code_db_ := Customer_Order_Line_API.Get_Demand_Code_Db(order_no_, line_no_, rel_no_, 0);
+      IF demand_code_db_ = 'PO' THEN
+         Customer_Order_Line_API.Get_Demand_Order_Info(demand_order_ref1_, demand_order_ref2_, demand_order_ref3_, demand_order_ref4_, order_no_, line_no_, rel_no_, 0);
+      END IF;
+      $IF Component_Expctr_SYS.INSTALLED $THEN
+         source_consumption_ := Exp_License_Connect_Util_API.Check_Source_Consumption(order_no_, line_no_, rel_no_, 
+                                                                                      Customer_Order_Line_API.Get_Expctr_License_Order_Type(demand_code_db_, demand_order_ref1_, demand_order_ref2_, demand_order_ref3_));
+      $ELSE
+         NULL;
+      $END
+   END IF;
+   RETURN source_consumption_;   
+END Check_Source_Order_Comsumption___;
+
+@DynamicComponentDependency EXPCTR
+PROCEDURE Update_Coverage_Quantities___ (
+   parent_objkey_ IN VARCHAR2 ) 
+IS
+   parent_rec_  Return_Material_Line_Receive_Parts_Virtual_Rec;
+   parent_key_  Return_Material_Line_Receive_Parts_Virtual_Key;
+   
+   child_rec_   Return_Material_Line_Received_Quantities_Virtual_Rec;
+   child_key_   Return_Material_Line_Received_Quantities_Virtual_Key;
+BEGIN
+   parent_key_.objkey   := parent_objkey_;
+   parent_rec_          := Get_Record___(parent_key_);  
+   
+   FOR received_quantitis_rec_ IN Get_Receive_Part_Array___(parent_key_) LOOP  
+      child_key_.objkey := received_quantitis_rec_.objkey;
+      child_rec_        := Get_Record___(child_key_);
+      
+      IF (child_rec_.sales_qty_to_return IS NOT NULL AND child_rec_.sales_qty_to_return > 0) OR 
+         (child_rec_.qty_to_return IS NOT NULL AND child_rec_.qty_to_return > 0 ) THEN
+       
+            Exp_License_Connect_Util_API.Update_Coverage_Quantities('Return', 
+                                                                    parent_rec_.order_no, 
+                                                                    parent_rec_.line_no, 
+                                                                    parent_rec_.rel_no, 
+                                                                    0, 
+                                                                    NVL(child_rec_.qty_to_return, child_rec_.sales_qty_to_return));
+                                                            
+      END IF;
+   END LOOP;
+END Update_Coverage_Quantities___;
+
+
+FUNCTION Fetch_Condition_Code___(
+   part_no_                IN VARCHAR2,
+   serial_no_              IN VARCHAR2,
+   lot_batch_no_           IN VARCHAR2,
+   default_condition_code_ IN VARCHAR2) RETURN VARCHAR2
+IS
+   condition_code_ VARCHAR2(10);
+BEGIN
+   condition_code_ := NVL(Condition_Code_Manager_API.Get_Condition_Code(part_no_, serial_no_, lot_batch_no_), default_condition_code_);
+   RETURN condition_code_;
+END Fetch_Condition_Code___;
+
+
+FUNCTION Part_Serial_Exist___(
+   part_no_   IN VARCHAR2,
+   serial_no_ IN VARCHAR2 ) RETURN BOOLEAN
+IS
+   exist_ BOOLEAN := FALSE;
+BEGIN
+   exist_ := Part_Serial_Catalog_API.Check_Exist(part_no_, serial_no_) = 'TRUE';  
+   RETURN exist_;
+END Part_Serial_Exist___;
+
+
+PROCEDURE Raise_Negative_Qty_Error___
+IS
+BEGIN
+   Error_SYS.Record_General(lu_name_, 'QTYCANNOTBENEGATIVE: The returned quantity can not be negative.'); 
+END Raise_Negative_Qty_Error___;
+
+
+PROCEDURE Raise_Remaining_Qty_Error___
+IS
+BEGIN
+   Error_SYS.Record_General(lu_name_, 'TRANSQTYTHANREMAINING: Transaction quantity should not be more than the remaining quantity to be returned.');
+END Raise_Remaining_Qty_Error___;
+
+FUNCTION Validate_Sales_Qty_To_Return___(
+   parent_objkey_              IN VARCHAR2,
+   objkey_                     IN VARCHAR2,
+   sales_qty_to_return_        IN NUMBER,
+   conversion_factor_          IN NUMBER,
+   inverted_conversion_factor_ IN NUMBER) RETURN Validate_Qty_Struc_Rec
+IS
+   validate_rec_   Validate_Qty_Struc_Rec;
+BEGIN
+   IF (sales_qty_to_return_ < 0) THEN
+      validate_rec_.raise_negative_qty_error := TRUE;
+   ELSE
+      validate_rec_.qty_to_return := sales_qty_to_return_ * conversion_factor_/ inverted_conversion_factor_;
+ 
+      IF NOT Validate_Total_Qty_To_Return___(parent_objkey_, objkey_, sales_qty_to_return_, validate_rec_.qty_to_return) THEN 
+         validate_rec_.raise_remaining_qty_error := TRUE;
+      END IF;
+   END IF;
+   RETURN validate_rec_;      
+END Validate_Sales_Qty_To_Return___;
+
+
+FUNCTION Validate_Qty_To_Return___(
+   parent_objkey_              IN VARCHAR2,
+   objkey_                     IN VARCHAR2,
+   qty_to_return_              IN NUMBER,
+   conversion_factor_          IN NUMBER,
+   inverted_conversion_factor_ IN NUMBER) RETURN Validate_Qty_Struc_Rec
+IS
+   validate_rec_   Validate_Qty_Struc_Rec;
+BEGIN
+   IF (qty_to_return_ < 0) THEN
+      validate_rec_.raise_negative_qty_error := TRUE;
+   ELSE
+      validate_rec_.sales_qty_to_return := qty_to_return_ / conversion_factor_ * inverted_conversion_factor_;
+      
+      IF NOT Validate_Total_Qty_To_Return___(parent_objkey_, objkey_, validate_rec_.sales_qty_to_return, qty_to_return_) THEN            
+         validate_rec_.raise_remaining_qty_error := TRUE;
+      END IF;
+   END IF;
+   RETURN validate_rec_;
+END Validate_Qty_To_Return___;
+
+
+FUNCTION Validate_Total_Qty_To_Return___ (
+   parent_objkey_       IN VARCHAR2,
+   objkey_              IN VARCHAR2,
+   sales_qty_to_return_ IN NUMBER,
+   qty_to_return_       IN NUMBER ) RETURN BOOLEAN
+IS
+   parent_rec_    Return_Material_Line_Receive_Parts_Virtual_Rec;
+   parent_key_    Return_Material_Line_Receive_Parts_Virtual_Key;
+   child_rec_     Return_Material_Line_Received_Quantities_Virtual_Rec;
+   child_key_     Return_Material_Line_Received_Quantities_Virtual_Key;
+   temp_sales_qty_to_return_  NUMBER :=0;
+   temp_qty_to_return_        NUMBER :=0;
+   return_value_         BOOLEAN :=FALSE;
+BEGIN
+   parent_key_.objkey := parent_objkey_;
+   parent_rec_        := Get_record___(parent_key_);
+   
+   FOR received_quantitis_rec_ IN Get_Receive_Part_Array___(parent_key_) LOOP  
+      child_key_.objkey := received_quantitis_rec_.objkey;
+      child_rec_        := Get_Record___(child_key_);
+      IF child_key_.objkey != objkey_ THEN      
+         IF (child_rec_.sales_qty_to_return IS NOT NULL AND child_rec_.sales_qty_to_return > 0) THEN
+            temp_sales_qty_to_return_ := temp_sales_qty_to_return_ + child_rec_.sales_qty_to_return;
+         END IF;
+         IF (child_rec_.qty_to_return IS NOT NULL AND child_rec_.qty_to_return > 0 ) THEN         
+            temp_qty_to_return_ := temp_qty_to_return_ + child_rec_.qty_to_return;
+         END IF;
+      END IF;
+   END LOOP;
+   
+   IF (parent_rec_.part_no IS NOT NULL) THEN
+      RETURN (parent_rec_.inventory_qty_to_return >= temp_qty_to_return_ + qty_to_return_);
+   ELSE
+      RETURN (parent_rec_.sales_qty_to_return >= temp_sales_qty_to_return_ + sales_qty_to_return_) ;
+   END IF;
+   
+   RETURN return_value_;
+END Validate_Total_Qty_To_Return___;
+
+FUNCTION Fetch_Stock_Details___(
+   contract_         IN VARCHAR2,
+   part_no_          IN VARCHAR2,
+   configuration_id_ IN VARCHAR2,
+   location_no_      IN VARCHAR2,
+   lot_batch_no_     IN VARCHAR2,
+   serial_no_        IN VARCHAR2,
+   eng_chg_level_    IN VARCHAR2,
+   waiv_dev_rej_no_  IN VARCHAR2,
+   activity_seq_     IN NUMBER,
+   handling_unit_id_ IN NUMBER,
+   expiration_date_  IN DATE )  RETURN Stock_Detail_Struc_Rec
+IS
+   stock_rec_  Inventory_Part_In_Stock_API.Public_Rec;  
+   stock_detail_struc_rec_ Stock_Detail_Struc_Rec;
+BEGIN
+   stock_rec_ := Inventory_Part_In_Stock_API.Get(contract_, 
+                                                part_no_, 
+                                                configuration_id_, 
+                                                location_no_, 
+                                                lot_batch_no_, 
+                                                serial_no_, 
+                                                eng_chg_level_, 
+                                                waiv_dev_rej_no_, 
+                                                activity_seq_, 
+                                                handling_unit_id_);   
+   stock_detail_struc_rec_.stock_exist := (stock_rec_.part_no IS NOT NULL);
+   stock_detail_struc_rec_.expiration_date := NVL(stock_rec_.expiration_date, expiration_date_);
+   RETURN stock_detail_struc_rec_;
+END Fetch_Stock_Details___;

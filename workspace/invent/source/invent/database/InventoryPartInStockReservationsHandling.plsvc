@@ -1,0 +1,335 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: InventoryPartInStockReservationsHandling
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  190909  YasMlk  SCFALL19-225, Added method Get_Order_Supply_Demand_Type_Db___.
+--  190612  JaThlk  SCUXXW4-21635, Added the method Get_Handling_Unit_Id_List___ to create handling unit id list.
+--  181011  JaThlk  SCUXXW4-7047, Added the function, Convert_To_String___ to convert ShipmentId to type string.
+--  180901  FANDSE  SCUXXW4-7047, Fixed @DynamicComponentDependency.
+--  180827  FANDSE  SCUXXW4-7047, Fixed Move Reservation Command.
+--  180821  FANDSE  SCUXXW4-7047, Added method to return Transport Task Filter, refined Check_Same_Site_Is_Selected
+--  180816  FANDSE  SCUXXW4-7047, Fixed comands for Shop Order and Interim Order
+--  180815  FANDSE  SCUXXW4-7047, Converted from tbwInvPartStockReservation using MTG Version: 1.21, initial commit, more changes will follow
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Find_Common_Site_Selected___ (
+   selection_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   selection_in_        VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_   VARCHAR2(32000);
+   contract_            VARCHAR2(5) := NULL;
+   prev_contract_       VARCHAR2(5) := NULL;
+BEGIN
+   WHILE (INSTR(selection_in_, ';') > 0) LOOP
+      current_selection_       := substr(selection_in_, 0, INSTR(selection_in_, ';'));
+      prev_contract_           := contract_;
+      contract_                := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT');
+      selection_in_            := substr(selection_in_, INSTR(selection_in_, ';')+1);
+      IF (prev_contract_ != contract_ AND contract_ IS NOT NULL) THEN
+         contract_ := NULL;
+         EXIT WHEN contract_ IS NULL;
+      END IF;
+   END LOOP;
+   RETURN contract_;
+END Find_Common_Site_Selected___;
+
+@DynamicComponentDependency SHPORD
+FUNCTION Check_Type_Of_Shop_Order___ (
+   selection_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   selection_in_            VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_       VARCHAR2(32000);
+   type_of_shop_order_      VARCHAR2(20) := NULL;
+   prev_type_of_shop_order_ VARCHAR2(20) := NULL;
+   shop_ord_rec_          Shop_Ord_API.Public_Rec;
+   order_no_                VARCHAR2(12);
+   release_no_              VARCHAR2(4);
+   sequence_no_             VARCHAR2(4);
+BEGIN
+   WHILE (INSTR(selection_in_, ';') > 0) LOOP
+      current_selection_       := substr(selection_in_, 0, INSTR(selection_in_, ';'));
+      order_no_                := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORD_REF1');
+      release_no_              := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORD_REF2_KEY');
+      sequence_no_             := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORD_REF3_KEY');
+      selection_in_            := substr(selection_in_, INSTR(selection_in_, ';')+1);
+      shop_ord_rec_            := Shop_Ord_API.Get(order_no_, release_no_, sequence_no_);
+      prev_type_of_shop_order_ := type_of_shop_order_;
+      IF (shop_ord_rec_.order_code IN ('A','B') OR (shop_ord_rec_.order_code = 'F' AND (shop_ord_rec_.mro_visit_id IS NOT NULL OR (shop_ord_rec_.cro_no IS NOT NULL AND shop_ord_rec_.dispo_order_no IS NOT NULL)))) THEN
+         type_of_shop_order_ := 'MroShopOrder';
+      ELSIF (shop_ord_rec_.order_code = 'D' AND (shop_ord_rec_.demand_code = 'MRO' OR shop_ord_rec_.demand_code = 'CRO')) THEN
+         type_of_shop_order_ := 'DispositionShopOrder';
+      ELSE
+         type_of_shop_order_ := 'ShopOrder';
+      END IF;
+      IF (prev_type_of_shop_order_ != type_of_shop_order_ AND prev_type_of_shop_order_ IS NOT NULL) THEN
+         type_of_shop_order_ := NULL;
+         EXIT WHEN type_of_shop_order_ IS NULL;
+      END IF;
+   END LOOP;
+   RETURN type_of_shop_order_;
+END Check_Type_Of_Shop_Order___;
+
+@DynamicComponentDependency ORDSTR
+FUNCTION Check_Type_Of_Interim_Order___ (
+   selection_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   selection_in_               VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_          VARCHAR2(32000);
+   type_of_interim_order_      VARCHAR2(15) := NULL;
+   prev_type_of_interim_order_ VARCHAR2(15) := NULL;
+   interim_header_id_          VARCHAR2(12);
+   interim_head_type_db_       VARCHAR2(20);
+BEGIN
+   WHILE (INSTR(selection_in_, ';') > 0) LOOP
+      current_selection_       := substr(selection_in_, 0, INSTR(selection_in_, ';'));
+      interim_header_id_       := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORD_REF1');
+      selection_in_            := substr(selection_in_, INSTR(selection_in_, ';')+1);
+      interim_head_type_db_    := Interim_Demand_Head_API.Get_Interim_Head_Type_Db(interim_header_id_);
+      prev_type_of_interim_order_ := type_of_interim_order_;
+      IF (interim_head_type_db_ = 'MRO') THEN
+         type_of_interim_order_ := 'MroInterimOrder';
+      ELSE
+         type_of_interim_order_ := 'InterimOrder';
+      END IF;
+      IF (prev_type_of_interim_order_ != type_of_interim_order_ AND prev_type_of_interim_order_ IS NOT NULL) THEN
+         type_of_interim_order_ := NULL;
+         EXIT WHEN type_of_interim_order_ IS NULL;
+      END IF;
+   END LOOP;
+   RETURN type_of_interim_order_;
+END Check_Type_Of_Interim_Order___;
+
+FUNCTION Create_Transport_Task_Filter___ (
+   selection_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   selection_in_               VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_          VARCHAR2(32000);
+   transport_task_filter_      VARCHAR2(32000) := NULL;
+   contract_                   VARCHAR2(5);
+   location_no_                VARCHAR2(35);
+   part_no_                    VARCHAR2(25);
+   configuration_id_           VARCHAR2(50);
+   lot_batch_no_               VARCHAR2(20);
+   serial_no_                  VARCHAR2(50);
+   eng_chg_level_              VARCHAR2(6);
+   waiv_dev_rej_no_            VARCHAR2(15);
+   activity_seq_               NUMBER;
+   handling_unit_id_           NUMBER;
+   order_ref1_                 VARCHAR2(50);
+   order_ref2_key_             VARCHAR2(50);
+   order_ref3_key_             VARCHAR2(50);
+   order_ref4_key_             VARCHAR2(50);
+   pick_list_no_key_           VARCHAR2(15);
+   shipment_id_key_            NUMBER;
+   supply_demand_type_         VARCHAR2(30);
+   transport_task_id_          NUMBER;
+BEGIN   
+   WHILE (INSTR(selection_in_, ';') > 0) LOOP
+      current_selection_ := substr(selection_in_, 0, INSTR(selection_in_, ';'));
+      contract_           := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT');
+      location_no_        := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOCATION_NO');
+      part_no_            := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PART_NO');
+      configuration_id_   := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONFIGURATION_ID');
+      lot_batch_no_       := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LOT_BATCH_NO');
+      serial_no_          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SERIAL_NO');
+      eng_chg_level_      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ENG_CHG_LEVEL');
+      waiv_dev_rej_no_    := Client_SYS.Get_Key_Reference_Value(current_selection_, 'WAIV_DEV_REJ_NO');
+      activity_seq_       := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ACTIVITY_SEQ');
+      handling_unit_id_   := Client_SYS.Get_Key_Reference_Value(current_selection_, 'HANDLING_UNIT_ID');
+      order_ref1_         := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORD_REF1');
+      order_ref2_key_     := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORD_REF2_KEY');
+      IF (order_ref2_key_ = CHR(32)) THEN
+         order_ref2_key_ := NULL;
+      END IF;
+      order_ref3_key_     := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORD_REF3_KEY');
+      IF (order_ref3_key_ = CHR(32)) THEN
+         order_ref3_key_ := NULL;
+      END IF;
+      order_ref4_key_     := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORD_REF4_KEY');
+      IF (order_ref4_key_ = CHR(32)) THEN
+         order_ref4_key_ := NULL;
+      END IF;
+      pick_list_no_key_   := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PICK_LIST_NO_KEY');
+      IF (pick_list_no_key_ = CHR(32)) THEN
+         pick_list_no_key_ := NULL;
+      END IF;
+      shipment_id_key_    := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SHIPMENT_ID_KEY');
+      IF (shipment_id_key_ = -99) THEN
+         shipment_id_key_ := to_number(NULL);
+      END IF;
+      supply_demand_type_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SUPPLY_DEMAND_TYPE');
+
+      transport_task_id_ := Transport_Task_Line_API.Get_Transport_Task_Id(contract_,
+                                                                          location_no_,
+                                                                          part_no_,
+                                                                          configuration_id_,
+                                                                          lot_batch_no_,
+                                                                          serial_no_,
+                                                                          eng_chg_level_,
+                                                                          waiv_dev_rej_no_,
+                                                                          activity_seq_,
+                                                                          handling_unit_id_,
+                                                                          order_ref1_,
+                                                                          order_ref2_key_,
+                                                                          order_ref3_key_,
+                                                                          order_ref4_key_,
+                                                                          pick_list_no_key_,
+                                                                          shipment_id_key_, 
+                                                                          supply_demand_type_);      
+
+
+      IF (transport_task_id_ IS NOT NULL) THEN
+         IF (transport_task_filter_ IS NULL) THEN
+            transport_task_filter_ := 'TransportTaskId eq '||transport_task_id_;
+         ELSIF (INSTR(transport_task_filter_,transport_task_id_) = 0) THEN
+            transport_task_filter_ := transport_task_filter_||' or TransportTaskId eq '||transport_task_id_;            
+         END IF;
+      END IF;
+   selection_in_ := substr(selection_in_, INSTR(selection_in_, ';')+1);
+   END LOOP;
+   RETURN transport_task_filter_;
+END Create_Transport_Task_Filter___;
+
+PROCEDURE Move_Reservation___ (
+   part_no_                   IN VARCHAR2,
+   configuration_id_          IN VARCHAR2,
+   contract_                  IN VARCHAR2,
+   location_no_               IN VARCHAR2,
+   to_location_no_            IN VARCHAR2,
+   supply_demand_type_        IN VARCHAR2,
+   ord_ref1_                  IN VARCHAR2,
+   ord_ref2_                  IN VARCHAR2,
+   ord_ref3_                  IN VARCHAR2,
+   ord_ref4_                  IN VARCHAR2,
+   lot_batch_no_              IN VARCHAR2,
+   serial_no_                 IN VARCHAR2,
+   eng_chg_level_             IN VARCHAR2,
+   waiv_dev_rej_no_           IN VARCHAR2,
+   activity_seq_              IN NUMBER,
+   handling_unit_id_          IN NUMBER,
+   qty_reserved_              IN NUMBER,
+   pick_list_no_              IN VARCHAR2,
+   qty_picked_                IN NUMBER,
+   pick_list_printed_db_      IN VARCHAR2,
+   shipment_id_               IN NUMBER,
+   move_comment_              IN VARCHAR2)
+IS    
+
+BEGIN   
+      Inv_Part_Stock_Reservation_API.Move_Reservation(part_no_                     => part_no_,
+                                                      configuration_id_            => configuration_id_,
+                                                      contract_                    => contract_,
+                                                      from_location_no_            => location_no_,
+                                                      to_location_no_              => to_location_no_,
+                                                      order_supply_demand_type_db_ => supply_demand_type_,
+                                                      order_no_                    => ord_ref1_,
+                                                      line_no_                     => ord_ref2_,
+                                                      release_no_                  => ord_ref3_,
+                                                      line_item_no_                => ord_ref4_,
+                                                      lot_batch_no_                => lot_batch_no_,
+                                                      serial_no_                   => serial_no_,
+                                                      eng_chg_level_               => eng_chg_level_,
+                                                      waiv_dev_rej_no_             => waiv_dev_rej_no_,
+                                                      activity_seq_                => activity_seq_,
+                                                      handling_unit_id_            => handling_unit_id_,
+                                                      quantity_to_move_            => qty_reserved_,
+                                                      pick_list_no_                => pick_list_no_,
+                                                      qty_picked_                  => qty_picked_,
+                                                      pick_list_printed_db_        => pick_list_printed_db_,
+                                                      shipment_id_                 => shipment_id_,
+                                                      move_comment_                => move_comment_);
+END Move_Reservation___;
+
+PROCEDURE Move_Res_With_Transport_Task___ (
+   part_no_                   IN VARCHAR2,
+   configuration_id_          IN VARCHAR2,
+   contract_                  IN VARCHAR2,
+   location_no_               IN VARCHAR2,
+   to_location_no_            IN VARCHAR2,
+   supply_demand_type_        IN VARCHAR2,
+   ord_ref1_                  IN VARCHAR2,
+   ord_ref2_                  IN VARCHAR2,
+   ord_ref3_                  IN VARCHAR2,
+   ord_ref4_                  IN VARCHAR2,
+   lot_batch_no_              IN VARCHAR2,
+   serial_no_                 IN VARCHAR2,
+   eng_chg_level_             IN VARCHAR2,
+   waiv_dev_rej_no_           IN VARCHAR2,
+   activity_seq_              IN NUMBER,
+   handling_unit_id_          IN NUMBER,
+   qty_reserved_              IN NUMBER,
+   pick_list_no_              IN VARCHAR2,
+   qty_picked_                IN NUMBER,
+   pick_list_printed_db_      IN VARCHAR2,
+   shipment_id_               IN NUMBER)
+IS    
+
+BEGIN   
+      Inv_Part_Stock_Reservation_API.Move_Res_with_Transport_Task(part_no_                     => part_no_,
+                                                      configuration_id_            => configuration_id_,
+                                                      contract_                    => contract_,
+                                                      from_location_no_            => location_no_,
+                                                      to_location_no_              => to_location_no_,
+                                                      order_supply_demand_type_db_ => supply_demand_type_,
+                                                      order_no_                    => ord_ref1_,
+                                                      line_no_                     => ord_ref2_,
+                                                      release_no_                  => ord_ref3_,
+                                                      line_item_no_                => ord_ref4_,
+                                                      pick_list_no_                => pick_list_no_,                                                      
+                                                      shipment_id_                 => shipment_id_,
+                                                      lot_batch_no_                => lot_batch_no_,
+                                                      serial_no_                   => serial_no_,
+                                                      eng_chg_level_               => eng_chg_level_,
+                                                      waiv_dev_rej_no_             => waiv_dev_rej_no_,
+                                                      activity_seq_                => activity_seq_,
+                                                      handling_unit_id_            => handling_unit_id_,
+                                                      quantity_to_move_            => qty_reserved_);
+END Move_Res_With_Transport_Task___;
+
+FUNCTION Convert_To_String___ (
+   shipment_id_ IN NUMBER ) RETURN VARCHAR2
+IS
+   
+BEGIN
+   RETURN TO_CHAR(shipment_id_);
+END Convert_To_String___;
+
+FUNCTION Get_Handling_Unit_Id_List___ (
+	total_selection_ IN VARCHAR2) RETURN VARCHAR2
+IS
+   selection_                VARCHAR2(32000) := CONCAT(total_selection_, ';');
+   current_selection_        VARCHAR2(32000);
+   handling_unit_id_list_    VARCHAR2(32000);
+   handling_unit_id_         NUMBER;
+   parent_handling_unit_id_  NUMBER;
+BEGIN
+	WHILE (INSTR(selection_, ';') > 0) LOOP
+      current_selection_ := SUBSTR(selection_, 0, INSTR(selection_, ';'));
+      handling_unit_id_ :=  Client_SYS.Get_Key_Reference_Value(current_selection_, 'HANDLING_UNIT_ID');
+      IF handling_unit_id_ IS NOT NULL THEN
+         parent_handling_unit_id_ := NVL(Handling_Unit_API.Get_Top_Parent_Handl_Unit_Id(handling_unit_id_), handling_unit_id_);   
+      END IF;
+      IF (handling_unit_id_list_ IS NULL) THEN
+         handling_unit_id_list_ := parent_handling_unit_id_ ;
+      ELSE   
+         handling_unit_id_list_ := handling_unit_id_list_ || ';' || parent_handling_unit_id_;
+      END IF; 
+      selection_ := SUBSTR(selection_, INSTR(selection_, ';') + 1); 
+   END LOOP;   
+   RETURN handling_unit_id_list_;
+END Get_Handling_Unit_Id_List___;  
+
+FUNCTION Get_Order_Supply_Demand_Type_Db___(
+   order_supply_demand_type_ IN VARCHAR2 )  RETURN VARCHAR2
+IS
+   
+BEGIN
+   RETURN Order_Supply_Demand_Type_API.Encode(order_supply_demand_type_); 
+END Get_Order_Supply_Demand_Type_Db___;

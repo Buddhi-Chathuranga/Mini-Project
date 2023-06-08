@@ -1,0 +1,687 @@
+client CreateCompanyAssistant;
+component ENTERP;
+layer Core;
+projection CreateCompanyAssistantHandling;
+include fragment CreateCompanyTemValidSelector;
+include fragment CurrBalCodePartLovSelector;
+@DynamicComponentDependency ACCRUL
+include fragment CreateComCurrBalLovSelector;
+@DynamicComponentDependency ACCRUL
+warningsenabled = ValidateAccountingDetails, CreateNewCompany;
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+
+
+-------------------------------- MAIN PAGES ---------------------------------
+navigator {
+   entry CreateCompanyAssistantNavEntry parent EnterpNavigator.CompanyMenu at index 400 {
+      label = "New Company";
+      assistant Assistant;
+   }
+}
+
+
+-------------------------------- ASSISTANTS ---------------------------------
+assistant Assistant for CreateCompanyStructure {
+   label = "New Company";
+
+   init command {
+      execute {
+         set CreateFrom = "Template";
+         call DefaultTemplate() into TemplateId;
+         set UseCurrencyBalance = true;
+         set DefCodePartExist = false;
+      }
+   }
+   steps {
+      step {
+         label = "Basic Details";
+         markdowntext {
+            text = "Welcome to this assistant which will create a new company.";
+         }
+         group CompanyBasicGroup;
+         group CreateCompanyAsGroup;
+         next command {
+            enabled = [(NewCompany != null) and(NewCompanyName != null)];
+            variable CheckCompanyExistVar Text;
+
+            execute {
+               call CheckCompanyExist(NewCompany) into CheckCompanyExistVar;
+            }
+         }
+      }
+      step {
+         label = "Create From";
+         markdowntext {
+            text = "Choose if you want the Company to be created from an Existing Company or a Template.";
+         }
+         group CreateFromGroup;
+         next command {
+            enabled = [(SourceCompany != null) or(TemplateId != null)];
+            variable ComponentListVar Text;
+
+            execute {
+               call ValidateCreateFromDetails(SourceCompany, TemplateId) into ComponentListVar;
+               if [ComponentListVar != null] {
+                  info("The installed versions of the component/s ${ComponentListVar} do not fully support create company from template or company. Note that this may cause inconsistency related errors during the process.");
+               }
+            }
+         }
+      }
+      step {
+         label = "Translations";
+         markdowntext {
+            text = "Company related translations will in the new company be created in selected source languages.";
+         }
+         markdowntext {
+            text = "By default translations will be created in the new company for all available source languages.";
+         }
+         group TranslationsGroup;
+         next command {
+            enabled = [(TemplTransLngCodes != null) or(CompanyTransLngCodes != null)];
+            variable LanguagesVar Structure(LanguageCodeStructure);
+            execute {
+               if [TemplTransLngCodes != null] {
+                  call LanguageList(TemplTransLngCodes) into LanguagesVar;
+                  set Languages = LanguagesVar.LanguageList;
+                  set LanguageCodes = LanguagesVar.LanguageCodeList;
+               }
+               if [CompanyTransLngCodes != null] {
+                  call LanguageList(CompanyTransLngCodes) into LanguagesVar;
+                  set Languages = LanguagesVar.LanguageList;
+                  set LanguageCodes = LanguagesVar.LanguageCodeList;
+               }
+            }
+         }
+      }
+      step {
+         label = "Accounting Details";
+         group CalenderCreationMethodGroup;
+         group AccountingDetailsGroup;
+         next command {
+            enabled = [(CurrencyCode != null) and(ValidFrom != null) and(DefaultLanguage != null) and(Country != null)];
+            execute {
+               @DynamicComponentDependency ACCRUL
+               call ValidateAccountingDetails(SourceCompany,
+               TemplateId,
+               CalenderCreationMethod,
+               AccYear,
+               StartYear,
+               StartMonth,
+               NumberOfYears,
+               CurrencyCode,
+               ValidFrom,
+               ParallelAccCurrency,
+               ParallelCurBase);
+               if [CalenderCreationMethod = "Source"] {
+                  call FetchCalendarData(SourceCompany, TemplateId) into CalendarDataVar;
+                  set AccYear = CalendarDataVar.AccYear;
+                  set StartYear = CalendarDataVar.StartYear;
+                  set StartMonth = CalendarDataVar.StartMonth;
+                  set NumberOfYears = CalendarDataVar.NumberOfYears;
+               }
+               @DynamicComponentDependency ACCRUL
+               if [(ParallelAccCurrency != null) and(CreateAsMasterCompany = true)] {
+                  set ParallelAccCurrency = null;
+                  set ParallelCurBase = null;
+               }
+            }
+         }
+      }
+      step {
+         label = "Currency Balance Setup";
+         group CurrBalCodePartSelectedGroup;
+         group CurrBalAccountsEnableGroup;
+         next command {
+            enabled = [(not UseCurrencyBalance) or((CodePart != null) and(InternalName != null))];
+            execute {
+               call LogicalAccTypesList(Assets, Liabilities, Revenues, Cost, Statistics, StatOpenBal) into LogicalAccTypesList;
+               if [((CodePart != null) and(InternalName != null)) and(CreateAsMasterCompany = true)] {
+                  set CodePart = null;
+                  set InternalName = null;
+               }
+            }
+         }
+      }
+      step {
+         label = "Summary";
+         group SummaryGroup;
+      }
+      final step {
+         markdowntext {
+            visible = [CompanyCreation = "TRUE"];
+            text = "Company ${NewCompany} is successfully created.";
+         }
+         markdowntext {
+            visible = [CompanyCreation = "OPEN_LOG"];
+            text = "Company ${NewCompany} is created with error.";
+         }
+         command ViewCompanyLogCommand {
+            visible = [CompanyCreation = "OPEN_LOG"];
+            execute {
+               navigate "page/CreateCompanyComponentLog/List?$filter=Company eq $[NewCompany]";
+            }
+         }
+         command ViewCompanyCommand {
+            execute {
+               navigate "page/Company/Form?$filter=Company eq $[NewCompany]";
+            }
+         }
+         command CloseCommand {
+            execute {
+               navigate back;
+            }
+         }
+      }
+   }
+   finish command {
+      enabled = [(component.Assistant.ActiveStep = 6) and((NewCompany != null) and(NewCompanyName != null))
+      and((SourceCompany != null) or(TemplateId != null))
+      and((TemplTransLngCodes != null) or(CompanyTransLngCodes != null))
+      and((CurrencyCode != null) and(ValidFrom != null) and(DefaultLanguage != null) and(Country != null))
+      and((not UseCurrencyBalance) or((CodePart != null) and(InternalName != null)))];
+      variable CompanyCreationVar Structure(CompanyCreationStructure);
+      execute {
+         @DynamicComponentDependency ACCRUL
+         call CreateNewCompany(NewCompany,
+         NewCompanyName,
+         CreateAsTemplateCompany,
+         CreateAsMasterCompany,
+         CreateFrom,
+         SourceCompany,
+         TemplateId,
+         CalenderCreationMethod,
+         AccYear,
+         StartYear,
+         StartMonth,
+         NumberOfYears,
+         UseVouNoPeriod,
+         CurrencyCode,
+         ValidFrom,
+         ParallelAccCurrency,
+         ParallelCurBase,
+         DefaultLanguage,
+         Country,
+         LogicalAccTypesList,
+         CodePart,
+         InternalName,
+         LanguageCodes) into CompanyCreationVar;
+
+         set NewCompany = "${CompanyCreationVar.Company}";
+         set CompanyCreation = "${CompanyCreationVar.Success}";
+      }
+   }
+   cancel command {
+      execute {
+         exit;
+      }
+   }
+}
+
+
+--------------------------------- COMMANDS ----------------------------------
+command ViewCompanyCommand {
+   label = "View Company";
+}
+
+command ViewCompanyLogCommand {
+   label = "View Company Log";
+}
+
+command CloseCommand {
+   label = "Close";
+}
+
+
+--------------------------------- SELECTORS ---------------------------------
+
+
+---------------------------------- GROUPS -----------------------------------
+group CompanyBasicGroup for CreateCompanyStructure {
+   label = "";
+
+   field NewCompany;
+   field NewCompanyName {
+      size = Large;
+   }
+}
+
+
+group CreateCompanyAsGroup for CreateCompanyStructure {
+   label = "Create As";
+
+   field CreateAsTemplateCompany;
+   field CreateAsMasterCompany {
+      validate command {
+         execute {
+            set UseCurrencyBalance = false;
+         }
+      }
+   }
+}
+
+
+group CreateFromGroup for CreateCompanyStructure {
+   label = "";
+
+   radiogroup CreateFrom {
+      validate command {
+         execute {
+            if [CreateFrom = "Existing"] {
+               set TemplateId = null;
+               set DefCodePartExist = false;
+               set CodePart = null;
+               set InternalName = null;
+            }
+            if [CreateFrom = "Template"] {
+               set SourceCompany = null;
+               set IsPeriodUsed = "FALSE";
+               call DefaultTemplate() into TemplateId;
+               call FetchCodePartInfo(SourceCompany, TemplateId) into CodePartInfoVar;
+               if [CodePartInfoVar != null] {
+                  set CodePart = CodePartInfoVar.CodePart;
+                  set InternalName = CodePartInfoVar.InternalName;
+                  if [(CodePart != null) and(InternalName != null)] {
+                     set DefCodePartExist = true;
+                  }
+                  else {
+                     set DefCodePartExist = false;
+                  }
+               }
+               else {
+                  set DefCodePartExist = false;
+                  set CodePart = null;
+                  set InternalName = null;
+               }
+            }
+            set TemplTransLngCodes = null;
+            set CompanyTransLngCodes = null;
+         }
+      }
+   }
+   lov SourceCompanyRef with ReferenceCompanySelector {
+      search = Company, Name;
+      description = SourceCompanyRef.Name;
+      visible = [CreateFrom = "Existing"];
+      required = [CreateFrom = "Existing"];
+      validate command {
+         execute {
+            call UseVouPeriod(SourceCompany) into IsPeriodUsed;
+            call FetchCodePartInfo(SourceCompany, TemplateId) into CodePartInfoVar;
+            if [CodePartInfoVar != null] {
+               set CodePart = CodePartInfoVar.CodePart;
+               set InternalName = CodePartInfoVar.InternalName;
+               if [(CodePart != null) and(InternalName != null)] {
+                  set DefCodePartExist = true;
+               }
+               else {
+                  set DefCodePartExist = false;
+               }
+            }
+            else {
+               set DefCodePartExist = false;
+               set CodePart = null;
+               set InternalName = null;
+            }
+         }
+      }
+   }
+   lov TemplateIdRef with ReferenceCreateCompanyTemValidSelector {
+      search = TemplateId, Description;
+      description = TemplateIdRef.Description;
+      visible = [CreateFrom = "Template"];
+      required = [CreateFrom = "Template"];
+      validate command {
+         execute {
+            call UseVouPeriodTemplate(TemplateId) into IsPeriodUsed;
+            call FetchCodePartInfo(SourceCompany, TemplateId) into CodePartInfoVar;
+            if [CodePartInfoVar != null] {
+               set CodePart = CodePartInfoVar.CodePart;
+               set InternalName = CodePartInfoVar.InternalName;
+               if [(CodePart != null) and(InternalName != null)] {
+                  set DefCodePartExist = true;
+               }
+               else {
+                  set DefCodePartExist = false;
+               }
+            }
+            else {
+               set DefCodePartExist = false;
+               set CodePart = null;
+               set InternalName = null;
+            }
+         }
+      }
+   }
+}
+
+
+group TranslationsGroup for CreateCompanyStructure {
+   label = "";
+
+   itempicker TemplTransLngCodes using TemplTranslationLngSet {
+      label = "";
+      availableitemslabel = "Available Languages";
+      selecteditemslabel = "Selected Languages";
+      displayvalue = Description;
+      compactmode = [false];
+      enableordering = [true];
+      orderby = Description asc;
+      visible = [TemplateId != null];
+      filter = [KeyValue = TemplateId];
+   }
+   itempicker CompanyTransLngCodes using CompanyTranslationLngSet {
+      label = "";
+      availableitemslabel = "Available Languages";
+      selecteditemslabel = "Selected Languages";
+      displayvalue = Description;
+      compactmode = [false];
+      enableordering = [true];
+      orderby = Description asc;
+      visible = [SourceCompany != null];
+      filter = [KeyValue = SourceCompany];
+   }
+}
+
+
+group CalenderCreationMethodGroup for CreateCompanyStructure {
+   label = "Calender Creation Method";
+
+   radiogroup CalenderCreationMethod {
+      showlabel = false;
+      validate command {
+         execute {
+            if [(IsPeriodUsed = "TRUE") and(CalenderCreationMethod = "Source")] {
+               set UseVouNoPeriod = true;
+               set AccYear = null;
+               set StartYear = null;
+               set StartMonth = null;
+               set NumberOfYears = null;
+            }
+            else {
+               if[CreateFrom = "Template"] {
+                  if[IsPeriodUsed = "TRUE"] {
+                     set UseVouNoPeriod = true;
+                  }
+               }
+               else {
+                  set UseVouNoPeriod = false;
+               }
+            }
+         }
+      }
+   }
+   field AccYear {
+      size = Small;
+      editable = [CalenderCreationMethod = "UserDefined"];
+      required = [CalenderCreationMethod = "UserDefined"];
+      validate command {
+         execute {
+            if [AccYear != null] {
+               if [AccYear < 1] {
+                  error("The number given for the First Accounting Year is not valid.'");
+               }
+               else {
+                  set StartYear = AccYear;
+                  set StartMonth = 1;
+               }
+            }
+         }
+      }
+   }
+   field StartYear {
+      size = Small;
+      editable = [CalenderCreationMethod = "UserDefined"];
+      required = [CalenderCreationMethod = "UserDefined"];
+   }
+   field StartMonth {
+      size = Small;
+      editable = [CalenderCreationMethod = "UserDefined"];
+      required = [CalenderCreationMethod = "UserDefined"];
+   }
+   field NumberOfYears {
+      size = Small;
+      editable = [CalenderCreationMethod = "UserDefined"];
+      required = [CalenderCreationMethod = "UserDefined"];
+   }
+   field UseVouNoPeriod {
+      editable = [not((IsPeriodUsed = "TRUE") and(CalenderCreationMethod = "Source"))];
+   }
+}
+
+
+group AccountingDetailsGroup for CreateCompanyStructure {
+   label = "";
+
+   lov CurrencyCodeRef with ReferenceIsoCurrencySelector {
+      validate command {
+         execute {
+            if [(StartYear != null) and(StartMonth != null) and(ValidFrom != null)] {
+               call DefaultValidFrom(StartYear, StartMonth) into ValidFrom;
+            }
+         }
+      }
+   }
+   field ValidFrom;
+   lov ParallelAccCurrencyRef with ReferenceIsoCurrencySelector {
+      editable = [CreateAsMasterCompany = false];
+      validate command {
+         execute {
+            if [(ParallelAccCurrency != null) and(ValidFrom = null)] {
+               alert("Valid From Date must be specified for Parallel Accounting Currency.");
+            }
+            @DynamicComponentDependency ACCRUL
+            if [ParallelAccCurrency = null] {
+               set ParallelCurBase = null;
+            }
+         }
+      }
+   }
+   @DynamicComponentDependency ACCRUL
+   field ParallelCurBase {
+      editable = [(ParallelAccCurrency != null) and(CreateAsMasterCompany = false)];
+      required = [ParallelAccCurrency != null];
+   }
+   field DefaultLanguage;
+   field Country;
+}
+
+
+group CurrBalCodePartSelectedGroup for CreateCompanyStructure {
+   label = "";
+
+   field UseCurrencyBalance {
+      size = Small;
+      editable = [(not DefCodePartExist) and(CreateAsMasterCompany = false)];
+      validate command {
+         execute {
+            set CodePart = null;
+            set TemplateCodePartRef = null;
+            set CompanyCodePartRef = null;
+            set InternalName = null;
+            set Assets = false;
+            set Liabilities = false;
+            set Revenues = false;
+            set Cost = false;
+            set Statistics = false;
+            set StatOpenBal = false;
+         }
+      }
+   }
+   field CodePart {
+      size = Small;
+      editable = [(not DefCodePartExist) and UseCurrencyBalance];
+      required = [(not DefCodePartExist) and UseCurrencyBalance];
+      validate command {
+         variable ValidateCodePartVar Text;
+         execute {
+            call ValidateCodePart(SourceCompany, TemplateId, CodePart) into ValidateCodePartVar;
+            call FetchInternalName(SourceCompany, TemplateId, CodePart) into InternalName;
+         }
+      }
+      lovswitch {
+         when [(not DefCodePartExist) and(TemplateId != null)] {
+            lov TemplateCodePartRef with ReferenceCurrBalCodePartLovSelector;
+         }
+         when [true] {
+            @DynamicComponentDependency ACCRUL
+            lov CompanyCodePartRef with ReferenceCreateComCurrBalLovSelector;
+         }
+      }
+   }
+   field InternalName {
+      required = [(not DefCodePartExist) and UseCurrencyBalance];
+      editable = [(not DefCodePartExist) and UseCurrencyBalance];
+      maxlength = 10;
+   }
+}
+
+
+group CurrBalAccountsEnableGroup for CreateCompanyStructure {
+   label = "Enable Accounts for Currency Balance";
+
+   field Assets {
+      size = Small;
+      editable = [UseCurrencyBalance];
+   }
+   field Liabilities {
+      size = Small;
+      editable = [UseCurrencyBalance];
+   }
+   field Revenues {
+      size = Small;
+      editable = [UseCurrencyBalance];
+   }
+   field Cost {
+      size = Small;
+      editable = [UseCurrencyBalance];
+   }
+   field Statistics {
+      size = Small;
+      editable = [UseCurrencyBalance];
+   }
+   field StatOpenBal {
+      size = Small;
+      editable = [UseCurrencyBalance];
+   }
+}
+
+
+group SummaryGroup for CreateCompanyStructure {
+   label = "";
+
+   field NewCompany {
+      editable = [false];
+   }
+   field NewCompanyName {
+      editable = [false];
+   }
+   field DefaultLanguage {
+      editable = [false];
+   }
+   field Country {
+      editable = [false];
+   }
+   lov SourceCompanyRef with ReferenceCompanySelector {
+      search = Company, Name;
+      description = SourceCompanyRef.Name;
+      editable = [false];
+      visible = [TemplateId = null];
+   }
+   lov TemplateIdRef with ReferenceCreateCompanyTemValidSelector {
+      search = TemplateId, Description;
+      description = TemplateIdRef.Description;
+      label = "Source Template";
+      editable = [false];
+      visible = [SourceCompany = null];
+   }
+   field CalenderCreationMethod {
+      editable = [false];
+   }
+   field CodePart {
+      label = "Code part for Currency Balance";
+      editable = [false];
+      lovswitch {
+         when [(not DefCodePartExist) and(TemplateId != null)] {
+            lov TemplateCodePartRef with ReferenceCurrBalCodePartLovSelector {
+               description = InternalName;
+            }
+         }
+         when [true] {
+            @DynamicComponentDependency ACCRUL
+            lov CompanyCodePartRef with ReferenceCreateComCurrBalLovSelector {
+               description = InternalName;
+            }
+         }
+      }
+   }
+   field AccYear {
+      editable = [false];
+   }
+   field StartYear {
+      editable = [false];
+   }
+   field StartMonth {
+      editable = [false];
+   }
+   field NumberOfYears {
+      editable = [false];
+   }
+   field CurrencyCode {
+      editable = [false];
+   }
+   field ValidFrom {
+      editable = [false];
+   }
+   field ParallelAccCurrency {
+      editable = [false];
+   }
+   @DynamicComponentDependency ACCRUL
+   field ParallelCurBase {
+      editable = [false];
+   }
+   field CreateAsTemplateCompany {
+      label = "Create as Template Company";
+      editable = [false];
+   }
+   field CreateAsMasterCompany {
+      editable = [false];
+   }
+   field UseVouNoPeriod {
+      editable = [false];
+   }
+   field Languages {
+      editable = [false];
+      multiline = true;
+   }
+}
+
+
+----------------------------------- LISTS -----------------------------------
+
+
+----------------------------------- CARDS -----------------------------------
+
+
+---------------------------------- DIALOGS ----------------------------------
+
+
+---------------------------------- CHARTS -----------------------------------
+
+
+--------------------------------- CALENDARS ---------------------------------
+
+
+---------------------------------- SHEETS -----------------------------------
+
+
+----------------------------- STATE INDICATORS ------------------------------
+
+
+----------------------------------- TREES -----------------------------------
+
+
+---------------------------------- PLUGINS ----------------------------------
+
+
+------------------------------- IMAGE VIEWERS -------------------------------

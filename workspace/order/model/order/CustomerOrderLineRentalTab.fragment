@@ -1,0 +1,1483 @@
+-- Date        Sign    History
+-- ----------  ------  ----------------------------------------------------------------------------------------------------------------------
+-- 2021-10-01  PrRtlk  SC21R2-2966, Used the Subset Customer Order in ShipmentCreation Enumeration for Customer Order related Shipment Creation types.
+-- 2021-06-18  JoWise  MF21R2-2106, Make time indication for Planned Due Date editable on Rental Lines tab on Customer Order page
+-- 2021-06-16  JoWise  MF21R2-2083, Set time for Planned Due Date field on Customer Order Line Rental Parts
+-- 2021-01-26  MaRalk  SC2020R1-11958, Added attributes OriginalOrderNo, OriginalLineNo, OriginalRelNo, OriginalItemNo to
+-- 2021-01-26          CustomerOrderRentalLine entity in order to pass to the Crud_Create___ when saving duplicated line and later is used
+-- 2021-01-26          CustomerOrderLine - Post_Insert_Actions___ method for Tax_Handling_Order_Util_API.Transfer_Tax_lines call.
+-- 2020-11-12  MaEelk  SC2020R1-11302, Replaced PriceSourceNetPriceDb with PriceSourceNetPrice.
+-- 2020-08-31  MaEelk  GESPRING20-5398, Added OriginalDiscount, OriginalAddDiscount and OriginalOrderDiscount to CustomerOrderRentalLine
+-- 2020-03-16  MaRalk  SCXTEND-2206, Used the fields FreeOfCharge, BlockedForInvoicing instead of FreeOfChargeDb, BlockedForInvoicingDb
+-- 2020-03-16          when enabling Duplicate functionality. Added attribute DuplicateLine to the entity. Renamed attributes SupplySiteInventoryUnitMeas,
+-- 2020-03-16          CancellationReasonDescription as SupplySiteInvUnitMeas, CancellationReasonDesc respectivly as they exceed length 30 and
+-- 2020-03-16          hence issues raised in CO line Unpack___ when saving the duplicated intersite CO lines, cancelled CO lines.
+-- 2019-12-05  MaEelk  SCXTEND-342, Initila Focus was set to CatalogNoRef
+-- 2019-10-29  JaThlk  SCXTEND-535, Excluded GenerateSerialReservationCommand.
+-- 2019-09-18  chlelk  SCXTEND-490, field ranking was done for 40 columns
+-- 2019-08-28  chlelk  SCUXXW4-24053, Field "Planned Due Date" is made non editable in Aurena
+-- 2019-05-20  fgusse  SCUXXW4-20685, Added ludependencies for DocumentText.
+-- 2019-03-28  SeJalk  SCUXXW4-796, Implemented rantal field validations.
+-- 2019-03-12  ErRalk  SCUXXW4-17230, Added Dependency Annotation for the relevant fields.
+---------------------------------------------------------------------------------------------------------------------------------------------
+
+fragment CustomerOrderLineRentalTab;
+component ORDER;
+layer Core;
+description "Put some useful description here ...";
+@DynamicComponentDependency RENTAL
+include fragment RentalLineFieldCommon;
+include fragment TaxIdNumbersValidation;
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+
+--------------------------------- COMMANDS ----------------------------------
+command ValidatePriceAndTotalCommand {
+   variable ValidationRecVar Structure(CustOrdLineValidation);
+   variable ReturnValidationRecVar Structure(CustOrdLineValidation);
+   variable TaxFromDefaultsVar Text;
+   variable TaxCodeFlagVar Boolean;
+   variable NewLineVar Boolean;
+   variable DuplicateLineVar Boolean;
+   variable TaxEditedVar Boolean;
+   variable RecalcLineDiscVar Boolean;
+   variable ValidatePriceListVar Boolean;
+   execute {
+      if [TaxCode != original.TaxCode or isNew] {
+         set TaxCodeFlagVar = true;
+      }
+      else {
+         set TaxCodeFlagVar = false;
+      }
+      if [isNew] {
+         set NewLineVar = true;
+      }
+      else {
+         set NewLineVar = false;
+      }
+      set DuplicateLineVar = false;
+      if [TaxCode != original.TaxCode or TaxCalcStructureId != original.TaxCalcStructureId] {
+         set TaxEditedVar = true;
+      }
+      else {
+         set TaxEditedVar = false;
+      }
+      copy this into ValidationRecVar;
+      -- need to pass PlannedRentalStartDate as a parameter since when copy this in to struct copy the date by timezone adjustment.
+      call SetOrderPriceAndSalesLineTotal(ValidationRecVar, TaxFromDefaultsVar, parent.CurrencyCode, parent.UsePriceInclTax,
+      TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar, RecalcLineDiscVar, ValidatePriceListVar, PlannedRentalStartDate, FreeOfCharge) into ReturnValidationRecVar {
+         when SUCCESS {
+            copy ReturnValidationRecVar into this;
+         }
+      }
+   }
+}
+
+command ValidatePlannedDeliveryDateRentalLineCommand for CustomerOrderRentalLine clone UpdateLicenseDateBaseCommand {
+   execute {
+      set Identity1 = OrderNo;
+      set Identity2 = LineNo;
+      set Identity3 = RelNo;
+      set Identity4 = LineItemNo;
+      set Source = "CUSTOMERORDER";
+
+      super;
+      if [RentalDb = "TRUE"] {
+         if [PlannedRentalReturnDate != null and PlannedDeliveryDate > PlannedRentalReturnDate] {
+            alert("The Planned Rental Return Date is earlier than the Planned Delivery Date.");
+         }
+
+      }
+   }
+}
+
+command ValidateVendorNoRentalLineCommand for CustomerOrderRentalLine clone ValidateVendorNoBaseCommand {
+   execute {
+      set Identity1 = OrderNo;
+      set Identity2 = LineNo;
+      set Identity3 = RelNo;
+      set Identity4 = LineItemNo;
+      set Source = "CUSTOMERORDER";
+
+      super;
+   }
+}
+
+@DynamicComponentDependency RENTAL
+command ValidatePlannedRentalEndDateCommand for CustomerOrderRentalLine clone ValidatePriceAndTotalCommand {
+   variable RentalDateVar {
+      type = Structure(RentalDateStructure);
+   }
+   execute {
+      set TaxFromDefaultsVar = "FALSE";
+
+      call CalculatePlannedRentalEndDate(PlannedRentalStartDateEditable, PlannedRentalStartTimeEditable, PlannedRentalDuration, RentalDurationUnitMeas, ChargeableId, ExceptionId, PeriodRounding) into RentalDateVar;
+      copy RentalDateVar into this;
+      if [ChargableDays = null] {
+         call GetRentalChargeableDays(PlannedRentalStartDateEditable, PlannedRentalStartTimeEditable, PlannedRentalEndDateEditable, PlannedRentalEndTimeEditable, ChargeableId, ExceptionId, PeriodRounding, ChargeableDays) into ChargableDays;
+      }
+      set ValidatePriceListVar = true;
+      super;
+      // Replication, start
+      set ChangedAttribNotInPol = null;
+      call CheckReplication(OrderNo, LineNo, RelNo, LineItemNo, BuyQtyDue, PlannedDeliveryDate, PackingInstructionId, DefaultAddrFlag, AddrFlag, ShipAddrNo, DockCode,
+      SubDockCode, LocationNo, PlannedRentalStartDateEditable, PlannedRentalStartTimeEditable, PlannedRentalEndDateEditable, PlannedRentalEndTimeEditable) into CheckReplicationVar;
+      set SendChangeRequest = CheckReplicationVar.SendChangeRequest;
+      set SupplyCodeCheck = CheckReplicationVar.SupplyCodeCheck;
+      set ChangedAttribNotInPol = CheckReplicationVar.ChangedAttribNotInPol;
+      if [ChangedAttribNotInPol != null] {
+         set ReplicateColumnsModified = "TRUE";
+      }
+      // Replication, end
+   }
+}
+
+@DynamicComponentDependency RENTAL
+command ValidateRentalDurationUnitMeasCommand for CustomerOrderRentalLine clone ValidatePriceAndTotalCommand {
+   variable RentalDateVar {
+      type = Structure(RentalDateStructure);
+   }
+   execute {
+      set TaxFromDefaultsVar = "FALSE";
+
+      call CalculatePlannedRentalEndDate(PlannedRentalStartDateEditable, PlannedRentalStartTimeEditable, PlannedRentalDuration, RentalDurationUnitMeas, ChargeableId, ExceptionId, PeriodRounding) into RentalDateVar;
+      copy RentalDateVar into this;
+      if [ChargableDays = null] {
+         call GetRentalChargeableDays(PlannedRentalStartDateEditable, PlannedRentalStartTimeEditable, PlannedRentalEndDateEditable, PlannedRentalEndTimeEditable, ChargeableId, ExceptionId, PeriodRounding, ChargeableDays) into ChargableDays;
+      }
+      set ValidatePriceListVar = false;
+      super;
+   }
+}
+
+@DynamicComponentDependency RENTAL
+command ValidatePlannedRentalDurationCommand for CustomerOrderRentalLine clone ValidatePriceAndTotalCommand {
+   variable RentalDurationVar {
+      type = Structure(RentalDurationStructure);
+   }
+   execute {
+      call CalculatePlannedRentalDuration(PlannedRentalStartDateEditable, PlannedRentalStartTimeEditable, PlannedRentalEndDateEditable, PlannedRentalEndTimeEditable, RentalDurationUnitMeas, ChargeableId, ExceptionId, PeriodRounding) into RentalDurationVar;
+      copy RentalDurationVar into this;
+      set PlannedRentalReturnDate = PlannedRentalEndDateEditable;
+      if [ChargableDays = null] {
+         call GetRentalChargeableDays(PlannedRentalStartDateEditable, PlannedRentalStartTimeEditable, PlannedRentalEndDateEditable, PlannedRentalEndTimeEditable, ChargeableId, ExceptionId, PeriodRounding, ChargeableDays) into ChargableDays;
+      }
+      set ValidatePriceListVar = false;
+      super;
+      // Replication, start
+      set ChangedAttribNotInPol = null;
+      call CheckReplication(OrderNo, LineNo, RelNo, LineItemNo, BuyQtyDue, PlannedDeliveryDate, PackingInstructionId, DefaultAddrFlag, AddrFlag, ShipAddrNo, DockCode,
+      SubDockCode, LocationNo, PlannedRentalStartDateEditable, PlannedRentalStartTimeEditable, PlannedRentalEndDateEditable, PlannedRentalEndTimeEditable) into CheckReplicationVar;
+      set SendChangeRequest = CheckReplicationVar.SendChangeRequest;
+      set SupplyCodeCheck = CheckReplicationVar.SupplyCodeCheck;
+      set ChangedAttribNotInPol = CheckReplicationVar.ChangedAttribNotInPol;
+      if [ChangedAttribNotInPol != null] {
+         set ReplicateColumnsModified = "TRUE";
+      }
+      // Replication, end
+   }
+}
+@DynamicComponentDependency RENTAL
+command ValidateRentalChargeableDaysCommand for CustomerOrderRentalLine clone ValidatePriceAndTotalCommand {
+   execute {
+      call CalculateRentalChargeableDays(PlannedRentalStartDateEditable, PlannedRentalStartTimeEditable, PlannedRentalEndDateEditable, PlannedRentalEndTimeEditable, ChargeableId, ExceptionId, PeriodRounding) into ChargableDays;
+      set ValidatePriceListVar = false;
+      super;
+   }
+}
+
+@DynamicComponentDependency RENTAL
+command ValidatePlannedRentalEndDateForBuyQtyCommand for CustomerOrderRentalLine clone ValidateBuyQtyDueBaseCommand {
+   variable RentalDateVar {
+      type = Structure(RentalDateStructure);
+   }
+   execute {
+      call CalculatePlannedRentalEndDate(PlannedRentalStartDateEditable, PlannedRentalStartTimeEditable, PlannedRentalDuration, RentalDurationUnitMeas, ChargeableId, ExceptionId, PeriodRounding) into RentalDateVar;
+      copy RentalDateVar into this;
+      if [ChargableDays = null] {
+         call GetRentalChargeableDays(PlannedRentalStartDateEditable, PlannedRentalStartTimeEditable, PlannedRentalEndDateEditable, PlannedRentalEndTimeEditable, ChargeableId, ExceptionId, PeriodRounding, ChargeableDays) into ChargeableDays;
+      }
+      super;
+   }
+}
+
+@DynamicComponentDependency RENTAL
+command ValidatePlannedRentalDurationForBuyQtyCommand for CustomerOrderRentalLine clone ValidateBuyQtyDueBaseCommand {
+   variable RentalDurationVar {
+      type = Structure(RentalDurationStructure);
+   }
+   execute {
+      call CalculatePlannedRentalDuration(PlannedRentalStartDateEditable, PlannedRentalStartTimeEditable, PlannedRentalEndDateEditable, PlannedRentalEndTimeEditable, RentalDurationUnitMeas, ChargeableId, ExceptionId, PeriodRounding) into RentalDurationVar;
+      copy RentalDurationVar into this;
+      set PlannedRentalReturnDate = PlannedRentalEndDateEditable;
+      if [ChargableDays = null] {
+         call GetRentalChargeableDays(PlannedRentalStartDateEditable, PlannedRentalStartTimeEditable, PlannedRentalEndDateEditable, PlannedRentalEndTimeEditable, ChargeableId, ExceptionId, PeriodRounding, ChargeableDays) into ChargableDays;
+      }
+      super;
+      // Replication, start
+      set ChangedAttribNotInPol = null;
+      call CheckReplication(OrderNo, LineNo, RelNo, LineItemNo, BuyQtyDue, PlannedDeliveryDate, PackingInstructionId, DefaultAddrFlag, AddrFlag, ShipAddrNo, DockCode,
+      SubDockCode, LocationNo, PlannedRentalStartDateEditable, PlannedRentalStartTimeEditable, PlannedRentalEndDateEditable, PlannedRentalEndTimeEditable) into CheckReplicationVar;
+      set SendChangeRequest = CheckReplicationVar.SendChangeRequest;
+      set SupplyCodeCheck = CheckReplicationVar.SupplyCodeCheck;
+      set ChangedAttribNotInPol = CheckReplicationVar.ChangedAttribNotInPol;
+      if [ChangedAttribNotInPol != null] {
+         set ReplicateColumnsModified = "TRUE";
+      }
+      // Replication, end
+   }
+}
+
+--------------------------------- FIELD SET ---------------------------------
+-- this is added to fix the filter issue in rental tab due to binding of diferent enumuration
+fieldset CustomerOrderLineRentalStateFieldSet for CustomerOrderRentalLine clone CustomerOrderLineStateFieldSet {
+
+}
+----------------------------------- LIST ------------------------------------
+@DynamicComponentDependency RENTAL
+list CustomerOrderLineRentalList for CustomerOrderRentalLine clone CustomerOrderLineBaseList {
+   crudactions {
+      before command BeforeSaveCommand;
+   }
+   lov CatalogNoRef with ReferenceAllSalesPartActiveLovSelector using GetRentalParts {
+      initialfocus = [true];
+      validate command ValidateCatalogNoCoLineCommand;
+   }
+   fieldset CustomerOrderLineRentalStateFieldSet;
+
+   field PlannedDeliveryDate {
+      validate command ValidatePlannedDeliveryDateRentalLineCommand;
+
+   }
+   field PlannedRentalStartDateEditable {
+      validate command ValidatePlannedRentalEndDateCommand;
+   }
+
+   field PlannedRentalStartTimeEditable {
+      validate command ValidatePlannedRentalEndDateCommand;
+      columnvisible = [false];
+   }
+
+   field PlannedRentalDuration {
+      validate command ValidatePlannedRentalEndDateForBuyQtyCommand;
+   }
+   field RentalDurationUnitMeas {
+      size = Small;
+      validate command ValidateRentalDurationUnitMeasCommand;
+   }
+
+   field PlannedRentalEndDateEditable {
+      validate command ValidatePlannedRentalDurationForBuyQtyCommand;
+   }
+
+   field PlannedRentalEndTimeEditable {
+      columnvisible = [false];
+      validate command ValidatePlannedRentalDurationCommand;
+   }
+   field ChargeableDays {
+      editable = [false];
+   }
+   field PlannedRentalReturnDate;
+   field ChargeableIdRef {
+      size = Small;
+      validate command ValidateRentalChargeableDaysCommand;
+
+   }
+   field ExceptionIdRef {
+      size = Small;
+      validate command ValidateRentalChargeableDaysCommand;
+
+   }
+   field PeriodRounding {
+      size = Small;
+      validate command ValidateRentalChargeableDaysCommand;
+
+   }
+   lov TransScheduleIdRef with ReferenceActiveRentalTransScheduleSelector {
+      size = Small;
+   }
+   field RentalTransScheduleRef.Description {
+      size = Small;
+      label = "Schedule Description";
+   }
+   field StartRentalOption {
+      size = Small;
+   }
+
+   @DynamicComponentDependency PURCH
+   lov VendorNoRef with ReferencePurchPartSuppAllAcquisLovSelector using GetRentalSupplierNo(SupplyCode, PurchasePartNo) {
+      size = Small;
+      validate command ValidateVendorNoRentalLineCommand;
+   }
+   field PartPrice {
+      columnexclude = [true];
+   }
+   field PrimaryRentalNo;
+   field PartPrice {
+      columnexclude = [true];
+   }
+   //fieldranking LineNo, CatalogNo, CatalogDesc, BuyQtyDue, PlannedRentalStartDateEditable, PlannedRentalEndDateEditable, CustomerOrderLineRentalStateFieldSet, SaleUnitPrice, TransScheduleIdRef, NetAmountCurr, PlannedDueDate, WantedDeliveryDateSalesUnitMeasRef, RelNo, PlannedRentalDuration, PriceSource, SupplyCode;
+
+   fieldranking LineNo, RelNo, CatalogNoRef, CatalogDesc, BuyQtyDue, SalesUnitMeasRef, Objstate, PlannedRentalDuration, RentalDurationUnitMeas, PlannedRentalStartDateEditable, PlannedRentalEndDateEditable, SaleUnitPrice, UnitPriceInclTax, PriceUnitMeas, DiscountAmountCurr, TotalOrderLineDiscount, NetAmountCurr, TaxAmountCurr, GrossAmountCurr, TransScheduleIdRef, ChargeableDays, ChargeableIdRef, PlannedRentalReturnDate, ExceptionIdRef, PeriodRounding, StartRentalOption, WantedDeliveryDate, TargetDate, PlannedDeliveryDate, PlannedShipDate, SupplyCode, VendorNoRef, DefaultAddrFlag, AddrFlag, ShipAddrNoRef, QtyAssigned, DeliveredQty, TaxCode, PartOwnership, PrimaryRentalNo;
+   fieldorder = LineNo, RelNo, CatalogNoRef, CatalogDesc, BuyQtyDue, SalesUnitMeasRef, Objstate, PlannedRentalDuration, RentalDurationUnitMeas, PlannedRentalStartDateEditable, PlannedRentalEndDateEditable, SaleUnitPrice, UnitPriceInclTax, PriceUnitMeas, DiscountAmountCurr, TotalOrderLineDiscount, NetAmountCurr, TaxAmountCurr, GrossAmountCurr, TransScheduleIdRef, ChargeableDays, ChargeableIdRef, PlannedRentalReturnDate, ExceptionIdRef, PeriodRounding, StartRentalOption, WantedDeliveryDate, TargetDate, PlannedDeliveryDate, PlannedShipDate, SupplyCode, VendorNoRef, DefaultAddrFlag, AddrFlag, ShipAddrNoRef, QtyAssigned, DeliveredQty, TaxCode, PartOwnership, PrimaryRentalNo;
+
+
+//   fieldorder {
+//      anchor RelNo;
+//      followedby CatalogNoRef;
+//   }
+//   fieldorder {
+//      anchor SalesUnitMeasRef;
+//      followedby CustomerOrderLineRentalStateFieldSet;
+//      followedby PlannedRentalDuration;
+//      followedby RentalDurationUnitMeas;
+//      followedby PlannedRentalStartDateEditable;
+//      followedby PlannedRentalStartTimeEditable;
+//      followedby PlannedRentalEndDateEditable;
+//      followedby PlannedRentalEndTimeEditable;
+//      followedby PartPrice;
+//   }
+//   fieldorder {
+//      anchor DemandOrderRef3;
+//      followedby PrimaryRentalNo;
+//   }
+//
+//   fieldorder {
+//      anchor TaxAmountCurr;
+//      followedby TransScheduleIdRef;
+//      followedby RentalTransScheduleRef.Description;
+//      followedby ChargeableDays;
+//      followedby ChargeableIdRef;
+//      followedby PlannedRentalReturnDate;
+//      followedby ExceptionIdRef;
+//      followedby PeriodRounding;
+//      followedby StartRentalOption;
+//   }
+//   fieldorder {
+//      anchor SupplyCode;
+//      followedby VendorNoRef;
+//
+//   }
+//   fieldorder {
+//      anchor TargetDate;
+//      followedby PlannedDeliveryDate;
+//   }
+
+   exclude OrderLineDetailsPriceQueryCommand, OrderLineDetailsMilestoneCommand, OrderLineDetailsStagedBillingProfileCommand, OrderLineDetailsPackagePartStructureCommand;
+   exclude OrderLine_CommissionCmdGroup;
+   exclude OrderLineDetailsCustomerWarrantyCommand;
+   exclude SubstituteSalesPartCommand, InputUoMParametersCommand, BulkValidateTaxIdNumberCommand, PerformPartMrpCommand, CreateCorrectiveInterSitePrCommand;
+
+   @DynamicComponentDependency EXPCTR
+   exclude FindandConnectExportLicenseCommand;
+
+   exclude ReserveSerialNumbersCommand;
+   exclude GenerateSerialReservationCommand;
+   -- ths whole command group should be excluded
+   exclude ConfigurationL1CmdGroup;
+
+   @DynamicComponentDependency SHPORD
+   exclude SupplyServiceObjectsShopOrderInfoCommand;
+   @DynamicComponentDependency WO
+   exclude SupplyServiceObjectsServiceRequestCommand;
+   @DynamicComponentDependency CROMFG
+   exclude SupplyServiceObjectsComponentRepairOrderInfoCommand;
+
+   exclude CapabilityCheckL1CmdGroup;
+
+   -- The whole command group should b excluded
+   exclude RMAL1CmdGroup;
+
+   @DynamicComponentDependency GENLED
+   exclude CreateJobCommand, CloseJobCommand;
+
+   exclude PartsbyAssortmentandSiteClCommand, InventoryPartAvailabilityPlanCommand;
+}
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+
+----------------------------- MAIN ENTRY POINTS -----------------------------
+@DynamicComponentDependency PURCH
+entityset PurchPartSuppAllAcquisLovSet for PurchPartSuppAllAcquisLov;
+
+------------------------------ ENTITY DETAILS -------------------------------
+@Override
+entity CustomerOrderRentalLine using CustomerOrderLine {
+   from = "customer_order_rental_line";
+   keys = LineNo, RelNo, OrderNo, LineItemNo {
+      where = "LINE_NO = :LineNo and REL_NO = :RelNo and ORDER_NO = :OrderNo and LINE_ITEM_NO = :LineItemNo";
+   }
+   supportwarnings = [true];
+
+   use attributes = CustomerPartNo, CustomerPartBuyQty, CustomerPartUnitMeas, CatalogNo, CatalogDesc, BuyQtyDue, DesiredQty, SalesUnitMeas, PackingInstructionId, InputUnitMeas, InputQty, InputConvFactor, InputVariableValues, WantedDeliveryDate, TargetDate, PlannedDeliveryDate, PromisedDeliveryDate, PlannedShipDate,
+   PlannedShipPeriod, PlannedDueDate, FirstActualShipDate, RealShipDate, DateEntered, PriceListNo, PartPrice, PriceSourceId, PriceSource, CalcCharPrice, CharPrice, SaleUnitPrice, UnitPriceInclTax, CustomsValue, PriceUnitMeas, BaseSaleUnitPrice, BaseUnitPriceInclTax, Cost, Discount, OrderDiscount, AdditionalDiscount,
+   FreeOfChargeTaxBasis, PriceEffectivityDate, TaxLiability, CloseTolerance, TaxCode, TaxClassId, TaxCalcStructureId, TaxIdNo, TaxIdValidatedDate, DeliveryType, ShipAddrNo, EndCustomerId, DockCode, SubDockCode, RefId, CustomerPoLineNo, CustomerPoRelNo, LocationNo, ConditionCode, OriginalPartNo, QtyAssigned, QtyToShip, QtyShort, QtyOnOrder,
+   QtyReturned, QtyInvoiced, VendorNo, SupplySite, SupplySiteDueDate, SupplySiteReserveType, DemandOrderRef1, DemandOrderRef2, DemandOrderRef3, SupSmObject, SupSmContract, LatestReleaseDate, OriginatingRelNo, JobId, ShipmentType, ShipmentCreation, LoadId, ProjectId, ActivitySeq, CancelReason,
+   ClassificationStandard, ClassificationPartNo, ClassificationUnitMeas, AdjustedWeightNet, AdjustedWeightGross, LineTotalQty, OwningCustomerNo, CustomerPartConvFactor, CustPartInvertConvFact, NoteId, Contract, PartNo, CurrencyRate, PriceConvFactor, InvertedConvFactor, RevisedQtyDue, NoteText, PreAccountingId,
+   CustomerNo, PurchasePartNo, ConfiguredLinePriceId, CustWarrantyId, RouteId, ForwardAgentId, DeliveryTerms, DelTermsLocation, DeliveryLeadtime, DistrictCode, RegionCode, DeliverToCustomerNo, OriginatingLineItemNo, ReplicateChanges, ChangeRequest, PartLevelId, PartLevel, CustomerLevelId, CustomerLevel, RelMtrlPlanning, ConvFactor,
+   ChangedAttribNotInPol, EvaluateDefaultInfo, ShipViaCode, Contact, PickingLeadtime, ExtTransportCalendarId, CustCalendarId, FreightMapId, ZoneId, FreightPriceListNo, DeliverySequence, PartOwnership, SupplyCode, DemandCode, ConsignmentStock, StagedBilling, SelfBilling, SmConnection, PriceFreeze, ExchangeItem,
+   DefaultAddrFlag, AddrFlag, IntrastatExempt, CatalogType, DopConnection, TaxLiabilityType, ReleasePlanning, CtpPlanned, PartPrice, SubProjectId, ActivityId, ActivityDescription, Company, OriginalDiscount, OriginalAddDiscount, OriginalOrderDiscount;
+
+   ludependencies = DocumentText, CustomerOrderLine;
+   validate action CreateChangeRequest;
+
+   attribute LineNo Text {
+      required = [false];
+   }
+   attribute RelNo Text {
+      label = "Del No";
+      required = [false];
+   }
+   attribute LineItemNo Number {
+      required = [false];
+   }
+   attribute LineItemNumber Text {
+      fetch = "line_item_no";
+   }
+   attribute LineNumber Text {
+      fetch = "LPAD(line_no,4)";
+   }
+   attribute RelNumber Text {
+      fetch = "LPAD(rel_no,4)";
+   }
+
+   attribute CustomerPartNo Text {
+      label = "Customer's Part No";
+      format = uppercase;
+   }
+   attribute CustomerPartBuyQty Number {
+      label = "Customer Sales Qty";
+   }
+   attribute CustomerPartUnitMeas Text {
+      label = "Customer's UoM";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute CatalogNo Text {
+      label = "Sales Part No";
+   }
+   attribute CatalogDesc Text {
+      label = "Sales Part Description";
+   }
+   attribute BuyQtyDue Number {
+      label = "Sales Qty";
+   }
+   attribute SalesUnitMeas Text {
+      label = "Sales UoM";
+      editable = [false];
+   }
+   attribute WantedDeliveryDate Timestamp {
+      label = "Wanted Delivery Date/Time";
+   }
+   attribute TargetDate Timestamp {
+      label = "Target Date/Time";
+   }
+   attribute PlannedDeliveryDate Timestamp {
+      label = "Planned Delivery Date/Time";
+   }
+   attribute PromisedDeliveryDate Timestamp {
+      label = "Promised Delivery Date/Time";
+      required = [false];
+   }
+   attribute PlannedDueDate Timestamp {
+      required = [false];
+      editable = [ETag != null];
+   }
+   attribute PlannedRentalDuration Number {
+      fetch = "planned_rental_duration";
+      label = "Planned Rental Duration";
+      required = [true];
+   }
+   @DynamicComponentDependency RENTAL
+   attribute RentalDurationUnitMeas Enumeration(RentalDurationUnitMeas.DurationUnits2) {
+      fetch = "rental_duration_unit_meas_db";
+      label = "Rental Duration UoM";
+      default = "Rental_Duration_Unit_Meas_API.DB_DAYS";
+   }
+
+   attribute PlannedRentalStartDateEditable Date {
+      label = "Planned Rental Start Date";
+      fetch = "planned_rental_start_date";
+      updatable = [false];
+      insertable = [false];
+   }
+   attribute PlannedRentalEndDateEditable Date {
+      label = "Planned Rental End Date";
+      fetch = "planned_rental_end_date";
+      updatable = [false];
+      insertable = [false];
+   }
+   attribute PlannedRentalStartTimeEditable Time {
+      label = "Planned Rental Start Time";
+      fetch = "planned_rental_start_date";
+      updatable = [false];
+      insertable = [false];
+   }
+   attribute PlannedRentalEndTimeEditable Time {
+      label = "Planned Rental End Time";
+      fetch = "planned_rental_end_date";
+      updatable = [false];
+      insertable = [false];
+   }
+   attribute PlannedRentalStartDate Timestamp {
+      label = "Rental Start DateTime Formatter";
+   }
+
+   attribute PlannedRentalEndDate Timestamp {
+      label = "Rental End DateTime Formatter";
+   }
+
+   attribute DeliveryTerms Text {
+      required = [false];
+   }
+
+   @DynamicComponentDependency RENTAL
+   attribute ChargeableDays Number {
+      fetch = "Rental_Object_Manager_API.Calculate_Chargeable_Days(planned_rental_start_date, planned_rental_end_date, chargeable_id, exception_id, Rental_Period_Rounding_API.Encode(period_rounding))";
+      label = "Chargeable Days";
+      maxlength = 2000;
+   }
+   attribute PlannedRentalReturnDate Date {
+      fetch = "planned_rental_return_date";
+      label = "Planned Rental Return Date";
+   }
+   attribute ChargeableId Text {
+      fetch = "chargeable_id";
+      label = "Chargeable Days ID";
+      maxlength = 30;
+      format = uppercase;
+   }
+   attribute ExceptionId Text {
+      fetch = "exception_id";
+      label = "Date Exception ID";
+      maxlength = 10;
+      format = uppercase;
+   }
+   @DynamicComponentDependency RENTAL
+   attribute PeriodRounding Enumeration(RentalPeriodRounding) {
+      fetch = "period_rounding_db";
+      label = "Period Rounding";
+      required = [true];
+   }
+   attribute TransScheduleId Text {
+      fetch = "trans_schedule_id";
+      label = "Schedule ID";
+      maxlength = 30;
+      required = [true];
+      format = uppercase;
+   }
+   @DynamicComponentDependency RENTAL
+   attribute StartRentalOption Enumeration(StartRentalOption) {
+      fetch = "start_rental_option_db";
+      label = "Start Rental Option";
+      required = [true];
+   }
+   attribute FirstActualShipDate Date {
+      editable = [false];
+   }
+   attribute RealShipDate Date {
+      label = "Last Actual Ship Date";
+      editable = [false];
+   }
+   attribute DocumentText Boolean {
+      fetch = "DECODE(Document_Text_API.Note_Id_Exist(note_id), '1', 'TRUE', 'FALSE')";
+      label = "Document Text";
+      editable = [false];
+   }
+   attribute PartPrice Number {
+      label = "Source Price/Curr";
+      editable = [false];
+      format = ifscurrency;
+   }
+   attribute PriceSource Enumeration(PricingSource) {
+      label = "Price Source";
+      maxlength = 200;
+   }
+   attribute SaleUnitPrice Number {
+      label = "Price/Curr";
+      format = ifscurrency;
+   }
+   attribute UnitPriceInclTax Number {
+      label = "Price Incl Tax/Curr";
+      format = ifscurrency;
+   }
+   attribute CustomsValue Number {
+      format = ifscurrency;
+   }
+   attribute PriceFreeze Enumeration(FreezeFlag) {
+      fetch = "price_freeze_db";
+      label = "Price Freeze";
+      required = [true];
+   }
+   attribute PriceUnitMeas Text {
+      label = "Price UoM";
+      editable = [false];
+   }
+   attribute BaseSaleUnitPrice Number {
+      label = "Price/Base";
+      format = ifscurrency;
+   }
+   attribute BaseUnitPriceInclTax Number {
+      label = "Price incl Tax/Base";
+      format = ifscurrency;
+   }
+   attribute Cost Number {
+      editable = [false];
+      format = ifscurrency;
+      required = [false];
+      updatable = [false];
+
+   }
+   attribute DiscountAmountCurr Number {
+      fetch = "Cust_Order_Line_Discount_API.Get_Total_Line_Discount__(order_no,line_no,rel_no,line_item_no,buy_qty_due,price_conv_factor)";
+      label = "Discount Amount/Curr";
+      editable = [false];
+      updatable = [false];
+      format = ifscurrency;
+   }
+   attribute Discount Number {
+      label = "Discount (%)";
+      maxlength = 5;
+   }
+   attribute TaxLiabilityType Enumeration(TaxLiabilityType) {
+      label = "Tax Liability Type";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute AdditionalDiscount Number {
+      label = "Additional Discount (%)";
+      editable = [false];
+   }
+   attribute TotalOrderLineDiscount Number {
+      fetch = "Customer_Order_Line_API.Get_Total_Discount_Percentage(order_no,line_no,rel_no,line_item_no)";
+      label = "Total Order Line Discount (%)";
+      editable = [false];
+   }
+   attribute TaxAmountBase Number {
+      fetch = "Customer_Order_Line_API.Get_Total_Tax_Amount_Base(order_no, line_no, rel_no, line_item_no)";
+      label = "Tax Amount/Base";
+      editable = [false];
+      insertable = [false];
+      updatable = [false];
+      format = ifscurrency;
+   }
+   attribute GrossAmountBase Number {
+      fetch = "Customer_Order_Line_API.Get_Base_Price_Incl_Tax_Total(order_no, line_no, rel_no, line_item_no)";
+      label = "Gross Amt/Base";
+      editable = [false];
+      insertable = [false];
+      updatable = [false];
+      format = ifscurrency;
+   }
+   attribute CloseTolerance Number {
+      label = "Closing Tolerance (%)";
+   }
+   attribute OrderDiscount Number {
+      label = "Group Discount (%)";
+      editable = [false];
+   }
+   attribute TaxCodeDescription Text {
+      fetch = "Statutory_Fee_API.Get_Description(company, tax_code)";
+      label = "Tax Code Description";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TaxClassId Text {
+      label = "Tax Class";
+      editable = [false];
+      insertable = [true];
+      updatable = [true];
+   }
+   attribute TaxClassDescription Text {
+      fetch = "Tax_Class_API.Get_Description(company, tax_class_id)";
+      label = "Tax Class Description";
+      editable = [false];
+      insertable = [false];
+      updatable = [false];
+   }
+   attribute NetAmountCurr Number {
+      fetch = "Customer_Order_Line_API.Get_Sale_Price_Total(order_no, line_no, rel_no, line_item_no)";
+      label = "Net Amount/Curr";
+      editable = [false];
+      insertable = [false];
+      updatable = [false];
+      format = ifscurrency;
+   }
+   attribute TaxAmountCurr Number {
+      fetch = "Customer_Order_Line_API.Get_Total_Tax_Amount_Curr(order_no, line_no, rel_no, line_item_no)";
+      label = "Tax Amount/Curr";
+      editable = [false];
+      insertable = [false];
+      updatable = [false];
+      format = ifscurrency;
+   }
+   attribute GrossAmountCurr Number {
+      fetch = "Customer_Order_Line_API.Get_Sale_Price_Incl_Tax_Total(order_no, line_no, rel_no, line_item_no)";
+      label = "Gross Amt/Curr";
+      editable = [false];
+      insertable = [false];
+      updatable = [false];
+      format = ifscurrency;
+   }
+   attribute MultipleTaxLines Boolean("TRUE", "FALSE") {
+      fetch = "Source_Tax_Item_API.Multiple_Tax_Items_Exist(company, 'CUSTOMER_ORDER_LINE', order_no, line_no, rel_no, line_item_no, '*')";
+      label = "Multiple Tax Lines";
+      insertable = [true];
+      updatable = [true];
+      editable = [false];
+      required = [true];
+   }
+   attribute TaxIdNo Text {
+      label = "Tax ID";
+   }
+   attribute PreviousTaxIdNo Text {
+      fetch = "NULL";
+   }
+   attribute TaxIdValidatedDate Date {
+      editable = [false];
+   }
+   attribute BlockedForInvoicing Boolean("TRUE", "FALSE") {
+      fetch = "blocked_for_invoicing_db";
+      label = "Invoice Blocked";
+      required = [true];
+   }
+   attribute DefaultAddrFlag Enumeration(GenYesNo) {
+      label = "Default Info";
+      required = [true];
+   }
+   attribute AddrFlag Enumeration(GenYesNo) {
+      label = "Single Occurrence";
+      required = [true];
+   }
+   attribute ShipAddrNo Text {
+      label = "Delivery Address";
+      format = uppercase;
+   }
+   attribute EndCustomerId Text {
+      label = "End Customer";
+      editable = [false];
+   }
+   attribute EndCustomerName Text {
+      fetch = "Cust_Ord_Customer_API.Get_Name(end_customer_id)";
+      label = "End Customer Name";
+      maxlength = 2000;
+      editable = [false];
+      updatable = [false];
+   }
+   attribute RefId Text {
+      label = "Reference ID";
+   }
+   attribute ConfigurationId Text {
+      required = [false];
+      updatable = [false];
+   }
+   attribute ChargedItem Enumeration(ChargedItem) {
+      label = "Charged Item";
+      required = [false];
+      updatable = [false];
+   }
+   attribute CreateSmObjectOption Enumeration(CreateSmObjectOption) {
+      label = "Create SM Object";
+      required = [false];
+      updatable = [false];
+      fetch = "create_sm_object_option_db";
+   }
+   attribute PartOwnership Enumeration(PartOwnership.Subset2) {
+      label = "Ownership";
+      fetch = "part_ownership_db";
+   }
+   attribute Owner Text {
+      fetch = "Customer_Order_Line_API.Get_Owner_For_Part_Ownership(order_no, line_no, rel_no, line_item_no, part_ownership_db)";
+      label = "Owner";
+      maxlength = 20;
+      format = uppercase;
+      editable = [false];
+      insertable = [false];
+      updatable = [false];
+   }
+   attribute OriginalPartNo Text {
+      label = "Original Sales Part No";
+      editable = [false];
+   }
+   attribute QtyAssigned Number {
+      label = "Reserved Qty";
+      editable = [false];
+   }
+
+   attribute DeliveredQty Number {
+      fetch = "DECODE(catalog_type_db, 'INV', qty_shipped, null)";
+      label = "Delivered Qty";
+      editable = [false];
+   }
+   attribute AvailableQty Number {
+      fetch = "Reserve_Customer_Order_API.Get_Available_Qty(NVL(supply_site,contract), NVL(part_no,catalog_no),configuration_id,order_no,line_no,rel_no,line_item_no,supply_code_db,part_ownership_db,owning_customer_no,project_id,condition_code,null,'TRUE')";
+      label = "Available Qty";
+      updatable = [false];
+   }
+   attribute QtyShort Number {
+      label = "Shortage Qty";
+      editable = [false];
+   }
+   attribute QtyPicked Number {
+      required = [false];
+   }
+   attribute PickedQtySalesUom Number {
+      fetch = "qty_picked/conv_factor";
+      label = "Picked Qty/Sales UoM";
+      editable = [false];
+   }
+   attribute DeliveredQtySalesUom Number {
+      fetch = "qty_shipped/conv_factor*inverted_conv_factor";
+      label = "Delivered Qty/Sales UoM";
+      editable = [false];
+   }
+   attribute SupplySite Text {
+      label = "Supply Site";
+      editable = [false];
+   }
+   attribute SupplySiteReservedQty Number {
+      fetch = "Inventory_Part_API.Get_Site_Converted_Qty(supply_site,part_no,Co_Supply_Site_Reservation_API.Get_Qty_Reserved(order_no,line_no,rel_no,line_item_no),contract,'ADD')";
+      label = "Supply Site Reserved Qty";
+      editable = [false];
+   }
+   attribute SupplySiteReserveType Enumeration(SupplySiteReserveType) {
+      label = "Supply Site Reservation Type";
+   }
+
+   attribute DemandOrderRef1 Text {
+      label = "Order Ref 1";
+      editable = [false];
+   }
+   attribute DemandOrderRef2 Text {
+      label = "Order Ref 2";
+      editable = [false];
+   }
+   attribute DemandOrderRef3 Text {
+      label = "Order Ref 3";
+      editable = [false];
+   }
+   attribute PrimaryRentalNo Number {
+      fetch = "primary_rental_no";
+      label = "Rental No";
+      editable = [false];
+   }
+   attribute ShipmentCreation Enumeration(ShipmentCreation.CustomerOrder) {
+      label = "Shipment Creation Method";
+      required = [true];
+   }
+   attribute LoadId Number {
+      label = "Load List ID";
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ProjectName Text {
+      fetch = "Project_API.Get_Name(PROJECT_ID)";
+      label = "Project Name";
+      editable = [false];
+      insertable = [false];
+      updatable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ProgramId Text {
+      fetch = "Project_API.Get_Program_Id(project_id)";
+      label = "Program ID";
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ProgramDescription Text {
+      fetch = "Project_Program_Global_API.Get_Description(Project_API.Get_Program_Id(project_id))";
+      label = "Program Description";
+      maxlength = 2000;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute SubProjectId Text {
+      fetch = "ACTIVITY_API.Get_Sub_Project_Id(ACTIVITY_SEQ)";
+      label = "Sub Project ID";
+      maxlength = 2000;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute SubProjectDescription Text {
+      fetch = "Activity_API.Get_Sub_Project_Description(activity_seq)";
+      label = "Sub Project Description";
+      maxlength = 2000;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ActivitySeq Number {
+      label = "Activity Sequence";
+      maxlength = 10;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ActivityId Text {
+      fetch = "ACTIVITY_API.Get_Activity_No(ACTIVITY_SEQ)";
+      label = "Activity ID";
+      maxlength = 2000;
+      editable = [false];
+   }
+   @DynamicComponentDependency PROJ
+   attribute ActivityDescription Text {
+      fetch = "ACTIVITY_API.Get_Description(ACTIVITY_SEQ)";
+      label = "Activity Description";
+      maxlength = 2000;
+      editable = [false];
+   }
+
+   attribute CancelReason Text {
+      editable = [ETag != null];
+   }
+   attribute CancellationReasonDesc Text {
+      fetch = "Order_Cancel_Reason_API.Get_Reason_Description(cancel_reason)";
+      label = "Cancellation Reason Description";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute ClassificationStandard Text {
+      editable = [ETag = null];
+   }
+   attribute ClassificationPartNo Text {
+      editable = [ETag = null];
+      format = uppercase;
+   }
+   attribute ClassificationUnitMeas Text {
+      label = "Classification UoM";
+      editable = [ETag = null];
+   }
+   attribute Gtin Text {
+      fetch = "Sales_Part_API.Get_Gtin_No(contract, catalog_no, input_unit_meas)";
+      label = "GTIN";
+      maxlength = 14;
+      editable = [ETag = null];
+   }
+   attribute AdjustedWeightNet Number {
+      label = "Adjusted Net Weight";
+      editable = [false];
+   }
+   attribute AdjustedWeightGross Number {
+      label = "Adjusted Gross Weight";
+      editable = [false];
+   }
+   attribute LineTotalQty Number {
+      label = "Total Volume";
+      editable = [false];
+   }
+   attribute OwningCustomerNo Text {
+      label = "Owning Customer";
+   }
+   attribute CustomerPartConvFactor Number {
+      editable = [false];
+   }
+   attribute NoteId Number {
+      maxlength = 10;
+   }
+   attribute CatalogType Enumeration(SalesPartType) {
+      label = "Sales Part Type";
+   }
+   attribute CurrencyRate Number {
+      label = "Curr Rate";
+      maxlength = 11;
+   }
+   attribute RevisedQtyDue Number {
+      label = "Inventory Qty";
+   }
+   attribute PreAccountingId Number {
+      label = "Pre-Posting ID";
+   }
+
+   attribute DemandCodeDb Text {
+      fetch = "demand_code_db";
+      label = "Demand Code db";
+      maxlength = 20;
+      editable = [false];
+   }
+   attribute SupplyCode Enumeration(OrderSupplyType) {
+      label = "Supply Code";
+      maxlength = 20;
+   }
+
+   attribute ConfiguredLinePriceId Number {
+      editable = [false];
+   }
+   attribute CustWarrantyId Number {
+      editable = [ETag != null];
+   }
+   attribute RouteId Text {
+      editable = [false];
+   }
+   attribute ForwardAgentId Text {
+      label = "Forwarder ID";
+   }
+   attribute DeliveryTermsDescription Text {
+      fetch = "Order_Delivery_Term_API.Get_Description(delivery_terms)";
+      label = "Delivery Terms Description";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute DelTermsLocation Text {
+      editable = [ETag != null];
+   }
+
+   attribute IntrastatExempt Enumeration(IntrastatExempt) {
+      label = "Intrastat Exempt";
+   }
+   attribute DeliverToCustomerNo Text {
+      label = "Deliver-to-Customer No";
+   }
+   attribute CostLevelDb Text {
+      fetch = "Inventory_Part_API.Get_Invent_Part_Cost_Level_Db(contract, part_no)";
+      label = "Inventory Part Cost Level";
+      maxlength = 2000;
+      editable = [false];
+      updatable = [false];
+
+   }
+   attribute Allowsendchg Text {
+      fetch = "Customer_Order_Line_API.Get_Send_Change_Msg_For_Supp(order_no, line_no, rel_no, line_item_no)";
+      label = "AllowSendChg";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute ReleasePlanning Enumeration(ReleasePlanning) {
+      maxlength = 20;
+      editable = [false];
+   }
+   attribute DopConnection Enumeration(DopConnection) {
+      label = "DOP Connection";
+      editable = [false];
+   }
+   attribute PriceSourceNetPrice Boolean("TRUE", "FALSE") {
+      label = "Net Price";
+      fetch = "price_source_net_price_db";
+      editable = [false];
+   }
+   attribute PartLevel Enumeration(PriceDiscountPartLevel) {
+      label = "Part Level";
+   }
+   attribute CustomerLevel Enumeration(PriceDiscountCustLevel) {
+      label = "Level";
+      maxlength = 30;
+   }
+   attribute CustomerLevelId Text {
+      label = "Level";
+   }
+   attribute DeliveryCountryCode Text {
+      fetch = "Cust_Order_Line_Address_API.Get_Country_Code(order_no, line_no, rel_no, line_item_no)";
+      maxlength = 20;
+   }
+   attribute Rental Boolean("TRUE", "FALSE") {
+      fetch = "rental_db";
+      label = "Net Price";
+      editable = [false];
+   }
+   attribute RentalDb Text {
+      fetch = "rental_db";
+      default = "'TRUE'";
+
+      label = "Rental";
+      maxlength = 5;
+      editable = [false];
+
+   }
+   attribute PlannedShipDate Timestamp {
+      label = "Planned Ship Date/Time";
+      editable = [ETag != null];
+   }
+   attribute InvertedConvFactor Number {
+      label = "Inverted Conversion Factor";
+      editable = [false];
+   }
+
+   attribute ShipmentConnectedDb Text {
+      fetch = "shipment_connected_db";
+      label = "Shipment Connected";
+      maxlength = 20;
+      editable = [false];
+      updatable = [false];
+
+   }
+   attribute PurchaseOrderNo Text {
+      fetch = "Customer_Order_Pur_Order_API.Get_Po_Order_No_For_Custord__(order_no, line_no, rel_no, line_item_no)";
+      label = "Purchase Order No";
+      maxlength = 20;
+      editable = [false];
+   }
+   attribute Linesourced Number {
+      fetch = "Sourced_Cust_Order_Line_API.Check_Exist(order_no, line_no, rel_no, line_item_no)";
+      label = "LineSourced";
+      editable = [false];
+   }
+
+   attribute ShipmentConnectedLinesExist Number {
+      fetch = "Shipment_Line_API.Shipment_Connected_Lines_Exist(order_no, 'CUSTOMER_ORDER', line_no, rel_no, line_item_no)";
+      editable = [false];
+   }
+
+   attribute CustPartInvertConvFact Number {
+      label = "Invert Conv Fact";
+      editable = [false];
+   }
+
+   attribute EvaluateDefaultInfo Text {
+      maxlength = 100;
+   }
+   attribute Contact Text {
+      maxlength = 100;
+   }
+   attribute ExtTransportCalendarId Text {
+      label = "Ext Transport Calendar ID";
+      maxlength = 100;
+   }
+   attribute CustCalendarId Text {
+      maxlength = 100;
+   }
+   attribute FreightMapId Text {
+      maxlength = 100;
+   }
+   attribute ZoneId Text {
+      maxlength = 100;
+   }
+   attribute FreightPriceListNo Text {
+      maxlength = 100;
+   }
+   attribute SuggestedExists Number {
+      fetch = "0";
+      updatable = [false];
+      insertable = [false];
+   }
+
+   attribute PickedQty Number {
+      fetch = "DECODE(catalog_type_db, 'INV', qty_picked, null)";
+      label = "Picked Qty";
+      editable = [false];
+   }
+   attribute ChangedAttribNotInPol Text {
+      maxlength = 100;
+      insertable = [false];
+      updatable = [true];
+   }
+   attribute SalesPriceGroupId Text {
+      fetch = "Sales_Part_API.Get_Sales_Price_Group_Id(contract, catalog_no)";
+      editable = [false];
+   }
+
+   attribute SuggestedPartExists Number {
+      fetch = "Suggested_Sales_Part_API.Suggested_Sales_Part_Exists(CONTRACT, CATALOG_NO)";
+   }
+   attribute UnformattedDiscount Number {
+      fetch = "null";
+   }
+   attribute FetchTaxCodes Text {
+      fetch = "'TRUE'";
+      editable = [false];
+   }
+   attribute FetchTaxFromDefaults Text {
+      fetch = "'TRUE'";
+   }
+   attribute BasicDataEdited Boolean("TRUE", "FALSE") {
+      fetch = "'FALSE'";
+      updatable = [false];
+      insertable = [false];
+
+   }
+   attribute PriceEdited Boolean("TRUE", "FALSE") {
+      fetch = "'FALSE'";
+      updatable = [false];
+      insertable = [false];
+   }
+   attribute DisconnectExpLic Text {
+      fetch = "'FALSE'";
+      editable = [false];
+      updatable = [true];
+   }
+   attribute RaisedQuestionExpLic Text {
+      fetch = "'FALSE'";
+      editable = [false];
+   }
+   attribute ValidatePriceEffectiveDate Text {
+      fetch = "'FALSE'";
+   }
+   attribute PriceEffDateValidated Text {
+      fetch = "'FALSE'";
+      editable = [false];
+      insertable = [false];
+      updatable = [false];
+   }
+   attribute Source Text {
+      fetch = "'CUSTOMERORDER'";
+   }
+   attribute Identity1 Text {
+      fetch = "order_no";
+   }
+   attribute Identity2 Text {
+      fetch = "line_no";
+   }
+   attribute Identity3 Text {
+      fetch = "rel_no";
+   }
+   attribute Identity4 Number {
+      fetch = "line_item_no";
+   }
+   attribute OriginalOrderNo Text {
+      fetch = "order_no";
+   }
+   attribute OriginalLineNo Text {
+      fetch = "line_no";
+   }
+   attribute OriginalRelNo Text {
+      fetch = "rel_no";
+   }
+   attribute OriginalItemNo Text {
+      fetch = "line_item_no";
+   }
+   attribute ShipmentType Text {
+      required = [true];
+   }
+   -- Computed fields
+   attribute QtyPickedAndShipped Number {
+      fetch = "qty_picked + qty_shipped - qty_shipdiff";
+   }
+
+   attribute QtyToReserve Number {
+      fetch = "revised_qty_due - qty_assigned";
+   }
+
+   attribute QtyUnreservable Number {
+      fetch = "qty_assigned - Reserve_Shipment_API.Get_Total_Qty_On_Pick_List(ORDER_NO,LINE_NO,REL_NO,LINE_ITEM_no,'CUSTOMER_ORDER',NULL)";
+   }
+
+   attribute Taxable Boolean("TRUE", "FALSE") {
+      fetch = "Sales_Part_API.Get_Taxable_Db(CONTRACT,CATALOG_NO)";
+      required = [true];
+   }
+   attribute QtyInvoiced Number {
+      label = "Invoiced Qty";
+      editable = [false];
+      required = [false];
+   }
+
+   attribute QtyOnOrder Number {
+      label = "Pegged Qty";
+      editable = [false];
+      required = [false];
+   }
+
+   attribute QtyReturned Number {
+      label = "Returned Qty";
+      editable = [false];
+      required = [false];
+   }
+
+   attribute QtyToShip Number {
+      label = "Non-Inventory Qty to Deliver";
+      editable = [false];
+      required = [false];
+
+   }
+
+   attribute CustomerNo Text {
+      required = [false];
+      default = "Customer_Order_API.Get_Customer_No(:OrderNo)";
+   }
+
+   attribute ShipViaCode Text {
+      maxlength = 100;
+      required = [false];
+   }
+   attribute DeliveryLeadtime Number {
+      label = "Delivery Leadtime";
+      maxlength = 3;
+      required = [false];
+   }
+   attribute PickingLeadtime Number {
+      maxlength = 100;
+      required = [false];
+   }
+
+   attribute OrderState Text {
+      fetch = "Customer_Order_API.Get_Objstate(order_no)";
+   }
+   attribute RebateBuilderDb Boolean("TRUE", "FALSE") {
+      label = "Rebate Builder";
+      required = [true];
+   }
+
+   attribute RelMtrlPlanning Boolean("TRUE", "FALSE") {
+      label = "Release for Mtrl Planning";
+      required = [true];
+   }
+   -- added to pass sever notification to refresh the prices.
+   attribute RefresshPriceSource Text {
+      fetch = "'FALSE'";
+   }
+
+   attribute ReplicateChanges Text {
+      insertable = [false];
+      updatable = [true];
+   }
+   attribute ChangeRequest Text {
+      insertable = [false];
+      updatable = [true];
+   }
+   attribute SendChangeRequest Text {
+      fetch = "NULL";
+      insertable = [false];
+      updatable = [true];
+   }
+   attribute ReplicateColumnsModified Text {
+      fetch = "'FALSE'";
+      insertable = [false];
+      updatable = [true];
+   }
+   attribute SupplyCodeCheck Text {
+      fetch = "'FALSE'";
+      insertable = [false];
+      updatable = [true];
+   }
+   attribute InventoryUnitMeas Text {
+      fetch = "Inventory_Part_API.Get_Unit_Meas(contract, part_no)";
+      editable = [false];
+   }
+   attribute SupplySiteInvUnitMeas Text {
+      fetch = "Inventory_Part_API.Get_Unit_Meas(supply_site, part_no)";
+      editable = [false];
+   }
+   attribute FreeOfCharge Boolean("TRUE", "FALSE") {
+      fetch = "'FALSE'";
+      editable = [false];
+   }
+   attribute DuplicateLine Text {
+      fetch = "'FALSE'";
+   }
+   -- gelr:disc_price_rounded, begin
+   attribute OriginalDiscount Number {
+      label = "Discount (%)";
+   }
+   attribute OriginalAddDiscount Number {
+      label = "Additional Discount (%)";
+      editable = [false];
+   }
+   attribute OriginalOrderDiscount Number {
+      label = "Group Discount (%)";
+      editable = [false];
+   }
+   -- gelr:disc_price_rounded, end
+   -- RENTAL Speific references
+   @DynamicComponentDependency RENTAL
+   reference RentalTransScheduleRef(TransScheduleId) to RentalTransSchedule(TransScheduleId);
+   @DynamicComponentDependency RENTAL
+   reference ChargeableIdRef(ChargeableId) to RentalChargeableDay(ChargeableId) {
+      label = "Chargeable Days ID";
+   }
+   @DynamicComponentDependency RENTAL
+   reference ExceptionIdRef(ExceptionId) to RentalException(ExceptionId) {
+      label = "Date Exception ID";
+   }
+   @DynamicComponentDependency RENTAL
+   reference TransScheduleIdRef(TransScheduleId) to ActiveRentalTransSchedule(TransScheduleId) {
+      label = "Schedule ID";
+   }
+
+   reference CustomerPartNoRef(CustomerNo, Contract, CustomerPartNo) to SalesPartCrossReference(CustomerNo, Contract, CustomerPartNo) {
+      label = "Customer's Part No";
+   }
+   reference CatalogNoRef(Contract, CatalogNo) to AllSalesPartActiveLov(Contract, CatalogNo) {
+      label = "Sales Part No";
+   }
+   reference SalesUnitMeasRef(SalesUnitMeas) to IsoUnit(UnitCode) {
+      label = "Sales UoM";
+   }
+
+   reference GtinRef(Contract, Gtin) to SalesPartGtinNoLov(Contract, GtinNo) {
+      label = "GTIN";
+   }
+
+   -- Tax info specific references
+   reference TaxLiabilityRef(TaxLiability) to TaxLiabilityLov(TaxLiability) {
+      label = "Tax Liability";
+   }
+   reference TaxCodeRef(Company, TaxCode) to TaxCodeRestricted(Company, FeeCode) {
+      label = "Tax Code";
+   }
+   reference TaxCalcStructureIdRef(Company, TaxCalcStructureId) to TaxCalcStructureActive(Company, TaxCalcStructureId) {
+      label = "Tax Calculation Structure";
+   }
+   reference DeliveryTypeRef(Company, DeliveryType) to DeliveryType(Company, DelivTypeId) {
+      label = "Delivery Type";
+   }
+
+   reference PackingInstructionIdRef(PackingInstructionId) to PackingInstructionWithRoot(PackingInstructionId) {
+      label = "Packing Instruction ID";
+   }
+   reference PriceListNoRef(SalesPriceGroupId, Contract, PriceListNo) to SalesPriceListJoinLov(SalesPriceGroupId, Contract, PriceListNo) {
+      label = "Price List No";
+   }
+   reference ShipAddrNoRef(DeliverToCustomerNo, ShipAddrNo) to CustAddressShipLov(CustomerNo, AddrNo) {
+      label = "Delivery Address";
+   }
+
+   @DynamicComponentDependency PURCH
+   reference VendorNoRef(PurchasePartNo, Contract, VendorNo) to PurchPartSuppAllAcquisLov(PartNo, Contract, VendorNo) {
+      label = "Supplier";
+   }
+   reference ConditionCodeRef(ConditionCode) to ConditionCode(ConditionCode) {
+      label = "Condition Code";
+   }
+   reference LoadIdRef(LoadId) to CustOrderLoadList(LoadId) {
+      label = "Load List ID";
+   }
+
+   reference CancelReasonRef(CancelReason) to OrderCancelReason(CancelReason) {
+      label = "Cancellation Reason";
+   }
+   reference ShipmentTypeRef(ShipmentType) to ShipmentType(ShipmentType) {
+      label = "Shipment Type";
+   }
+}
+
+------------------------------- ENUMERATIONS --------------------------------
+
+---------------------------------- QUERIES ----------------------------------
+
+---------------------------------- ACTIONS ----------------------------------
+
+--------------------------------- FUNCTIONS ---------------------------------
+function GetRentalParts List < Entity(AllSalesPartActiveLov) > {
+   where = "SALES_TYPE_DB IN ('RENTAL', 'SALES RENTAL')";
+}
+
+@DynamicComponentDependency PURCH
+function GetRentalSupplierNo List < Entity(PurchPartSuppAllAcquisLov) > {
+   parameter SupplyCode Enumeration(OrderSupplyType);
+   parameter PurchasePartNo Text;
+   where = "PART_NO = :PurchasePartNo AND ACQUISITION_TYPE_DB IN ('RENTAL', 'PURCHASE RENTAL') AND (VENDOR_CATEGORY = Supplier_Category_API.Decode(DECODE(:SupplyCode,'PT', 'E','PD', 'E', 'IPT', 'I','IPD', 'I', '')) OR (:SupplyCode NOT IN ('PT', 'PD', 'IPT', 'IPD')))";
+   basedon PurchPartSuppAllAcquisLovSet;
+}
+
+-------------------------------- STRUCTURES ---------------------------------
+
+action SetOrderPriceAndSalesLineTotal Structure(CustOrdLineValidation) {
+   initialcheck none;
+   parameter ValidationRec       Structure(CustOrdLineValidation);
+   parameter TaxFromDefaults     Text;
+   parameter CurrencyCode        Text;
+   parameter UsePriceInclTax     Boolean;
+   parameter TaxCodeFlag         Boolean;
+   parameter NewLine             Boolean;
+   parameter DuplicateLine       Boolean;
+   parameter TaxEdited           Boolean;
+   parameter RecalcLineDisc      Boolean;
+   parameter ValidatePriceList   Boolean;
+   parameter PlannedRentalStartDate Timestamp;
+   parameter FreeOfChargeDb      Boolean;
+}
+
+--------------------------------- VIRTUALS ----------------------------------
+
+--------------------------------- SUMMARIES ---------------------------------
+
+-------------------------------- SINGLETONS ---------------------------------
+
+--------------------------------- CHECKLIST ---------------------------------
+

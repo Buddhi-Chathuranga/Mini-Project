@@ -1,0 +1,313 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: ReturnMaterialLineScrapParts
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+-- 2020-03-06  Kagalk  GESPRING20-1801, Added warehouse_journal functionality.
+-- 2020-01-31  Kagalk  GESPRING20-1624, Added modify_date_applied functionality.
+-- 2018-07-17  MaEelk  SCUXXW4-8762, Rewrote Fetch_Total_Scrapping_Quantity___.
+-- 2018-05-28  MaEelk  Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Fetch_Rma_Line_Details___(
+   rma_no_      IN NUMBER,
+   rma_line_no_ IN NUMBER ) RETURN Rma_Line_Details_Struc_Rec
+IS
+   rma_line_details_rec_ Rma_Line_Details_Struc_Rec;
+   return_material_line_rec_ Return_Material_Line_API.Public_Rec;
+BEGIN
+   return_material_line_rec_ := Return_Material_Line_API.Get(rma_no_, rma_line_no_);
+   rma_line_details_rec_.contract := return_material_line_rec_.contract;
+   rma_line_details_rec_.part_no  := return_material_line_rec_.part_no;
+   rma_line_details_rec_.catalog_no := return_material_line_rec_.catalog_no;
+   rma_line_details_rec_.catalog_description := Sales_Part_API.Get_Catalog_Desc_For_Lang(return_material_line_rec_.contract, return_material_line_rec_.catalog_no, Fnd_Session_API.Get_Language());
+   rma_line_details_rec_.configuration_id := return_material_line_rec_.configuration_id;
+   rma_line_details_rec_.condition_code := return_material_line_rec_.condition_code;
+   rma_line_details_rec_.condition_code_description := Condition_Code_API.Get_Description(return_material_line_rec_.condition_code);
+   rma_line_details_rec_.sales_qty_to_Return := return_material_line_rec_.qty_to_return - NVL(return_material_line_rec_.qty_received, 0);
+   rma_line_details_rec_.sales_unit_meas := Return_Material_Line_API.Get_Sales_Unit_Meas(rma_no_, rma_line_no_);
+   rma_line_details_rec_.inventory_qty_to_return := return_material_line_rec_.qty_to_return_inv_uom - NVL(return_material_line_rec_.qty_received_inv_uom, 0);
+   rma_line_details_rec_.inventory_unit_meas := Inventory_Part_API.Get_Unit_Meas(return_material_line_rec_.contract, return_material_line_rec_.part_no);
+   IF (return_material_line_rec_.order_no IS NOT NULL) THEN
+      rma_line_details_rec_.order_connected := TRUE;
+   ELSE
+      rma_line_details_rec_.order_connected := FALSE;
+   END IF;
+   IF (return_material_line_rec_.credit_invoice_no IS NOT NULL) THEN
+      rma_line_details_rec_.credited := TRUE;
+   ELSE
+      rma_line_details_rec_.credited := FALSE;
+   END IF;
+   rma_line_details_rec_.receipt_date := Site_API.Get_Site_Date(return_material_line_rec_.contract);
+   rma_line_details_rec_.conversion_factor := return_material_line_rec_.conv_factor;
+   rma_line_details_rec_.inverted_conversion_factor := return_material_line_rec_.inverted_conv_factor;   
+   rma_line_details_rec_.stop_new_serial_in_rma_db := Part_Catalog_API.Get_Stop_New_Serial_In_Rma_Db(return_material_line_rec_.part_no);
+   rma_line_details_rec_.latest_return_date := Return_Material_API.Get_Latest_Return_Date(rma_no_);
+   -- gelr:modify_date_applied, begin
+   rma_line_details_rec_.arrival_date := return_material_line_rec_.arrival_date;
+   -- gelr:modify_date_applied, end
+   RETURN rma_line_details_rec_;   
+END Fetch_Rma_Line_Details___;
+
+FUNCTION Fetch_Condition_Code___(
+   part_no_                IN VARCHAR2,
+   serial_no_              IN VARCHAR2,
+   lot_batch_no_           IN VARCHAR2,
+   default_condition_code_ IN VARCHAR2) RETURN VARCHAR2
+IS
+   condition_code_ VARCHAR2(10);
+BEGIN
+   condition_code_ := NVL(Condition_Code_Manager_API.Get_Condition_Code(part_no_, serial_no_, lot_batch_no_), default_condition_code_);
+   RETURN condition_code_;
+END Fetch_Condition_Code___;
+
+FUNCTION Part_Serial_Exist___(
+   part_no_   IN VARCHAR2,
+   serial_no_ IN VARCHAR2 ) RETURN BOOLEAN
+IS
+   exist_ BOOLEAN := FALSE;
+BEGIN
+   exist_ := Part_Serial_Catalog_API.Check_Exist(part_no_, serial_no_) = 'TRUE';  
+   RETURN exist_;
+END Part_Serial_Exist___;
+
+FUNCTION Fetch_Inventory_Qty_To_Return___ (
+   rma_no_      IN NUMBER,
+   rma_line_no_ IN NUMBER ) RETURN NUMBER
+IS
+   return_material_line_rec_ Return_Material_Line_API.Public_Rec;
+   inventory_qty_to_return_ NUMBER;
+BEGIN
+   return_material_line_rec_ := Return_Material_Line_API.Get(rma_no_, rma_line_no_);
+   inventory_qty_to_return_ := return_material_line_rec_.qty_to_return_inv_uom - NVL(return_material_line_rec_.qty_received_inv_uom, 0);
+   RETURN inventory_qty_to_return_;  
+END Fetch_Inventory_Qty_To_Return___;
+
+FUNCTION Fetch_Total_Scrapping_Quantity___(
+   parent_objkey_ IN VARCHAR2,
+   scrapping_quantity_ IN NUMBER) RETURN NUMBER
+IS
+   parent_rec_  Return_Material_Line_Scrap_Parts_Virtual_Rec;
+   parent_key_  Return_Material_Line_Scrap_Parts_Virtual_Key;   
+   child_rec_   Return_Material_Line_Scrapped_Quantities_Virtual_Rec;
+   child_key_   Return_Material_Line_Scrapped_Quantities_Virtual_Key;
+   total_scrapping_quantity_ NUMBER := 0;
+
+BEGIN
+   parent_key_.objkey := parent_objkey_;
+   parent_rec_   := Get_Record___(parent_key_);
+
+   FOR scrapped_quantitis_rec_ IN Get_Rma_Line_Scrapped_Quantities___(parent_key_) LOOP  
+      child_key_.objkey := scrapped_quantitis_rec_.objkey;
+      child_rec_        := Get_Record___(child_key_);
+      
+      total_scrapping_quantity_ := total_scrapping_quantity_ + child_rec_.qty_to_scrap;
+   END LOOP;   
+
+   total_scrapping_quantity_ := total_scrapping_quantity_ + scrapping_quantity_;
+   RETURN total_scrapping_quantity_;
+END Fetch_Total_Scrapping_Quantity___;
+
+FUNCTION Count_Decimals___ (
+   number_  NUMBER) RETURN NUMBER
+IS
+   decimal_ NUMBER := 0;
+   counter_ NUMBER := 0;
+BEGIN
+   decimal_ := number_;
+   counter_ := 0;
+   WHILE (mod(decimal_, 1) != 0) 
+   LOOP
+      decimal_ := decimal_ * 10;
+      counter_ := counter_ + 1;
+   END LOOP;
+   RETURN counter_;   
+END Count_Decimals___;
+
+FUNCTION Validate_Ok___(
+   parent_objkey_ IN VARCHAR2 ) RETURN Validating_Information_Struc_Rec
+IS
+   validating_information_rec_ Validating_Information_Struc_Rec;
+   parent_rec_  Return_Material_Line_Scrap_Parts_Virtual_Rec;
+   parent_key_  Return_Material_Line_Scrap_Parts_Virtual_Key;   
+   child_rec_   Return_Material_Line_Scrapped_Quantities_Virtual_Rec;
+   child_key_   Return_Material_Line_Scrapped_Quantities_Virtual_Key;
+   lot_serial_qty_allowed_ VARCHAR2(5);
+   poss_lot_qty_to_return_ NUMBER; 
+BEGIN
+   parent_key_.objkey := parent_objkey_;
+   parent_rec_   := Get_Record___(parent_key_);
+   
+   -- gelr:warehouse_journal, begin
+   IF (Company_Localization_Info_API.Get_Parameter_Val_From_Site_Db(parent_rec_.contract, 'WAREHOUSE_JOURNAL') = Fnd_Boolean_API.DB_TRUE ) THEN
+      IF (parent_rec_.catalog_no IS NOT NULL AND Sales_Part_API.Get_Non_Inv_Part_Type_Db(parent_rec_.contract, parent_rec_.catalog_no) != 'SERVICE') THEN
+         IF (parent_rec_.external_delivery_note_ref IS NULL) THEN
+            Error_SYS.Check_Not_Null(lu_name_, 'External Delivery Note Reference', parent_rec_.external_delivery_note_ref);               
+         END IF;            
+         IF (parent_rec_.external_delivery_note_date IS NULL) THEN
+            Error_SYS.Check_Not_Null(lu_name_, 'External Delivery Note Date', parent_rec_.external_delivery_note_date);
+         END IF;
+         IF (parent_rec_.delivery_reason_id IS NULL) THEN
+            Error_SYS.Check_Not_Null(lu_name_, 'Delivery Reason ID', parent_rec_.delivery_reason_id);
+         END IF;               
+      END IF;            
+   END IF;
+   -- gelr:warehouse_journal, end
+   
+   validating_information_rec_.after_latest_return_date := FALSE;
+   validating_information_rec_.invalid_catch_qty := FALSE;
+   validating_information_rec_.does_not_originate_from_Rma := FALSE;
+   validating_information_rec_.different_condition_code := FALSE;
+   validating_information_rec_.return_lot_serial_not_allowed := FALSE;
+   
+   IF (parent_rec_.latest_return_date IS NOT NULL) THEN
+      IF (parent_rec_.latest_return_date < parent_rec_.receipt_date) THEN
+         validating_information_rec_.after_latest_return_date := TRUE;
+         RETURN validating_information_rec_;
+      END IF;      
+   END IF;
+
+   FOR scrapped_quantitis_rec_ IN Get_Rma_Line_Scrapped_Quantities___(parent_key_) LOOP  
+      child_key_.objkey := scrapped_quantitis_rec_.objkey;
+      child_rec_        := Get_Record___(child_key_);
+      
+      IF (child_rec_.catch_qty_to_scrap IS NOT NULL)  THEN
+         IF (child_rec_.qty_to_scrap IS NULL) THEN
+            validating_information_rec_.invalid_catch_qty := TRUE; 
+            RETURN validating_information_rec_;
+         END IF;
+      END IF;
+      
+      IF (NOT(parent_rec_.order_connected) AND(Return_Material_API.Get_Originating_Rma_No(child_rec_.rma_no) IS NULL)) THEN
+         validating_information_rec_.does_not_originate_from_Rma := TRUE; 
+         RETURN validating_information_rec_;
+      END IF;
+
+      IF ((parent_rec_.condition_code IS NOT NULL) AND (parent_rec_.condition_code != NVL(child_rec_.condition_code, parent_rec_.condition_code))) THEN
+         validating_information_rec_.different_condition_code := TRUE;
+         RETURN validating_information_rec_;      
+      END IF;
+      Return_Material_Line_API.Return_Lot_Serial_Allowed(lot_serial_qty_allowed_, 
+                                                         poss_lot_qty_to_return_, 
+                                                         child_rec_.rma_no, 
+                                                         child_rec_.rma_line_no, 
+                                                         child_rec_.lot_batch_no, 
+                                                         child_rec_.serial_no, 
+                                                         child_rec_.eng_chg_level, 
+                                                         child_rec_.qty_to_scrap);  
+      IF (lot_serial_qty_allowed_ = 'FALSE') THEN
+         validating_information_rec_.return_lot_serial_not_allowed := TRUE;
+         validating_information_rec_.lot_batch_no := child_rec_.lot_batch_no;
+         validating_information_rec_.serial_no             := child_rec_.serial_no;
+         validating_information_rec_.eng_chg_level         := child_rec_.eng_chg_level;                        
+         validating_information_rec_.qty_can_return_on_lot := TRUNC(poss_lot_qty_to_return_, Count_Decimals___(poss_lot_qty_to_return_));
+         validating_information_rec_.qty_to_scrap         := TRUNC(child_rec_.qty_to_scrap, Count_Decimals___(child_rec_.qty_to_scrap));
+         
+         RETURN validating_information_rec_;
+      END IF;
+   END LOOP;   
+   RETURN validating_information_rec_;
+END Validate_Ok___;
+
+@Override
+PROCEDURE CRUD_Default___ (
+   rec_  IN OUT Return_Material_Line_Scrapped_Quantities_Virtual_Rec )
+IS
+   parent_rec_  Return_Material_Line_Scrap_Parts_Virtual_Rec;
+   parent_key_  Return_Material_Line_Scrap_Parts_Virtual_Key;
+   
+BEGIN
+   super(rec_);
+   parent_key_.objkey := rec_.parent_objkey;
+   parent_rec_   := Get_record___(parent_key_);
+   rec_.serial_no := '*';
+   rec_.lot_batch_no := '*';
+   rec_.waiv_dev_rej_no := '*';
+   rec_.eng_chg_level := Inventory_Part_Revision_API.Get_Eng_Chg_Level(parent_rec_.contract, parent_rec_.part_no, parent_rec_.receipt_date);
+   rec_.condition_code := parent_rec_.condition_code;
+END CRUD_Default___;
+
+
+PROCEDURE Execute_Ok___ (
+   parent_objkey_ IN VARCHAR2 ) 
+IS
+   parent_rec_  Return_Material_Line_Scrap_Parts_Virtual_Rec;
+   parent_key_  Return_Material_Line_Scrap_Parts_Virtual_Key;
+   
+   child_rec_   Return_Material_Line_Scrapped_Quantities_Virtual_Rec;
+   child_key_   Return_Material_Line_Scrapped_Quantities_Virtual_Key;
+   msg_         CLOB;
+BEGIN
+   parent_key_.objkey := parent_objkey_;
+   parent_rec_   := Get_Record___(parent_key_);
+   Message_SYS.Add_Attribute(msg_,'PACK_START', 'TRUE');
+   FOR scrapped_quantitis_rec_ IN Get_Rma_Line_Scrapped_Quantities___(parent_key_) LOOP  
+      child_key_.objkey := scrapped_quantitis_rec_.objkey;
+      child_rec_        := Get_Record___(child_key_);
+
+      Message_SYS.Add_Attribute(msg_,'RMA_NO', child_rec_.rma_no);
+      Message_SYS.Add_Attribute(msg_,'RMA_LINE_NO', child_rec_.rma_line_no);
+      Message_SYS.Add_Attribute(msg_,'PART_NO', parent_rec_.part_no);
+      Message_SYS.Add_Attribute(msg_,'CONTRACT', parent_rec_.contract);
+      Message_SYS.Add_Attribute(msg_,'CONFIGURATION_ID', parent_rec_.configuration_id);
+      Message_SYS.Add_Attribute(msg_,'LOT_BATCH_NO', child_rec_.lot_batch_no);
+      Message_SYS.Add_Attribute(msg_,'SERIAL_NO', child_rec_.serial_no);
+      Message_SYS.Add_Attribute(msg_,'ENG_CHG_LEVEL', child_rec_.eng_chg_level);
+      Message_SYS.Add_Attribute(msg_,'WAIV_DEV_REJ_NO', child_rec_.waiv_dev_rej_no);
+      Message_SYS.Add_Attribute(msg_,'REJECT_REASON', child_rec_.reject_reason);
+      Message_SYS.Add_Attribute(msg_,'CONDITION_CODE', NVL(scrapped_quantitis_rec_.condition_code,parent_rec_.condition_code));
+      Message_SYS.Add_Attribute(msg_,'QTY_RECEIPT', child_rec_.qty_to_scrap / parent_rec_.conversion_factor * parent_rec_.inverted_conversion_factor);
+      Message_SYS.Add_Attribute(msg_,'QTY_RECEIPT_INV', child_rec_.qty_to_scrap);
+      Message_SYS.Add_Attribute(msg_,'CATCH_QTY_RECEIPT', child_rec_.catch_qty_to_scrap);
+      -- gelr:modify_date_applied, begin
+      Message_SYS.Add_Attribute(msg_,'DATE_APPLIED', parent_rec_.arrival_date);
+      -- gelr:modify_date_applied, end
+      -- gelr:warehouse_journal, begin
+      Message_SYS.Add_Attribute(msg_,'EXTERNAL_DELNOTE_REF', parent_rec_.external_delivery_note_ref);
+      Message_SYS.Add_Attribute(msg_,'EXTERNAL_DELNOTE_DATE', parent_rec_.external_delivery_note_date);
+      Message_SYS.Add_Attribute(msg_,'DELIV_REASON_ID', parent_rec_.delivery_reason_id);         
+      -- gelr:warehouse_journal, end      
+      IF (child_rec_.scrap_total_qty) THEN
+         Message_SYS.Add_Attribute(msg_,'RECEIPT_ALL', 'TRUE');
+      ELSE
+         Message_SYS.Add_Attribute(msg_,'RECEIPT_ALL', 'FALSE');
+      END IF;   
+      
+      Return_Material_Line_Initial_Check___(child_rec_.rma_no, child_rec_.rma_line_no);
+      
+   END LOOP;
+   Message_SYS.Add_Attribute(msg_,'PACK_COMPLETE', 'TRUE');
+   Return_Material_Line_API.Unpack_Cust_Receipt(msg_, 'SCRAP');
+END Execute_Ok___;
+
+PROCEDURE Execute_Cancel___ (
+   parent_objkey_ IN VARCHAR2 ) 
+IS
+   parent_rec_  Return_Material_Line_Scrap_Parts_Virtual_Rec;
+   parent_key_  Return_Material_Line_Scrap_Parts_Virtual_Key;
+   
+   child_rec_   Return_Material_Line_Scrapped_Quantities_Virtual_Rec;
+   child_key_   Return_Material_Line_Scrapped_Quantities_Virtual_Key;
+BEGIN
+   parent_key_.objkey := parent_objkey_;
+   parent_rec_   := Get_Record___(parent_key_);
+   FOR scrapped_quantitis_rec_ IN Get_Rma_Line_Scrapped_Quantities___(parent_key_) LOOP  
+      child_key_.objkey := scrapped_quantitis_rec_.objkey;
+      child_rec_        := Get_Record___(child_key_);
+      CRUD_Delete___(child_rec_);      
+   END LOOP;
+   CRUD_Delete___(parent_rec_); 
+END Execute_Cancel___;
+
+PROCEDURE Refresh_Line___ 
+IS
+   
+BEGIN
+   NULL;
+END Refresh_Line___;

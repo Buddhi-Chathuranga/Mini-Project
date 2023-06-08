@@ -1,0 +1,168 @@
+-------------------------------------------------------------------------------------------- 
+-- Export file for Task CLEANUP_INVENTORY_API.CLEANUP_ROUTINE.
+-- 
+--  Date    Sign    History
+--  ------  ------  -----------------------------------------------------------
+--  161207  NiDalk  Bug LIM-9969, Added parameter HANDLING_UNITS_ONLY to Cleanup of Inventory batch schedule. 
+--  160118  NiDalk  Bug 126636, Modified get_schedules cursor of Update_Scheduled_Tasks only to fetch required fields.
+--  100716  DAYJLK  Bug 91834, Added log_user to Upgrade_Background_Job to set the correct
+--  100716	        user on converted scheduled tasks. Modified Update_Scheduled_Tasks to set 
+--  100716          correct user when renaming scheduled tasks.
+--  100321  Asawlk  Bug 89271, Modified method Upgrade_Background_Job() to create new batch schedules
+--  100321          for already existing user jobs using new method CLEANUP_INVENTORY_API.CLEANUP_ROUTINE.  
+--  080424  NiBalk  Bug 72596, Modified METHOD_NAME from Cleanup_Routine__ to Cleanup_Routine.
+--  080424          and added procedure Update_Scheduled_Tasks. 
+--  050324  IFSAPP  Export file for task CLEANUP_INVENTORY_API.CLEANUP_ROUTINE__.
+-------------------------------------------------------------------------------------------- 
+
+PROMPT Register Batch Schedule Method "CLEANUP_INVENTORY_API.CLEANUP_ROUTINE"
+DECLARE
+   schedule_method_id_ NUMBER          := NULL;
+   seq_no_             NUMBER          := NULL;
+   info_msg_           VARCHAR2(32000) := NULL;
+BEGIN
+-- Construct Main Message
+   info_msg_    := Message_SYS.Construct('');
+   Message_SYS.Add_Attribute(info_msg_, 'METHOD_NAME', 'CLEANUP_INVENTORY_API.CLEANUP_ROUTINE');
+   Message_SYS.Add_Attribute(info_msg_, 'DESCRIPTION', 'Cleanup of Inventory');
+   Message_SYS.Add_Attribute(info_msg_, 'MODULE', 'INVENT');
+   Message_SYS.Add_Attribute(info_msg_, 'SINGLE_EXECUTION_DB', 'FALSE');
+   Message_SYS.Add_Attribute(info_msg_, 'ARGUMENT_TYPE_DB', 'MESSAGE');
+   Message_SYS.Add_Attribute(info_msg_, 'VALIDATION_METHOD', 'CLEANUP_INVENTORY_API.VALIDATE_PARAMS');
+-- Register Batch Schedule Method
+   Batch_SYS.Register_Batch_Schedule_Method(schedule_method_id_, info_msg_);
+-- Adding parameters
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'NUMBER_OF_DAYS', 365, 'TRUE', NULL);
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'SITE', '%', 'FALSE', NULL);
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'PROJECT_ID', '%', 'FALSE', NULL);
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'LOCATION_TYPE', to_char(NULL), 'FALSE', NULL);
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'SERIALS_ONLY', '0', 'FALSE', NULL);
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'CONFIGURATIONS_ONLY', '0', 'FALSE', NULL);
+   Batch_SYS.Register_Schedule_Method_Param(seq_no_, schedule_method_id_, 'HANDLING_UNITS_ONLY', '0', 'FALSE', NULL);
+END;
+/
+
+
+------------------------------------------------------------------------------------------
+-- Inventory Cleanup Tasks (Upgraded from background jobs)
+------------------------------------------------------------------------------------------
+DECLARE
+   PROCEDURE Upgrade_Background_Job (
+      old_method_name_ IN VARCHAR2,
+      new_method_name_ IN VARCHAR2,
+      schedule_name_   IN VARCHAR2)
+   IS
+      parameters_          VARCHAR2(4000);
+      execution_plan_      VARCHAR2(4000);
+      param_start_         NUMBER;
+      param_stop_          NUMBER;
+      next_execution_date_ DATE;
+      start_date_          DATE := sysdate;
+      
+      seq_no_              NUMBER;
+      schedule_id_         NUMBER;
+      values_              Message_SYS.line_table;
+      count_               INTEGER;
+      names_               Message_SYS.name_table;
+
+      CURSOR get_jobs IS
+         SELECT what, interval, log_user 
+         FROM   user_jobs
+         WHERE  UPPER(what) like '%'||old_method_name_||'%';
+   BEGIN
+      FOR rec IN get_jobs LOOP
+        execution_plan_ := rec.interval;
+        param_start_ := instr(execution_plan_, '(');
+        param_stop_  := instr(execution_plan_, ')');
+        execution_plan_ := substr(execution_plan_, param_start_ + 2, param_stop_ - param_start_- 3);
+
+        Batch_SYS.New_Batch_Schedule(schedule_id_, next_execution_date_, start_date_, NULL, schedule_name_, new_method_name_, 'TRUE', execution_plan_);
+
+         -- Update batch schedule with correct user name 
+         UPDATE batch_schedule_tab SET username = rec.log_user WHERE schedule_id = schedule_id_; 
+
+        parameters_ := rec.what;
+        param_start_ := instr(parameters_, '(''');
+        param_stop_  := instr(parameters_, ''')');
+        parameters_  := substr(parameters_, param_start_ + 3, param_stop_ - param_start_- 4);     
+        
+        IF Message_SYS.Is_Message(parameters_ ) THEN
+        -- Get attributes from message.
+           Message_SYS.Get_Attributes(parameters_, count_, names_, values_);
+           FOR i in 1..count_ LOOP
+              IF (names_(i) = 'SERIALS_ONLY' OR names_(i) = 'CONFIGURATIONS_ONLY') THEN
+                 values_(i):=REPLACE(REPLACE(values_(i), 'TRUE', 1), 'FALSE', 0);
+              END IF;
+              Batch_SYS.New_Batch_Schedule_Param(seq_no_, schedule_id_, names_(i), values_(i));
+           END LOOP;
+        END IF;
+      END LOOP;        
+   END Upgrade_Background_Job;
+   
+   PROCEDURE Remove_Server_Process (
+      method_name_ IN VARCHAR2 )
+   IS
+      job_   NUMBER;
+      CURSOR get_job IS
+         SELECT job
+         FROM   user_jobs
+         WHERE  UPPER(what) like '%'||method_name_||'%';
+   BEGIN
+      FOR rec_ IN get_job LOOP
+         dbms_job.remove(rec_.job);
+      END LOOP;
+            
+   EXCEPTION
+      WHEN OTHERS THEN
+         NULL;
+   END Remove_Server_Process;
+
+   PROCEDURE Update_Scheduled_Tasks(
+      old_method_ IN VARCHAR2,
+      new_method_ IN VARCHAR2)
+   IS
+      CURSOR get_schedules(old_method_id_  IN NUMBER) IS
+         SELECT next_execution_date, start_date, stop_date, schedule_name, active_db, execution_plan, lang_code, username, schedule_id   
+         FROM   batch_schedule
+         WHERE  schedule_method_id = old_method_id_;
+
+      old_method_id_  NUMBER;
+      schedule_id_    NUMBER;
+   BEGIN
+      old_method_id_ := Batch_Schedule_Method_API.Get_Schedule_Method_Id(old_method_);
+      
+      FOR rec_ IN get_schedules(old_method_id_) LOOP
+         Batch_Sys.New_Batch_Schedule(schedule_id_,
+                                      rec_.next_execution_date,
+                                      rec_.start_date,
+                                      rec_.stop_date,
+                                      rec_.schedule_name,
+                                      new_method_,
+                                      rec_.active_db,
+                                      rec_.execution_plan,
+                                      rec_.lang_code);   
+
+         -- Update batch schedule with correct user name 
+         UPDATE batch_schedule_tab SET username = rec_.username WHERE schedule_id = schedule_id_; 
+
+         Batch_Sys.Remove_Batch_Schedule(rec_.schedule_id);  
+      END LOOP;
+      
+      DELETE FROM BATCH_SCHEDULE_METHOD_TAB
+      WHERE  schedule_method_id = old_method_id_; 
+      
+   END Update_Scheduled_Tasks;
+
+BEGIN
+   ------------------------------------------------------------------------------------------
+   -- Upgrading Background Jobs to Scheduled Tasks
+   ------------------------------------------------------------------------------------------
+   Upgrade_Background_Job('CLEANUP_INVENTORY_API.CLEANUP_ROUTINE__', 'CLEANUP_INVENTORY_API.CLEANUP_ROUTINE', 'Cleanup of Inventory');
+   Remove_Server_Process('CLEANUP_INVENTORY_API.CLEANUP_ROUTINE__');
+   Update_Scheduled_Tasks('CLEANUP_INVENTORY_API.CLEANUP_ROUTINE__', 'CLEANUP_INVENTORY_API.CLEANUP_ROUTINE');
+END;
+/
+
+COMMIT
+/
+

@@ -1,0 +1,185 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     SalesPartsList
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign    History
+--  ------     ------  ---------------------------------------------------------
+-- 2018-11-17  IzShlk  SCUXXW4-1441, Converted from tbwSalesPart using MTG Version: 1.33
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Calculate_Prices___(
+   use_price_incl_tax_ IN BOOLEAN,
+   price_incl_tax_     IN NUMBER,
+   price_              IN NUMBER,
+   taxable_            IN BOOLEAN,
+   tax_code_           IN VARCHAR2,
+   company_            IN VARCHAR2 )  RETURN Calculate_Price_Structure_Rec
+IS
+   price_temp_          NUMBER;
+   price_incl_tax_temp_ NUMBER;
+   tax_percentage_      NUMBER;
+   calculate_price_     BOOLEAN := TRUE;
+   tax_calc_base_       VARCHAR2(100);
+   calculate_price_rec_ Calculate_Price_Structure_Rec;
+   -- TODO: Fetch the ifs curr rounding from profile
+   ifs_curr_rounding_   NUMBER := 16;
+BEGIN
+  IF use_price_incl_tax_ THEN
+      tax_calc_base_ := 'GROSS_BASE';
+      IF (price_incl_tax_ IS NULL  OR taxable_ = FALSE OR tax_code_ IS NULL) THEN
+         calculate_price_rec_.price := price_incl_tax_;
+         calculate_price_rec_.price_incl_tax := price_incl_tax_;
+         calculate_price_ := FALSE;       
+      END IF;
+   ELSE
+      tax_calc_base_ := 'NET_BASE';
+      IF (price_ IS NULL OR taxable_ = FALSE OR tax_code_ IS NULL) THEN
+         calculate_price_rec_.price_incl_tax := price_;
+         calculate_price_rec_.price := price_;
+         calculate_price_ := FALSE;
+      END IF;
+   END IF;
+   
+   IF calculate_price_ THEN
+      price_temp_          := price_;
+      price_incl_tax_temp_ := price_incl_tax_;
+      tax_percentage_      := Statutory_Fee_API.Get_Fee_Rate(company_, tax_code_);
+      
+      Tax_Handling_Util_API.Calculate_Prices(price_temp_, price_incl_tax_temp_, tax_calc_base_, tax_percentage_, ifs_curr_rounding_); 
+    
+      calculate_price_rec_.price := price_temp_;
+      calculate_price_rec_.price_incl_tax := price_incl_tax_temp_;
+   END IF;
+   RETURN calculate_price_rec_;
+END Calculate_Prices___;
+
+FUNCTION Sales_Part_Filter___(
+   price_source_           IN VARCHAR2,
+   source_assortment_      IN VARCHAR2,
+   source_assortment_node_ IN VARCHAR2,
+   source_id_              IN VARCHAR2,
+   source_price_unit_meas_ IN VARCHAR2 )  RETURN Objid_Arr
+IS
+   base_collection_ Objid_Arr := Objid_Arr();
+   
+   CURSOR get_agreement_part_no IS
+      SELECT objid 
+      FROM  Sales_Part
+      WHERE CATALOG_NO IN  (  SELECT part_no
+                              FROM Assortment_Node
+                              WHERE part_no IS NOT NULL
+                              START WITH assortment_node_id = source_assortment_node_
+                                   AND assortment_id = source_assortment_
+                              CONNECT BY PRIOR assortment_node_id = parent_node
+                                  AND PRIOR assortment_id = assortment_id )
+      AND   CONTRACT IN    (  SELECT contract
+                              FROM  customer_agreement_site
+                              WHERE agreement_id = source_id_)     
+      AND  ( source_price_unit_meas_ = '*' OR (source_price_unit_meas_ != '*' AND PRICE_UNIT_MEAS =  source_price_unit_meas_))                                      
+   ;
+   
+   CURSOR get_campaign_part_no IS
+      SELECT objid 
+      FROM Sales_Part
+      WHERE CATALOG_NO IN  (  SELECT part_no
+                              FROM Assortment_Node
+                              WHERE part_no IS NOT NULL
+                              START WITH assortment_node_id = source_assortment_node_
+                                   AND assortment_id = source_assortment_
+                              CONNECT BY PRIOR assortment_node_id = parent_node
+                                  AND PRIOR assortment_id = assortment_id )
+      AND   CONTRACT IN    (  SELECT contract
+                              FROM  campaign_site
+                              WHERE campaign_id = source_id_)     
+      AND  ( source_price_unit_meas_ = '*' OR (source_price_unit_meas_ != '*' AND PRICE_UNIT_MEAS =  source_price_unit_meas_))                                      
+   ;
+   
+   CURSOR get_price_list_part_no IS
+      SELECT objid 
+      FROM Sales_Part
+      WHERE CATALOG_NO IN  (  SELECT part_no
+                              FROM Assortment_Node
+                              WHERE part_no IS NOT NULL
+                              START WITH assortment_node_id = source_assortment_node_
+                                   AND assortment_id = source_assortment_
+                              CONNECT BY PRIOR assortment_node_id = parent_node
+                                  AND PRIOR assortment_id = assortment_id )
+      AND   CONTRACT IN    (  SELECT contract
+                              FROM  sales_price_list_site
+                              WHERE price_list_no = source_id_)     
+      AND  ( source_price_unit_meas_ = '*' OR (source_price_unit_meas_ != '*' AND PRICE_UNIT_MEAS =  source_price_unit_meas_))                                      
+   ;
+   
+   CURSOR get_sales_promotion_part_no IS
+      SELECT objid 
+      FROM Sales_Part
+      WHERE CATALOG_NO IN  (  SELECT part_no
+                              FROM Assortment_Node
+                              WHERE part_no IS NOT NULL
+                              START WITH assortment_node_id = source_assortment_node_
+                                   AND assortment_id = source_assortment_
+                              CONNECT BY PRIOR assortment_node_id = parent_node
+                                  AND PRIOR assortment_id = assortment_id )
+      AND   CONTRACT  =     source_id_    
+      AND  ( source_price_unit_meas_ IS NULL OR (source_price_unit_meas_ IS NOT NULL AND PRICE_UNIT_MEAS =  source_price_unit_meas_))                                      
+   ;
+   
+   CURSOR get_rebates_agreement_part_no IS
+      SELECT objid 
+      FROM Sales_Part
+      WHERE CATALOG_NO IN  (  SELECT part_no
+                              FROM Assortment_Node
+                              WHERE part_no IS NOT NULL
+                              START WITH assortment_node_id = source_assortment_node_
+                                   AND assortment_id = source_assortment_
+                              CONNECT BY PRIOR assortment_node_id = parent_node
+                                  AND PRIOR assortment_id = assortment_id )
+      AND   Site_API.Get_Company(CONTRACT)  =  (SELECT company
+                                                FROM  rebate_agreement
+                                                WHERE agreement_id = source_id_)                                       
+   ;
+            
+   CURSOR get_all_parts IS
+      SELECT objid 
+      FROM Sales_Part;
+   
+BEGIN
+   IF price_source_ = 'AgreementAssortment' THEN
+      FOR rec_ IN get_agreement_part_no LOOP
+         base_collection_.extend;
+         base_collection_(base_collection_.last) := rec_.objid;
+      END LOOP; 
+   ELSIF price_source_ = 'CampaignAssortment' THEN
+      FOR rec_ IN get_campaign_part_no LOOP
+         base_collection_.extend;
+         base_collection_(base_collection_.last) := rec_.objid;
+      END LOOP; 
+   ELSIF price_source_ = 'SalesPriceListAssort' THEN
+      FOR rec_ IN get_price_list_part_no LOOP
+         base_collection_.extend;
+         base_collection_(base_collection_.last) := rec_.objid;
+      END LOOP;
+   ELSIF price_source_ = 'CalculatedSalesPromotionDeal' THEN
+      FOR rec_ IN get_sales_promotion_part_no LOOP
+         base_collection_.extend;
+         base_collection_(base_collection_.last) := rec_.objid;
+      END LOOP;
+   ELSIF price_source_ = 'RebatesAgreementAssortment' THEN
+      FOR rec_ IN get_rebates_agreement_part_no LOOP
+         base_collection_.extend;
+         base_collection_(base_collection_.last) := rec_.objid;
+      END LOOP; 
+   ELSE
+      FOR rec_ IN get_all_parts LOOP
+         base_collection_.extend;
+         base_collection_(base_collection_.last) := rec_.objid;
+      END LOOP;
+   END IF;
+  
+   RETURN base_collection_;
+END Sales_Part_Filter___;

@@ -1,0 +1,826 @@
+----------------------------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  -----------------------------------------------------------------------------------
+-- 2021-02-23  NiDalk  SC2020R1-12544, Modified Delete_Warranty_Condition___, Delete_Warranty_Condition___, Update_Warranty_Conditions___
+--                     and Update_Warranty_Language___ not to fetch parent values as it is not necessary.
+-- 2019-04-05  SAGELK  SCUXXW4-15935, Converted the Customer Warranty Type Entity to a virtual, so that the
+--                                    connection is maintained between lists is maintained. And fixed the
+--                                    issue of creating a new warranty when the warranty type is shared and
+--                                    a crud action is triggered in Conditions,warranty language and document text.
+-- 2019-01-10  SWiclk  SCUXXW4-7645, Created.
+----------------------------------------------------------------------------------------------------------
+
+layer Core;
+
+-- This method creates a new warranty Id if null or otherwise if the existing warranty is Shared then  
+-- a new warranty id will be created and copy lines from previous warranty id.
+PROCEDURE Create_Customer_Warranty_Id___(
+   warranty_id_    IN OUT NUMBER,
+   part_no_        IN     VARCHAR2,
+   serial_no_      IN     VARCHAR2,
+   virtual_objkey_ IN     VARCHAR2)
+IS
+   new_warranty_id_ NUMBER;
+   warranty_state_  VARCHAR2(20);  
+BEGIN    
+   IF (warranty_id_ IS NULL) THEN
+      Cust_Warranty_API.New(new_warranty_id_);
+   ELSE
+      warranty_state_ :=  Cust_Warranty_API.Get_Objstate(warranty_id_);      
+      IF (warranty_state_ = Cust_Warranty_API.DB_SHARED) THEN 
+         -- New warranty id will be created in the Cust_Warranty_API.Copy()
+         Cust_Warranty_API.Copy(new_warranty_id_, warranty_id_, part_no_, serial_no_); 
+      END IF;      
+   END IF;    
+   
+   IF (warranty_id_ IS NULL OR (warranty_id_ != new_warranty_id_)) THEN      
+      warranty_id_ := new_warranty_id_;   
+      Update_Part_Info_Virtual___ (warranty_id_, part_no_, serial_no_, virtual_objkey_);
+   END IF;  
+   
+END Create_Customer_Warranty_Id___;
+
+PROCEDURE Update_Part_Info_Virtual___(
+   warranty_id_    IN NUMBER,
+   part_no_        IN VARCHAR2,
+   serial_no_      IN VARCHAR2,
+   virtual_objkey_ IN VARCHAR2)
+IS  
+   part_info_virtual_rec_  Part_Information_Virtual_Rec;
+BEGIN
+   part_info_virtual_rec_.objkey    := virtual_objkey_;
+   part_info_virtual_rec_.part_no   := part_no_;
+   part_info_virtual_rec_.serial_no := serial_no_;
+   part_info_virtual_rec_.customer_warranty_id := warranty_id_;
+   part_info_virtual_rec_.obj_created_by := Fnd_Session_API.Get_Fnd_User();
+   CRUD_Update___(part_info_virtual_rec_, part_info_virtual_rec_);
+END Update_Part_Info_Virtual___;
+
+-- This function is not used yet but might have to use.
+--FUNCTION Get_Customer_Warranty_Conditions___ (
+--   selection_ IN VARCHAR2,
+--   part_no_   IN VARCHAR2,
+--   serial_no_ IN VARCHAR2) RETURN Objid_Arr
+--IS
+--   base_collection_ objid_Arr := Objid_Arr();
+--   
+--   warranty_id_ NUMBER := regexp_substr(selection_,'\=(.*?)\^',1,1,NULL,1);
+--   warranty_type_id_  VARCHAR2(20) := regexp_substr(selection_,'\=(.*?)\^',1,2,NULL,1);
+--   CURSOR get_records IS
+--   SELECT *          
+--   FROM cust_warranty_condition t
+   --WHERE warranty_id = warranty_id_ 
+--   AND   warranty_type_id = warranty_type_id_;
+--BEGIN
+--	FOR rec_ IN get_records LOOP
+--      base_collection_.extend;
+--      base_collection_(base_collection_.last) := rec_.objid;
+--   END LOOP;
+--   RETURN base_collection_;
+--END Get_Customer_Warranty_Conditions___;
+
+--Header Group
+--CRUD CREATE OF HEADER (Part Information) VIRTUAL
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Part_Information_Virtual_Rec )
+IS
+BEGIN
+   super(rec_);
+   Create_Customer_Warranty_Type_List___(rec_);
+END CRUD_Create___;
+
+--CustomerWarrantyType List 
+--CREATE Customer Warranty Type List
+PROCEDURE Create_Customer_Warranty_Type_List___(
+   part_info_rec_ IN Part_Information_Virtual_Rec)
+IS
+   warranty_type_rec_ Customer_Warranty_Type_Virtual_Rec;
+   
+   CURSOR get_customer_warranty_type IS
+   SELECT 
+      DECODE(material_cost_type_db, 'MATERIAL', 'TRUE', 'FALSE') AS material_cost_type_db,
+      DECODE(expenses_cost_type_db, 'EXPENSES', 'TRUE', 'FALSE') AS expenses_cost_type_db,
+      DECODE(fixed_price_cost_type_db, 'FIXED PRICE', 'TRUE', 'FALSE') AS fixed_price_cost_type_db,
+      DECODE(personnel_cost_type_db, 'PERSONNEL', 'TRUE', 'FALSE') AS personnel_cost_type_db,
+      DECODE(external_cost_type_db, 'EXTERNAL', 'TRUE', 'FALSE') AS external_cost_type_db,
+      warranty_type_id,
+      warranty_description,
+      warranty_id,
+      note_text,
+      objid,
+      objversion     
+   FROM CUST_WARRANTY_TYPE
+   WHERE warranty_id = part_info_rec_.customer_warranty_id;
+BEGIN
+   FOR rec_ IN get_customer_warranty_type LOOP
+      warranty_type_rec_.material_cost_type_db     := Fndcg_Projection_Svc_Util_API.To_Boolean(rec_.material_cost_type_db);
+      warranty_type_rec_.expenses_cost_type_db     := Fndcg_Projection_Svc_Util_API.To_Boolean(rec_.expenses_cost_type_db);
+      warranty_type_rec_.fixed_price_cost_type_db  := Fndcg_Projection_Svc_Util_API.To_Boolean(rec_.fixed_price_cost_type_db);
+      warranty_type_rec_.personnel_cost_type_db    := Fndcg_Projection_Svc_Util_API.To_Boolean(rec_.personnel_cost_type_db);
+      warranty_type_rec_.external_cost_type_db     := Fndcg_Projection_Svc_Util_API.To_Boolean(rec_.external_cost_type_db);
+      
+      warranty_type_rec_.warranty_type_id          := rec_.warranty_type_id;
+      warranty_type_rec_.warranty_description      := rec_.warranty_description;
+      warranty_type_rec_.warranty_id               := rec_.warranty_id;
+      warranty_type_rec_.note_text                 := rec_.note_text;
+      
+      warranty_type_rec_.part_no                   := part_info_rec_.part_no;
+      warranty_type_rec_.serial_no                 := part_info_rec_.serial_no;
+      warranty_type_rec_.obj_id                    := rec_.objid;
+      warranty_type_rec_.obj_version               := rec_.objversion;
+      
+      warranty_type_rec_.objkey                    := sys_guid();
+      warranty_type_rec_.parent_objkey             := part_info_rec_.objkey;
+      
+      CRUD_Create___(warranty_type_rec_);
+   END LOOP;
+END Create_Customer_Warranty_Type_List___;
+
+--Convert Boolean values to string
+FUNCTION Convert_Customer_Boolean_To_String___(
+   value_name_ IN VARCHAR2,
+   bool_value_ IN BOOLEAN ) RETURN VARCHAR2
+IS
+BEGIN
+   CASE value_name_
+      WHEN 'MATERIAL_COST_TYPE_DB' THEN
+         IF bool_value_ THEN
+            RETURN 'MATERIAL';
+         ELSE
+            RETURN 'NOT MATERIAL';
+         END IF;
+      WHEN 'EXPENSES_COST_TYPE_DB' THEN
+         IF bool_value_ THEN
+            RETURN 'EXPENSES';
+         ELSE
+            RETURN 'NOT EXPENSES';
+         END IF;
+      WHEN 'FIXED_PRICE_COST_TYPE_DB' THEN
+         IF bool_value_ THEN
+            RETURN 'FIXED PRICE';
+         ELSE
+            RETURN 'NOT FIXED PRICE';
+         END IF;
+      WHEN 'PERSONNEL_COST_TYPE_DB' THEN
+         IF bool_value_ THEN
+            RETURN 'PERSONNEL';
+         ELSE
+            RETURN 'NOT PERSONNEL';
+         END IF;
+      WHEN 'EXTERNAL_COST_TYPE_DB' THEN
+         IF bool_value_ THEN
+            RETURN 'EXTERNAL';
+         ELSE
+            RETURN 'NOT EXTERNAL';
+         END IF;
+   END CASE;
+END Convert_Customer_Boolean_To_String___;
+
+--Customer Warranty Type Create
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Customer_Warranty_Type_Virtual_Rec )
+IS
+   attr_           VARCHAR2(32000);
+   info_           VARCHAR2(200);
+   warranty_id_    NUMBER;
+   copy_rec_       Customer_Warranty_Type_Virtual_Rec;
+   part_info_rec_  Part_Information_Virtual_Rec;
+   part_info_key_  Part_Information_Virtual_Key;
+BEGIN
+   part_info_key_.objkey  := rec_.parent_objkey;
+   part_info_rec_         := Get_record___(part_info_key_);
+   
+   copy_rec_     := rec_;
+   warranty_id_  := rec_.warranty_id;
+   
+   IF NOT Cust_Warranty_Type_API.Exists(rec_.warranty_id, rec_.warranty_type_id) THEN
+      Create_Customer_Warranty_Id___(warranty_id_, part_info_rec_.part_no, part_info_rec_.serial_no, rec_.parent_objkey);
+      
+      Client_SYS.Add_To_Attr('WARRANTY_ID', warranty_id_, attr_);
+      copy_rec_.warranty_id := warranty_id_;      
+      Client_SYS.Add_To_Attr('WARRANTY_TYPE_ID', rec_.warranty_type_id, attr_);
+      Client_SYS.Add_To_Attr('WARRANTY_DESCRIPTION', rec_.warranty_description, attr_);
+      Client_SYS.Add_To_Attr('NOTE_TEXT', rec_.note_text, attr_);
+      
+      Client_SYS.Add_To_Attr('MATERIAL_COST_TYPE_DB',  Convert_Customer_Boolean_To_String___('MATERIAL_COST_TYPE_DB', rec_.material_cost_type_db), attr_);
+      Client_SYS.Add_To_Attr('EXPENSES_COST_TYPE_DB', Convert_Customer_Boolean_To_String___('EXPENSES_COST_TYPE_DB', rec_.expenses_cost_type_db), attr_);
+      Client_SYS.Add_To_Attr('FIXED_PRICE_COST_TYPE_DB', Convert_Customer_Boolean_To_String___('FIXED_PRICE_COST_TYPE_DB', rec_.fixed_price_cost_type_db), attr_);
+      Client_SYS.Add_To_Attr('PERSONNEL_COST_TYPE_DB', Convert_Customer_Boolean_To_String___('PERSONNEL_COST_TYPE_DB', rec_.personnel_cost_type_db), attr_);
+      Client_SYS.Add_To_Attr('EXTERNAL_COST_TYPE_DB', Convert_Customer_Boolean_To_String___('EXTERNAL_COST_TYPE_DB', rec_.external_cost_type_db) , attr_);
+      Client_SYS.Add_To_Attr('WARRANTY_CONDITION_RULE', Warranty_Condition_Rule_API.Decode('INCLUSIVE'), attr_);
+      
+      Cust_Warranty_Type_API.New__(info_, copy_rec_.obj_id, copy_rec_.obj_version, attr_, 'DO');
+   END IF;
+   
+   super(copy_rec_);
+END CRUD_Create___;
+
+@Override
+PROCEDURE CRUD_Update___(
+   old_ IN Customer_Warranty_Type_Virtual_Rec,
+   new_ IN Customer_Warranty_Type_Virtual_Rec )
+IS
+   customer_warranty_id_  NUMBER;
+   attr_                  VARCHAR2(32000);
+   info_                  VARCHAR2(200);
+   copy_new_              Customer_Warranty_Type_Virtual_Rec;
+   
+   CURSOR get_part_info_warranty_id IS
+   SELECT customer_warranty_id
+   FROM ${PROJECTION}_PART_INFORMATION_VIRTUAL_VRT
+   WHERE objkey = new_.parent_objkey;
+BEGIN
+   copy_new_ := new_;
+   
+   --   Get the current warranty id from the header
+   OPEN get_part_info_warranty_id;
+   FETCH get_part_info_warranty_id INTO customer_warranty_id_;
+   CLOSE get_part_info_warranty_id;
+   copy_new_.warranty_id := customer_warranty_id_;
+   
+   --   Check if the warranty is shared and get new warranty.
+   Create_Customer_Warranty_Id___(copy_new_.warranty_id, new_.part_no, new_.serial_no, new_.parent_objkey);
+   
+   --   Get the new Objversion and new ObjId
+   IF (copy_new_.warranty_id != new_.warranty_id) THEN 
+      Get_Customer_Obj___(copy_new_.obj_id, copy_new_.obj_version, copy_new_.warranty_id, copy_new_.warranty_type_id);
+   END IF;
+--   Create the Attr
+   Client_SYS.Add_To_Attr('WARRANTY_DESCRIPTION', new_.warranty_description, attr_);
+   Client_SYS.Add_To_Attr('NOTE_TEXT', new_.note_text, attr_);
+   
+   Client_SYS.Add_To_Attr('MATERIAL_COST_TYPE_DB',  Convert_Customer_Boolean_To_String___('MATERIAL_COST_TYPE_DB', new_.material_cost_type_db), attr_);
+   Client_SYS.Add_To_Attr('EXPENSES_COST_TYPE_DB', Convert_Customer_Boolean_To_String___('EXPENSES_COST_TYPE_DB', new_.expenses_cost_type_db), attr_);
+   Client_SYS.Add_To_Attr('FIXED_PRICE_COST_TYPE_DB', Convert_Customer_Boolean_To_String___('FIXED_PRICE_COST_TYPE_DB', new_.fixed_price_cost_type_db), attr_);
+   Client_SYS.Add_To_Attr('PERSONNEL_COST_TYPE_DB', Convert_Customer_Boolean_To_String___('PERSONNEL_COST_TYPE_DB', new_.personnel_cost_type_db), attr_);
+   Client_SYS.Add_To_Attr('EXTERNAL_COST_TYPE_DB', Convert_Customer_Boolean_To_String___('EXTERNAL_COST_TYPE_DB', new_.external_cost_type_db) , attr_);
+   Client_SYS.Add_To_Attr('WARRANTY_CONDITION_RULE', Warranty_Condition_Rule_API.Decode('INCLUSIVE'), attr_);
+   
+   Cust_Warranty_Type_API.Modify__(info_, copy_new_.obj_id, copy_new_.obj_version, attr_, 'DO');
+   
+   super(old_, copy_new_);
+END CRUD_Update___;
+
+--Customer Warranty Type Delete
+@Override
+PROCEDURE CRUD_Delete___(
+   rec_ IN Customer_Warranty_Type_Virtual_Rec )
+IS
+   customer_warranty_id_ NUMBER;
+   info_                 VARCHAR2(200);
+   copy_rec_             Customer_Warranty_Type_Virtual_Rec;
+   part_info_rec_        Part_Information_Virtual_Rec;
+   old_part_info_rec_    Part_Information_Virtual_Rec;
+   part_info_key_        Part_Information_Virtual_Key;
+   
+   CURSOR get_part_info_warranty_id IS
+   SELECT customer_warranty_id
+   FROM ${PROJECTION}_PART_INFORMATION_VIRTUAL_VRT
+   WHERE objkey = rec_.parent_objkey;
+BEGIN
+   copy_rec_ := rec_;
+    --   Get the current warranty id from the header
+   OPEN get_part_info_warranty_id;
+   FETCH get_part_info_warranty_id INTO customer_warranty_id_;
+   copy_rec_.warranty_id := customer_warranty_id_;
+   CLOSE get_part_info_warranty_id;
+   
+   --   Check if the warranty is shared and get new warranty.
+   Create_Customer_Warranty_Id___(copy_rec_.warranty_id, rec_.part_no, rec_.serial_no, rec_.parent_objkey);
+   
+   --   Get the new Objversion and new ObjId
+   IF (copy_rec_.warranty_id != rec_.warranty_id) THEN 
+      Get_Customer_Obj___(copy_rec_.obj_id, copy_rec_.obj_version, copy_rec_.warranty_id, copy_rec_.warranty_type_id);
+   END IF;
+   
+   Cust_Warranty_Type_API.Remove__(info_, copy_rec_.obj_id, copy_rec_.obj_version, 'DO');
+   
+   super(copy_rec_);
+   
+   IF NOT Cust_Warranty_Type_API.Warranty_Types_Exist(copy_rec_.warranty_id) THEN
+      part_info_key_.objkey := rec_.parent_objkey;
+      part_info_rec_ := Get_Record___(part_info_key_);
+      old_part_info_rec_ := part_info_rec_;
+      part_info_rec_.customer_warranty_id := NULL;
+      CRUD_UPDATE___(old_part_info_rec_, part_info_rec_);
+   END IF;
+END CRUD_Delete___;
+
+--Customer Warranty Type Get Objid and @Override
+--Since the entity is not used in the fragment there is no autogenerated methods to get the objid and objversion
+PROCEDURE Get_Customer_Obj___(
+   objid_            OUT VARCHAR2,
+   objversion_       OUT VARCHAR2,
+   warranty_id_      IN  NUMBER,
+   warranty_type_id_ IN  VARCHAR2)
+IS
+   customer_warranty_objid_      VARCHAR2(2000);
+   customer_warranty_objversion_ VARCHAR2(2000);
+   
+   CURSOR get_customer_warranty_obj IS
+   SELECT objid_, objversion_
+   FROM  CUST_WARRANTY_TYPE
+   WHERE warranty_id = warranty_id_
+   AND   warranty_type_id = warranty_type_id_;
+BEGIN
+   OPEN get_customer_warranty_obj;
+   FETCH get_customer_warranty_obj INTO customer_warranty_objid_, customer_warranty_objversion_;
+   CLOSE get_customer_warranty_obj;
+   objid_ := customer_warranty_objid_;
+   objversion_ := customer_warranty_objversion_;
+END Get_Customer_Obj___;
+
+----Customer Warranty Type Copy from template
+PROCEDURE Copy_Customer_Warranty_From_Template___ (
+   warranty_id_         IN NUMBER,
+   template_id_         IN VARCHAR2,
+   part_no_             IN VARCHAR2,
+   serial_no_           IN VARCHAR2,
+   grand_parent_objkey_ IN VARCHAR2)
+IS
+   part_info_rec_    Part_Information_Virtual_Rec;
+   part_info_key_    Part_Information_Virtual_Key;
+   copy_warranty_id_ NUMBER;
+   
+   CURSOR get_customer_warranty_type_list IS
+   SELECT * 
+   FROM ${PROJECTION}_CUSTOMER_WARRANTY_TYPE_VIRTUAL_VRT;
+BEGIN
+   part_info_key_.objkey := grand_parent_objkey_;
+   part_info_rec_        := Get_Record___(part_info_key_);
+   copy_warranty_id_     := warranty_id_;
+   
+   Create_Customer_Warranty_Id___(copy_warranty_id_, part_no_, serial_no_, grand_parent_objkey_);
+   
+	Cust_Warranty_Type_API.Copy_From_Template(copy_warranty_id_, template_id_);
+   
+   part_info_rec_.customer_warranty_id := copy_warranty_id_;
+   
+   --Have to use this instead of CRUD DELETE because CRUD DELETE has been used to Delete the values in the entity as well.
+   --Here the whole virtual needs to be refreshed as new record so all the records in the virtual are deleted and created again to avoid having duplicate records.
+   --Checking if a record already exists or not in CRUD CREATE will have for loop in for loop (performance issue [nxn]).
+   FOR rec_ IN get_customer_warranty_type_list LOOP
+      DELETE FROM ${PROJECTION}CUSTOMER_WARRANTY_TYPE_VIRTUAL_VRT WHERE objkey = rec_.objkey;
+   END LOOP;
+   
+   Create_Customer_Warranty_Type_List___(part_info_rec_);
+   
+END Copy_Customer_Warranty_From_Template___;
+
+--Copy Customer Warramty
+FUNCTION Copy_And_Get_Customer_Warranty_Id___(
+   warranty_type_objkey_ IN VARCHAR2) RETURN NUMBER
+IS
+   --   Part Information Virtual VALUES
+   part_info_rec_        Part_Information_Virtual_Rec;
+   old_part_info_rec_    Part_Information_Virtual_Rec;
+   part_info_key_        Part_Information_Virtual_Key;
+   
+   --   Warranty Type VALUES
+   old_warranty_type_rec_  Customer_Warranty_Type_Virtual_Rec;
+   new_warranty_type_rec_  Customer_Warranty_Type_Virtual_Rec;
+   warranty_type_key_      Customer_Warranty_Type_Virtual_Key;
+   
+BEGIN
+   --   Update parent virtual with the new warranty_id
+   warranty_type_key_.objkey := warranty_type_objkey_;
+   old_warranty_type_rec_    := Get_Record___(warranty_type_key_);
+   new_warranty_type_rec_    := old_warranty_type_rec_;
+   
+   --   Get Grand Parent Record
+   part_info_key_.objkey := old_warranty_type_rec_.parent_objkey;
+   part_info_rec_        := Get_Record___(part_info_key_);
+   old_part_info_rec_    := part_info_rec_;
+   
+   -- Copy Warranty ID
+   Create_Customer_Warranty_Id___(part_info_rec_.customer_warranty_id, part_info_rec_.part_no, part_info_rec_.serial_no, part_info_rec_.objkey);
+   
+   new_warranty_type_rec_.warranty_id := part_info_rec_.customer_warranty_id;
+   CRUD_UPDATE___(old_part_info_rec_, part_info_rec_);
+   CRUD_UPDATE___(old_warranty_type_rec_, new_warranty_type_rec_);
+   
+   RETURN part_info_rec_.customer_warranty_id;
+END Copy_And_Get_Customer_Warranty_Id___;
+
+--Customer Warranty Condition CREATE
+@Override
+PROCEDURE CRUD_Create___ (
+   etag_   IN OUT VARCHAR2,
+   key_    IN OUT Customer_Warranty_Condition_Key,
+   attr_   IN OUT VARCHAR2,
+   info_   OUT VARCHAR2,
+   action_ IN  VARCHAR2 )
+IS
+   new_warranty_id_ NUMBER;
+   objkey_          VARCHAR2(50);
+BEGIN
+   objkey_          := Client_SYS.Get_Item_Value('PARENT_OBJKEY', attr_);
+   new_warranty_id_ := Copy_And_Get_Customer_Warranty_Id___(objkey_);
+   
+   Client_SYS.Set_Item_Value('WARRANTY_ID', to_char(new_warranty_id_), attr_);
+
+   super(etag_, key_, attr_, info_, action_);
+END CRUD_Create___;
+
+--Customer Warranty Condition DELETE
+PROCEDURE Delete_Warranty_Condition___ (
+   key_           IN Customer_Warranty_Condition_Key)
+IS
+   copy_key_        Customer_Warranty_Condition_Key;
+   etag_       VARCHAR2(32000);
+   info_       VARCHAR2(200);
+   objid_      VARCHAR2(2000);
+   objversion_ VARCHAR2(2000);
+BEGIN
+   copy_key_ := key_;
+   Get_Objid_Objversion___(objid_, objversion_, copy_key_);
+   etag_ := Get_Etag___(objid_, objversion_);
+   
+   CRUD_Delete___(etag_, copy_key_, info_, 'DO');
+END Delete_Warranty_Condition___;
+
+--Customer Warranty Condition UPDATE
+PROCEDURE Update_Warranty_Conditions___ (
+   key_           IN Customer_Warranty_Condition_Key,
+   min_value_     IN NUMBER,
+   max_value_     IN NUMBER)
+IS
+	copy_key_        Customer_Warranty_Condition_Key;
+   info_            VARCHAR2(200);
+   objid_           VARCHAR2(2000);
+   objversion_      VARCHAR2(2000);
+   attr_            VARCHAR2(32000);
+   etag_            VARCHAR2(32000);
+BEGIN
+   copy_key_ := key_;
+   Get_Objid_Objversion___(objid_, objversion_, copy_key_);
+   etag_ := Get_Etag___(objid_, objversion_);
+   
+   --   Build ATTR
+   IF min_value_ IS NOT NULL THEN
+      Client_SYS.Add_To_Attr('MIN_VALUE', min_value_, attr_);
+   END IF;
+   IF max_value_ IS NOT NULL THEN
+      Client_SYS.Add_To_Attr('MAX_VALUE', max_value_, attr_);
+   END IF;
+   
+   CRUD_Update___(etag_, copy_key_, attr_, info_, 'DO');
+END Update_Warranty_Conditions___;
+
+--Customer Warranty Language CREATE
+@Override
+PROCEDURE CRUD_Create___ (
+   etag_   IN OUT VARCHAR2,
+   key_    IN OUT Warranty_Language_Description_Key,
+   attr_   IN OUT VARCHAR2,
+   info_   OUT VARCHAR2,
+   action_ IN  VARCHAR2 )
+IS
+   new_warranty_id_ NUMBER;
+   parent_objkey_ VARCHAR2(50);
+BEGIN
+   parent_objkey_   := Client_SYS.Get_Item_Value('PARENT_OBJKEY', attr_);
+   new_warranty_id_ := Copy_And_Get_Customer_Warranty_Id___(parent_objkey_);
+   
+   -- Add the new warranty to attr
+   Client_SYS.Set_Item_Value('WARRANTY_ID', to_char(new_warranty_id_), attr_);
+   
+   super(etag_, key_, attr_, info_, action_);
+END CRUD_Create___;
+
+PROCEDURE Delete_Warranty_Language___ (
+   key_           IN Warranty_Language_Description_Key)
+IS
+   copy_key_        Warranty_Language_Description_Key;
+   etag_            VARCHAR2(32000);
+   info_            VARCHAR2(200);
+   objid_           VARCHAR2(2000);
+   objversion_      VARCHAR2(2000);  
+BEGIN
+   copy_key_ := key_;
+   Get_Objid_Objversion___(objid_, objversion_, copy_key_);
+   etag_ := Get_Etag___(objid_, objversion_);
+   
+   CRUD_Delete___(etag_, copy_key_, info_, 'DO');
+END Delete_Warranty_Language___;
+
+PROCEDURE Update_Warranty_Language___ (
+   key_                IN Warranty_Language_Description_Key,
+   warranty_type_desc_ IN VARCHAR2)
+IS
+	copy_key_        Warranty_Language_Description_Key;
+   etag_            VARCHAR2(32000);
+   info_            VARCHAR2(200);
+   attr_            VARCHAR2(32000);
+   objid_           VARCHAR2(2000);
+   objversion_      VARCHAR2(2000);
+BEGIN
+   copy_key_ := key_;
+   Get_Objid_Objversion___(objid_, objversion_, copy_key_);
+   etag_ := Get_Etag___(objid_, objversion_);
+   
+   --   Build ATTR
+   IF warranty_type_desc_ IS NOT NULL THEN
+      Client_SYS.Add_To_Attr('WARRANTY_TYPE_DESC', warranty_type_desc_, attr_);
+   END IF;
+   
+   CRUD_Update___(etag_, copy_key_, attr_, info_, 'DO');
+END Update_Warranty_Language___;
+
+--DOCUMENT TEXT CREATE
+@Override
+PROCEDURE CRUD_Create___ (
+   etag_   IN OUT VARCHAR2,
+   key_    IN OUT Document_Text_Key,
+   attr_   IN OUT VARCHAR2,
+   info_   OUT VARCHAR2,
+   action_ IN  VARCHAR2 )
+IS
+   new_warranty_id_      NUMBER;
+   old_warranty_id_      NUMBER;
+   new_lang_row_note_id_ NUMBER;
+   note_id_              NUMBER;
+   warranty_type_id_     VARCHAR2(20);
+   language_code_        VARCHAR2(2);
+   warranty_state_       VARCHAR2(20);
+   
+   CURSOR get_warranty_lang_rec (note_id_ NUMBER) IS
+   SELECT warranty_type_id, language_code
+   FROM WARRANTY_LANG_DESC
+   WHERE note_id = note_id_;
+   
+   CURSOR get_warranty_type_(objkey_ VARCHAR2) IS
+   SELECT warranty_id
+   FROM ${PROJECTION}_CUSTOMER_WARRANTY_TYPE_VIRTUAL_VRT
+   WHERE objkey = objkey_;
+   
+   CURSOR get_new_note_id (language_code_ VARCHAR2, warranty_id_ VARCHAR2, warranty_type_id_ VARCHAR2) IS
+   SELECT note_id
+   FROM WARRANTY_LANG_DESC
+   WHERE warranty_id = warranty_id_ AND warranty_type_id = warranty_type_id_ AND language_code = language_code_;
+   
+   --   NOTE TEXT VIRTUAL
+   note_text_rec_     Note_Text_Virtual_Rec;
+   note_text_key_     Note_Text_Virtual_Key;
+   old_note_text_rec_ Note_Text_Virtual_Rec;
+BEGIN
+   -- Get the note id (old) from attr
+   note_id_ := Client_SYS.Get_Item_Value('NOTE_ID', attr_);
+   
+   -- Get the warranty language description using the note id (old) from attr 
+   OPEN get_warranty_lang_rec(note_id_);
+   FETCH get_warranty_lang_rec INTO warranty_type_id_, language_code_;
+   CLOSE get_warranty_lang_rec;
+   
+   -- Get the parent objkey (objkey of Note Text Virtual) from the attr
+   note_text_key_.objkey := Client_SYS.Cut_Item_Value('PARENT_OBJKEY', attr_);
+   -- Get the Note Text Virtual Record (parent record of Document Text)
+   note_text_rec_ := Get_Record___(note_text_key_);
+   
+   -- Get the Customer Warranty Type Virtual warranty id using the warranty type objkey.
+   OPEN get_warranty_type_(note_text_rec_.warranty_type_objkey);
+   FETCH get_warranty_type_ INTO old_warranty_id_;
+   CLOSE get_warranty_type_;
+   
+   warranty_state_ :=  Cust_Warranty_API.Get_Objstate(old_warranty_id_);
+--   Check to see if the warranty is shared
+   IF (warranty_state_ = Cust_Warranty_API.DB_SHARED) THEN 
+      -- This returns new warranty id if this record is shared after copying the record. 
+      new_warranty_id_ :=  Copy_And_Get_Customer_Warranty_Id___(note_text_rec_.warranty_type_objkey);
+      
+      --Get the note id of the copied warranty language description using the new warranty id.
+      OPEN get_new_note_id(language_code_, new_warranty_id_, warranty_type_id_);
+      FETCH get_new_note_id INTO new_lang_row_note_id_;
+      CLOSE get_new_note_id;
+      
+      --Set the new note id to the attr,
+      Client_SYS.Set_Item_Value('NOTE_ID', new_lang_row_note_id_, attr_);
+      
+      super(etag_, key_, attr_, info_, action_);
+      
+      -- Copy the Note Text Virtual Record to pass in CRUD UPDATE
+      old_note_text_rec_ := note_text_rec_;
+      -- Update the Note Text Virtual Record with the new note id
+      note_text_rec_.note_id := new_lang_row_note_id_;
+      -- CAll CRUD UPDATE of the Note Text Virtual to update the record with the new Note ID
+      CRUD_Update___(old_note_text_rec_, note_text_rec_);
+   ELSE
+      super(etag_, key_, attr_, info_, action_);
+   END IF;
+END CRUD_Create___;
+
+PROCEDURE Delete_Document_Text___ (
+   key_           IN Document_Text_Key,
+   parent_objkey_ IN VARCHAR2)
+IS
+   document_text_copy_key_   Document_Text_Key;
+   info_                     VARCHAR2(200);
+   etag_                     VARCHAR2(32000);
+   new_warranty_id_          NUMBER;
+   old_warranty_id_          NUMBER;
+   new_lang_row_note_id_     NUMBER;
+   warranty_type_id_         VARCHAR2(20);
+   language_code_            VARCHAR2(2);
+   document_text_objid_      VARCHAR2(2000);
+   document_text_objversion_ VARCHAR2(2000);
+   warranty_state_           VARCHAR2(20);
+   
+   CURSOR get_warranty_lang_rec (note_id_ NUMBER) IS
+   SELECT warranty_type_id, language_code
+   FROM WARRANTY_LANG_DESC
+   WHERE note_id = note_id_;
+   
+   CURSOR get_warranty_type_(objkey_ VARCHAR2) IS
+   SELECT warranty_id
+   FROM ${PROJECTION}_CUSTOMER_WARRANTY_TYPE_VIRTUAL_VRT
+   WHERE objkey = objkey_;
+   
+   CURSOR get_new_note_id (language_code_ VARCHAR2, warranty_id_ VARCHAR2, warranty_type_id_ VARCHAR2) IS
+   SELECT note_id
+   FROM WARRANTY_LANG_DESC
+   WHERE warranty_id = warranty_id_ AND warranty_type_id = warranty_type_id_ AND language_code = language_code_;
+   
+   CURSOR get_document_text(output_type_ VARCHAR2, note_id_ NUMBER) IS
+   SELECT objid, objversion
+   FROM DOCUMENT_TEXT
+   WHERE output_type = output_type_ AND note_id = note_id_;
+   
+   --   NOTE TEXT VIRTUAL
+   note_text_rec_     Note_Text_Virtual_Rec;
+   note_text_key_     Note_Text_Virtual_Key;
+   old_note_text_rec_ Note_Text_Virtual_Rec;
+BEGIN
+   document_text_copy_key_ := key_;
+   -- Get the parent objkey (objkey of Note Text Virtual) from the attr
+   note_text_key_.objkey := parent_objkey_;
+   -- Get the Note Text Virtual Record (parent record of Document Text)
+   note_text_rec_ := Get_Record___(note_text_key_);
+   
+   -- Get the language code and warranty type id in warranty language description using the note id (old) from attr 
+   OPEN get_warranty_lang_rec(key_.note_id);
+   FETCH get_warranty_lang_rec INTO warranty_type_id_, language_code_;
+   CLOSE get_warranty_lang_rec;
+   
+   -- Get the Parent Customer Warranty Type Virtual warranty id using the warranty type objkey.
+   OPEN get_warranty_type_(note_text_rec_.warranty_type_objkey);
+   FETCH get_warranty_type_ INTO old_warranty_id_;
+   CLOSE get_warranty_type_;
+   
+   warranty_state_ :=  Cust_Warranty_API.Get_Objstate(old_warranty_id_);      
+--   Check to see if the warranty id is shared
+   IF (warranty_state_ = Cust_Warranty_API.DB_SHARED) THEN 
+      -- This returns new warranty id if this record is shared after copying the record. 
+      new_warranty_id_ :=  Copy_And_Get_Customer_Warranty_Id___(note_text_rec_.warranty_type_objkey);
+      
+      --Get the note id of the copied warranty language description using the new warranty id.
+      OPEN get_new_note_id(language_code_, new_warranty_id_, warranty_type_id_);
+      FETCH get_new_note_id INTO new_lang_row_note_id_;
+      CLOSE get_new_note_id;
+      
+      --Get the Document Text objid and objversion that needs to be deleted
+      OPEN get_document_text (key_.output_type, new_lang_row_note_id_);
+      FETCH get_document_text INTO document_text_objid_, document_text_objversion_;
+      CLOSE get_document_text;
+      
+      document_text_copy_key_.note_id := new_lang_row_note_id_;
+      Document_Text_API.Remove__(info_, document_text_objid_, document_text_objversion_, 'DO');
+      
+      -- Copy the Note Text Virtual Record to pass in CRUD UPDATE
+      old_note_text_rec_ := note_text_rec_;
+      -- Update the Note Text Virtual Record with the new note id
+      note_text_rec_.note_id := new_lang_row_note_id_;
+      
+      -- CAll CRUD UPDATE of the Note Text Virtual to update the record with the new Note ID
+      CRUD_Update___(old_note_text_rec_, note_text_rec_);
+   ELSE
+      --Get the Document Text objid and objversion that needs to be deleted
+      OPEN get_document_text (key_.output_type, key_.note_id);
+      FETCH get_document_text INTO document_text_objid_, document_text_objversion_;
+      CLOSE get_document_text;
+      
+      etag_ := Get_Etag___(document_text_objid_, document_text_objversion_);
+      
+      CRUD_Delete___(etag_, key_, info_, 'DO');
+   END IF;
+END Delete_Document_Text___;
+
+
+PROCEDURE Update_Document_Text___ (
+   key_           IN Document_Text_Key,
+   parent_objkey_ IN VARCHAR2,
+   note_text_     IN VARCHAR2)
+IS
+   document_text_copy_key_  Document_Text_Key;
+   
+   warranty_state_           VARCHAR2(20);
+   new_warranty_id_          NUMBER;
+   old_warranty_id_          NUMBER;
+   new_lang_row_note_id_     NUMBER;
+   warranty_type_id_         VARCHAR2(20);
+   language_code_            VARCHAR2(2);
+   document_text_objid_      VARCHAR2(2000);
+   document_text_objversion_ VARCHAR2(2000);
+   info_                     VARCHAR2(200);
+   attr_                     VARCHAR2(32000);
+   etag_                     VARCHAR2(32000);
+   
+   CURSOR get_warranty_lang_rec (note_id_ NUMBER) IS
+   SELECT warranty_type_id, language_code
+   FROM WARRANTY_LANG_DESC
+   WHERE note_id = note_id_;
+   
+   CURSOR get_warranty_type_(objkey_ VARCHAR2) IS
+   SELECT warranty_id
+   FROM ${PROJECTION}_CUSTOMER_WARRANTY_TYPE_VIRTUAL_VRT
+   WHERE objkey = objkey_;
+   
+   CURSOR get_new_note_id (language_code_ VARCHAR2, warranty_id_ VARCHAR2, warranty_type_id_ VARCHAR2) IS
+   SELECT note_id
+   FROM WARRANTY_LANG_DESC
+   WHERE warranty_id = warranty_id_ AND warranty_type_id = warranty_type_id_ AND language_code = language_code_;
+   
+   CURSOR get_document_text (output_type_ VARCHAR2, note_id_ NUMBER) IS
+   SELECT objid, objversion
+   FROM DOCUMENT_TEXT
+   WHERE output_type = output_type_ AND note_id = note_id_;
+   
+   --   NOTE TEXT VIRTUAL
+   note_text_rec_     Note_Text_Virtual_Rec;
+   note_text_key_     Note_Text_Virtual_Key;
+   old_note_text_rec_ Note_Text_Virtual_Rec;
+   
+BEGIN
+   -- Get the parent objkey (objkey of Note Text Virtual) from the attr
+   note_text_key_.objkey := parent_objkey_;
+   -- Get the Note Text Virtual Record (parent record of Document Text)
+   note_text_rec_ := Get_Record___(note_text_key_);
+   document_text_copy_key_ := key_;
+   
+   -- Get the language code and warranty type id of warranty language description using the note id (old) from attr 
+   OPEN get_warranty_lang_rec(key_.note_id);
+   FETCH get_warranty_lang_rec INTO warranty_type_id_, language_code_;
+   CLOSE get_warranty_lang_rec;
+   
+   -- Get the Parent Customer Warranty Type Virtual warranty id using the warranty type virtual objkey.
+   OPEN get_warranty_type_(note_text_rec_.warranty_type_objkey);
+   FETCH get_warranty_type_ INTO old_warranty_id_;
+   CLOSE get_warranty_type_;
+   
+   warranty_state_ :=  Cust_Warranty_API.Get_Objstate(old_warranty_id_);      
+--   Check to see if the warranty is shared
+   IF (warranty_state_ = Cust_Warranty_API.DB_SHARED) THEN 
+      
+      -- This returns warranty id if this record is shared after copying the record. 
+      new_warranty_id_ :=  Copy_And_Get_Customer_Warranty_Id___(note_text_rec_.warranty_type_objkey);
+      
+      --Get the note id of the copied warranty language description using the new warranty id.
+      OPEN get_new_note_id(language_code_, new_warranty_id_, warranty_type_id_);
+      FETCH get_new_note_id INTO new_lang_row_note_id_;
+      CLOSE get_new_note_id;
+      
+      --Get the objid and objversion of Document Text that needs to be updated
+      OPEN get_document_text (key_.output_type, new_lang_row_note_id_);
+      FETCH get_document_text INTO document_text_objid_, document_text_objversion_;
+      CLOSE get_document_text;
+      
+      document_text_copy_key_.note_id := new_lang_row_note_id_;
+
+      etag_ := Get_Etag___(document_text_objid_, document_text_objversion_);
+      
+      -- Get the parent objkey (objkey of Note Text Virtual) from the attr
+      note_text_key_.objkey := parent_objkey_;
+      
+      -- Get the Note Text Virtual Record (parent record of Document Text)
+      note_text_rec_ := Get_Record___(note_text_key_);
+      -- Copy the Note Text Virtual Record to pass in CRUD UPDATE
+      old_note_text_rec_ := note_text_rec_;
+      -- Update the Note Text Virtual Record with the new note id
+      note_text_rec_.note_id := new_lang_row_note_id_;
+      
+      -- CAll CRUD UPDATE of the Note Text Virtual to update the record with the new Note ID
+      CRUD_Update___(old_note_text_rec_, note_text_rec_);
+      
+      --   Build ATTR
+      IF note_text_ IS NOT NULL THEN
+         Client_SYS.Add_To_Attr('NOTE_TEXT', note_text_, attr_);
+      END IF;
+      
+      CRUD_Update___(etag_, document_text_copy_key_, attr_, info_, 'DO');
+   ELSE
+      --Get the objid and objversion of Document Text that needs to be updated
+      OPEN get_document_text (key_.output_type, key_.note_id);
+      FETCH get_document_text INTO document_text_objid_, document_text_objversion_;
+      CLOSE get_document_text;
+      
+      etag_ := Get_Etag___(document_text_objid_, document_text_objversion_);
+      
+      --   Build ATTR
+      IF note_text_ IS NOT NULL THEN
+         Client_SYS.Add_To_Attr('NOTE_TEXT', note_text_, attr_);
+      END IF;
+      
+      CRUD_Update___(etag_, document_text_copy_key_, attr_, info_, 'DO');
+   END IF;
+END Update_Document_Text___;

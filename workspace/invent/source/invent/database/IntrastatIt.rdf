@@ -1,0 +1,778 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: Intrastat
+--
+--  File:         IntrastatIt.rdf
+--
+--  Date    Sign    History
+--  ------  ----    -----------------------------------------------------------
+--  220126  ErFelk  Bug 161523(FI21R2-7714), Modified CURSOR get_lines by adding DECODE to some fields. This is a merge from GET.
+--  211104  ErFelk  Bug 161107(SC21R2-4958), Modified the report by removing the fetching of line_vat_no logic and replaced it by opponent tax id taken from intrastat line.
+--  210127  SBalLK  Bug 157792(SCZ-13284), Changed add custom field call by adding report view as parameter to include/not include
+--  210127          custom field according to the report definition.
+--  201002  SBalLK  GESPRING20-537, Added additional Italy intrastat functionality.
+--  140418  TiRalk  Bug 116087, Modified report method to fetch vat_no_ properly when opponent type is company.
+--  130816  IsSalk  Bug 111274, Modified Report_Overview to get the Customer's Tax ID according to the delivery country.
+--  121016  PraWlk  Bug 105887, Removed SUBSTR to avoid length restriction of customs statistics number description. 
+--  120913  NipKlk  Bug 102537, Used the Intrastat_Direction_API.Encode() method to get the db values from client value.
+--  120821  RuLiLk  Enabled Custom Fields for report 'Intrastat Report Italy'
+--  120410  AyAmlk  Bug 100608, Increased the column length of delivery_terms to 5 in view INTRASTAT_IT_REP.
+--  120405  RoJalk  Bug 101284, Modified report method to avoid error message when fetching opponent number document address
+--  120405          to print the report with return transactions and get the correct opponent document address country code
+--  120405          when the opponent is supplier, customer and company.
+--  110309  Bmekse  DF-917 Replaced calls to Company_Invoice_Info_API.Get_Vat_No with 
+--                  Tax_Liability_Countries_API.Get_Tax_Id_Number.
+--  090929  PraWlk  Bug 85516, Increased the length of com_code_desc_ to 200.
+--  090928  ChFolk  Removed unused variables in the package.
+--  090601  SaWjlk  Bug 83173, Removed the prog text duplications.
+--  080317  HoInlk  Bug 72069, Added missing "ifs_assert_safe" annotations.
+--  070411  ChBalk  Replaced SUBSTRB with SUBSTR.
+--  060911  ChBalk  Merged call 53157, Made some changes in order to comply report printouts with electronic file.
+--  060908  IsWilk  Removed the qrp entries.
+--  060518  DaZase  Bug 57442 Report Designer handling and Layout added. Also corrected a problem 
+--                  with variables mismatch in call to Customer_Info_Vat_API.Default_Vat_No.
+--  051216  SuJalk  Changed VIEW_RPV to TABLE in COMMENT ON TABLE.
+--  050906  JaBalk  Changed the SUBSTRB to SUBSTR and length of variable com_code_desc_ to 35.
+--  050107  DiVelk  Bug 48877, Converted value of 'intrastat_direction_' to uppercase.
+--  040924  ChJalk  Bug 46743, Modified the length of the variable com_code_desc_ and assigned only the first
+--  040924          35 characters to the variable.
+--  040610  NaWilk  Bug 44975, Modified FROM clause in view INTRASTAT_IT_REP.
+--  040428  IsWilk  Rewrote the DBMS_SQL to Native dynamic SQL inside FOR LOOPs.
+--  040301  GeKalk  Replaced substrb with substr for UNICODE modifications.
+--  040202  NaWalk  Rewoke the modification for dbms_sql.and removed the fourth variable of DBMS_SQL 
+--                  inside the loop,for Unicode modification.
+--  040127  NaWalk  Modified the code in method Report_Overview to improve performance.
+--  040126  NaWalk  Rewrote the DBMS_SQL to Native dynamic SQL for Unicode modification.  
+------------------------------------ 13.3.0 -----------------------------------
+--  031016  PrJalk Bug fix 106237, Added procedure Init.
+--  020217  IsAn  A4/Letter conversion.
+--  011016  DaZa  Created using spec 'Functional specification for IID 10235 
+--                - Italian Intrastat File' by Martin Korn.
+-----------------------------------------------------------------------------
+
+define MODULE             = INVENT
+define LU                 = Intrastat
+define PKG                = INTRASTAT_IT_RPI
+
+define TABLE              = INVENT_INFO_SERVICES_RPT
+define VIEW               = INTRASTAT_IT_REP
+DEFINE VIEW_RPV           = INVENT_INFO_SERVICES_RPV
+define METHOD             = Report_Overview
+
+define COMPANY_NAME       = S1
+define COMPANY_VAT_NO     = S2
+define REPR_NAME          = S3
+define REPR_VAT_NO        = S4
+define CURRENCY_CODE      = S5
+define REPORTING_PERIOD   = S6
+define CREATION_DATE      = D1
+define NO_OF_LINES        = N1
+define REPORT_TITLE       = S7
+define STAT_VALUES_SUM    = N2
+
+define LINE_NO            = N3
+define OPPONENT_TAX_ID    = S8
+define NOTC               = S9
+define COMMODITY_CODE     = S10
+define COM_CODE_DESC      = S11
+define STATISTICAL_VALUE  = N4
+DEFINE OPPOSITE_COUNTRY   = S12 
+DEFINE MODE_OF_TRANSPORT  = S13
+DEFINE DELIVERY_TERMS     = S14
+DEFINE COUNTRY_OF_ORIGIN  = S15
+DEFINE COUNTY             = S16
+-- gelr:italy_intrastat, start
+DEFINE INVOICE_DATE             = D2
+DEFINE ADJUST_TO_PREV_INTRASTAT = S17
+DEFINE SERVICE_STATISTICAL_CODE = S18
+DEFINE SERVICE_WAY              = S19
+DEFINE SERVICE_PAYMENT_WAY      = S20
+DEFINE INVOICE_SERIE            = S21
+DEFINE INVOICE_NUMBER           = S22
+-- gelr:italy_intrastat, end
+
+-----------------------------------------------------------------------------
+-- PACKAGE SPECIFICATION:
+-----------------------------------------------------------------------------
+
+PROMPT Creating &PKG specification
+
+CREATE OR REPLACE PACKAGE &PKG AS
+
+module_ CONSTANT VARCHAR2(6) := '&MODULE';
+lu_name_ CONSTANT VARCHAR2(25) := '&LU';
+
+PROCEDURE &METHOD (
+   report_attr_    IN VARCHAR2,
+   parameter_attr_ IN VARCHAR2 );
+
+PROCEDURE Init;
+
+END &PKG;
+/
+SHOW ERROR
+
+-----------------------------------------------------------------------------
+-- REPORTS
+-----------------------------------------------------------------------------
+PROMPT Creating report view &VIEW
+
+CREATE OR REPLACE VIEW &VIEW AS
+SELECT H.RESULT_KEY                            RESULT_KEY,
+       H.ROW_NO                                ROW_NO,
+       H.&COMPANY_NAME                         COMPANY_NAME,
+       H.&COMPANY_VAT_NO                       COMPANY_VAT_NO,
+       H.&REPR_NAME                            REPR_NAME,
+       H.&REPR_VAT_NO                          REPR_VAT_NO,     
+       H.&CURRENCY_CODE                        CURRENCY_CODE,
+       H.&REPORTING_PERIOD                     REPORTING_PERIOD,
+       H.&CREATION_DATE                        CREATION_DATE,
+       H.&NO_OF_LINES                          NO_OF_LINES,
+       H.&REPORT_TITLE                         REPORT_TITLE, 
+       H.&STAT_VALUES_SUM                      STAT_VALUES_SUM,      
+       D.&LINE_NO                              LINE_NO,
+       D.&OPPONENT_TAX_ID                      OPPONENT_TAX_ID,
+       D.&NOTC                                 NOTC,
+       D.&COMMODITY_CODE                       COMMODITY_CODE,
+       D.&COM_CODE_DESC                        COM_CODE_DESC,
+       D.&STATISTICAL_VALUE                    STATISTICAL_VALUE,
+       NULL                                    INTRASTAT_ID,
+       NULL                                    INTRASTAT_DIRECTION,
+       D.&OPPOSITE_COUNTRY                     OPPOSITE_COUNTRY, 
+       D.&MODE_OF_TRANSPORT                    MODE_OF_TRANSPORT,  
+       D.&DELIVERY_TERMS                       DELIVERY_TERMS,
+       D.&COUNTRY_OF_ORIGIN                    COUNTRY_OF_ORIGIN,
+       D.&COUNTY                               COUNTY,
+       -- gelr:italy_intrastat, start
+       D.&INVOICE_DATE                         INVOICE_DATE,
+       D.&ADJUST_TO_PREV_INTRASTAT             ADJUST_TO_PREV_INTRASTAT,
+       D.&SERVICE_STATISTICAL_CODE             SERVICE_STATISTICAL_CODE,
+       D.&SERVICE_WAY                          SERVICE_WAY,
+       D.&SERVICE_PAYMENT_WAY                  SERVICE_PAYMENT_WAY,
+       D.&INVOICE_SERIE                        INVOICE_SERIE,
+       D.&INVOICE_NUMBER                       INVOICE_NUMBER
+       -- gelr:italy_intrastat, end
+FROM  &VIEW_RPV H, &VIEW_RPV D
+WHERE D.RESULT_KEY = H.RESULT_KEY 
+AND   D.PARENT_ROW_NO = H.ROW_NO
+WITH  read only;
+
+COMMENT ON TABLE &VIEW IS
+   'MODULE=&MODULE^LU=&LU^PROMPT=&LU^';
+
+COMMENT ON COLUMN &VIEW..result_key IS
+   'FLAGS=M----^DATATYPE=NUMBER^';
+COMMENT ON COLUMN &VIEW..row_no IS
+   'FLAGS=M----^DATATYPE=NUMBER^';  
+COMMENT ON COLUMN &VIEW..COMPANY_NAME IS
+   'FLAGS=A----^DATATYPE=STRING(100)^TITLE=Company name:^ITEM_NAME=iCompanyName^';  
+COMMENT ON COLUMN &VIEW..COMPANY_VAT_NO IS
+   'FLAGS=A----^DATATYPE=STRING(61)^TITLE=Company Tax No:^ITEM_NAME=iCompanyVatNo^';   
+COMMENT ON COLUMN &VIEW..REPR_NAME IS
+   'FLAGS=A----^DATATYPE=STRING(100)^TITLE=Representative name:^ITEM_NAME=iReprName^';  
+COMMENT ON COLUMN &VIEW..REPR_VAT_NO IS
+   'FLAGS=A----^DATATYPE=STRING(61)^TITLE=Representative Tax No:^ITEM_NAME=iReprVatNo^';     
+COMMENT ON COLUMN &VIEW..CURRENCY_CODE IS
+   'FLAGS=A----^DATATYPE=STRING(3)^TITLE=Reporting Currency code:^ITEM_NAME=iCurrencyCode^'; 
+COMMENT ON COLUMN &VIEW..REPORTING_PERIOD IS
+   'FLAGS=A----^DATATYPE=STRING(4)^TITLE=Reporting period:^ITEM_NAME=iReportingPeriod^';
+COMMENT ON COLUMN &VIEW..CREATION_DATE IS
+   'FLAGS=A----^DATATYPE=DATE/DATE^TITLE=Creation date:^ITEM_NAME=iCreationDate^';
+COMMENT ON COLUMN &VIEW..NO_OF_LINES IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Number of lines:^ITEM_NAME=iNoOfLines^';  
+COMMENT ON COLUMN &VIEW..REPORT_TITLE IS
+   'FLAGS=A----^DATATYPE=STRING(50)^TITLE=Report title^ITEM_NAME=iReportTitle^';   
+COMMENT ON COLUMN &VIEW..STAT_VALUES_SUM IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Total invoiced value:^ITEM_NAME=iStatisticalValueSum^';
+          
+COMMENT ON COLUMN &VIEW..LINE_NO IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Line No^ITEM_NAME=iLineNo^';
+COMMENT ON COLUMN &VIEW..OPPONENT_TAX_ID IS
+   'FLAGS=A----^DATATYPE=STRING(50)^TITLE=Opponent Tax Id:^ITEM_NAME=iOpponentTaxId^';      
+COMMENT ON COLUMN &VIEW..NOTC IS
+   'FLAGS=A----^DATATYPE=STRING(2)^TITLE=Nature of Transaction^ITEM_NAME=iNotc^';  
+COMMENT ON COLUMN &VIEW..COMMODITY_CODE IS
+   'FLAGS=A----^DATATYPE=STRING(8)^TITLE=Commodity Code^ITEM_NAME=iCommodityCode^';
+COMMENT ON COLUMN &VIEW..COM_CODE_DESC IS
+   'FLAGS=A----^DATATYPE=STRING(35)^TITLE=Commodity Code Description^ITEM_NAME=iComCodeDesc^';
+COMMENT ON COLUMN &VIEW..STATISTICAL_VALUE IS
+   'FLAGS=A----^DATATYPE=NUMBER^TITLE=Invoiced Value^ITEM_NAME=iStatisticalValue^';
+COMMENT ON COLUMN &VIEW..INTRASTAT_ID IS
+   'FLAGS=A----^DATATYPE=NUMBER^REF=Intrastat^QUERY=Intrastat ID:^QFLAGS=MCS--^STATUS=Enter Intrastat ID^';
+COMMENT ON COLUMN &VIEW..INTRASTAT_DIRECTION IS
+   'FLAGS=A----^DATATYPE=STRING(20)^REF=IntrastatDirection^QUERY=Intrastat Direction:^QFLAGS=MCS--^STATUS=Enter Intrastat Direction^';
+COMMENT ON COLUMN &VIEW..OPPOSITE_COUNTRY IS
+   'FLAGS=A----^DATATYPE=STRING(2)^TITLE=Opposite Country^ITEM_NAME=iOppositeCountry^';
+COMMENT ON COLUMN &VIEW..MODE_OF_TRANSPORT IS
+   'FLAGS=A----^DATATYPE=STRING(1)^TITLE=Mode of Transport^ITEM_NAME=iModeOfTransport^';
+COMMENT ON COLUMN &VIEW..DELIVERY_TERMS IS
+   'FLAGS=A----^DATATYPE=STRING(5)^TITLE=Delivery Terms^ITEM_NAME=iDeliveryTerms^';
+COMMENT ON COLUMN &VIEW..COUNTRY_OF_ORIGIN IS
+   'FLAGS=A----^DATATYPE=STRING(2)^TITLE=Country of Origin^ITEM_NAME=iCountryOfOrigin^';
+COMMENT ON COLUMN &VIEW..COUNTY IS
+   'FLAGS=A----^DATATYPE=STRING(35)^TITLE=County^ITEM_NAME=iCounty^';
+-- gelr:italy_intrastat, start
+COMMENT ON COLUMN &VIEW..invoice_date
+   IS 'FLAGS=A----^DATATYPE=DATE/DATE^TITLE=Invoice Date^';
+COMMENT ON COLUMN &VIEW..adjust_to_prev_intrastat
+   IS 'FLAGS=A----^DATATYPE=STRING(5)^TITLE=Adjust To Prev Intrastat^';
+COMMENT ON COLUMN &VIEW..service_statistical_code
+   IS 'FLAGS=A----^DATATYPE=STRING(15)^TITLE=Service Statistical Code^';
+COMMENT ON COLUMN &VIEW..service_way
+   IS 'FLAGS=A----^DATATYPE=STRING(30)^TITLE=Service Way^';
+COMMENT ON COLUMN &VIEW..service_payment_way
+   IS 'FLAGS=A----^DATATYPE=STRING(30)^TITLE=Service Payment Way^';
+COMMENT ON COLUMN &VIEW..invoice_serie
+   IS 'FLAGS=A----^DATATYPE=STRING(20)^TITLE=Invoice Serie^';
+COMMENT ON COLUMN &VIEW..invoice_number
+   IS 'FLAGS=A----^DATATYPE=STRING(50)^TITLE=Invoice Number^';
+-- gelr:italy_intrastat, end
+   
+
+BEGIN 
+   Report_SYS.Define_Report_('&VIEW','&MODULE','&LU','Intrastat Report Italy','&TABLE','&PKG..&METHOD',30,NULL,NULL,NULL,'PLSQL1.2','TRUE','Supply Chain','Intrastat'); 
+   -- Addition for Custom Fields ------
+   Report_Lu_Definition_API.Clear_Custom_Fields_For_Report('&VIEW');
+   Report_Lu_Definition_API.Enable_Custom_Fields_for_Lu('&VIEW','Intrastat','INTRASTAT_IT_REP');
+   Report_SYS.Refresh_('&VIEW');
+END;
+/
+
+-----------------------------------------------------------------------------
+-- PACKAGE IMPLEMENTATION
+-----------------------------------------------------------------------------
+
+PROMPT Creating &PKG implementation
+
+CREATE OR REPLACE PACKAGE BODY &PKG AS
+
+PROCEDURE &METHOD (
+   report_attr_    IN VARCHAR2,
+   parameter_attr_ IN VARCHAR2 )
+IS
+  
+   file_line_no_        NUMBER := 0;
+   vat_no_               VARCHAR2(50);   
+   stmt_                 VARCHAR2(2000);
+   no_of_lines_          NUMBER;  
+   result_key_           NUMBER;
+   row_no_               NUMBER := 1;
+   parent_row_no_        NUMBER := 0;
+   report_title_         VARCHAR2(50);
+   intrastat_id_         NUMBER;
+   intrastat_direction_  VARCHAR2(20);
+   rep_curr_rate_        NUMBER;
+   country_code_         VARCHAR2(2);   
+   statistical_values_sum_ NUMBER := 0;
+   report_period_          VARCHAR2(4);
+   com_code_desc_          VARCHAR2(2000);
+   company_vat_no_         VARCHAR2(61);
+   company_name_           VARCHAR2(100);
+   repr_vat_no_            VARCHAR2(61);
+   repr_name_              VARCHAR2(100);
+   notc_dummy_             VARCHAR2(2);  
+   do_xml_                 BOOLEAN := Report_SYS.Should_Generate_Xml('&VIEW');
+   do_rs_                  BOOLEAN := Report_SYS.Should_Generate_Result_Set('&VIEW');
+   xml_                    CLOB;
+   package_name_           VARCHAR2(100) := 'INTRASTAT_IT_REP';
+   document_address_         VARCHAR2(50);
+   doc_country_code_         VARCHAR2(2);
+   country_of_origin_dummy_  NUMBER;
+   delivery_country_code_    VARCHAR2(2);
+   -- gelr:italy_intrastat, start
+   italy_intrastat_enabled_         BOOLEAN := FALSE;
+   italy_intrastat_                 VARCHAR2(5) := Fnd_Boolean_API.DB_FALSE;
+   -- gelr:italy_intrastat, end
+      
+   CURSOR get_notc IS
+      SELECT DISTINCT notc
+      FROM   intrastat_line_tab
+      WHERE  intrastat_id = intrastat_id_;
+   
+   CURSOR get_country_notc (notc_ VARCHAR2) IS
+      SELECT country_notc
+      FROM   country_notc_tab
+      WHERE  notc = notc_
+      AND    country_code = 'IT';
+
+   CURSOR check_opponent_number IS
+      SELECT COUNT(*)                  
+      FROM   intrastat_line_tab il
+      WHERE  il.intrastat_id = intrastat_id_
+      AND    il.intrastat_direction = intrastat_direction_
+      AND    il.rowstate = 'Released'
+      AND    il.opponent_number IS NULL;
+
+   CURSOR check_opponent_type IS
+      SELECT COUNT(*)                  
+      FROM   intrastat_line_tab il
+      WHERE  il.intrastat_id = intrastat_id_
+      AND    il.intrastat_direction = intrastat_direction_
+      AND    il.rowstate = 'Released'
+      AND    il.opponent_type IS NULL
+      AND    il.opponent_number IS NOT NULL;
+   
+   CURSOR get_head IS
+      SELECT company,
+             representative,
+             repr_tax_no,  
+             end_date,
+             creation_date,
+             rep_curr_code,
+             bransch_no,
+             bransch_no_repr,
+             company_contact,
+             rep_curr_rate,
+             country_code,
+             to_invoice_date,
+             rowkey
+      FROM   intrastat_tab
+      WHERE  intrastat_id = intrastat_id_;
+
+
+   -- county_ and Removed partner from select list and modified GROUP BY statement.
+   CURSOR get_lines IS
+      SELECT DECODE(il.customs_stat_no, NULL, NULL, il.opposite_country)  opposite_country,
+             DECODE(il.customs_stat_no, NULL, NULL, il.mode_of_transport) mode_of_transport,
+             DECODE(il.customs_stat_no, NULL, NULL, il.delivery_terms)    delivery_terms,
+             DECODE(intrastat_direction_, 'IMPORT', DECODE(il.customs_stat_no, NULL, NULL, il.country_of_origin), NULL) country_of_origin,
+             il.opponent_number,
+             il.contract,
+             il.opponent_type,
+             il.opponent_tax_id,
+             DECODE(il.customs_stat_no, NULL, NULL, SUBSTR(il.county, 1, 2)) county,
+             DECODE(il.customs_stat_no, NULL, NULL,
+             decode(il.triangulation, 'TRIANGULATION', 
+                    decode(cn.country_notc,'1','A',
+                                           '2','B',
+                                           '3','C',
+                                           '4','D',
+                                           '5','E',
+                                           '6','F',
+                                           '7','G',
+                                           '8','H',
+                                           '9','I', cn.country_notc), 
+                    cn.country_notc)) decoded_country_notc,                                            
+             il.customs_stat_no,
+             SUM((NVL(il.invoiced_unit_price, NVL(il.order_unit_price,0)) + 
+                  NVL(il.unit_add_cost_amount_inv, NVL(il.unit_add_cost_amount,0)) +
+                  NVL(il.unit_charge_amount_inv,0) + NVL(il.unit_charge_amount,0)) * 
+                     il.quantity) * rep_curr_rate_ invoiced_value,
+             -- gelr:italy_intrastat, start
+             SUM(NVL(il.opposite_country_curr_amt, 0))                  opposite_country_curr_amt,
+             DECODE(italy_intrastat_, 'FALSE', DECODE(il.customs_stat_no, NULL, il.invoice_serie,  NULL), NULL)  invoice_serie,             -- Need to set value to null when italy intrastat not enabled to discard the effect of this attibute
+             DECODE(italy_intrastat_, 'FALSE', DECODE(il.customs_stat_no, NULL, il.invoice_number, NULL), NULL) invoice_number,            -- Need to set value to null when italy intrastat not enabled to discard the effect of this attibute
+             DECODE(il.customs_stat_no, NULL, il.invoice_date,   NULL) invoice_date,
+             il.adjust_to_prev_intrastat,
+             DECODE(il.customs_stat_no, NULL, il.service_statistical_code, NULL) service_statistical_code,             
+             DECODE(il.customs_stat_no, NULL, il.service_way,    NULL) service_way,
+             DECODE(il.customs_stat_no, NULL, il.service_payment_way,    NULL) service_payment_way,             
+             il.protocol_no
+             -- gelr:italy_intrastat, end
+      FROM   intrastat_line_tab il, country_notc_tab cn
+      WHERE  il.intrastat_id = intrastat_id_
+      AND    il.intrastat_direction = intrastat_direction_
+      AND    il.rowstate = 'Released'        
+      AND    il.notc = cn.notc      
+      AND    cn.country_code = country_code_      
+      GROUP BY  DECODE(il.customs_stat_no, NULL, NULL, il.opposite_country),
+                DECODE(il.customs_stat_no, NULL, NULL, il.mode_of_transport),
+                DECODE(il.customs_stat_no, NULL, NULL, il.delivery_terms),
+                DECODE(intrastat_direction_, 'IMPORT', DECODE(il.customs_stat_no, NULL, NULL, il.country_of_origin), NULL),
+                il.opponent_number,
+                il.contract,
+                il.opponent_type,
+                il.opponent_tax_id,
+                DECODE(il.customs_stat_no, NULL, NULL, SUBSTR(il.county, 1, 2)),
+                DECODE(il.customs_stat_no, NULL, NULL, 
+                DECODE(il.triangulation, 'TRIANGULATION', 
+                       DECODE(cn.country_notc,'1','A',
+                                              '2','B',
+                                              '3','C',
+                                              '4','D',
+                                              '5','E',
+                                              '6','F',
+                                              '7','G',
+                                              '8','H',
+                                              '9','I', cn.country_notc), cn.country_notc)),
+             il.customs_stat_no,
+             -- gelr:italy_intrastat, start
+             DECODE(italy_intrastat_, 'FALSE', DECODE(il.customs_stat_no, NULL, il.invoice_serie,  NULL), NULL),               -- Need to set value to null when italy intrastat not enabled to discard the effect of this attibute
+             DECODE(italy_intrastat_, 'FALSE', DECODE(il.customs_stat_no, NULL, il.invoice_number, NULL), NULL),              -- Need to set value to null when italy intrastat not enabled to discard the effect of this attibute
+             DECODE(il.customs_stat_no, NULL, il.invoice_date,   NULL),
+             il.adjust_to_prev_intrastat,
+             DECODE(il.customs_stat_no, NULL, il.service_statistical_code,      NULL),             
+             DECODE(il.customs_stat_no, NULL, il.service_way,    NULL),
+             DECODE(il.customs_stat_no, NULL, il.service_payment_way, NULL),             
+             il.protocol_no
+             -- gelr:italy_intrastat, end
+                ;
+      
+   CURSOR check_country_of_origin(italy_intrastat_ IN VARCHAR2) IS
+      SELECT 1                  
+      FROM   intrastat_line_tab
+      WHERE  intrastat_id = intrastat_id_
+      AND    intrastat_direction = 'IMPORT'
+      AND    rowstate = 'Released'
+      AND    country_of_origin IS NULL
+      -- gelr:italy_intrastat, start
+      AND    ((italy_intrastat_ = 'FALSE') OR 
+              (italy_intrastat_ = 'TRUE' AND service_statistical_code IS NULL));
+      -- gelr:italy_intrastat, end
+                  
+   FUNCTION Decode_Val ( expression_    VARCHAR2,
+                         search_        VARCHAR2,
+                         result_        VARCHAR2,
+                         default_       VARCHAR2) RETURN VARCHAR2
+   IS
+   BEGIN
+      IF (expression_ = search_) THEN
+         RETURN result_;
+      ELSE
+         RETURN default_;
+      END IF;
+   END Decode_Val;
+
+
+BEGIN
+
+   General_SYS.Init_Method(lu_name_, '&PKG', '&METHOD');
+
+   result_key_ := to_number(Client_SYS.Get_Item_Value('RESULT_KEY', report_attr_));
+   intrastat_id_ := to_number(Client_SYS.Get_Item_Value('INTRASTAT_ID', parameter_attr_));
+   intrastat_direction_ := Intrastat_Direction_API.Encode(Client_SYS.Get_Item_Value('INTRASTAT_DIRECTION', parameter_attr_));
+   
+   -- check that country notc have valid values
+   FOR notc_rec_ IN get_notc LOOP
+      OPEN get_country_notc(notc_rec_.notc);
+      FETCH get_country_notc INTO notc_dummy_;
+      IF (get_country_notc%NOTFOUND) THEN    
+         CLOSE get_country_notc;
+         Error_SYS.Record_General(lu_name_, 'NOCOUNTRYNOTC: This country is missing an entry for NOTC :P1 in table COUNTRY_NOTC_TAB. Contact your system administrator.', notc_rec_.notc);   
+      END IF;        
+      CLOSE get_country_notc;  
+   END LOOP;
+
+   -- check that no opponent_number is NULL
+   OPEN check_opponent_number;
+   FETCH check_opponent_number INTO no_of_lines_;
+   IF (no_of_lines_ > 0) THEN
+      Error_SYS.Record_General(lu_name_, 'OPPONENTNONULL: This transaction have 1 or more rows with an empty Opponent Number, they must have a valid Opponent Number.');      
+   END IF;   
+   CLOSE check_opponent_number;
+
+   no_of_lines_ := 0;
+   OPEN check_opponent_type;
+   FETCH check_opponent_type INTO no_of_lines_;
+   IF (no_of_lines_ > 0) THEN
+      CLOSE check_opponent_type;
+      Error_SYS.Record_General(lu_name_, 'NOOPPONENTTYPE: Opponent type is missing for one or more lines.');      
+   END IF;   
+   CLOSE check_opponent_type;
+   
+   -- gelr:italy_intrastat, start
+   IF(Company_Localization_Info_API.Get_Parameter_Value_Db(Intrastat_API.Get_Company(intrastat_id_), 'ITALY_INTRASTAT') = Fnd_Boolean_API.DB_TRUE) THEN
+      italy_intrastat_enabled_ := TRUE;
+      italy_intrastat_         :=  Fnd_Boolean_API.DB_TRUE; -- Use only for cursor changes since sql doesn't support boolean.
+   END IF;
+   -- gelr:italy_intrastat, end
+   -- Check for country_of_origin when intrastat_direction_ = 'IMPORT' .
+   IF (intrastat_direction_ = 'IMPORT') THEN
+      OPEN check_country_of_origin(italy_intrastat_);
+      FETCH check_country_of_origin INTO country_of_origin_dummy_;
+      IF (check_country_of_origin%FOUND) THEN
+         CLOSE check_country_of_origin;
+         Error_SYS.Record_General(lu_name_, 'NOCOUNTRYOFORIGIN: Country of Origin is mandatory for import lines. Values are missing for some import lines.'); 
+      END IF;
+      CLOSE check_country_of_origin;
+   END IF;
+
+   IF (intrastat_direction_ = 'EXPORT') THEN
+      report_title_ := Language_SYS.Translate_Constant(lu_name_, 'REPEXPORTIT: Intrastat Export Report');
+   ELSE
+      report_title_ := Language_SYS.Translate_Constant(lu_name_, 'REPIMPORTIT: Intrastat Import Report');
+   END IF;
+
+   IF (do_xml_) THEN
+      Xml_Record_Writer_SYS.Create_Report_Header(xml_,'&VIEW',package_name_);
+   END IF;
+
+   FOR headrec_ IN get_head LOOP     
+      
+      IF (Transaction_SYS.Logical_Unit_Is_Installed('TaxLiabilityCountries')) THEN
+         stmt_ := 'BEGIN :vat_no := Tax_Liability_Countries_API.Get_Tax_Id_Number_Db(:company, :country, TRUNC(:creation_date)); END;';
+         
+         -- ifs_assert_safe bmekse 20110309
+         EXECUTE IMMEDIATE stmt_ 
+            USING OUT vat_no_,
+                  IN  headrec_.company,
+                  IN  headrec_.country_code,
+                  IN  headrec_.creation_date;
+      END IF;
+  
+      report_period_ := to_char(headrec_.end_date, 'YYMM');         
+      rep_curr_rate_ := headrec_.rep_curr_rate;
+      country_code_ := headrec_.country_code;      
+
+      company_vat_no_ :=  vat_no_ || '-' || headrec_.bransch_no;
+      company_name_ := Company_API.Get_Name(headrec_.company); 
+  
+      IF (headrec_.representative IS NOT NULL) THEN
+         repr_vat_no_ :=  headrec_.repr_tax_no || '-' || headrec_.bransch_no_repr;
+         repr_name_ := Person_Info_API.Get_Name(headrec_.representative);
+      END IF;         
+
+      IF (do_xml_) THEN        
+         Xml_Record_Writer_SYS.Add_Element(xml_,'REPORT_TITLE', report_title_);
+         Xml_Record_Writer_SYS.Add_Element(xml_,'CREATION_DATE', headrec_.creation_date);
+         Xml_Record_Writer_SYS.Add_Element(xml_,'REPORTING_PERIOD', report_period_);
+         Xml_Record_Writer_SYS.Add_Element(xml_,'CURRENCY_CODE', headrec_.rep_curr_code);
+         Xml_Record_Writer_SYS.Add_Element(xml_,'REPR_VAT_NO', repr_vat_no_);
+         Xml_Record_Writer_SYS.Add_Element(xml_,'REPR_NAME', repr_name_);
+         Xml_Record_Writer_SYS.Add_Element(xml_,'COMPANY_VAT_NO', company_vat_no_);
+         Xml_Record_Writer_SYS.Add_Element(xml_,'COMPANY_NAME', company_name_);
+         Xml_Record_Writer_SYS.Add_Custom_Fields(xml_,'Intrastat',headrec_.rowkey, '&VIEW');
+
+         Xml_Record_Writer_SYS.Start_Element(xml_, 'INTRASTAT_IT_LINES');
+      END IF;
+      
+      IF (do_rs_) THEN
+         -- Insert Head details
+         INSERT INTO &TABLE
+            (result_key, row_no, parent_row_no, 
+             &COMPANY_NAME, &COMPANY_VAT_NO, 
+             &REPR_NAME, &REPR_VAT_NO,           
+             &REPORTING_PERIOD, &CREATION_DATE,
+             &CURRENCY_CODE, &REPORT_TITLE )
+         VALUES
+            (result_key_, row_no_, parent_row_no_, 
+            company_name_, company_vat_no_, 
+            repr_name_, repr_vat_no_,          
+            report_period_, headrec_.creation_date,
+            headrec_.rep_curr_code, report_title_ );   
+         parent_row_no_ := row_no_;   
+         row_no_ := row_no_ + 1;
+      END IF;
+
+      vat_no_ := NULL;
+      
+      -- Data Records
+      FOR linerec_ IN get_lines LOOP
+         
+         IF (linerec_.opponent_type = 'SUPPLIER') THEN
+            document_address_ := Supplier_Info_Address_API.Get_Default_Address(linerec_.opponent_number, Address_Type_Code_API.Decode('INVOICE'));
+            doc_country_code_ := Supplier_Info_Address_API.Get_Country_Code(linerec_.opponent_number, document_address_);            
+         ELSIF (linerec_.opponent_type = 'CUSTOMER') THEN
+            document_address_ := Customer_Info_Address_API.Get_Default_Address(linerec_.opponent_number, Address_Type_Code_API.Decode('INVOICE'));
+            doc_country_code_ := Customer_Info_Address_API.Get_Country_Code(linerec_.opponent_number, document_address_);
+            delivery_country_code_ := Customer_Info_Address_API.Get_Delivery_Country_Db(linerec_.opponent_number);            
+         -- If Opponent_type is COMPANY, it fetches the document address country code of company.
+         ELSE
+            document_address_ := Company_Address_API.Get_Default_Address(linerec_.opponent_number, Address_Type_Code_API.Decode('INVOICE'));
+            doc_country_code_ := Company_Address_API.Get_Country_Db(linerec_.opponent_number, document_address_);            
+         END IF;
+
+         Iso_Country_API.Exist_Db(doc_country_code_);
+
+         file_line_no_ := file_line_no_ + 1;
+         com_code_desc_ := Customs_Statistics_Number_API.Get_Description(linerec_.customs_stat_no);
+
+         linerec_.opposite_country := Decode_Val(linerec_.opposite_country, 'GR', 'EL', linerec_.opposite_country); 
+         linerec_.country_of_origin := Decode_Val(linerec_.country_of_origin, 'GR', 'EL', linerec_.country_of_origin); 
+
+         IF (do_xml_) THEN
+            Xml_Record_Writer_SYS.Start_Element(xml_, 'INTRASTAT_IT_LINE');
+            Xml_Record_Writer_SYS.Add_Element(xml_,'COM_CODE_DESC', com_code_desc_);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'COMMODITY_CODE', linerec_.customs_stat_no);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'LINE_NO', file_line_no_);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'NOTC', linerec_.decoded_country_notc);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'STATISTICAL_VALUE', round(linerec_.invoiced_value));
+            Xml_Record_Writer_SYS.Add_Element(xml_,'OPPONENT_TAX_ID', linerec_.opponent_tax_id);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'MODE_OF_TRANSPORT', linerec_.mode_of_transport);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'COUNTRY_OF_ORIGIN', linerec_.country_of_origin);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'COUNTY', linerec_.county);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'DELIVERY_TERMS', linerec_.delivery_terms);
+            Xml_Record_Writer_SYS.Add_Element(xml_,'OPPOSITE_COUNTRY', linerec_.opposite_country);
+            -- gelr:italy_intrastat, start
+            IF (italy_intrastat_enabled_) THEN
+               Xml_Record_Writer_SYS.Add_Element(xml_,'INVOICE_DATE',             linerec_.invoice_date);
+               Xml_Record_Writer_SYS.Add_Element(xml_,'ADJUST_TO_PREV_INTRASTAT', linerec_.adjust_to_prev_intrastat);
+               Xml_Record_Writer_SYS.Add_Element(xml_,'SERVICE_STATISTICAL_CODE', linerec_.service_statistical_code);
+               Xml_Record_Writer_SYS.Add_Element(xml_,'SERVICE_WAY',              linerec_.service_way);
+               Xml_Record_Writer_SYS.Add_Element(xml_,'SERVICE_PAYMENT_WAY',      linerec_.service_payment_way);
+               Xml_Record_Writer_SYS.Add_Element(xml_,'INVOICE_SERIE',            linerec_.invoice_serie);
+               Xml_Record_Writer_SYS.Add_Element(xml_,'INVOICE_NUMBER',           linerec_.invoice_number);
+            END IF;
+            -- gelr:italy_intrastat, end
+            Xml_Record_Writer_SYS.End_Element(xml_, 'INTRASTAT_IT_LINE');
+         END IF;
+
+         IF (do_rs_) THEN
+            -- insert detail rows
+            INSERT INTO &TABLE
+               (result_key, row_no, parent_row_no, &LINE_NO, 
+                &OPPONENT_TAX_ID, &NOTC,
+                &COMMODITY_CODE, &COM_CODE_DESC,
+                &STATISTICAL_VALUE,
+                &OPPOSITE_COUNTRY, 
+                &MODE_OF_TRANSPORT,  
+                &DELIVERY_TERMS,
+                &COUNTRY_OF_ORIGIN,
+                &COUNTY,
+                -- gelr:italy_intrastat, start
+                &INVOICE_DATE,
+                &ADJUST_TO_PREV_INTRASTAT,
+                &SERVICE_STATISTICAL_CODE,
+                &SERVICE_WAY,
+                &SERVICE_PAYMENT_WAY,
+                &INVOICE_SERIE,
+                &INVOICE_NUMBER
+                -- gelr:italy_intrastat, end
+                )
+            VALUES
+               (result_key_, row_no_, parent_row_no_, file_line_no_, 
+                linerec_.opponent_tax_id, linerec_.decoded_country_notc,
+                linerec_.customs_stat_no, com_code_desc_,
+                round(linerec_.invoiced_value), 
+                linerec_.opposite_country,
+                linerec_.mode_of_transport,
+                linerec_.delivery_terms,
+                linerec_.country_of_origin,
+                linerec_.county,
+                -- gelr:italy_intrastat, start
+                DECODE(italy_intrastat_, 'TRUE', DECODE(linerec_.customs_stat_no, NULL, linerec_.invoice_date, NULL), NULL),
+                DECODE(italy_intrastat_, 'TRUE', linerec_.adjust_to_prev_intrastat, NULL),
+                DECODE(italy_intrastat_, 'TRUE', DECODE(linerec_.customs_stat_no, NULL, linerec_.service_statistical_code, NULL), NULL),
+                DECODE(italy_intrastat_, 'TRUE', DECODE(linerec_.customs_stat_no, NULL, linerec_.service_way, NULL), NULL),
+                DECODE(italy_intrastat_, 'TRUE', DECODE(linerec_.customs_stat_no, NULL, linerec_.service_payment_way,    NULL),      NULL),
+                DECODE(italy_intrastat_, 'TRUE', DECODE(linerec_.customs_stat_no, NULL, linerec_.invoice_serie,  NULL), NULL),
+                DECODE(italy_intrastat_, 'TRUE', DECODE(linerec_.customs_stat_no, NULL, linerec_.invoice_number, NULL), NULL)
+                -- gelr:italy_intrastat, end
+                );
+            row_no_ := row_no_ + 1;
+         END IF;
+
+         -- sums
+         statistical_values_sum_ := statistical_values_sum_ + ROUND(linerec_.invoiced_value);
+
+      END LOOP;
+
+      IF (do_rs_) THEN
+         IF (row_no_ = 2) THEN -- no details      
+            -- insert blank row
+            INSERT INTO &TABLE
+               (result_key, row_no, parent_row_no, &LINE_NO, 
+                &OPPONENT_TAX_ID, &NOTC,
+                &COMMODITY_CODE, &COM_CODE_DESC,
+                &STATISTICAL_VALUE,
+                &OPPOSITE_COUNTRY, 
+                &MODE_OF_TRANSPORT,  
+                &DELIVERY_TERMS,
+                &COUNTRY_OF_ORIGIN,
+                &COUNTY )
+            VALUES
+               (result_key_, row_no_, parent_row_no_, NULL, 
+                NULL, NULL,
+                NULL, NULL,
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                NULL );     
+         END IF;
+         
+         -- update the head with no_of_lines and sums
+         UPDATE &TABLE
+         SET    &NO_OF_LINES = file_line_no_,
+                &STAT_VALUES_SUM = statistical_values_sum_
+         WHERE  result_key = result_key_
+         AND    row_no = parent_row_no_;
+      END IF;
+      
+   END LOOP;
+
+   IF (do_xml_) THEN
+      Xml_Record_Writer_SYS.End_Element(xml_, 'INTRASTAT_IT_LINES');
+      Xml_Record_Writer_SYS.Add_Element(xml_,'NO_OF_LINES', file_line_no_);
+      Xml_Record_Writer_SYS.Add_Element(xml_,'STAT_VALUES_SUM', round(statistical_values_sum_));
+      Xml_Record_Writer_SYS.End_Element(xml_,'&VIEW');
+      Report_SYS.Finish_Xml_Report('&VIEW',result_key_,xml_);
+   END IF;
+
+END &METHOD;
+
+-----------------------------------------------------------------------------
+-------------------- FOUNDATION1 METHODS ------------------------------------
+-----------------------------------------------------------------------------
+-- Init
+--   Dummy procedure that can be called at database startup to ensure that
+--   this package is loaded into memory for performance reasons only.
+-----------------------------------------------------------------------------
+
+PROCEDURE Init
+IS
+BEGIN
+   NULL;
+END Init;
+
+
+END &PKG;
+/
+SHOW ERROR
+
+-----------------------------------------------------------------------------
+-- END
+-----------------------------------------------------------------------------
+
+
+
+
+
+----------------------------------------------------------
+-- <UNDEFINE_SECTION>
+----------------------------------------------------------
+-- This section is reserved for undefine statements
+-- nothing should be manually written below because
+-- that would be overwritten everytime the IFS / Undefine
+-- tool is run.  
+-- Also do NOT make any changes to the above tag because
+-- this will result in duplicated code
+----------------------------------------------------------
+UNDEFINE MODULE
+UNDEFINE LU
+UNDEFINE PKG
+UNDEFINE TABLE
+UNDEFINE VIEW
+UNDEFINE VIEW_RPV
+UNDEFINE METHOD
+UNDEFINE COMPANY_NAME
+UNDEFINE COMPANY_VAT_NO
+UNDEFINE REPR_NAME
+UNDEFINE REPR_VAT_NO
+UNDEFINE CURRENCY_CODE
+UNDEFINE REPORTING_PERIOD
+UNDEFINE CREATION_DATE
+UNDEFINE NO_OF_LINES
+UNDEFINE REPORT_TITLE
+UNDEFINE STAT_VALUES_SUM
+UNDEFINE LINE_NO
+UNDEFINE OPPONENT_TAX_ID
+UNDEFINE NOTC
+UNDEFINE COMMODITY_CODE
+UNDEFINE COM_CODE_DESC
+UNDEFINE STATISTICAL_VALUE
+UNDEFINE OPPOSITE_COUNTRY
+UNDEFINE MODE_OF_TRANSPORT
+UNDEFINE DELIVERY_TERMS
+UNDEFINE COUNTRY_OF_ORIGIN
+UNDEFINE COUNTY
+-- gelr:italy_intrastat, start
+UNDEFINE INVOICE_DATE
+UNDEFINE ADJUST_TO_PREV_INTRASTAT
+UNDEFINE SERVICE_STATISTICAL_CODE
+UNDEFINE SERVICE_WAY
+UNDEFINE SERVICE_PAYMENT_WAY
+UNDEFINE INVOICE_SERIE
+UNDEFINE INVOICE_NUMBER
+-- gelr:italy_intrastat, end

@@ -1,0 +1,459 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: SalesComplementaryPartsHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date        Sign    History
+--  ------      ------  ---------------------------------------------------------
+--  2021-07-26  ChFolk  SCZ-15615(Bug-160007), Added function Get_Project_Info___. Modified Create_Records___ to add activity_seq into the new attr_.
+--  2019-09-16  Rulilk  SCFALL19-391, Modified method CreateRecords by adding LineNo and ReleaseNo as parameters.
+--  2019-08-20  MalLlk  SCUXXW4-22978, Renamed the projection ManageComplementaryPartsAssistant to SalesComplementaryPartsHandling.
+--  2019-03-31  ChBnlk  SCUXXW4-18215, Modified method CRUD_Create___() in order to properly create the complmentry part lines.
+--  2019-03-28  ChBnlk  SCUXXW4-8377, Modified method CRUD_Create___() to support Customer Order Template dialog.
+--  2019-03-20  ChBnlk  SCUXXW4-8517, Modified method CRUD_Create___() to support Sales Quotation Template dialog.
+--  2018-11-20  RuLiLk  SCUXXW4-8810, Converted from dlgSuggestedSalesPart using MTG Version: 1.33
+-----------------------------------------------------------------------------
+
+layer Core;
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Suggested_Sales_Part_Virtual_Rec )
+IS
+   record_           VARCHAR2(32000) := rec_.record; 
+   record2_          VARCHAR2(32000) := rec_.obj_record;
+   array_            json_array_t;
+   current_record_   VARCHAR2(32000);
+   source_no_        VARCHAR2(12);
+   line_no_          VARCHAR2(4);
+   rel_no_           VARCHAR2(4);
+   line_item_no_     NUMBER;
+   
+   CURSOR get_suggested_sales_part_order IS
+      SELECT S.contract, s.parent_part_no, c.buy_qty_due, c.wanted_delivery_date, c.planned_delivery_date, c.price_effectivity_date, s.suggested_part_no, c.pre_accounting_id, c.order_no, c.line_no, c.rel_no 
+      FROM suggested_sales_part S
+      INNER JOIN customer_order_line_tab c
+      ON C.order_no = source_no_
+      AND C.line_no = line_no_
+      AND c.rel_no = rel_no_
+      AND c.line_item_no = line_item_no_
+      AND c.contract = s.contract
+      AND c.catalog_no = s.parent_part_no   
+      AND (Customer_Order_API.Get_Limit_Sales_To_Assortme_Db(order_no) = 'FALSE'
+      OR (Customer_Order_API.Get_Limit_Sales_To_Assortme_Db(order_no) = 'TRUE' AND EXISTS (SELECT 1 FROM Limit_To_Assort_Sales_Part_Lov lasp WHERE suggested_part_no = lasp.catalog_no))) ;
+   
+   CURSOR get_suggested_sales_part_quote IS
+      SELECT s.contract, s.parent_part_no,  c.buy_qty_due, c.wanted_delivery_date, s.suggested_part_no, c.quotation_no, c.line_no, c.rel_no
+      FROM suggested_sales_part s
+      INNER JOIN order_quotation_line_tab c
+      ON c.quotation_no = source_no_
+      AND c.line_no = line_no_
+      AND c.rel_no = rel_no_
+      AND c.line_item_no = line_item_no_
+      AND c.contract = s.contract
+      AND c.catalog_no = s.parent_part_no;   
+   
+   CURSOR get_sales_quotation_line_rec_ IS
+      SELECT * 
+      FROM order_quotation_line_tab
+      WHERE quotation_no = source_no_
+      AND line_no = line_no_
+      AND rel_no = line_no_
+      AND line_item_no = line_item_no_;
+
+   CURSOR get_customer_order_line_rec_ IS
+      SELECT * 
+      FROM customer_order_line_tab
+      WHERE order_no = source_no_
+      AND line_no = line_no_
+      AND rel_no = line_no_
+      AND line_item_no = line_item_no_;
+   
+   suggested_sales_part_list_rec_  Suggested_Sales_Part_List_Virtual_Rec;
+   parent_part_no_    VARCHAR2(25);
+   limit_sales_       VARCHAR2(10);
+   temp_key_rec_      VARCHAR2(2000);
+   token1_            VARCHAR2(2000);
+   last_pos_          NUMBER := 1;
+   delimiter_count_   NUMBER := 0;      
+   delimiter_pos_     NUMBER := 0;
+   last_pos1_         NUMBER := 1;
+   delimiter_count1_  NUMBER := 0;
+   delimiter_pos1_    NUMBER := 0;
+   key_count_         NUMBER := 0;
+   pos_               NUMBER;
+   pos1_              NUMBER;
+   quote_line_        Order_Quotation_Line_Tab%ROWTYPE; 
+   order_line_        Customer_Order_Line_Tab%ROWTYPE;  
+BEGIN
+   super(rec_);
+   IF (record_ IS NOT NULL) THEN 
+      array_  := json_array_t.parse(record_);
+      
+      FOR index_ IN 0 .. (array_.get_size - 1) LOOP
+         current_record_  := array_.get_String(index_);
+         IF (rec_.source = 'ORDER') THEN
+            
+            source_no_       := Client_SYS.Get_Key_Reference_Value(current_record_, 'ORDER_NO');
+            line_no_         := Client_SYS.Get_Key_Reference_Value(current_record_, 'LINE_NO');
+            rel_no_          := Client_SYS.Get_Key_Reference_Value(current_record_, 'REL_NO');
+            line_item_no_    := Client_SYS.Get_Key_Reference_Value(current_record_, 'LINE_ITEM_NO');
+            parent_part_no_  := Customer_Order_Line_API.Get_Catalog_No(source_no_, line_no_, rel_no_, line_item_no_);
+            limit_sales_     := Customer_Order_API.Get_Limit_Sales_To_Assortme_Db(source_no_);
+            
+            FOR sub_part_rec_ IN get_suggested_sales_part_order LOOP
+               suggested_sales_part_list_rec_.objkey                 := sys_guid();
+               suggested_sales_part_list_rec_.parent_objkey          := rec_.objkey;
+               suggested_sales_part_list_rec_.contract               := sub_part_rec_.contract;
+               suggested_sales_part_list_rec_.source_no              := sub_part_rec_.order_no;
+               suggested_sales_part_list_rec_.line_no                := line_no_;
+               suggested_sales_part_list_rec_.release_no             := rel_no_;
+               suggested_sales_part_list_rec_.parent_part_no         := sub_part_rec_.parent_part_no;
+               suggested_sales_part_list_rec_.suggested_part_no      := sub_part_rec_.suggested_part_no;
+               suggested_sales_part_list_rec_.buy_qty_due            := sub_part_rec_.buy_qty_due;
+               suggested_sales_part_list_rec_.wanted_delivery_date   := sub_part_rec_.wanted_delivery_date;
+               suggested_sales_part_list_rec_.planned_delivery_date  := sub_part_rec_.planned_delivery_date;
+               suggested_sales_part_list_rec_.price_effectivity_date := sub_part_rec_.price_effectivity_date;
+               CRUD_Create___(suggested_sales_part_list_rec_);
+            END LOOP; 
+            
+         ELSIF (rec_.source = 'QUOTE') THEN
+            source_no_       := Client_SYS.Get_Key_Reference_Value(current_record_, 'QUOTATION_NO');
+            line_no_         := Client_SYS.Get_Key_Reference_Value(current_record_, 'LINE_NO');
+            rel_no_          := Client_SYS.Get_Key_Reference_Value(current_record_, 'REL_NO');
+            line_item_no_    := Client_SYS.Get_Key_Reference_Value(current_record_, 'LINE_ITEM_NO');
+            parent_part_no_  := Customer_Order_Line_API.Get_Catalog_No(source_no_, line_no_, rel_no_, line_item_no_);
+         
+            FOR sub_part_rec_ IN get_suggested_sales_part_quote LOOP
+               suggested_sales_part_list_rec_.objkey               := sys_guid();
+               suggested_sales_part_list_rec_.parent_objkey        := rec_.objkey;
+               suggested_sales_part_list_rec_.contract             := sub_part_rec_.contract;
+               suggested_sales_part_list_rec_.source_no            := sub_part_rec_.quotation_no;
+               suggested_sales_part_list_rec_.line_no              := line_no_;
+               suggested_sales_part_list_rec_.release_no           := rel_no_;
+               suggested_sales_part_list_rec_.parent_part_no       := sub_part_rec_.parent_part_no;
+               suggested_sales_part_list_rec_.suggested_part_no    := sub_part_rec_.suggested_part_no;
+               suggested_sales_part_list_rec_.buy_qty_due          := sub_part_rec_.buy_qty_due;
+               suggested_sales_part_list_rec_.wanted_delivery_date := sub_part_rec_.wanted_delivery_date;
+               CRUD_Create___(suggested_sales_part_list_rec_);
+            END LOOP;      
+         END IF;
+      END LOOP;
+      
+   ELSIF (record2_ IS NOT NULL) THEN
+      LOOP
+         pos_ := instr (record2_, ',', 1, delimiter_count_ + 1);
+         IF NOT pos_ = 0 THEN
+            delimiter_count_  := delimiter_count_ + 1;
+            delimiter_pos_    := pos_;         
+            temp_key_rec_     := substr ( record2_, last_pos_, delimiter_pos_ - last_pos_ );
+            last_pos_         := delimiter_pos_  + length(',');
+            delimiter_count1_ := 0;
+            key_count_        := 0;
+            delimiter_pos1_   := 0;
+            last_pos1_        := 1;
+            LOOP
+               pos1_ := instr (temp_key_rec_, '^', 1, delimiter_count1_ + 1);
+               IF NOT pos1_ = 0 THEN
+                  delimiter_count1_ := delimiter_count1_ + 1;
+                  delimiter_pos1_   := pos1_;
+                  token1_           := substr ( temp_key_rec_, last_pos1_, delimiter_pos1_ - last_pos1_ );
+                  last_pos1_        := delimiter_pos1_  + length(',');
+
+                  IF key_count_ = 0 THEN 
+                     source_no_ := token1_;
+                  ELSIF key_count_ = 1 THEN 
+                     line_no_ := token1_;  
+                  ELSIF key_count_ = 2 THEN 
+                     rel_no_ := token1_; 
+                  ELSIF key_count_ = 3 THEN 
+                     line_item_no_ := to_number(token1_);
+                  END IF;
+                  key_count_ := key_count_ + 1;
+               ELSE
+                  EXIT;
+               END IF;
+            END LOOP;
+            
+         IF (rec_.source = 'QUOTE') THEN            
+            OPEN get_sales_quotation_line_rec_;
+            FETCH get_sales_quotation_line_rec_ INTO quote_line_;
+            CLOSE get_sales_quotation_line_rec_;
+
+            parent_part_no_   := quote_line_.catalog_no;
+
+            FOR sub_part_rec_ IN get_suggested_sales_part_quote LOOP
+               suggested_sales_part_list_rec_.objkey               := sys_guid();
+               suggested_sales_part_list_rec_.parent_objkey        := rec_.objkey;
+               suggested_sales_part_list_rec_.contract             := sub_part_rec_.contract;
+               suggested_sales_part_list_rec_.source_no            := sub_part_rec_.quotation_no;
+               suggested_sales_part_list_rec_.line_no              := line_no_;
+               suggested_sales_part_list_rec_.release_no           := rel_no_;
+               suggested_sales_part_list_rec_.parent_part_no       := sub_part_rec_.parent_part_no;
+               suggested_sales_part_list_rec_.suggested_part_no    := sub_part_rec_.suggested_part_no;
+               suggested_sales_part_list_rec_.buy_qty_due          := sub_part_rec_.buy_qty_due;
+               suggested_sales_part_list_rec_.wanted_delivery_date := sub_part_rec_.wanted_delivery_date;
+               CRUD_Create___(suggested_sales_part_list_rec_);
+            END LOOP;
+
+         ELSIF (rec_.source = 'ORDER') THEN
+            OPEN get_customer_order_line_rec_;
+            FETCH get_customer_order_line_rec_ INTO order_line_;
+            CLOSE get_customer_order_line_rec_;
+
+            parent_part_no_   := order_line_.catalog_no;
+
+            FOR sub_part_rec_ IN get_suggested_sales_part_order LOOP
+               suggested_sales_part_list_rec_.objkey                 := sys_guid();
+               suggested_sales_part_list_rec_.parent_objkey          := rec_.objkey;
+               suggested_sales_part_list_rec_.contract               := sub_part_rec_.contract;
+               suggested_sales_part_list_rec_.source_no              := sub_part_rec_.order_no;
+               suggested_sales_part_list_rec_.line_no                := line_no_;
+               suggested_sales_part_list_rec_.release_no             := rel_no_;
+               suggested_sales_part_list_rec_.parent_part_no         := sub_part_rec_.parent_part_no;
+               suggested_sales_part_list_rec_.suggested_part_no      := sub_part_rec_.suggested_part_no;
+               suggested_sales_part_list_rec_.buy_qty_due            := sub_part_rec_.buy_qty_due;
+               suggested_sales_part_list_rec_.wanted_delivery_date   := sub_part_rec_.wanted_delivery_date;
+               suggested_sales_part_list_rec_.planned_delivery_date  := sub_part_rec_.planned_delivery_date;
+               suggested_sales_part_list_rec_.price_effectivity_date := sub_part_rec_.price_effectivity_date;
+               CRUD_Create___(suggested_sales_part_list_rec_);
+            END LOOP;
+
+            END IF;  
+            source_no_    := NULL;    
+            line_no_      := NULL; 
+            rel_no_       := NULL; 
+            line_item_no_ := NULL;        
+         ELSE
+            EXIT;
+         END IF;
+      END LOOP;     
+   END IF;
+END CRUD_Create___;
+
+
+FUNCTION Get_Price___(
+   source_                 IN VARCHAR2,
+   source_no_              IN VARCHAR2,
+   suggested_part_no_      IN VARCHAR2,
+   tax_code_               IN VARCHAR2,
+   quantity_               IN NUMBER,
+   price_effectivity_date_ IN DATE )  RETURN Struct_Get_Price_Rec
+IS
+   customer_level_db_      VARCHAR2(100);
+   customer_level_id_      VARCHAR2(100);
+   price_list_no_          VARCHAR2(100);
+   contract_               VARCHAR2(100);
+   use_price_incl_tax_     VARCHAR2(100);
+   condition_code_         VARCHAR2(100);
+   sale_unit_price_        NUMBER;
+   unit_price_incl_tax_    NUMBER;
+   dummy_num_              NUMBER;
+   price_source_           VARCHAR2(100);
+   price_source_id_        VARCHAR2(100);
+   dummy_varchar_          VARCHAR2(100);   
+   tax_calc_base_          VARCHAR2(10);
+   calc_price_             BOOLEAN:= TRUE;
+   tax_percentatge_        NUMBER;
+   order_rec_              Customer_Order_API.Public_Rec;
+   struct_get_price_       Struct_Get_Price_Rec;
+   quote_rec_              Order_Quotation_API.Public_Rec;   
+BEGIN   
+   IF (source_ = 'ORDER')THEN
+      order_rec_          := Customer_Order_API.Get(source_no_);
+      contract_           := order_rec_.contract;
+      use_price_incl_tax_ := order_rec_.use_price_incl_tax;
+   ELSIF (source_ = 'QUOTE')THEN
+      quote_rec_          := Order_Quotation_API.Get(source_no_);     
+      contract_           := quote_rec_.contract;
+      use_price_incl_tax_ := quote_rec_.use_price_incl_tax;
+   END IF;
+
+   IF (source_ = 'ORDER')THEN
+      Sales_Price_List_API.Get_Valid_Price_List(customer_level_db_,
+                                                customer_level_id_,
+                                                price_list_no_,
+                                                contract_,
+                                                suggested_part_no_,
+                                                order_rec_.customer_no,
+                                                order_rec_.currency_code,
+                                                NULL,
+                                                NULL);
+      Customer_Order_Pricing_API.Get_Order_Line_Price_Info(sale_unit_price_,
+                                                            unit_price_incl_tax_,
+                                                            dummy_num_,
+                                                            dummy_num_,
+                                                            dummy_num_,
+                                                            dummy_num_, 
+                                                            price_source_,
+                                                            price_source_id_,
+                                                            dummy_varchar_,
+                                                            dummy_varchar_,
+                                                            dummy_varchar_,
+                                                            dummy_varchar_,
+                                                            dummy_varchar_,
+                                                            customer_level_db_,
+                                                            customer_level_id_,
+                                                            source_no_,
+                                                            suggested_part_no_,
+                                                            quantity_,
+                                                            price_list_no_,
+                                                            price_effectivity_date_,
+                                                            condition_code_,
+                                                            use_price_incl_tax_);
+   ELSIF (source_ = 'QUOTE')THEN
+      Sales_Price_List_API.Get_Valid_Price_List(customer_level_db_,
+                                                customer_level_id_,
+                                                price_list_no_,
+                                                quote_rec_.contract,
+                                                suggested_part_no_,
+                                                quote_rec_.customer_no,
+                                                quote_rec_.currency_code,
+                                                NULL,
+                                                NULL);
+      Customer_Order_Pricing_API.Get_Quote_Line_Price_Info(sale_unit_price_,
+                                                           unit_price_incl_tax_,
+                                                           dummy_num_,
+                                                           dummy_num_,
+                                                           dummy_num_,
+                                                           dummy_num_, 
+                                                           price_source_,
+                                                           price_source_id_,
+                                                           dummy_varchar_,
+                                                           dummy_varchar_,
+                                                           dummy_varchar_,
+                                                           customer_level_db_,
+                                                           customer_level_id_,
+                                                           source_no_,
+                                                           suggested_part_no_,
+                                                           quantity_,
+                                                           price_list_no_,
+                                                           price_effectivity_date_,
+                                                           condition_code_,
+                                                           use_price_incl_tax_);
+   END IF;
+
+   -- client method CalculatePrices
+   IF use_price_incl_tax_ = 'TRUE' THEN
+      tax_calc_base_ := 'GROSS_BASE';
+      IF (unit_price_incl_tax_ IS NULL) AND (tax_code_ IS NULL) THEN
+         sale_unit_price_ := unit_price_incl_tax_;
+         calc_price_ := FALSE;
+      END IF;   
+   ELSE
+      tax_calc_base_ := 'NET_BASE';
+      IF (sale_unit_price_ IS NULL) AND (tax_code_ IS NULL) THEN
+         unit_price_incl_tax_ := sale_unit_price_;
+         calc_price_ := FALSE;
+      END IF;
+   END IF;
+   IF calc_price_ THEN
+      tax_percentatge_ := Statutory_Fee_API.Get_Fee_Rate(Site_API.Get_Company(contract_),
+                                                         Sales_Part_API.Get_Tax_Code(contract_,suggested_part_no_));
+      Tax_Handling_Util_API.Calculate_Prices(sale_unit_price_, 
+                                             unit_price_incl_tax_, 
+                                             tax_calc_base_, 
+                                             tax_percentatge_,
+                                             NULL); 
+                                             -- nIfsCurrRounding); -- check how this is implemented.
+   END IF;
+   struct_get_price_.price           := sale_unit_price_;
+   struct_get_price_.price_incl_tax  := unit_price_incl_tax_;
+   struct_get_price_.price_source    := price_source_;
+   struct_get_price_.price_source_id := price_source_id_;
+
+   RETURN struct_get_price_;                                             
+END Get_Price___;
+
+FUNCTION Create_Records___(
+   source_            IN VARCHAR2,        
+   parent_obj_key_    IN VARCHAR2,
+   suggested_part_no_ IN VARCHAR2,
+   suggested_line_no_ IN VARCHAR2,
+   suggested_rel_no_  IN VARCHAR2) RETURN Return_Values_Rec
+IS
+   struct_rec_          Return_Values_Rec;
+   attr_                VARCHAR2(32000);
+   info_                VARCHAR2(32000);
+   rec_                 ${PROJECTION}_SUGGESTED_SALES_PART_LIST_VIRTUAL_VRT%ROWTYPE;
+   
+   CURSOR get_modified_lines IS
+      SELECT * 
+      FROM ${PROJECTION}_SUGGESTED_SALES_PART_LIST_VIRTUAL_VRT t
+      WHERE t.parent_objkey = parent_obj_key_
+      AND   suggested_part_no = suggested_part_no_
+      AND   line_no = suggested_line_no_
+      AND   release_no = suggested_rel_no_
+      AND   NVL(t.quantity,0) > 0;
+BEGIN 
+   OPEN get_modified_lines;
+   FETCH get_modified_lines INTO rec_;
+   CLOSE get_modified_lines;
+   
+   Client_SYS.Clear_Attr(attr_);      
+   Client_SYS.Add_To_Attr('CONTRACT', rec_.contract, attr_);
+   Client_SYS.Add_To_Attr('CATALOG_NO', rec_.suggested_part_no, attr_);
+   Client_SYS.Add_To_Attr('BUY_QTY_DUE', rec_.quantity, attr_);
+   Client_SYS.Add_To_Attr('WANTED_DELIVERY_DATE', rec_.wanted_delivery_date, attr_);
+   
+   IF (rec_.activity_seq != 0) THEN
+      Client_SYS.Add_To_Attr('ACTIVITY_SEQ', rec_.activity_seq, attr_);
+   END IF;
+   
+   IF rec_.contract IS NOT NULL THEN
+      User_Allowed_Site_API.Is_Authorized(rec_.contract);
+   END IF;   
+   
+   IF (source_ = 'ORDER')THEN
+      Client_SYS.Add_To_Attr('ORDER_NO', rec_.source_no, attr_);
+      Client_SYS.Add_To_Attr('PLANNED_DELIVERY_DATE', rec_.planned_delivery_date, attr_);
+      Client_SYS.Add_To_Attr('PRICE_EFFECTIVITY_DATE', rec_.price_effectivity_date, attr_);
+      Client_SYS.Add_To_Attr('COPY_DISCOUNT', 'FALSE', attr_);
+      Customer_Order_Line_API.New(info_, attr_ );
+      struct_rec_.pre_accounting_id      := Client_SYS.Get_Item_Value_To_Number('PRE_ACCOUNTING_ID', attr_, lu_name_);
+      struct_rec_.line_no                := Client_SYS.Get_Item_Value('LINE_NO', attr_);
+      struct_rec_.release_no             := Client_SYS.Get_Item_Value('REL_NO', attr_);
+
+      RETURN struct_rec_;
+   ELSIF (source_ = 'QUOTE') THEN                     
+      Client_SYS.Add_To_Attr('QUOTATION_NO', rec_.source_no, attr_);
+      Client_SYS.Add_To_Attr('PRICE_SOURCE', rec_.price_source, attr_);
+      Client_SYS.Add_To_Attr('COPY_STATUS', 'FALSE', attr_);    
+      Order_Quotation_Line_API.New(info_, attr_ );
+      
+      RETURN struct_rec_;
+   END IF;
+END Create_Records___;
+
+FUNCTION Is_Mandatory_Pre_Posting___ (
+	order_no_    IN VARCHAR2,
+	contract_    IN VARCHAR2 ) RETURN BOOLEAN
+IS
+   is_mandatory_        NUMBER := 0;
+BEGIN
+	is_mandatory_ := Customer_Order_Line_API.Is_Pre_Posting_Mandatory(Site_API.Get_Company(contract_), order_no_);
+   IF is_mandatory_ = 0 THEN
+      RETURN FALSE;
+   ELSE
+      RETURN TRUE;
+   END IF;
+END Is_Mandatory_Pre_Posting___;
+
+FUNCTION Get_Project_Info___ (
+   parent_source_no_ IN VARCHAR2,
+   source_           IN VARCHAR2 )  RETURN Project_Info_Structure_Rec
+IS
+   proj_info_rec_    Project_Info_Structure_Rec;
+   co_rec_           Customer_Order_API.Public_Rec;
+BEGIN
+   IF (parent_source_no_ IS NOT NULL AND source_ = 'ORDER')THEN
+      co_rec_ := Customer_Order_API.Get(parent_source_no_);
+      proj_info_rec_.project_id := co_rec_.project_id;
+      proj_info_rec_.contract := co_rec_.contract;
+      proj_info_rec_.company := Site_API.Get_Company(co_rec_.contract);
+   END IF;
+   RETURN proj_info_rec_;
+   
+END Get_Project_Info___;

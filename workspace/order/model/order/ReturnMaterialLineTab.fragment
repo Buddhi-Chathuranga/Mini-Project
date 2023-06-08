@@ -1,0 +1,3322 @@
+
+--------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  ---------------------------------------------------------------
+-- 2021-10-18  Skanlk  Bug 161110(SC21R2-3223), Modified ReturnMaterialLinesList by making CatalogDesc field as multiline field.
+-- 2021-10-11  Skanlk  Bug 161117(SCZ-16558), Added the details command to CatalogNo in ReturnMaterialLinesList to resolve the zooming issue.
+-- 2021-05-28  Skanlk  Bug 159213(SCZ-14979), Added the details command to OrderNoRef to resolve the zooming issue.
+-- 2021-03-03  MalLlk  SCZ-13866 (Bug 158000), Modified the from view as 'return_material_line_info' in ReturnMaterialLine entity.
+-- 2021--2-09  MaEelk  SC2020R1-12173, ReturnMaterialReason entity was overridden and ReturnReasonCode was made Uppercase
+-- 2020-12-03  ErRalk  Bug 154854(SCZ-12479), Modified command BulkComplete to display an information message before complete the RMA line if the header is order connected.
+-- 2020-12-02  WaSalk  SC2020R1-9584, Addded ModifyDateAppliedEnabled as an attribute to avoid refresh issues.
+-- 2020-07-27  ChBnlk  SCXTEND-4658, Added new parameters to the function GetInfoFromOrderNo and to the
+-- 2020-07-27          reference OrderNoRef to select proper values from the LOV.
+-- 2020-07-03  WaSalk  GESPRING20-4880, Modified columns added by gelr functionalities to columnvisible = [false].
+-- 2020-05-11  MaEelk  SCXTEND-4316, DeliveredCatalogNoLov was overridden and added LineNo, RelNo and LineItemno to the keys.
+-- 2020-05-11          Added Order line Information to GetOrderInfoFromCatalogNo
+-- 2020-04-23  MaEelk  SCZ-9720, DeliveredCatalogNoLov was overridden and added LineNo, RelNo and LineItemno to the keys.
+-- 2020-01-29  Kagalk  GESPRING20-1624, Added modify_date_applied functionality.
+-- 2019-12-27  JaThlk  SCXTEND-1949, Modified the where clause in OrderNoFilter to filter OrderNo according to ShipmentId.
+-- 2019-10-17  hairlk  SCXTEND-805, Avalara integration, Added lov CustomerTaxUsageTypeRef to RMA lines.
+-- 2019-09-12  YasMlk  SCFALL19-225, Added get methods to scope QtyToReturnInv to CreateCorrectiveInterSitePrCommand, DirectReturntoSupplierfromInternalOrderTransitCommand.
+-- 2019-07-22  RaVdlk  SCUXXW4-21758, Added a query for ReturnMaterial Reference
+-- 2019-05-20  fgusse  SCUXXW4-20685, Added translatable in DocumentTextCommand.
+-- 2019-03-09  IzShlk  SCUXXW4-17154, Added the validation for DebitInvoiceNo.
+-- 2019-03-01  RaVdlk  SCUXXW4-1389, Added the validation for DebitInvoiceSeriesId and PurchaseOrderNo
+-- 2019-02-18  RaVdlk  SCUXXW4-1389, Modified the validation of CatalogNo
+-- 2019-02-11  RaVdlk  SCUXXW4-1389, Handled validations for Fee Code
+-- 2019-02-07  RaVdlk  SCUXXW4-1389, Handled validations for UnitPriceInclTax
+-- 2019-02-06  RaVdlk  SCUXXW4-1389, Moved the ReturnMaterialLine code to a fragement
+--------------------------------------------------------------------------------------
+
+fragment ReturnMaterialLineTab;
+component ORDER;
+layer Core;
+description "Put some useful description here ...";
+include fragment CustomerOrderLineRmaLovSelector;
+include fragment InvoiceCustomerRmaLovSelector;
+include fragment TaxCodeRestrictedSelector;
+include fragment TaxCodeExemptRestrictedSelector;
+include fragment TaxCalcStructureActiveSelector;
+include fragment SalesPartGtinNoLovSelector;
+include fragment IntorderPartLovSelector;
+include fragment DeliveredCatalogNoLovSelector;
+include fragment ShippedCatalogNosLovSelector;
+include fragment SalesPartLov2Selector;
+include fragment AllSalesPartActiveLovSelector;
+include fragment TaxLinesCommonAssistant;
+include fragment ReturnMaterialLineInitialCheck;
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+
+--------------------------------- COMMANDS ----------------------------------
+@Override
+command BulkRelease for ReturnMaterialLine {
+   label = "Release";
+   enabled = [Objstate = "Planned" and RmaNo != null and(substring(Condition, 0, 1) != "*")];
+   mode = SelectedRecords;
+   variable Exists {
+      type = Number;
+   }
+   bulkexecute {
+      set ValidateSuccess = true;
+      call CheckConnectedPromo(Selection)into Exists;
+      if [Exists = 1] {
+         confirm("There exists one or more sales promotion charge lines that are connected to the customer order line(s) that you are releasing") {
+            when CANCEL {
+               set ValidateSuccessVar = false;
+               exit CANCEL;
+            }
+         }
+      }
+      if [parent.ReceiptRmaNo != null] {
+         messagebox("", information, "The selected RMA line(s) will be released and a new line(s) will be created in receipt RMA ${parent.ReceiptRmaNo}") {
+            when "OK" {
+               set ValidateSuccessVar = true;
+            }
+            when  "Cancel" {
+               set ValidateSuccessVar = false;
+               exit CANCEL;
+            }
+         }
+      }
+      else {
+         confirm("This will release the selected RMA line/lines") {
+            when OK {
+               set ValidateSuccessVar = true;
+            }
+            when CANCEL {
+               exit;
+            }
+         }
+      }
+      if [ValidateSuccess] {
+         bulkcall Release();
+         refresh;
+      }
+   }
+}
+
+@Override
+command BulkDeny for ReturnMaterialLine {
+   label = "Deny";
+   enabled = [Objstate = "Planned" and RmaNo != null and(substring(Condition, 1, 1) != "*")];
+   mode = SelectedRecords;
+   bulkexecute {
+      confirm("This will deny any returns of the selected RMA line/lines") {
+         when OK {
+            bulkcall Deny();
+            refresh;
+         }
+      }
+   }
+}
+
+@Override
+command BulkCancel for ReturnMaterialLine {
+   label = "Cancel";
+   mode = SelectedRecords;
+   enabled = [Objstate in("Planned", "Released") and RmaNo != null and(substring(Condition, 9, 1) != "*")];
+   variable EntityCodeVar {
+      type = Text;
+   }
+   variable CancellationReasonVar {
+      type = Text;
+   }
+   bulkexecute {
+      set EntityCodeVar = "RM";
+      dialog CancelReasonDialog(EntityCodeVar) into(CancellationReasonVar) {
+         when OK {
+            call CancelReturnMaterialLine(Selection, CancellationReasonVar) {
+               when FAIL {
+                  error("${error.Message}");
+               }
+            }
+         }
+         when CANCEL {
+            exit CANCEL;
+         }
+      }
+      if [parent.ReceiptRmaNo != null and(parent.ReturnToContract != parent.Contract)] {
+         messagebox("", information, "Receipt RMA line(s) in the site ${parent.ReturnToContract} is also cancelled") {
+            when "OK" {
+               refresh;
+            }
+         }
+      }
+   }
+}
+
+@Override
+command BulkComplete for ReturnMaterialLine {
+   label = "Complete";
+   mode = SelectedRecords;
+   enabled = [Objstate = "PartiallyReceived" and RmaNo != null and(substring(Condition, 2, 1) != "*")];
+   variable OrderConnectedLinesExist Boolean;
+   bulkexecute {
+      -- Check whether there is at least one order connected RMA line.
+      ifall [OrderNo = null] {
+         set OrderConnectedLinesExist = false;
+
+      }
+      else {
+         set OrderConnectedLinesExist = true;
+      }
+
+      if [parent.OrderNo != null or OrderConnectedLinesExist = true] {
+         confirm("It will not be possible to return any remaining quantity on the customer order.") {
+            when CANCEL {
+               exit;
+            }
+         }
+      }
+      if [parent.ReceiptRmaNo != null and(parent.ReturnToContract != parent.Contract)] {
+         messagebox("", information, "Returning the selected RMA lines as well as the corresponding receipt RMA lines of site ${parent.ReturnToContract} will also be completed") {
+            when "OK" {
+               refresh;
+            }
+         }
+      }
+      else {
+         if [parent.OrderNo = null and OrderConnectedLinesExist = false] {
+            confirm(" This will complete the returns of the selected RMA line/lines ") {
+               when OK {
+                  bulkcall Complete();
+                  refresh;
+               }
+               when CANCEL {
+                  exit;
+               }
+            }
+         }
+         else {
+            bulkcall Complete();
+            refresh;
+         }
+      }
+   }
+}
+@DynamicComponentDependency EXPCTR
+command FindandConnectExportLicenseCommand for ReturnMaterialLine {
+   label = "Find and Connect Export License";
+   enabled = [LicenseEnabled and ExportLicenseStatusForFindAndConnect];
+   mode = SingleRecord;
+   variable Connected {
+      type = Number;
+   }
+   execute {
+      call FindAndConnExpLicense(RmaNo, RmaLineNo) into Connected;
+      navigate "page/FindAndConnectExportLicense/Form?$filter=ExpLicenseConnectId eq $[Connected]";
+   }
+}
+command ReceivePartsCommand for ReturnMaterialLine {
+   label = "Receive Parts";
+   -- gelr:modify_date_applied, begin
+   enabled = [((ModifyDateAppliedEnabled and ArrivalDate != null) or not(ModifyDateAppliedEnabled)) and(not((Objstate = "ReturnCompleted" or RentalDb = "TRUE") or substring(Condition, 3, 1) = "*" or(CustomersCompany = Company and CustomersCompany != null and parent.OriginatingRmaNo = null and SalesPartRef.CatalogType = "InventoryPart")))];
+   -- gelr:modify_date_applied, end
+   execute {
+      navigate "assistant/ReturnMaterialLineReceiveParts/Assistant?$action=InitParameters{RmaNoNum:$[RmaNo], RmaLineNoNum:$[RmaLineNo]}";
+   }
+}
+command ReceivePartsOrderDeliveriesCommand for ReturnMaterialLine {
+   label = "Receive Parts against Order Deliveries";
+   mode = SelectedRecords;
+   -- gelr:modify_date_applied, begin
+   enabled = [((ModifyDateAppliedEnabled and ArrivalDate != null) or not(ModifyDateAppliedEnabled)) and(not((substring(Condition, 3, 1) = "*") or OrderNo = null or(CustomersCompany = Company and CustomersCompany != null and parent.OriginatingRmaNo = null and SalesPartRef.CatalogType = "InventoryPart" and RentalDb = "FALSE") or(Objstate = "ReturnCompleted")))];
+   -- gelr:modify_date_applied, end
+   bulkexecute {
+      navigate "assistant/ReceivePartsAgainstOrderDeliveries/ReceivePartsOrderDeliveriesAssistant?$action=InitParameters{FullSelectionStr:$[Selection]}";
+   }
+}
+command ScrapPartsCommand for ReturnMaterialLine {
+   label = "Scrap Parts";
+   -- gelr:modify_date_applied, begin
+   enabled = [((ModifyDateAppliedEnabled and ArrivalDate != null) or not(ModifyDateAppliedEnabled)) and(not((substring(Condition, 3, 1) = "*") or PartNo = null or Objstate = "ReturnCompleted" or(CustomersCompany = Company and CustomersCompany != null and parent.OriginatingRmaNo = null and SalesPartRef.CatalogType = "InventoryPart") or RentalDb = "TRUE"))];
+   -- gelr:modify_date_applied, end
+   execute {
+      navigate "assistant/ReturnMaterialLineScrapParts/Assistant?$action=InitParameters{
+      RmaNoNum:$[RmaNo], RmaLineNoNum:$[RmaLineNo]}";
+   }
+}
+command ReturnPartsfromInternalOrdeCommand for ReturnMaterialLine {
+   label = "Return Parts from Internal Order Transit";
+   -- gelr:modify_date_applied, begin
+   enabled = [((ModifyDateAppliedEnabled and ArrivalDate != null) or not(ModifyDateAppliedEnabled)) and((substring(Condition, 3, 1) != "*") and PartNo != null and(CustomersCompany = Company and CustomersCompany != null and parent.OriginatingRmaNo = null) and RentalDb = "FALSE")];
+   -- gelr:modify_date_applied, end
+   execute {
+      assistant ReturnPartsFromIntOrderTransit.InternalOrderReturnAssistant(RmaNo, RmaLineNo) {
+         when OK {
+            exit OK;
+         }
+      }
+   }
+}
+command ScrapPartsfromInternalOrderCommand for ReturnMaterialLine {
+   label = "Scrap Parts from Internal Order Transit";
+   -- gelr:modify_date_applied, begin
+   enabled = [((ModifyDateAppliedEnabled and ArrivalDate != null) or not(ModifyDateAppliedEnabled)) and((substring(Condition, 3, 1) != "*") and PartNo != null and(CustomersCompany = Company and CustomersCompany != null and parent.OriginatingRmaNo = null) and RentalDb = "FALSE")];
+   -- gelr:modify_date_applied, end
+   execute {
+      assistant ScrapPartsFromIntOrderTransit.InternalOrderScrapAssistant(RmaNo, RmaLineNo) {
+         when OK {
+            exit OK;
+         }
+      }
+   }
+}
+command RegisterDirectReturnsCommand for ReturnMaterialLine {
+   label = "Register Direct Returns to Supplier";
+   enabled = [RmaNo != null and((substring(Condition, 10, 1) != "*"))];
+   mode = SingleRecord;
+   execute {
+      assistant RegisterDirectReturnsToSupplier.DirectReturnsToSupplierAssistant(RmaNo, RmaLineNo) {
+         when OK {
+            exit OK;
+         }
+      }
+   }
+}
+command ResolveShortagesCommand for ReturnMaterialLine {
+   label = "Resolve Shortages";
+   mode = SingleRecord;
+   enabled = [RmaNo != null and QtyReturnedInv > 0 and SystemParameterShortageFlag = "Y" and PartShortageExist > 0 and PartShortageFlagDb = "Y"];
+   execute {
+      if [ConditionCode != null] {
+         navigate "page/ResolveShortagesForInventoryPart/Form?$filter=Contract eq $[Contract] and PartNo eq $[PartNo] and ConditionCode eq $[ConditionCode]";
+      }
+      navigate "page/ResolveShortagesForInventoryPart/Form?$filter=Contract eq $[Contract] and PartNo eq $[PartNo]";
+   }
+}
+command RMALineTaxLinesCommand for ReturnMaterialLine {
+   label = "RMA Line Tax Lines";
+   mode = SingleRecord;
+   enabled = [true];
+
+   variable PackageNameVar Text;
+   variable ReadOnlyVar Boolean;
+   variable CalcBaseVar Text;
+   variable TitleVar Text;
+   variable SetDefaultCmdVisibleVar Boolean;
+
+   execute {
+      set PackageNameVar = "RETURN_MATERIAL_LINE_API";
+      if [parent.UsePriceInclTaxDb = true] {
+         set CalcBaseVar = "GROSS_BASE";
+      }
+      else {
+         set CalcBaseVar = "NET_BASE";
+      }
+
+      if [Objstate = "Denied"  or Objstate = "Cancelled" or parent.TaxCalcMethod != "NOT_USED"] {
+         set ReadOnlyVar = true;
+      }
+      else {
+         set ReadOnlyVar = false;
+      }
+
+      set TitleVar = "Return Material Line Tax Lines" {
+         translatable = true;
+      }
+
+      set SetDefaultCmdVisibleVar = true;
+
+
+      assistant TaxLinesCommonAssistant(keyref, PackageNameVar, ReadOnlyVar, CalcBaseVar, TitleVar, null, SetDefaultCmdVisibleVar) {
+         when OK {
+            call RefreshLines();
+            exit OK;
+         }
+         when CANCEL {
+            exit CANCEL;
+         }
+      }
+   }
+}
+
+-- "Create Corrective Inter-Site Price Postings" from Lines
+command CreateCorrectiveInterSitePrCommand for ReturnMaterialLine {
+   label = "Create Corrective Inter-Site Price Postings";
+   enabled = [(QtyToReturn > 0) and(CreditApproverId != null) and(IsCorrIntersiteAllowed = 1)];
+   mode = SingleRecord;
+
+   execute {
+      call GetQtyToReturnInv(QtyToReturn, ConvFactor, InvertedConvFactor) into QtyToReturnInvVar;
+      dialog CorrIntersitePostingsDialog(OrderNo, LineNo, RelNo, LineItemNo, RmaNo, RmaLineNo, QtyToReturnInvVar);
+
+   }
+}
+
+command DirectReturntoSupplierfromInternalOrderTransitCommand for ReturnMaterialLine {
+   label = "Direct Return to Supplier from Internal Order Transit";
+   enabled = [RmaNo != null and((substring(Condition, 11, 1) != "*"))];
+   execute {
+      call GetQtyToReturnInv(QtyToReturn, ConvFactor, InvertedConvFactor) into QtyToReturnInvVar;
+
+      assistant ReturnToSupplierFromIntOrderTransit.ReturnToSupplierFromIntOrderAssistant(RmaNo, RmaLineNo, Objstate, Contract, CustomerContract, ReturnReasonCode, parent.ReturnToVendorNo,
+      PartNo, CatalogNo, ConfigurationId, QtyToReturnInvVar, QtyReceived, InventoryUom, OrderNo, SupplierReturnReason) {
+         when OK {
+            call RefreshLines();
+            exit OK;
+         }
+         when CANCEL {
+            call RefreshLines();
+            exit OK;
+         }
+      }
+   }
+}
+command ApproveforCreditCommand for ReturnMaterialLine {
+   label = "Approve for Credit";
+   enabled = [(substring(Condition, 6, 1) != "*") and(RmaNo != null) and(CreditApproverId = null) and(Objstate != "Planned"and Objstate != "Denied" and Objstate != "Cancelled") and(QtyToReturn != 0)and RentalDb = "FALSE"];
+   mode = SelectedRecords;
+   bulkexecute {
+      ifall [CreditedAmount != 0] {
+         assistant ApproveForCredit.ApproveForCreditAssistant(Selection, null) {
+            when CANCEL {
+               exit;
+            }
+         }
+      }
+      else {
+         alert("This will approve the selected RMA line/lines for credit");
+         bulkcall CheckForApproveForCredit() {
+            continueonerror = [true];
+            when FAIL {
+               error("${error.Message}");
+            }
+         }
+      }
+   }
+}
+command RemoveCreditApprovalCommand for ReturnMaterialLine {
+   label = "Remove Credit Approval";
+   enabled = [RmaNo != null and(substring(Condition, 7, 1) != "*") and RentalDb = "FALSE"];
+   mode = SelectedRecords;
+   bulkexecute {
+      confirm("This will remove the approval for credit of the selected RMA line/lines") {
+         when CANCEL {
+            exit CANCEL;
+         }
+         when OK {
+            bulkcall RemoveCreditApprovalInLines();
+         }
+      }
+   }
+}
+command CreateCreditInvoiceCommand for ReturnMaterialLine {
+   label = "Create Credit Invoice";
+   enabled = [RmaNo != null and(substring(Condition, 4, 1) != "*")];
+   mode = SelectedRecords;
+   variable RmaSelectionVar
+      {
+      type = Text;
+   }
+   bulkexecute {
+      stringify(records, "RMA_NO=${RmaNo}^RMA_LINE_NO=${RmaLineNo}^", JSON) into RmaSelectionVar;
+      assistant CreateCreditInvoice.CreateCreditInvoiceAssistant(RmaSelectionVar, "RML") {
+         when OK {
+            exit OK;
+         }
+      }
+   }
+}
+command ViewCreditCorrInvoiceCommand for ReturnMaterialLine {
+   label = "View Credit/Corr.Invoice";
+   mode = SelectedRecords;
+   enabled = [RmaNo != null and(substring(Condition, 5, 1) != "*")];
+   bulkexecute {
+      bulknavigate "page/CustomerOrderInvoice/Form?$filter=Company eq $[Company] and InvoiceId eq $[CreditInvoiceNo]";
+   }
+}
+@DynamicComponentDependency CFGCHR
+command ViewConfigurationCommand for ReturnMaterialLine {
+   label = "View Configuration";
+   enabled = [ConfigurationId != "*" and RmaNo != null and CatalogNo != null];
+   mode = SingleRecord;
+   execute {
+      set Usage = "CustomerOrder";
+      set Mode = "View";
+      navigate "assistant/PartConfigurationAssistant/EditConfiguration?$action=InitConfiguration{VarUsage:$[Usage],
+                                                                                                 VarMode:'View',
+                                                                                                 VarIdentity1:$[OrderNo],
+                                                                                                 VarIdentity2:$[LineNo],
+                                                                                                 VarIdentity3:$[RelNo],
+                                                                                                 VarIdentity4:$[LineItemNo]}";
+   }
+}
+command DocumentTextCommand for ReturnMaterialLine {
+   label = "Document Text";
+   enabled = [NoteId != null];
+   variable LabelTextVar;
+   execute {
+      set LabelTextVar = "for Return Material Authorization - ${RmaNo} ${RmaLineNo}" {
+         translatable = true;
+      }
+      assistant DocumentText(NoteId, LabelTextVar) {
+         when NO {
+            exit CANCEL;
+         }
+      }
+      refresh;
+   }
+}
+---------------------------- VALIDATION COMMANDS ----------------------------
+
+-- This command is used as common code for OrderNo, LineNo, RelNo and DebitInvoiceNo validations.
+-- This contains collection of IEE methods (GetOrderData, HandleCatchQty, GetPriceInfo, CalculateCatchQty) as a single command
+command ValidateDebitInvoiceOrderInfo for ReturnMaterialLine {
+   variable DebitOrderInfoVar {
+      type = DebitOrderInfo;
+   }
+   variable CoPackChgLineSeqNo Number;
+   variable DebitInvoiceMsgFlag Boolean;
+   variable FetchOrderDataFlag Boolean;
+
+   execute {
+      -- HandleCatchQty
+      if [CatchUnitEnabled = "TRUE"] {
+         if [DebitInvoiceMsgFlag] {
+            if [DebitInvoiceNo = null] {
+               messagebox("", question, "Do you want the system to recalculate the Catch Quantity using the price conversion factor from the Sales Part.") {
+                  when "Yes" {
+                     set CalcpriceConvFactorFlag = true;
+                  }
+                  when "No" {
+                     set CalcpriceConvFactorFlag = false;
+                  }
+               }
+            }
+            else {
+               messagebox("", question, "Do you want the system to recalculate the Catch Quantity using the average price conversion factor from the Invoice.") {
+                  when "Yes" {
+                     set CalcpriceConvFactorFlag = true;
+                  }
+                  when "No" {
+                     set CalcpriceConvFactorFlag = false;
+                  }
+               }
+            }
+         }
+         else {
+            if [OrderNo = null] {
+               messagebox("", question, "Do you want the system to recalculate the Catch Quantity using the price conversion factor from the Sales Part.") {
+                  when "Yes" {
+                     set CalcpriceConvFactorFlag = true;
+                  }
+                  when "No" {
+                     set CalcpriceConvFactorFlag = false;
+                  }
+               }
+            }
+            else {
+               messagebox("", question, "Do you want the system to recalculate the Catch Quantity using the average price conversion factor from the Customer Order.") {
+                  when "Yes" {
+                     set CalcpriceConvFactorFlag = true;
+                  }
+                  when "No" {
+                     set CalcpriceConvFactorFlag = false;
+                  }
+               }
+            }
+         }
+      }
+      -- This function will return Order data (GetOrderData() in IEE), price info (GetPriceInfo() in IEE), calculated catch qty value (CalculateCatchQty() in IEE)
+      -- In Cases where it is no need to fetch Order Data, use FetchOrderDataFlag as False.
+      call ValidateOrderInfo("FALSE", RmaNo, RmaLineNo, OrderNo, LineNo, RelNo, LineItemNo, Contract, CatalogNo, PriceConvFactor, ConditionCode, FeeCode, QtyToReturn,
+      DebitInvoiceNo, DebitInvoiceItemId, DebitInvoiceSeriesId, PurchaseOrderNo, Company, DeliveryType, TaxLiability, TaxLiabilityTypeDb, TaxCalcStructureId, CurrencyRate, DebitInvoiceId, CatchQty, CatchUnitEnabled, CalcpriceConvFactorFlag,
+      Objstate, AllowQtyToReturnUpdate, ConvFactor, InvertedConvFactor, CatalogDesc, QtyToReturnInvUom, RentalDb, ConfigurationId, PartNo, BaseSaleUnitPrice, BaseUnitPriceInclTax, SaleUnitPrice, UnitPriceInclTax,
+      TaxClassId, MultipleTaxLines, TaxAmountBase, NetAmtBase, GrossAmtBase, TaxAmtCurr, NetAmtCurr, GrossAmtCurr, FetchOrderDataFlag) into DebitOrderInfoVar;
+
+      set OrderNo = DebitOrderInfoVar.OrderNo;
+      set LineNo = DebitOrderInfoVar.LineNo;
+      set RelNo = DebitOrderInfoVar.RelNo;
+      set LineItemNo = DebitOrderInfoVar.LineItemNo;
+      set CatalogNo = DebitOrderInfoVar.CatalogNo;
+      set QtyToReturn = DebitOrderInfoVar.QtyToReturn;
+      set DeliveryType = DebitOrderInfoVar.DeliveryType;
+      set TaxLiability = DebitOrderInfoVar.TaxLiability;
+      set CurrencyRate = DebitOrderInfoVar.CurrencyRate;
+      set ConvFactor = DebitOrderInfoVar.ConvFactor;
+      set InvertedConvFactor = DebitOrderInfoVar.InvertedConvFactor;
+      set CatalogDesc = DebitOrderInfoVar.CatalogDesc;
+      set QtyToReturnInvUom = DebitOrderInfoVar.QtyToReturnInvUom;
+      set RentalDb = DebitOrderInfoVar.RentalDb;
+      set PurchaseOrderNo = DebitOrderInfoVar.CustomerPoNo;
+      set ConfigurationId = DebitOrderInfoVar.ConfigurationId;
+      set PartNo = DebitOrderInfoVar.PartNo;
+
+      if [DebitOrderInfoVar.InfoMessage != null] {
+         set InfoMessage = DebitOrderInfoVar.InfoMessage;
+         alert("${InfoMessage}");
+         exit;
+      }
+      set BaseSaleUnitPrice = DebitOrderInfoVar.NetPriceBase;
+      set BaseUnitPriceInclTax = DebitOrderInfoVar.GrossPriceBase;
+      set SaleUnitPrice = DebitOrderInfoVar.NetPriceCurr;
+      set UnitPriceInclTax = DebitOrderInfoVar.GrossPriceCurr;
+      set FeeCode = DebitOrderInfoVar.TaxCode;
+      set TaxClassId = DebitOrderInfoVar.TaxClassId;
+      set MultipleTaxLines = DebitOrderInfoVar.MultipleTax;
+      set TaxAmountBase = DebitOrderInfoVar.LineTaxDomAmount;
+      set NetAmtBase = DebitOrderInfoVar.LineNetDomAmount;
+      set GrossAmtBase = DebitOrderInfoVar.LineGrossDomAmount;
+      set TaxAmtCurr = DebitOrderInfoVar.LineTaxCurrAmount;
+      set NetAmtCurr = DebitOrderInfoVar.LineNetCurrAmount;
+      set GrossAmtCurr = DebitOrderInfoVar.LineGrossCurrAmount;
+      set TaxCalcStructureId = DebitOrderInfoVar.TaxCalcStructureId;
+      set ConditionCode = DebitOrderInfoVar.ConditionCode;
+      set PriceConvFactor = DebitOrderInfoVar.PriceConvFactor;
+      set CatchQty = DebitOrderInfoVar.CatchQty;
+      set CoPackChgLineSeqNo = DebitOrderInfoVar.CoPackChgLineSeqNo;
+   }
+}
+
+command ValidateDebitinvoiceNo for ReturnMaterialLine clone ValidateDebitInvoiceOrderInfo {
+   variable InvoiceType Text;
+   variable InvoiceSeriesInfoVar {
+      type = InvoiceSeriesInfo;
+   }
+   variable SeriesInfoVar {
+      type = SeriesInfo;
+   }
+   variable OrderInfoVar {
+      type = OrderInfo;
+   }
+   variable CalcpriceConvFactorFlag Boolean;
+   variable DebitInvoiceValidated Boolean;
+
+   execute {
+      set DebitInvoiceMsgFlag = true;
+      set FetchOrderDataFlag = true;
+      set InvoiceType = "INVOICE";
+      set CalcpriceConvFactorFlag = false;
+      call ValidateInvoiceSeries(RmaNo, RmaLineNo, parent.ShipmentId, DebitInvoiceNo, DebitInvoiceItemId, DebitInvoiceId, OrderNo, LineNo, RelNo, LineItemNo, Contract, parent.Company, CatalogNo, DebitInvoiceSeriesId,
+      parent.CustomerNo, parent.CurrencyCode, Objstate, QtyToReturn, PriceConvFactor, PartNo, ConfigurationId, TaxLiability, CurrencyRate, ConvFactor, InvertedConvFactor,
+      ConditionCode, CatalogDesc, DeliveryType, QtyToReturnInvUom, RentalDb, PurchaseOrderNo) into InvoiceSeriesInfoVar;
+      if [InvoiceSeriesInfoVar.SeriesNotExist] {
+         warning("Invoice Series must have a value when the RMA line is connected to a Debit Invoice.");
+         exit;
+      }
+
+      set DebitInvoiceSeriesId = InvoiceSeriesInfoVar.DebitInvoiceSeriesId;
+      set DebitInvoiceItemId = InvoiceSeriesInfoVar.DebitInvoiceItemId;
+      set DebitInvoiceId = InvoiceSeriesInfoVar.DebitInvoiceId;
+      set PriceConvFactor = InvoiceSeriesInfoVar.PriceConvFactor;
+      set OrderNo = InvoiceSeriesInfoVar.OrderNo;
+      set LineNo = InvoiceSeriesInfoVar.LineNo;
+      set RelNo = InvoiceSeriesInfoVar.RelNo;
+      set LineItemNo = InvoiceSeriesInfoVar.LineItemNo;
+      set CatalogNo = InvoiceSeriesInfoVar.CatalogNo;
+      set PartNo = InvoiceSeriesInfoVar.PartNo;
+      set ConfigurationId = InvoiceSeriesInfoVar.ConfigurationId;
+      set QtyToReturn = InvoiceSeriesInfoVar.QtyToReturn;
+      set TaxLiability = InvoiceSeriesInfoVar.TaxLiability;
+      set CurrencyRate = InvoiceSeriesInfoVar.CurrencyRate;
+      set ConvFactor = InvoiceSeriesInfoVar.ConvFactor;
+      set InvertedConvFactor = InvoiceSeriesInfoVar.InvertedConvFactor;
+      set ConditionCode = InvoiceSeriesInfoVar.ConditionCode;
+      set CatalogDesc = InvoiceSeriesInfoVar.CatalogDesc;
+      set DeliveryType = InvoiceSeriesInfoVar.DeliveryType;
+      set QtyToReturnInvUom = InvoiceSeriesInfoVar.QtyToReturnInvUom;
+      set RentalDb = InvoiceSeriesInfoVar.RentalDb;
+      set PurchaseOrderNo = InvoiceSeriesInfoVar.CustomerPoNo;
+      set DebitInvoiceValidated = InvoiceSeriesInfoVar.DebitInvValidated;
+
+      if [DebitInvoiceNo = null] {
+         set DebitInvoiceSeriesId = null;
+         if [OrderNo != null] {
+            set DebitInvoiceMsgFlag = true;
+            set FetchOrderDataFlag = true;
+            super;
+            if [QtyEditedFlag != "EDITED"] {
+               set QtyEditedFlag = "CO";
+            }
+         }
+         exit;
+      }
+
+      if [OrderNo != null and not(DebitInvoiceValidated)] {
+         set DebitInvoiceMsgFlag = true;
+         set FetchOrderDataFlag = true;
+         super;
+      }
+      else {
+         if [DebitInvoiceSeriesId != null] {
+            set DebitInvoiceMsgFlag = true;
+            set FetchOrderDataFlag = false;
+            super;
+         }
+      }
+
+      if [DebitInvoiceNo = null and OrderValidated = "FALSE"] {
+         -- Remove Order Info
+         set OrderNo = null;
+         set LineNo = null;
+         set RelNo = null;
+         set LineItemNo = null;
+         set ConditionCode = null;
+         set DebitInvoiceSeriesId = null;
+         set RentalDb = "FALSE";
+         set PurchaseOrderNo = null;
+         set ConfigurationId = "*";
+
+         set DebitInvoiceMsgFlag = false;
+         set FetchOrderDataFlag = false;
+         super;
+
+         exit;
+      }
+
+      if [OrderValidated = "FALSE"] {
+         if [DebitInvoiceSeriesId = null] {
+            call GetSeriesInfo(Company, DebitInvoiceNo, Contract, CatalogNo) into SeriesInfoVar;
+            if [SeriesInfoVar.SeriesNotExist] {
+               warning("Invoice Series must have a value when the RMA line is connected to a Debit Invoice.");
+               exit;
+            }
+            set DebitInvoiceSeriesId = SeriesInfoVar.SeriesId;
+         }
+         else {
+            set InvoiceType = "INVOICE";
+            call GetOrderInfo(InvoiceType, RmaNo, RmaLineNo, PurchaseOrderNo, DebitInvoiceNo, DebitInvoiceItemId, OrderNo, Contract,
+            CatalogNo, QtyToReturn, DebitInvoiceSeriesId, Objstate)into OrderInfoVar;
+            if [OrderInfoVar.ErrorMessage != null] {
+               alert("${OrderInfo.ErrorMessage}");
+               exit;
+            }
+            set OrderNo = OrderInfoVar.OrderNo;
+            set LineNo = OrderInfoVar.LineNo;
+            set RelNo = OrderInfoVar.RelNo;
+            set LineItemNo = OrderInfoVar.LineItemNo;
+            set CatalogNo = OrderInfoVar.CatalogNo;
+            set PartNo = OrderInfoVar.PartNo;
+            set TaxLiability = OrderInfoVar.TaxLiability;
+            set CurrencyRate = OrderInfoVar.CurrencyRate;
+            set ConvFactor = OrderInfoVar.ConvFactor;
+            set InvertedConvFactor = OrderInfoVar.InvertedConvFactor;
+            set ConditionCode = OrderInfoVar.ConditionCode;
+            set CatalogDesc = OrderInfoVar.CatalogDesc;
+            set DeliveryType = OrderInfoVar.DeliveryType;
+            set QtyToReturnInvUom = OrderInfoVar.QtyToReturnInvUom;
+            set RentalDb = OrderInfoVar.RentalDb;
+            set PriceConvFactor = OrderInfoVar.PriceConvFactor;
+            set PurchaseOrderNo = OrderInfoVar.CustomerPoNo;
+            set QtyToReturn = OrderInfoVar.QtyToReturn;
+            set ConfigurationId = OrderInfoVar.ConfigurationId;
+            set OrderValidated = OrderInfoVar.OrderValidated;
+            set DebitInvoiceValidated = OrderInfoVar.DebitInvValidated;
+
+            set DebitInvoiceMsgFlag = false;
+            set FetchOrderDataFlag = false;
+            super;
+         }
+      }
+
+      if [QtyToReturn = 0 and not(DebitInvoiceValidated)] {
+         info("The calculated quantity to return is zero. This is because the return material lines already have a
+         quantity to return which equals the maximum quantity to return for the connected order line");
+      }
+      if [CoPackChgLineSeqNo != null] {
+         info("RMA line is connected to a customer order line with a pack size charge/discount");
+      }
+      if [QtyEditedFlag != "EDITED"] {
+         set QtyEditedFlag = "CO";
+      }
+   }
+}
+
+command CalculatePricesCommand for ReturnMaterialLine {
+   execute {
+      call CalculateLinePrices(TaxFromDefaultsVar, RmaNo, RmaLineNo, OrderNo, LineNo, RelNo, LineItemNo, SaleUnitPrice, UnitPriceInclTax,
+      FeeCode, TaxCalcStructureId, TaxClassId, Company, Contract, DeliveryType, CatalogNo, TaxLiability, TaxLiabilityTypeDb, CurrencyRate,
+      DebitInvoiceId, DebitInvoiceItemId, NetAmtCurr, GrossAmtCurr, QtyToReturn, PriceConvFactor, DeliveryCountryCode)into PriceDetails;
+      set BaseSaleUnitPrice = PriceDetails.NetPriceBase;
+      set BaseUnitPriceInclTax = PriceDetails.GrossPriceBase;
+      set SaleUnitPrice = PriceDetails.NetPriceCurr;
+      set UnitPriceInclTax = PriceDetails.GrossPriceCurr;
+      set FeeCode = PriceDetails.TaxCode;
+      set TaxClassId = PriceDetails.TaxClassId;
+      set MultipleTaxLines = PriceDetails.MultipleTax;
+      set TaxAmountBase = PriceDetails.LineTaxDomAmount;
+      set NetAmtBase = PriceDetails.LineNetDomAmount;
+      set GrossAmtBase = PriceDetails.LineGrossDomAmount;
+      set TaxAmtCurr = PriceDetails.LineTaxCurrAmount;
+      set NetAmtCurr = PriceDetails.LineNetCurrAmount;
+      set GrossAmtCurr = PriceDetails.LineGrossCurrAmount;
+      set TaxCalcStructureId = PriceDetails.TaxCalcStructureId;
+      set FetchTaxFromDefaults = PriceDetails.FetchTaxFromDefaults;
+   }
+}
+command ValidateUnitPriceInclTaxCommand for ReturnMaterialLine clone CalculatePricesCommand {
+   execute {
+      call GetBasePriceInCurrency(OrderNo, RmaNo, Contract, UnitPriceInclTax) into SalesPriceInfo;
+      set CurrencyRate = SalesPriceInfo.CurrencyRate;
+      set TaxFromDefaultsVar = "FALSE";
+      super;
+   }
+}
+command ValidateSaleUnitPriceCommand for ReturnMaterialLine clone CalculatePricesCommand {
+   execute {
+      call GetBasePriceInCurrency(OrderNo, RmaNo, Contract, SaleUnitPrice) into SalesPriceInfo;
+      set CurrencyRate = SalesPriceInfo.CurrencyRate;
+      set TaxFromDefaultsVar = "FALSE";
+      super;
+   }
+}
+command GetPriceInfo for ReturnMaterialLine {
+   execute {
+      call GetPriceInfo(TaxFromDefaultsVar, RmaNo, RmaLineNo, OrderNo, LineNo, RelNo, LineItemNo, Contract, CatalogNo, PriceConvFactor, ConditionCode, FeeCode, QtyToReturn,
+      DebitInvoiceNo, DebitInvoiceItemId, DebitInvoiceSeriesId, PurchaseOrderNo, Company, DeliveryType, TaxLiability, TaxLiabilityTypeDb, TaxCalcStructureId, CurrencyRate, DebitInvoiceId)into PriceDetails;
+      if [PriceDetails.InfoMessage != null] {
+         set InfoMessage = PriceDetails.InfoMessage;
+         alert("${InfoMessage}");
+         exit;
+      }
+      set PriceConvFactor = PriceDetails.PriceConvFactor;
+      set ConditionCode = PriceDetails.ConditionCode;
+      set BaseSaleUnitPrice = PriceDetails.NetPriceBase;
+      set BaseUnitPriceInclTax = PriceDetails.GrossPriceBase;
+      set SaleUnitPrice = PriceDetails.NetPriceCurr;
+      set UnitPriceInclTax = PriceDetails.GrossPriceCurr;
+      set FeeCode = PriceDetails.TaxCode;
+      set TaxClassId = PriceDetails.TaxClassId;
+      set MultipleTaxLines = PriceDetails.MultipleTax;
+      set TaxAmountBase = PriceDetails.LineTaxDomAmount;
+      set NetAmtBase = PriceDetails.LineNetDomAmount;
+      set GrossAmtBase = PriceDetails.LineGrossDomAmount;
+      set TaxAmtCurr = PriceDetails.LineTaxCurrAmount;
+      set NetAmtCurr = PriceDetails.LineNetCurrAmount;
+      set GrossAmtCurr = PriceDetails.LineGrossCurrAmount;
+      set TaxCalcStructureId = PriceDetails.TaxCalcStructureId;
+      set OrderValidated = PriceDetails.OrderValidated;
+   }
+}
+command ValidateConditionCode for ReturnMaterialLine clone GetPriceInfo {
+   execute {
+      if [(OrderNo = null) and(ConditionCode != null) and(ConditionCodeUsage = "ALLOW_COND_CODE")] {
+         set TaxFromDefaultsVar = "FALSE";
+         super;
+      }
+   }
+}
+
+command ValidateQtyToReturn for ReturnMaterialLine clone GetPriceInfo {
+   execute {
+      set TaxFromDefaultsVar = "FALSE";
+
+      if [parent.ReceiptRmaNo != null] {
+         if [(Objstate != "Planned" and QtyToReturn != original.QtyToReturn)] {
+            info(" The modification will be replicated in the associated receipt RMA");
+         }
+      }
+      if [OrderNo != null] {
+         super;
+      }
+      if [QtyToReturn != null and SaleUnitPrice != null and BaseSaleUnitPrice != null] {
+         call CalculateLinePrices(TaxFromDefaultsVar, RmaNo, RmaLineNo, OrderNo, LineNo, RelNo, LineItemNo, SaleUnitPrice, UnitPriceInclTax,
+         FeeCode, TaxCalcStructureId, TaxClassId, Company, Contract, DeliveryType, CatalogNo, TaxLiability, TaxLiabilityTypeDb,
+         CurrencyRate, DebitInvoiceId, DebitInvoiceItemId, NetAmtCurr, GrossAmtCurr, QtyToReturn, PriceConvFactor, DeliveryCountryCode)into PriceDetails;
+         set BaseSaleUnitPrice = PriceDetails.NetPriceBase;
+         set BaseUnitPriceInclTax = PriceDetails.GrossPriceBase;
+         set SaleUnitPrice = PriceDetails.NetPriceCurr;
+         set UnitPriceInclTax = PriceDetails.GrossPriceCurr;
+         set FeeCode = PriceDetails.TaxCode;
+         set TaxClassId = PriceDetails.TaxClassId;
+         set MultipleTaxLines = PriceDetails.MultipleTax;
+         set TaxAmountBase = PriceDetails.LineTaxDomAmount;
+         set NetAmtBase = PriceDetails.LineNetDomAmount;
+         set GrossAmtBase = PriceDetails.LineGrossDomAmount;
+         set TaxAmtCurr = PriceDetails.LineTaxCurrAmount;
+         set NetAmtCurr = PriceDetails.LineNetCurrAmount;
+         set GrossAmtCurr = PriceDetails.LineGrossCurrAmount;
+         set TaxCalcStructureId = PriceDetails.TaxCalcStructureId;
+         set FetchTaxFromDefaults = PriceDetails.FetchTaxFromDefaults;
+         call CalculateCatchQty(QtyToReturn, PriceConvFactor, CatchUnitEnabled)into CatchQty;
+         set QtyEditedFlag = "EDITED";
+      }
+   }
+}
+-- did not find any use of this validation in IEE
+//command ValidateGtin for ReturnMaterialLine clone GetPriceInfo {
+//   execute {
+//      call ValidateGtinNo(RmaNo, OrderNo, LineNo, RelNo, LineItemNo, Contract, Company, CurrencyCode, DateRequested, GTIN)into SalesPartInfo;
+//      set CatalogNo = SalesPartInfo.CatalogNo;
+//      set CatchUom = SalesPartInfo.CatchUnit;
+//      set CurrencyRate = SalesPartInfo.CurrencyRate;
+//      set GTIN = SalesPartInfo.GtinNo;
+//      set Taxable = SalesPartInfo.Taxable;
+//      set FeeCode = SalesPartInfo.FeeCode;
+//      set DeliveryType = SalesPartInfo.DeliveryType;
+//      set ScrapUnit = SalesPartInfo.ScrapUnit;
+//      set ReturnUom = SalesPartInfo.ReceiveUnit;
+//      set TaxFromDefaultsVar = "FALSE";
+//      super;
+//   }
+//}
+command ValidateOrderRelatedInfo for ReturnMaterialLine clone ValidateDebitInvoiceOrderInfo {
+   variable ValidNoVar Number;
+   variable OrderRelatedInfoVar {
+      type = OrderRelatedInfo;
+   }
+   variable OrderRelatedValue Text;
+   execute {
+      if [OrderRelatedValue = null] {
+         set OrderNo = null;
+         set LineNo = null;
+         set RelNo = null;
+         set DebitInvoiceNo = null;
+         set ConditionCode = null;
+         set DebitInvoiceSeriesId = null;
+         set RentalDb = "FALSE";
+         set ConfigurationId = "*";
+         set PurchaseOrderNo = null;
+         set TaxFromDefaultsVar = "FALSE";
+         set DebitInvoiceMsgFlag = false;
+         set FetchOrderDataFlag = false;
+         super;
+      }
+      else {
+         call IsValidNumber(OrderRelatedValue) into ValidNoVar;
+         if [ValidNoVar = 0] {
+            error("Field format is invalid");
+            exit;
+         }
+      }
+      if [OrderValidated = "FALSE"] {
+         call PriceFactorWithInvoiceInfo(parent.Company, OrderNo, LineNo, RelNo, LineItemNo, DebitInvoiceNo, DebitInvoiceSeriesId)into OrderRelatedInfoVar;
+         set PriceConvFactor = OrderRelatedInfoVar.PriceConvFactor;
+         set DebitInvoiceItemId = OrderRelatedInfoVar.DebitInvoiceItemId;
+         set DebitInvoiceId = OrderRelatedInfoVar.DebitInvoiceId;
+         set TaxFromDefaultsVar = "FALSE";
+         set DebitInvoiceMsgFlag = false;
+         set FetchOrderDataFlag = false;
+         super;
+      }
+      if [CoPackChgLineSeqNo != null] {
+         info("RMA line is connected to a customer order line with a pack size charge/discount");
+      }
+      call GetOrderDataPriceInfo(RmaNo, RmaLineNo, OrderNo, LineNo, RelNo, LineItemNo, Contract, CatalogNo, PriceConvFactor, ConditionCode, FeeCode,
+      QtyToReturn, DebitInvoiceNo, DebitInvoiceItemId, DebitInvoiceSeriesId, PurchaseOrderNo, parent.Company, DeliveryType, TaxLiability, TaxLiabilityTypeDb,
+      TaxCalcStructureId, CurrencyRate, DebitInvoiceId, AllowQtyToReturnUpdate, ConvFactor, InvertedConvFactor, CatalogDesc, QtyToReturnInvUom, RentalDb,
+      ConfigurationId, PartNo, BaseSaleUnitPrice, BaseUnitPriceInclTax, SaleUnitPrice, UnitPriceInclTax, TaxClassId, MultipleTaxLines, TaxAmountBase, NetAmtBase,
+      GrossAmtBase, TaxAmtCurr, NetAmtCurr, GrossAmtCurr, Objstate)into DebitOrderInfo;
+
+      set OrderNo = DebitOrderInfoVar.OrderNo;
+      set LineNo = DebitOrderInfoVar.LineNo;
+      set RelNo = DebitOrderInfoVar.RelNo;
+      set LineItemNo = DebitOrderInfoVar.LineItemNo;
+      set CatalogNo = DebitOrderInfoVar.CatalogNo;
+      set QtyToReturn = DebitOrderInfoVar.QtyToReturn;
+      set DeliveryType = DebitOrderInfoVar.DeliveryType;
+      set TaxLiability = DebitOrderInfoVar.TaxLiability;
+      set CurrencyRate = DebitOrderInfoVar.CurrencyRate;
+      set ConvFactor = DebitOrderInfoVar.ConvFactor;
+      set InvertedConvFactor = DebitOrderInfoVar.InvertedConvFactor;
+      set CatalogDesc = DebitOrderInfoVar.CatalogDesc;
+      set QtyToReturnInvUom = DebitOrderInfoVar.QtyToReturnInvUom;
+      set RentalDb = DebitOrderInfoVar.RentalDb;
+      set PurchaseOrderNo = DebitOrderInfoVar.CustomerPoNo;
+      set ConfigurationId = DebitOrderInfoVar.ConfigurationId;
+      set PartNo = DebitOrderInfoVar.PartNo;
+
+      if [DebitOrderInfoVar.InfoMessage != null] {
+         set InfoMessage = DebitOrderInfoVar.InfoMessage;
+         alert("${InfoMessage}");
+         exit;
+      }
+      set BaseSaleUnitPrice = DebitOrderInfoVar.NetPriceBase;
+      set BaseUnitPriceInclTax = DebitOrderInfoVar.GrossPriceBase;
+      set SaleUnitPrice = DebitOrderInfoVar.NetPriceCurr;
+      set UnitPriceInclTax = DebitOrderInfoVar.GrossPriceCurr;
+      set FeeCode = DebitOrderInfoVar.TaxCode;
+      set TaxClassId = DebitOrderInfoVar.TaxClassId;
+      set MultipleTaxLines = DebitOrderInfoVar.MultipleTax;
+      set TaxAmountBase = DebitOrderInfoVar.LineTaxDomAmount;
+      set NetAmtBase = DebitOrderInfoVar.LineNetDomAmount;
+      set GrossAmtBase = DebitOrderInfoVar.LineGrossDomAmount;
+      set TaxAmtCurr = DebitOrderInfoVar.LineTaxCurrAmount;
+      set NetAmtCurr = DebitOrderInfoVar.LineNetCurrAmount;
+      set GrossAmtCurr = DebitOrderInfoVar.LineGrossCurrAmount;
+      set TaxCalcStructureId = DebitOrderInfoVar.TaxCalcStructureId;
+      set CoPackChgLineSeqNo = DebitOrderInfoVar.CoPackChgLineSeqNo;
+   }
+}
+command ValidateLineNo for ReturnMaterialLine clone ValidateOrderRelatedInfo {
+   execute {
+      set OrderRelatedValue = LineNo;
+      super;
+   }
+}
+
+command ValidateRelNo for ReturnMaterialLine clone ValidateOrderRelatedInfo {
+   execute {
+      set OrderRelatedValue = RelNo;
+      super;
+   }
+}
+
+command ValidateOrderNo for ReturnMaterialLine clone ValidateDebitInvoiceOrderInfo {
+   variable OrderNoInfoVar {
+      type = OrderNoInfo;
+   }
+   execute {
+      if [parent.ReceiptRmaNo != null] {
+         if [(Objstate != "Planned" and OrderNo != original.OrderNo)] {
+            info(" The modification will be replicated in the associated receipt RMA");
+         }
+      }
+      set AllowQtyToReturnUpdate = "FALSE";
+      call GetInfoFromOrderNo(RmaNo, RmaLineNo, parent.ShipmentId, OrderNo, LineNo, RelNo, LineItemNo, parent.Contract, parent.Company, parent.CustomerNo, parent.CurrencyCode,
+      CatalogNo, CatalogDesc, PartNo, ConfigurationId, DeliveryType, QtyToReturnInvUom, RentalDb, Objstate, DebitInvoiceNo, QtyToReturn, DebitInvoiceItemId, DebitInvoiceSeriesId, FeeCode, TaxLiability, TaxLiabilityTypeDb, TaxCalcStructureId, DebitInvoiceId,
+      CurrencyRate, ConvFactor, InvertedConvFactor, PriceConvFactor, BaseUnitPriceInclTax, UnitPriceInclTax, TaxClassId, TaxAmountBase, NetAmtBase, GrossAmtBase, TaxAmtCurr, NetAmtCurr, GrossAmtCurr) into OrderNoInfoVar;
+      set LineNo = OrderNoInfoVar.LineNo;
+      set RelNo = OrderNoInfoVar.RelNo;
+      set LineItemNo = OrderNoInfoVar.LineItemNo;
+      set CatalogNo = OrderNoInfoVar.CatalogNo;
+      set PartNo = OrderNoInfoVar.PartNo;
+      set ConfigurationId = OrderNoInfoVar.ConfigurationId;
+      set QtyToReturn = OrderNoInfoVar.QtyToReturn;
+      set TaxLiability = OrderNoInfoVar.TaxLiability;
+      set CurrencyRate = OrderNoInfoVar.CurrencyRate;
+      set ConvFactor = OrderNoInfoVar.ConvFactor;
+      set InvertedConvFactor = OrderNoInfoVar.InvertedConvFactor;
+      set ConditionCode = OrderNoInfoVar.ConditionCode;
+      set CatalogDesc = OrderNoInfoVar.CatalogDesc;
+      set DeliveryType = OrderNoInfoVar.DeliveryType;
+      set QtyToReturnInvUom = OrderNoInfoVar.QtyToReturnInvUom;
+      set RentalDb = OrderNoInfoVar.RentalDb;
+      set PurchaseOrderNo = OrderNoInfoVar.CustomerPoNo;
+      set PriceConvFactor = OrderNoInfoVar.PriceConvFactor;
+      set DeliveryCountryCode = OrderNoInfoVar.DeliveryCountryCode;
+      set PoOrderNo = OrderNoInfoVar.PoOrderNo;
+      set PoLineNo = OrderNoInfoVar.PoLineNo;
+      set PoORelNo = OrderNoInfoVar.PoORelNo;
+      set FeeCode = OrderNoInfoVar.FeeCode;
+      if [OrderNo != null] {
+         if [DebitInvoiceNo != null] {
+            set DebitInvoiceNo = null;
+            set DebitInvoiceSeriesId = null;
+         }
+         set PriceConvFactor = OrderNoInfoVar.PriceConvFactor;
+         set BaseSaleUnitPrice = OrderNoInfoVar.BaseSaleUnitPrice;
+         set BaseUnitPriceInclTax = OrderNoInfoVar.BaseUnitPriceInclTax;
+         set SaleUnitPrice = OrderNoInfoVar.SaleUnitPrice;
+         set UnitPriceInclTax = OrderNoInfoVar.UnitPriceInclTax;
+         set FeeCode = OrderNoInfoVar.TaxCode;
+         set TaxClassId = OrderNoInfoVar.TaxClassId;
+         set MultipleTaxLines = OrderNoInfoVar.MultipleTaxLines;
+         set TaxAmountBase = OrderNoInfoVar.TaxAmountBase;
+         set NetAmtBase = OrderNoInfoVar.NetAmtBase;
+         set GrossAmtBase = OrderNoInfoVar.GrossAmtBase;
+         set TaxAmtCurr = OrderNoInfoVar.TaxAmtCurr;
+         set NetAmtCurr = OrderNoInfoVar.NetAmtCurr;
+         set GrossAmtCurr = OrderNoInfoVar.GrossAmtCurr;
+         set TaxCalcStructureId = OrderNoInfoVar.TaxCalcStructureId;
+         set OrderValidated = OrderNoInfoVar.OrderValidated;
+      }
+      if [OrderNo = null] {
+         set OrderNo = null;
+         set LineNo = null;
+         set RelNo = null;
+         set DebitInvoiceNo = null;
+         set ConditionCode = null;
+         set DebitInvoiceSeriesId = null;
+         set RentalDb = "FALSE";
+         set ConfigurationId = "*";
+         set PurchaseOrderNo = null;
+         set DebitInvoiceMsgFlag = false;
+         set FetchOrderDataFlag = false;
+         super;
+         exit;
+      }
+
+      if [OrderValidated = "FALSE"] {
+         set InvoiceType = "CO";
+         call GetOrderAndInvoiceInfo(InvoiceType, RmaNo, RmaLineNo, PurchaseOrderNo, DebitInvoiceNo, DebitInvoiceItemId, OrderNo, parent.Contract,
+         parent.Company, parent.CustomerNo, parent.CurrencyCode, CatalogNo, QtyToReturn, DebitInvoiceSeriesId, Objstate)into OrderInfo;
+         if [OrderInfo.ErrorMessage != null] {
+            alert("${OrderInfo.ErrorMessage}");
+            exit;
+         }
+         set LineNo = OrderInfo.LineNo;
+         set RelNo = OrderInfo.RelNo;
+         set LineItemNo = OrderInfo.LineItemNo;
+         set CatalogNo = OrderInfo.CatalogNo;
+         set PartNo = OrderInfo.PartNo;
+         set ConfigurationId = OrderInfo.ConfigurationId;
+         set QtyToReturn = OrderInfo.QtyToReturn;
+         set TaxLiability = OrderInfo.TaxLiability;
+         set CurrencyRate = OrderInfo.CurrencyRate;
+         set ConvFactor = OrderInfo.ConvFactor;
+         set InvertedConvFactor = OrderInfo.InvertedConvFactor;
+         set ConditionCode = OrderInfo.ConditionCode;
+         set CatalogDesc = OrderInfo.CatalogDesc;
+         set DeliveryType = OrderInfo.DeliveryType;
+         set QtyToReturnInvUom = OrderInfo.QtyToReturnInvUom;
+         set RentalDb = OrderInfo.RentalDb;
+         set PurchaseOrderNo = OrderInfo.CustomerPoNo;
+         set PriceConvFactor = OrderInfo.PriceConvFactor;
+         set DebitInvoiceItemId = OrderInfo.DebitInvoiceItemId;
+         set DebitinvoiceId = OrderInfo.DebitInvoiceItemId;
+         set DebitInvoiceSeriesId = OrderInfo.DebitInvoiceSeriesId;
+         set DebitInvoiceMsgFlag = false;
+         set FetchOrderDataFlag = false;
+         super;
+      }
+      else {
+         set DebitInvoiceMsgFlag = false;
+         set FetchOrderDataFlag = false;
+         super;
+      }
+      if [QtyToReturn = 0] {
+         info("The calculated quantity to return is zero. This is because the return material lines already have a
+         quantity to return which equals the maximum quantity to return for the connected order line");
+      }
+      if [CoPackChgLineSeqNo != null] {
+         info("RMA line is connected to a customer order line with a pack size charge/discount");
+      }
+      if [QtyEditedFlag != "EDITED"] {
+         set QtyEditedFlag = "CO";
+      }
+   }
+}
+command ValidateInvoiceSeriesId for ReturnMaterialLine clone GetPriceInfo {
+   variable InvoiceType Text;
+   execute {
+      set InvoiceType = "INVOICE";
+      if [DebitInvoiceSeriesId != null and OrderValidated = "FALSE" and DebitInvoiceNo != null] {
+         call GetOrderInfo(InvoiceType, RmaNo, RmaLineNo, PurchaseOrderNo, DebitInvoiceNo, DebitInvoiceItemId, OrderNo, Contract,
+         CatalogNo, QtyToReturn, DebitInvoiceSeriesId, Objstate)into OrderInfo;
+         if [OrderInfo.ErrorMessage != null] {
+            alert("${OrderInfo.ErrorMessage}");
+            exit;
+         }
+         set OrderNo = OrderInfo.OrderNo;
+         set LineNo = OrderInfo.LineNo;
+         set RelNo = OrderInfo.RelNo;
+         set LineItemNo = OrderInfo.LineItemNo;
+         set CatalogNo = OrderInfo.CatalogNo;
+         set CatalogDesc = OrderInfo.CatalogDesc;
+         set QtyToReturn = OrderInfo.QtyToReturn;
+         set CurrencyRate = OrderInfo.CurrencyRate;
+         set ConvFactor = OrderInfo.ConvFactor;
+         set ConditionCode = OrderInfo.ConditionCode;
+         set TaxLiability = OrderInfo.TaxLiability;
+         set ConfigurationId = OrderInfo.ConfigurationId;
+         set PriceConvFactor = OrderInfo.PriceConvFactor;
+         set PartNo = OrderInfo.PartNo;
+         set DeliveryType = OrderInfo.DeliveryType;
+         set InvertedConvFactor = OrderNoInfoVar.InvertedConvFactor;
+         set QtyToReturnInvUom = OrderNoInfoVar.QtyToReturnInvUom;
+         set RentalDb = OrderNoInfoVar.RentalDb;
+         set PurchaseOrderNo = OrderNoInfoVar.CustomerPoNo;
+         set TaxFromDefaultsVar = "FALSE";
+         super;
+      }
+   }
+}
+
+command ValidatePurchaseOrderNo for ReturnMaterialLine clone CalculatePricesCommand {
+   variable PurchaseOrderInfoVar {
+      type = PurchaseOrderInfo;
+   }
+   execute {
+      if [PurchaseOrderNo != null] {
+         call GetOrderInfoFromPoNo(parent.ShipmentId, RmaNo, RmaLineNo, CatalogNo, parent.Company, parent.Contract,
+         OrderNo, parent.CurrencyCode, parent.CustomerNo, Objstate, QtyToReturn, "FALSE",
+         DebitInvoiceNo, DebitInvoiceItemId, DebitInvoiceSeriesId, DebitInvoiceId, FeeCode, TaxLiability, TaxLiabilityTypeDb, TaxCalcStructureId, CatalogDesc, PartNo, ConfigurationId,
+         DeliveryType, QtyToReturnInvUom, RentalDb, CurrencyRate, ConvFactor, InvertedConvFactor, PriceConvFactor, BaseUnitPriceInclTax, BaseSaleUnitPrice, SaleUnitPrice, UnitPriceInclTax,
+         TaxClassId, TaxAmountBase, NetAmtBase, GrossAmtBase, TaxAmtCurr, NetAmtCurr, GrossAmtCurr) into PurchaseOrderInfoVar;
+         if [PurchaseOrderInfoVar.ErrorMessage != null] {
+            alert("${PurchaseOrderInfoVar.ErrorMessage}");
+         }
+         set OrderNo = PurchaseOrderInfoVar.OrderNo;
+         set LineNo = PurchaseOrderInfoVar.LineNo;
+         set RelNo = PurchaseOrderInfoVar.RelNo;
+         set LineItemNo = PurchaseOrderInfoVar.LineItemNo;
+         set CatalogNo = PurchaseOrderInfoVar.CatalogNo;
+         set CatalogDesc = PurchaseOrderInfoVar.CatalogDesc;
+         set PartNo = PurchaseOrderInfoVar.PartNo;
+         set ConfigurationId = PurchaseOrderInfoVar.ConfigurationId;
+         set QtyToReturn = PurchaseOrderInfoVar.QtyToReturn;
+         set TaxLiability = PurchaseOrderInfoVar.TaxLiability;
+         set CurrencyRate = PurchaseOrderInfoVar.CurrencyRate;
+         set ConvFactor = PurchaseOrderInfoVar.ConvFactor;
+         set InvertedConvFactor = PurchaseOrderInfoVar.InvertedConvFactor;
+         set ConditionCode = PurchaseOrderInfoVar.ConditionCode;
+         set DeliveryType = PurchaseOrderInfoVar.DeliveryType;
+         set QtyToReturnInvUom = PurchaseOrderInfoVar.QtyToReturnInvUom;
+         set RentalDb = PurchaseOrderInfoVar.RentalDb;
+         set DeliveryCountryCode = PurchaseOrderInfoVar.DeliveryCountryCode;
+         set PoOrderNo = PurchaseOrderInfoVar.PoOrderNo;
+         set PoLineNo = PurchaseOrderInfoVar.PoLineNo;
+         set PoORelNo = PurchaseOrderInfoVar.PoORelNo;
+         set PriceConvFactor = PurchaseOrderInfoVar.PriceConvFactor;
+         set BaseSaleUnitPrice = PurchaseOrderInfoVar.BaseSaleUnitPrice;
+         set BaseUnitPriceInclTax = PurchaseOrderInfoVar.BaseUnitPriceInclTax;
+         set SaleUnitPrice = PurchaseOrderInfoVar.SaleUnitPrice;
+         set UnitPriceInclTax = PurchaseOrderInfoVar.UnitPriceInclTax;
+         set FeeCode = PurchaseOrderInfoVar.TaxCode;
+         set TaxClassId = PurchaseOrderInfoVar.TaxClassId;
+         set MultipleTaxLines = PurchaseOrderInfoVar.MultipleTaxLines;
+         set TaxAmountBase = PurchaseOrderInfoVar.TaxAmountBase;
+         set NetAmtBase = PurchaseOrderInfoVar.NetAmtBase;
+         set GrossAmtBase = PurchaseOrderInfoVar.GrossAmtBase;
+         set TaxAmtCurr = PurchaseOrderInfoVar.TaxAmtCurr;
+         set NetAmtCurr = PurchaseOrderInfoVar.NetAmtCurr;
+         set GrossAmtCurr = PurchaseOrderInfoVar.GrossAmtCurr;
+         set TaxCalcStructureId = PurchaseOrderInfoVar.TaxCalcStructureId;
+         set OrderValidated = PurchaseOrderInfoVar.OrderValidated;
+         set TaxFromDefaultsVar = "FALSE";
+         super;
+         if [QtyEditedFlag != "EDITED"] {
+            set QtyEditedFlag = "CPO";
+         }
+      }
+   }
+}
+
+command ValidateCatalogNoCommand for ReturnMaterialLine clone GetPriceInfo {
+   variable PriceValidatedVar Boolean;
+   variable TaxFromDefaultsVar Text;
+   variable OrderInfoVar {
+      type = OrderInfo;
+   }
+   execute {
+      if [parent.OrderNo != null or parent.ShipmentId != null] {
+         call GetOrderInfoFromCatalogNo(RmaNo, RmaLineNo, parent.ShipmentId, parent.Contract, parent.Company, parent.OrderNo, LineNo, RelNo, LineItemNo, parent.CustomerNo, parent.CurrencyCode,
+         CatalogNo, Objstate, QtyToReturn, PartNo, ConfigurationId, ConditionCode, DeliveryType, QtyToReturnInvUom, RentalDb, TaxLiability, CurrencyRate, ConvFactor, InvertedConvFactor, PriceConvFactor)into OrderInfoVar;
+         set OrderNo = OrderInfoVar.OrderNo;
+         set LineNo = OrderInfoVar.LineNo;
+         set RelNo = OrderInfoVar.RelNo;
+         set LineItemNo = OrderInfoVar.LineItemNo;
+         set CatalogNo = OrderInfoVar.CatalogNo;
+         set PartNo = OrderInfoVar.PartNo;
+         set ConfigurationId = OrderInfoVar.ConfigurationId;
+         set QtyToReturn = OrderInfoVar.QtyToReturn;
+         set TaxLiability = OrderInfoVar.TaxLiability;
+         set CurrencyRate = OrderInfoVar.CurrencyRate;
+         set ConvFactor = OrderInfoVar.ConvFactor;
+         set InvertedConvFactor = OrderInfoVar.InvertedConvFactor;
+         set ConditionCode = OrderInfoVar.ConditionCode;
+         set CatalogDesc = OrderInfoVar.CatalogDesc;
+         set DeliveryType = OrderInfoVar.DeliveryType;
+         set QtyToReturnInvUom = OrderInfoVar.QtyToReturnInvUom;
+         set RentalDb = OrderInfoVar.RentalDb;
+         set PurchaseOrderNo = OrderInfoVar.CustomerPoNo;
+         set PriceConvFactor = OrderInfoVar.PriceConvFactor;
+         set DeliveryCountryCode = OrderInfoVar.DeliveryCountryCode;
+         set PoOrderNo = OrderInfoVar.PoOrderNo;
+         set PoLineNo = OrderInfoVar.PoLineNo;
+         set PoRelNo = OrderInfoVar.PoRelNo;
+         set OrderValidated = OrderInfoVar.OrderValidated;
+      }
+      call GetSalesPartDefaults(RmaNo, OrderNo, LineNo, RelNo, LineItemNo, Company, Contract, CatalogNo, parent.CurrencyCode, parent.DateRequested) into SalesPartInfo;
+      set PartNo = SalesPartInfo.PartNo;
+      set CatalogDesc = SalesPartInfo.CatalogDesc;
+      set CatchUom = SalesPartInfo.CatchUnit;
+      set CurrencyRate = SalesPartInfo.CurrencyRate;
+      set GTIN = SalesPartInfo.GtinNo;
+      set Taxable = SalesPartInfo.Taxable;
+      set FeeCode = SalesPartInfo.FeeCode;
+      set DeliveryType = SalesPartInfo.DeliveryType;
+      set ScrapUnit = SalesPartInfo.ScrapUnit;
+      set ReturnUom = SalesPartInfo.ReceiveUnit;
+      set CatchUnitEnabled = SalesPartInfo.CatchUnitEnabled;
+      set PriceValidatedVar = SalesPartInfo.PriceValidated;
+      if [not PriceValidatedVar] {
+         set PriceValidatedVar = true;
+         set TaxFromDefaultsVar = "TRUE";
+         super;
+      }
+   }
+}
+
+command AfterCrudCommand for ReturnMaterialLine {
+   execute {
+      if [Objstate = "Released" and ReceiptRmaLineNo != null] {
+         info("The connected receipt RMA line(s) is deleted in receipt RMA ${parent.ReceiptRmaNo} in site ${parent.ReturnToContract}");
+      }
+   }
+}
+----------------------------------- LISTS -----------------------------------
+
+list ReturnMaterialLinesList for ReturnMaterialLine {
+   orderby = RmaLineNo;
+   crudactions {
+      new {
+         enabled = [not(parent.Objstate in("Denied", "Cancelled")) or(parent.Contract = parent.ReturnToContract and parent.OriginatingRmaNo != null) or parent.Objstate = null];
+      }
+      edit {
+         enabled = [not(parent.Objstate in("Denied", "Cancelled"))];
+      }
+      delete {
+         enabled = [not(parent.Objstate in("Denied", "Cancelled"))];
+      }
+      after command AfterCrudCommand;
+   }
+   field RmaLineNo;
+   fieldset ReturnMaterialStateBadge;
+   field CatalogNo {
+      label = "Sales Part No";
+      lovswitch {
+         when [parent.OrderNo != null] {
+            lov CatalogNoWithOrderNoRef with ReferenceDeliveredCatalogNoLovSelector using CatalogNoWithOrderNoList(parent.OrderNo, parent.Contract, parent.CustomerNo, parent.CurrencyCode) {
+               freeinput = [true];
+               details = "page/SalesPart/Form?$filter=CatalogNo eq $[CatalogNo] and Contract eq $[Contract]";
+            }
+         }
+         when [parent.ShipmentId != null] {
+            lov CatalogNoWithShipmentRef with ReferenceShippedCatalogNosLovSelector using CatalogNoWithShpmntNoList(parent.ShipmentId, parent.Contract, parent.CustomerNo) {
+               freeinput = [true];
+               details = "page/SalesPart/Form?$filter=CatalogNo eq $[CatalogNo] and Contract eq $[Contract]";
+            }
+         }
+         when [true] {
+            lov CatalogNoRef2 with ReferenceSalesPartLov2Selector using GetCatalogNoList(parent.Contract) {
+               freeinput = [true];
+               details = "page/SalesPart/Form?$filter=CatalogNo eq $[CatalogNo] and Contract eq $[Contract]";
+            }
+         }
+      }
+      validate command ValidateCatalogNoCommand;
+   }
+   field CatalogDesc {
+      multiline = true;
+      size = Medium;
+   }
+   field ConfigurationId {
+      label = "Configuration ID";
+   }
+   lov  ConditionCodeRef with ReferenceConditionCodeSelector {
+      label = "Condition Code";
+      validate command ValidateConditionCode;
+      description = ConditionCodeDescription;
+   }
+   field QtyToReturn {
+      validate command ValidateQtyToReturn;
+   }
+   field ReturnUom {
+      label = "Return UoM";
+   }
+   measure CatchQty(CatchUom) {
+      editable = [(CatchUnitEnabled = "TRUE")];
+      validate command {
+         variable CalculatedPriceConvFactor {
+            type = Number;
+         }
+         execute {
+            if [(QtyToReturn != null) and(CatchQty != null)] {
+               call CalculatePriceConversionFactor(CatchQty, QtyToReturn)into CalculatedPriceConvFactor;
+               set PriceConvFactor = CalculatedPriceConvFactor;
+            }
+         }
+      }
+   }
+   lov ReturnMaterialReasonRef with ReferenceReturnMaterialReasonSelector {
+      label = "Return Material Reason";
+      description = ReturnReasonDescription;
+      editable = [RentalDb = "FALSE" or RentalDb != null];
+      validate command {
+         variable DefaultInspection {
+            type = Text;
+         }
+         execute {
+            call GetInspectionDefault(ReturnMaterialReasonRef.ReturnReasonCode)into DefaultInspection;
+            set InspectionInfo = DefaultInspection;
+         }
+      }
+   }
+   field InspectionInfo;
+   lov OrderNoRef with ReferenceCustomerOrderLovSelector using OrderNoFilter(parent.ReturnToVendorNo, parent.ReturnToContract, parent.Contract, parent.Company, parent.ReturnToCompany, parent.OrderNo, parent.ShipmentId, parent.UsePriceInclTaxDb) {
+      size = Small;
+      details = "page/CustomerOrder/Form?$filter=OrderNo eq $[OrderNo]";
+      validate command ValidateOrderNo;
+   }
+   field LineNo {
+      validate command ValidateLineNo;
+   }
+   field RelNo {
+      label = "Del No";
+      validate command ValidateRelNo;
+   }
+   -- did not include the validation for LineItemNo
+   field RentalNo;
+   @DynamicComponentDependency RENTAL
+   field RentalEndDateEdited {
+      label = "Rental End Date";
+      editable = [RentalDb = "RENTAL"];
+      validate command {
+         execute {
+            if [RentalEndDate = null and RentalEndDateTime = null] {
+               set RentalEndDateTime = CurrentTime;
+            }
+            if [RentalEndDate = null] {
+               set RentalEndDateTime = null;
+               set RentalEndDate = null;
+            }
+            if [RentalEndDate != null and RentalEndDateTime != null] {
+               call ConstructDate(RentalEndDate, RentalEndDateTime) into RentalEndDate;
+            }
+         }
+      }
+   }
+   @DynamicComponentDependency RENTAL
+   field RentalEndTimeEdited {
+      label = "Rental End Time";
+      editable = [RentalDb = "RENTAL" and RentalEndDateEdited != null];
+      validate command {
+         execute {
+            if [RentalEndTimeEdited = null] {
+               set RentalEndTimeEdited = CurrentTime;
+            }
+            if [RentalEndDateEdited != null and RentalEndTimeEdited != null] {
+               call ConstructDate(RentalEndDateEdited, RentalEndTimeEdited) into RentalEndDate;
+            }
+
+         }
+      }
+   }
+   field DebitInvoiceSeriesId {
+      size = Small;
+      validate command ValidateInvoiceSeriesId;
+   }
+   lov DebitInvoiceNoRef with ReferenceInvoiceCustomerRmaLovSelector using DebitInvoiceNoFilter(parent.CurrencyCode, parent.CustomerNo, Objstate, CatalogNo, OrderNo, parent.OrderNo, parent.ShipmentId) {
+      size = Small;
+      freeinput = [true];
+      //Equivalent APF control, colsDebitInvoiceNo, handles a PM_DataItemValidate message in colsDebitInvoiceNo_WindowActions
+      //Refactor and handle that inside following validate command (or remove the validate command if not necessary)
+      validate command ValidateDebitinvoiceNo;
+   }
+   lov PurchaseOrderNoRef with ReferenceCustomerOrderLineRmaLovSelector using GetPurchOrderNoList(parent.OrderNo) {
+      size = Small;
+      validate command ValidatePurchaseOrderNo;
+   }
+   measure QtyReceived(ReturnUom);
+   field DateReturned;
+   measure QtyReturnedInv(InventoryPartRef.UnitMeas);
+   measure QtyScrapped(InventoryPartRef.UnitMeas);
+   field BaseSaleUnitPrice {
+      editable = [not parent.UsePriceInclTaxDb];
+      preserveprecision = [true];
+      validate command {
+         execute {
+            set TaxFromDefaultsVar = "FALSE";
+            call ValidateBaseSaleUnitPrice(BaseSaleUnitPrice, TaxFromDefaultsVar, RmaNo, RmaLineNo, OrderNo, LineNo, RelNo, LineItemNo, UnitPriceInclTax,
+            FeeCode, TaxCalcStructureId, TaxClassId, Company, Contract, DeliveryType, CatalogNo, TaxLiability, TaxLiabilityTypeDb, DebitInvoiceId, DebitInvoiceItemId,
+            NetAmtCurr, GrossAmtCurr, QtyToReturn, PriceConvFactor)into PriceDetails;
+            set BaseSaleUnitPrice = PriceDetails.NetPriceBase;
+            set BaseUnitPriceInclTax = PriceDetails.GrossPriceBase;
+            set SaleUnitPrice = PriceDetails.NetPriceCurr;
+            set UnitPriceInclTax = PriceDetails.GrossPriceCurr;
+            set FeeCode = PriceDetails.TaxCode;
+            set TaxClassId = PriceDetails.TaxClassId;
+            set MultipleTaxLines = PriceDetails.MultipleTax;
+            set TaxAmountBase = PriceDetails.LineTaxDomAmount;
+            set NetAmtBase = PriceDetails.LineNetDomAmount;
+            set GrossAmtBase = PriceDetails.LineGrossDomAmount;
+            set TaxAmtCurr = PriceDetails.LineTaxCurrAmount;
+            set NetAmtCurr = PriceDetails.LineNetCurrAmount;
+            set GrossAmtCurr = PriceDetails.LineGrossCurrAmount;
+            set TaxCalcStructureId = PriceDetails.TaxCalcStructureId;
+         }
+      }
+   }
+   field BaseUnitPriceInclTax {
+      editable = [parent.UsePriceInclTaxDb];
+      preserveprecision = [true];
+      validate command {
+         execute {
+            set TaxFromDefaultsVar = "FALSE";
+            call ValidateBaseUnitPriceInclTax(BaseUnitPriceInclTax, TaxFromDefaultsVar, RmaNo, RmaLineNo, OrderNo, LineNo, RelNo, LineItemNo, UnitPriceInclTax,
+            FeeCode, TaxCalcStructureId, TaxClassId, Company, Contract, DeliveryType, CatalogNo, TaxLiability, TaxLiabilityTypeDb, DebitInvoiceId, DebitInvoiceItemId,
+            NetAmtCurr, GrossAmtCurr, QtyToReturn, PriceConvFactor)into PriceDetails;
+            set BaseSaleUnitPrice = PriceDetails.NetPriceBase;
+            set BaseUnitPriceInclTax = PriceDetails.GrossPriceBase;
+            set SaleUnitPrice = PriceDetails.NetPriceCurr;
+            set UnitPriceInclTax = PriceDetails.GrossPriceCurr;
+            set FeeCode = PriceDetails.TaxCode;
+            set TaxClassId = PriceDetails.TaxClassId;
+            set MultipleTaxLines = PriceDetails.MultipleTax;
+            set TaxAmountBase = PriceDetails.LineTaxDomAmount;
+            set NetAmtBase = PriceDetails.LineNetDomAmount;
+            set GrossAmtBase = PriceDetails.LineGrossDomAmount;
+            set TaxAmtCurr = PriceDetails.LineTaxCurrAmount;
+            set NetAmtCurr = PriceDetails.LineNetCurrAmount;
+            set GrossAmtCurr = PriceDetails.LineGrossCurrAmount;
+            set TaxCalcStructureId = PriceDetails.TaxCalcStructureId;
+         }
+      }
+   }
+   field SaleUnitPrice {
+      editable = [not parent.UsePriceInclTaxDb];
+      preserveprecision = [true];
+      validate command ValidateUnitPriceInclTaxCommand;
+   }
+   field UnitPriceInclTax {
+      editable = [parent.UsePriceInclTaxDb];
+      preserveprecision = [true];
+      validate command ValidateSaleUnitPriceCommand;
+   }
+   field NetAmtBase;
+   field GrossAmtBase;
+   field NetAmtCurr;
+   field GrossAmtCurr;
+   lov TaxLiabilityRef with ReferenceTaxLiabilityLovSelector using GetTaxLiability(DeliveryCountryCode) {
+      size = Small;
+      validate command {
+         execute {
+            call  ValidateTaxLiability(OrderNo, LineNo, RelNo, LineItemNo, RmaNo, RmaLineNo, TaxLiability, SaleUnitPrice, UnitPriceInclTax, FeeCode, TaxCalcStructureId,
+            TaxClassId, Company, Contract, DeliveryType, CatalogNo, DebitInvoiceId, DebitInvoiceItemId, NetAmtCurr, GrossAmtCurr, QtyToReturn, PriceConvFactor)into PriceDetails;
+            set BaseSaleUnitPrice = PriceDetails.NetPriceBase;
+            set BaseUnitPriceInclTax = PriceDetails.GrossPriceBase;
+            set SaleUnitPrice = PriceDetails.NetPriceCurr;
+            set UnitPriceInclTax = PriceDetails.GrossPriceCurr;
+            set FeeCode = PriceDetails.TaxCode;
+            set TaxClassId = PriceDetails.TaxClassId;
+            set MultipleTaxLines = PriceDetails.MultipleTax;
+            set TaxAmountBase = PriceDetails.LineTaxDomAmount;
+            set NetAmtBase = PriceDetails.LineNetDomAmount;
+            set GrossAmtBase = PriceDetails.LineGrossDomAmount;
+            set TaxAmtCurr = PriceDetails.LineTaxCurrAmount;
+            set NetAmtCurr = PriceDetails.LineNetCurrAmount;
+            set GrossAmtCurr = PriceDetails.LineGrossCurrAmount;
+            set TaxCalcStructureId = PriceDetails.TaxCalcStructureId;
+            set TaxLiabilityTypeDb = PriceDetails.TaxLiabilityType;
+         }
+      }
+   }
+   field SalesPartRef.Taxable {
+      size = Small;
+      label = "Taxable";
+      -- The code written for validation in IEE, does not seem to get executed.
+      -- This is an insertable 'false' and update not allowed field in IEE
+   }
+   field MultipleTaxLines {
+      size = Small;
+   }
+   field CurrDate {
+      columnexclude = [true];
+   }
+   field FeeCode {
+      editable = [parent.ExternalTaxCalMethod = "NOT_USED"];
+      lovswitch {
+         when [SalesPartRef.Taxable and TaxLiability = "TAX"] {
+            lov TaxCodeRef with ReferenceTaxCodeRestrictedSelector using TaxCodeRestrictedFetchValidTaxCodes(CurrDate) {
+               preview = TaxCodeRestrictedCard;
+               description = TaxCodeRef.Description;
+            }
+         }
+         when [true] {
+            lov TaxCodeExemptRef with ReferenceTaxCodeExemptRestrictedSelector using TaxCodeExemptRestrictedFetchValidTaxCodes(CurrDate) {
+               preview = TaxCodeExemptRestrictedCard;
+               description = TaxCodeExemptRef.Description;
+            }
+         }
+      }
+      validate command {
+         execute {
+            set TaxFromDefaultsVar = "FALSE";
+            if [FeeCode != null] {
+               if [TaxCalcStructureId != null] {
+                  messagebox("", question, "This will overwrite the existing tax calculation structure. Do you want to continue?.") {
+                     when "Yes" {
+                        log("The Tax Code has changed and overridden the tax Calculation Structure");
+                     }
+                     when "No" {
+                        set FeeCode = original.FeeCode;
+                        exit;
+                     }
+                  }
+               }
+               if [MultipleTaxLines and TaxCalcStructureId = null] {
+                  messagebox("", question, "This will overwrite the existing multiple tax lines. Do you want to continue?.") {
+                     when "Yes" {
+                        log("The Tax Code has changed and overridden the multiple tax lines");
+                     }
+                     when "No" {
+                        set FeeCode = original.FeeCode;
+                        exit;
+                     }
+                  }
+               }
+               set MultipleTaxLines = false;
+            }
+            if [FeeCode = "" and MultipleTaxLines] {
+               set MultipleTaxLines = false;
+            }
+            if [FeeCode = null and not MultipleTaxLines] {
+               set TaxFromDefaultsVar = "DO_NOT_FETCH";
+               set FetchTaxCodes = "FALSE";
+            }
+            if [TaxClassId != null] {
+               set TaxClassId = null;
+            }
+            if [TaxCalcStructureId != null] {
+               set TaxCalcStructureId = null;
+            }
+            call CalculateLinePrices(TaxFromDefaultsVar, RmaNo, RmaLineNo, OrderNo, LineNo, RelNo, LineItemNo, SaleUnitPrice, UnitPriceInclTax, FeeCode, TaxCalcStructureId,
+            TaxClassId, Company, Contract, DeliveryType, CatalogNo, TaxLiability, TaxLiabilityTypeDb, CurrencyRate, DebitInvoiceId, DebitInvoiceItemId, NetAmtCurr,
+            GrossAmtCurr, QtyToReturn, PriceConvFactor, DeliveryCountryCode)into PriceDetails {
+               when SUCCESS {
+                  set BaseSaleUnitPrice = PriceDetails.NetPriceBase;
+                  set BaseUnitPriceInclTax = PriceDetails.GrossPriceBase;
+                  set SaleUnitPrice = PriceDetails.NetPriceCurr;
+                  set UnitPriceInclTax = PriceDetails.GrossPriceCurr;
+                  set FeeCode = PriceDetails.TaxCode;
+                  set TaxClassId = PriceDetails.TaxClassId;
+                  set MultipleTaxLines = PriceDetails.MultipleTax;
+                  set TaxAmountBase = PriceDetails.LineTaxDomAmount;
+                  set NetAmtBase = PriceDetails.LineNetDomAmount;
+                  set GrossAmtBase = PriceDetails.LineGrossDomAmount;
+                  set TaxAmtCurr = PriceDetails.LineTaxCurrAmount;
+                  set NetAmtCurr = PriceDetails.LineNetCurrAmount;
+                  set GrossAmtCurr = PriceDetails.LineGrossCurrAmount;
+                  set TaxCalcStructureId = PriceDetails.TaxCalcStructureId;
+                  set FetchTaxFromDefaults = PriceDetails.FetchTaxFromDefaults;
+               }
+            }
+         }
+      }
+   }
+   lov TaxClassIdRef with ReferenceTaxClassSelector {
+      size = Small;
+      description = TaxClassDescription;
+   }
+   lov TaxCalcStructureIdRef with ReferenceTaxCalcStructureActiveSelector {
+      size = Small;
+      editable = [parent.ExternalTaxCalMethod = "NOT_USED"];
+      validate command {
+         execute {
+            if [TaxCalcStructureId != original.TaxCalcStructureId] {
+               if [TaxCalcStructureId != null] {
+                  messagebox("", question, "This will overwrite the existing tax code. Do you want to continue?.") {
+                     when "Yes" {
+                        set FeeCode = null;
+                     }
+                     when "No" {
+                        set TaxCalcStructureId = original.TaxCalcStructureId;
+                        exit;
+                     }
+                  }
+                  if [MultipleTaxLines and  original.TaxCalcStructureId = null] {
+                     messagebox("", question, "This will overwrite the existing multiple tax lines. Do you want to continue?.") {
+                        when "Yes" {
+                           if [TaxClassId != null] {
+                              set TaxClassIdRef = null;
+                           }
+                        }
+                        when "No" {
+                           set TaxCalcStructureId = original.TaxCalcStructureId;
+                           exit;
+                        }
+                     }
+                  }
+               }
+               else {
+                  set TaxFromDefaultsVar = "DO_NOT_FETCH";
+                  set FetchTaxCodes = "FALSE";
+               }
+            }
+            call CalculateLinePrices(TaxFromDefaultsVar, RmaNo, RmaLineNo, OrderNo, LineNo, RelNo, LineItemNo, SaleUnitPrice, UnitPriceInclTax, FeeCode, TaxCalcStructureId,
+            TaxClassId, Company, Contract, DeliveryType, CatalogNo, TaxLiability, TaxLiabilityTypeDb, CurrencyRate, DebitInvoiceId, DebitInvoiceItemId, NetAmtCurr, GrossAmtCurr,
+            QtyToReturn, PriceConvFactor, DeliveryCountryCode)into PriceDetails {
+               when SUCCESS {
+                  set BaseSaleUnitPrice = PriceDetails.NetPriceBase;
+                  set BaseUnitPriceInclTax = PriceDetails.GrossPriceBase;
+                  set SaleUnitPrice = PriceDetails.NetPriceCurr;
+                  set UnitPriceInclTax = PriceDetails.GrossPriceCurr;
+                  set FeeCode = PriceDetails.TaxCode;
+                  set TaxClassId = PriceDetails.TaxClassId;
+                  set MultipleTaxLines = PriceDetails.MultipleTax;
+                  set TaxAmountBase = PriceDetails.LineTaxDomAmount;
+                  set NetAmtBase = PriceDetails.LineNetDomAmount;
+                  set GrossAmtBase = PriceDetails.LineGrossDomAmount;
+                  set TaxAmtCurr = PriceDetails.LineTaxCurrAmount;
+                  set NetAmtCurr = PriceDetails.LineNetCurrAmount;
+                  set GrossAmtCurr = PriceDetails.LineGrossCurrAmount;
+                  set TaxCalcStructureId = PriceDetails.TaxCalcStructureId;
+                  set FetchTaxFromDefaults = PriceDetails.FetchTaxFromDefaults;
+               }
+            }
+         }
+      }
+   }
+   lov DeliveryTypeRef with ReferenceDeliveryTypeSelector {
+      size = Small;
+      description = DeliveryTypeDescription;
+      label = "Delivery Type";
+      validate command {
+         execute {
+            set TaxFromDefaultsVar = "TRUE";
+            if [TaxLiabilityTypeDb = ""] {
+               call  ValidateDeliveryType(OrderNo, LineNo, RelNo, LineItemNo, RmaNo, RmaLineNo, TaxLiability, TaxFromDefaultsVar, SaleUnitPrice, UnitPriceInclTax,
+               FeeCode, TaxCalcStructureId, TaxClassId, Company, Contract, DeliveryType, CatalogNo, TaxLiabilityTypeDb, DebitInvoiceId, DebitInvoiceItemId,
+               NetAmtCurr, GrossAmtCurr, QtyToReturn, PriceConvFactor)into PriceDetails;
+               set BaseSaleUnitPrice = PriceDetails.NetPriceBase;
+               set BaseUnitPriceInclTax = PriceDetails.GrossPriceBase;
+               set SaleUnitPrice = PriceDetails.NetPriceCurr;
+               set UnitPriceInclTax = PriceDetails.GrossPriceCurr;
+               set FeeCode = PriceDetails.TaxCode;
+               set TaxClassId = PriceDetails.TaxClassId;
+               set MultipleTaxLines = PriceDetails.MultipleTax;
+               set TaxAmountBase = PriceDetails.LineTaxDomAmount;
+               set NetAmtBase = PriceDetails.LineNetDomAmount;
+               set GrossAmtBase = PriceDetails.LineGrossDomAmount;
+               set TaxAmtCurr = PriceDetails.LineTaxCurrAmount;
+               set NetAmtCurr = PriceDetails.LineNetCurrAmount;
+               set GrossAmtCurr = PriceDetails.LineGrossCurrAmount;
+               set TaxCalcStructureId = PriceDetails.TaxCalcStructureId;
+            }
+         }
+      }
+   }
+   lov CreditApproverIdRef with ReferenceOrderCoordinatorLovSelector {
+      size = Small;
+   }
+   field CreditInvSeriesID {
+      size = Small;
+   }
+   field CreditCorrInvoiceNo {
+      size = Small;
+   }
+   field CreditInvoiceItemId;
+   lov CancelReasonRef with ReferenceOrderCancelReasonSelector {
+      size = Small;
+      editable = [Objstate = "Cancelled"];
+      description = CancelReasonDescription;
+   }
+   lov GTINRef with ReferenceSalesPartGtinNoLovSelector using SalesPartGtinNumbers {
+      size = Small;
+      -- The code written for validation in IEE, does not seem to get executed.
+      -- This is an insertable 'false' and update not allowed field in IEE
+   }
+   field RebateBuilder {
+      label = "Rebate Builder";
+      editable = [RebateBuilderDb = "TRUE"];
+   }
+   field NoteText {
+      multiline = true;
+      searchable = false;
+   }
+   field DocumentText {
+      size = Small;
+   }
+   @DynamicComponentDependency EXPCTR
+   field ExportControlled {
+      size = Small;
+   }
+   field PoOrderNo {
+      size = Small;
+   }
+   field PoLineNo {
+      size = Small;
+   }
+   field PoRelNo {
+      size = Small;
+   }
+   lov SupplierReturnReasonRef with ReferenceReturnCauseSelector {
+      size = Small;
+      description = SupplierReturnReasonDesc;
+      label = "Supplier Return Reason";
+   }
+   field OriginatingRmaLineNo;
+   field ReceiptRmaLineNo;
+   lov CustomerTaxUsageTypeRef with ReferenceCustomerTaxUsageTypeSelector {
+      description = CustomerTaxUsageTypeRef.Description;
+   }
+   -- gelr:modify_date_applied, begin
+   field ArrivalDate {
+      editable = [(Objstate != "ReturnCompleted" and Objstate != "Denied" and Objstate != "Cancelled" and Objstate != "PartiallyReceived")];
+      columnvisible = [false];
+      columnexclude = [not(component.global.GlModifyDateAppliedEnabled)];
+   }
+   -- gelr:modify_date_applied, end
+
+  // fieldranking RmaLineNo, Objstate, CatalogNoRef, CatalogDesc, QtyToReturn, BaseSaleUnitPrice, BaseUnitPriceInclTax, SaleUnitPrice, UnitPriceInclTax, TaxLiabilityRef;
+
+   commandgroup CommandGroupCmdGroup {
+
+      command BulkRelease;
+      command BulkDeny;
+      command BulkCancel;
+      command BulkComplete;
+   }
+
+   commandgroup CommandGroup2CmdGroup {
+
+      @DynamicComponentDependency EXPCTR
+      command FindandConnectExportLicenseCommand;
+   }
+
+   commandgroup CommandGroup3CmdGroup {
+
+      command ReceivePartsCommand;
+      command ReceivePartsOrderDeliveriesCommand;
+      command ScrapPartsCommand;
+      command ReturnPartsfromInternalOrdeCommand;
+      command ScrapPartsfromInternalOrderCommand;
+      command RegisterDirectReturnsCommand;
+      command ResolveShortagesCommand;
+      command RMALineTaxLinesCommand;
+      command CreateCorrectiveInterSitePrCommand;
+      command DirectReturntoSupplierfromInternalOrderTransitCommand;
+   }
+
+   commandgroup CommandGroup4CmdGroup {
+
+      command ApproveforCreditCommand;
+      command RemoveCreditApprovalCommand;
+      command CreateCreditInvoiceCommand;
+      command ViewCreditCorrInvoiceCommand;
+   }
+
+   commandgroup CommandGroup5CmdGroup {
+
+      @DynamicComponentDependency CFGCHR
+      command ViewConfigurationCommand;
+   }
+
+   commandgroup CommandGroup6CmdGroup {
+
+      command DocumentTextCommand;
+   }
+}
+--------------------------------- SELECTORS ---------------------------------
+selector ReferenceCustomerOrderLovSelector for CustomerOrderLineRmaLov {
+   label = "";
+   static OrderNo;
+   static LineNo;
+   static CatalogNo;
+   static CatalogDesc;
+}
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+@Override
+entity ReturnMaterialLine {
+   crud = Create, Read, Update, Delete;
+   ludependencies = ReturnMaterial, DocumentText, ReturnMaterialLine;
+
+   from = "return_material_line_info";
+   exec = "RETURN_MATERIAL_LINE_API";
+   keys = RmaNo, RmaLineNo {
+      where = "RMA_NO = :RmaNo and RMA_LINE_NO = :RmaLineNo";
+   }
+
+   attribute RmaNo Number {
+      editable = [false];
+   }
+   attribute RmaLineNo Number {
+      required = [false];
+      fetch = "RMA_LINE_NO";
+      editable = [false];
+   }
+   attribute CatalogNo Text {
+      editable = [ETag = null];
+      updatable = [true];
+      format = uppercase;
+      required = [true];
+   }
+   attribute CatalogDesc Text {
+      label = "Sales Part Description";
+   }
+   attribute QtyToReturn Number {
+      updatable = [true];
+      editable = [true];
+      insertable = [true];
+      required = [true];
+   }
+   attribute ReturnUom Text {
+      fetch = "RETURN_MATERIAL_LINE_API.Get_Sales_Unit_Meas(RMA_NO, RMA_LINE_NO)";
+      label = "Return UoM";
+      maxlength = 2000;
+   }
+   attribute CatchUom Text {
+      fetch = "Inventory_Part_API.Get_Enabled_Catch_Unit_Meas(contract,part_no)";
+      label = "Catch UoM";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute ReturnReasonCode Text {
+      label = "Return Reason";
+      format = uppercase;
+      required = [true];
+   }
+   attribute ReturnReasonDescription Text {
+      fetch = "RETURN_MATERIAL_REASON_API.Get_Return_Reason_Description(RETURN_REASON_CODE)";
+   }
+   attribute DeliveryTypeDescription Text {
+      fetch = "DELIVERY_TYPE_API.Get_Description(COMPANY,DELIVERY_TYPE)";
+   }
+   attribute RentalNo Number {
+      fetch = "Customer_Order_Line_API.Get_Primary_Rental_No(order_no, line_no, rel_no, line_item_no)";
+      label = "Rental No";
+      maxlength = 2000;
+      editable = [false];
+   }
+   @DynamicComponentDependency RENTAL
+   attribute RentalEndDate Timestamp {
+      label = "Rental End Date Time";
+      fetch = "RENTAL_END_DATE";
+      insertable = [true];
+      updatable = [true];
+   }
+   attribute DebitInvoiceSeriesId Text {
+      label = "Debit/Corr Inv Series ID";
+      maxlength = 50;
+   }
+   attribute DebitInvoiceNo Text {
+      label = "Debit/Corr Inv No";
+      editable = [true];
+      updatable = [true];
+   }
+   attribute PurchaseOrderNo Text {
+      label = "Customer's PO No";
+      fetch = "PURCHASE_ORDER_NO";
+      updatable = [true];
+      insertable = [true];
+   }
+   attribute QtyReceived Number {
+      label = "Total Received Qty";
+      editable = [false];
+   }
+   attribute DateReturned Date {
+      label = "Return Completed";
+      editable = [false];
+   }
+   attribute QtyReturnedInv Number {
+      label = "Returned Inv Qty";
+      editable = [false];
+   }
+   attribute QtyScrapped Number {
+      label = "Scrapped Qty";
+      editable = [false];
+   }
+   attribute ScrapUnit Text {
+      fetch = "Inventory_Part_API.Get_Unit_Meas(CONTRACT, PART_NO)";
+   }
+   attribute BaseSaleUnitPrice Number {
+      format = ifscurrency;
+      updatable = [true];
+      label = "Price/Base";
+   }
+   attribute BaseUnitPriceInclTax Number {
+      format = ifscurrency;
+      updatable = [true];
+      label = "Price/Base incl. Tax";
+   }
+   attribute SaleUnitPrice Number {
+      label = "Price/Curr";
+      format = ifscurrency;
+      updatable = [true];
+   }
+   attribute UnitPriceInclTax Number {
+      label = "Price Incl Tax/Curr";
+      format = ifscurrency;
+      editable = [true];
+      updatable = [true];
+   }
+   attribute NetAmtBase Number {
+      editable = [false];
+      updatable = [true];
+      format = ifscurrency;
+   }
+   attribute GrossAmtBase Number {
+      editable = [false];
+      updatable = [true];
+      format = ifscurrency;
+   }
+   attribute NetAmtCurr Number {
+      editable = [false];
+      updatable = [true];
+      format = ifscurrency;
+   }
+   attribute GrossAmtCurr Number {
+      editable = [false];
+      updatable = [true];
+      format = ifscurrency;
+   }
+   attribute TaxLiabilityTypeDb Text {
+      maxlength = 100;
+      editable = [false];
+      updatable = [true];
+   }
+   attribute TaxLiability Text {
+      fetch = "TAX_LIABILITY";
+      label = "Tax Liability";
+      updatable = [true];
+      editable = [true];
+   }
+   attribute MultipleTaxLines Boolean("TRUE", "FALSE") {
+      editable = [false];
+      updatable = [true];
+      insertable = [false];
+   }
+   attribute FeeCode Text {
+      label = "Tax Code";
+      format = uppercase;
+      updatable = [true];
+   }
+   attribute TaxCodeDescription Text {
+      fetch = "Statutory_Fee_API.Get_Description(company, fee_code)";
+      label = "Tax Code Description";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TaxClassId Text {
+      label = "Tax Class";
+      editable = [false];
+      updatable = [true];
+   }
+   attribute TaxClassDescription Text {
+      fetch = "TAX_CLASS_API.Get_Description(COMPANY, TAX_CLASS_ID)";
+   }
+   attribute CreditApproverId Text {
+      editable = [false];
+   }
+   attribute CreditInvSeriesID Text {
+      fetch = "credit_invoice_series_id";
+      maxlength = 2000;
+      editable = [false];
+      format = uppercase;
+   }
+   attribute CreditCorrInvoiceNo Text {
+      maxlength = 50;
+      editable = [false];
+   }
+   attribute CreditInvoiceItemId Number {
+      label = "Credit/Corr Invoice Line Pos";
+      editable = [false];
+   }
+   attribute CancelReason Text {
+      editable = [ETag != null];
+   }
+   attribute CancelReasonDescription Text {
+      fetch = "ORDER_CANCEL_REASON_API.GET_REASON_DESCRIPTION(CANCEL_REASON)";
+   }
+   attribute CancellationReasonDescription Text {
+      fetch = "Order_Cancel_Reason_API.Get_Reason_Description(cancel_reason)";
+      label = "Cancellation Reason Description";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute GTIN Text {
+      fetch = "Part_Gtin_API.Get_Default_Gtin_No(catalog_no)";
+      label = "GTIN";
+      maxlength = 14;
+      editable = [false];
+   }
+   attribute RebateBuilderDb Text {
+      fetch = "rebate_builder_db";
+      label = "Rebate Builder DB";
+   }
+   attribute RebateBuilder Boolean("TRUE", "FALSE") {
+      fetch = "rebate_builder_db";
+      label = "Rebate Builder";
+      required = [true];
+   }
+   attribute NoteText Text {
+      fetch = "note_text";
+      label = "Notes";
+      maxlength = 2000;
+   }
+   attribute DocumentText Boolean("TRUE", "FALSE") {
+      fetch = "DECODE(DOCUMENT_TEXT_API.NOTE_ID_EXIST(NOTE_ID), '1', 'TRUE', 'FALSE')";
+      label = "Document Text";
+      editable = [false];
+   }
+   attribute DebitInvoiceItemId Number {
+      label = "Debit/Corr Inv No";
+      maxlength = 4;
+   }
+   attribute CreditInvoiceNo Number {
+      label = "Credit/Corr Invoice No";
+      maxlength = 12;
+      editable = [false];
+   }
+   attribute PartNo Text {
+      label = "Part_No";
+      editable = [false];
+      updatable = [true];
+   }
+   attribute Contract Text {
+      fetch = "CONTRACT";
+      editable = [ETag = null];
+   }
+   attribute InvertedConvFactor Number {
+      editable = [false];
+      updatable = [true];
+   }
+   attribute Company Text {
+      fetch = "COMPANY";
+      editable = [ETag != null];
+   }
+   attribute TaxAmtCurr Number {
+      editable = [false];
+      updatable = [true];
+      format = ifscurrency;
+   }
+   attribute Condition Text;
+   attribute QtyEditedFlag Text {
+      updatable = [true];
+      insertable = [true];
+      maxlength = 100;
+   }
+   attribute CreditedAmount Number {
+      fetch = "Invoice_Customer_Order_API.Get_Credited_Amt_Per_Ord_Line(order_no, line_no, rel_no, line_item_no)";
+      label = "Credited Amount";
+      editable = [false];
+   }
+   attribute PartShortageExist Number {
+      fetch = "Shortage_Demand_API.Shortage_Exists(CONTRACT, PART_NO)";
+   }
+   attribute PartShortageFlagDb Text {
+      fetch = "Inventory_Part_API.Get_Shortage_Flag_Db(CONTRACT, PART_NO)";
+   }
+   attribute SystemParameterShortageFlag Text {
+      fetch = "Mpccom_System_Parameter_API.Get_Parameter_Value1('SHORTAGE_HANDLING')";
+      editable = [false];
+   }
+   @DynamicComponentDependency EXPCTR
+   attribute ExportLicenseStatusForFindAndConnect Boolean("TRUE", "FALSE") {
+      fetch = "Exp_License_Connect_Util_API.Get_Export_Controlled(NVL(part_no,catalog_no),rma_no,rma_line_no,null,null,'RMA')";
+      label = "Export License Status for Find and Connect";
+      editable = [false];
+   }
+   @DynamicComponentDependency EXPCTR
+   attribute LicenseEnabled Boolean("TRUE", "FALSE") {
+      fetch = "Customer_Order_Flow_API.Get_License_Enabled(RMA_NO, 'INTERACT_RMA')";
+   }
+   attribute Rental Enumeration(FndBoolean) {
+      required = [false];
+      updatable = [false];
+   }
+   attribute RentalDb Text {
+      fetch = "rental_db";
+      label = "Rental DB";
+      maxlength = 20;
+      editable = [false];
+      required = [true];
+      format = uppercase;
+   }
+   @DynamicComponentDependency EXPCTR
+   attribute ExportControlled Text {
+      fetch = "Exp_License_Connect_Head_API.Get_State_By_Ref(rma_no,rma_line_no,null,null,'RMA')";
+      label = "Export License Status for Find and Connect";
+      editable = [false];
+   }
+   attribute PoOrderNo Text {
+      label = "Purchase Order No";
+      editable = [false];
+      updatable = [true];
+   }
+   attribute PoLineNo Text {
+      label = "PO Line No";
+      editable = [false];
+      updatable = [true];
+   }
+   attribute PoRelNo Text {
+      label = "PO Release No";
+      editable = [false];
+      updatable = [true];
+   }
+   attribute SupplierReturnReason Text {
+      format = uppercase;
+   }
+   attribute SupplierReturnReasonDesc Text {
+      fetch = "Return_Cause_API.Get_Description(SUPPLIER_RETURN_REASON)";
+   }
+   attribute OriginatingRmaLineNo Number {
+      editable = [false];
+      label = "Originating RMA Line No";
+   }
+   attribute ReceiptRmaLineNo Number {
+      editable = [false];
+      label = "Receipt RMA Line No";
+   }
+   attribute TaxAmountBase Number {
+      fetch = "tax_amt_base";
+      editable = [false];
+      updatable = [true];
+      format = ifscurrency;
+   }
+   attribute DebitInvoiceId Number {
+      fetch = "Customer_Order_Inv_Head_API.Get_Invoice_Id_By_No(company, debit_invoice_no, debit_invoice_series_id)";
+      label = "Debit Invoice ID";
+      editable = [false];
+      updatable = [true];
+   }
+   attribute OrderNo Text {
+      fetch = "ORDER_NO";
+      updatable = [true];
+   }
+   attribute LineNo Text {
+      fetch = "LINE_NO";
+      updatable = [true];
+   }
+   attribute RelNo Text {
+      fetch = "REL_NO";
+      updatable = [true];
+   }
+   attribute LineItemNo Number {
+      fetch = "LINE_ITEM_NO";
+      updatable = [true];
+   }
+   attribute InventoryUom Text {
+      fetch = "Inventory_Part_API.Get_Unit_Meas(CONTRACT, PART_NO)";
+   }
+   attribute OrderCatalogNo Text {
+      fetch = "Customer_Order_line_API.Get_Catalog_No(order_no, line_no, rel_no, line_item_no)";
+   }
+   attribute IsCorrIntersiteAllowed Number {
+      fetch = "Intersite_Profit_Manager_API.Is_Corrective_Allowed(order_no, line_no, rel_no, line_item_no)";
+   }
+   attribute CurrencyRate Number {
+      updatable = [true];
+   }
+   attribute ConditionCodeUsage Text {
+      fetch = "Part_Catalog_API.Get_Condition_Code_Usage_Db(PART_NO)";
+   }
+   attribute CatchUnitEnabled Text {
+      fetch = "Part_Catalog_API.Get_Catch_Unit_Enabled_Db(PART_NO)";
+   }
+   attribute ConditionCode Text {
+      updatable = [true];
+      editable = [true];
+   }
+   attribute ConditionCodeDescription Text {
+      fetch = "CONDITION_CODE_API.Get_Description(CONDITION_CODE)";
+   }
+   @DynamicComponentDependency RENTAL
+   attribute RentalEndDateEdited Date {
+      fetch = "RENTAL_END_DATE";
+      editable = [true];
+      updatable = [false];
+   }
+   @DynamicComponentDependency RENTAL
+   attribute RentalEndTimeEdited Time {
+      fetch = "RENTAL_END_DATE";
+      editable = [true];
+      updatable = [false];
+   }
+   attribute CustomersCompany Text;
+   attribute CustomerContract Text {
+      fetch = "customers_contract";
+   }
+   attribute DeliveryCountryCode Text {
+      updatable = [true];
+   }
+   attribute CurrentTime Time {
+      fetch = "SYSDATE";
+   }
+   attribute AllowQtyToReturnUpdate Text {
+      fetch = "'TRUE'";
+      required = [false];
+   }
+   attribute CurrDate Date {
+      fetch = "NVL(DATE_RETURNED,trunc(Site_API.Get_Site_Date(CONTRACT)))";
+   }
+   attribute FetchTaxCodes Text {
+      fetch = "'TRUE'";
+      default = "'TRUE'";
+      insertable = [true];
+      updatable = [false];
+      required = [false];
+   }
+   attribute SetTaxFromOriginal Text {
+      fetch = "'FALSE'";
+      editable = [false];
+      updatable = [false];
+      insertable = [true];
+   }
+   attribute FetchTaxFromDefaults Text {
+      fetch = "'FALSE'";
+      insertable = [false];
+      updatable = [true];
+      required = [false];
+   }
+   attribute OrderValidated Text {
+      fetch = "'FALSE'";
+      required = [false];
+   }
+   -- gelr:modify_date_applied, begin
+   attribute ArrivalDate Date;
+   attribute ModifyDateAppliedEnabled Boolean("TRUE", "FALSE") {
+      fetch = "Company_Localization_Info_API.Get_Parameter_Value_Db(COMPANY, 'MODIFY_DATE_APPLIED') ";
+   }
+   -- gelr:modify_date_applied, end
+   attribute ConfigurationId Text;
+   attribute CatchQty Number;
+   attribute InspectionInfo Text;
+   attribute PriceConvFactor Number;
+   attribute TaxCalcStructureId Text;
+   attribute DeliveryType Text;
+   attribute ReplacementOrderNo Text;
+   attribute ConvFactor Number;
+   attribute QtyToReturnInvUom Number;
+   attribute NoteId Number;
+   attribute CustomerTaxUsageType Text;
+
+   reference RmaNoRef(RmaNo) to ReturnMaterialReference(RmaNo) {
+      label = "RMA No";
+      prefetch ShipmentId as ShipmentId;
+      prefetch CustomerNo as CustomerNo;
+      prefetch CurrencyCode as CurrencyCode;
+   }
+   reference ConditionCodeRef(ConditionCode) to ConditionCode(ConditionCode);
+   reference ReturnMaterialReasonRef(ReturnReasonCode) to ReturnMaterialReason(ReturnReasonCode);
+   reference InventoryPartRef(Contract, PartNo) to InventoryPart(Contract, PartNo);
+   reference SalesPartRef(Contract, CatalogNo) to SalesPart(Contract, CatalogNo);
+
+   reference OrderNoRef(CatalogNo, Contract, CustomerNo, CurrencyCode, LineNo, RelNo, LineItemNo, OrderNo) to CustomerOrderLineRmaLov(CatalogNo, Contract, CustomerNo, CurrencyCode, LineNo, RelNo, LineItemNo, OrderNo) {
+      label = "Order No";
+   }
+   reference DebitInvoiceNoRef(Contract, CustomerNo, CurrencyCode, DebitInvoiceNo) to InvoiceCustomerRmaLov(Contract, CustomerNo, CurrencyCode, InvoiceNo) {
+      label = "Debit/Corr Inv No";
+   }
+   reference PurchaseOrderNoRef(CatalogNo, Contract, CustomerNo, CurrencyCode, OrderNo, PurchaseOrderNo) to CustomerOrderLineRmaLov(CatalogNo, Contract, CustomerNo, CurrencyCode, OrderNo, CustomerPoNo) {
+      label = "Customer's PO No";
+   }
+   reference TaxLiabilityRef(TaxLiability) to TaxLiabilityLov(TaxLiability) {
+      label = "Tax Liability";
+   }
+   reference TaxCodeRef(Company, FeeCode) to TaxCodeRestricted(Company, FeeCode) {
+      label = "Tax Code";
+   }
+   reference TaxCodeExemptRef(Company, FeeCode) to TaxCodeExemptRestricted(Company, FeeCode) {
+      label = "Tax Code Exempt";
+   }
+   reference TaxClassIdRef(Company, TaxClassId) to TaxClass(Company, TaxClassId) {
+      label = "Tax Class";
+   }
+   reference TaxCalcStructureIdRef(Company, TaxCalcStructureId) to TaxCalcStructureActive(Company, TaxCalcStructureId) {
+      label = "Tax Calculation Structure";
+      copy TaxCalcStructureId to OldTaxCalcStructureId;
+   }
+   reference DeliveryTypeRef(Company, DeliveryType) to DeliveryType(Company, DelivTypeId) {
+      label = "Delivery Type";
+   }
+   reference CreditApproverIdRef(CreditApproverId) to OrderCoordinatorLov(AuthorizeCode) {
+      label = "Credit Approver ID";
+   }
+   reference CancelReasonRef(CancelReason) to OrderCancelReason(CancelReason) {
+      label = "Cancellation Reason";
+   }
+   reference GTINRef(Contract, GTIN) to SalesPartGtinNoLov(Contract, GtinNo) {
+      label = "GTIN";
+   }
+   reference SupplierReturnReasonRef(SupplierReturnReason) to ReturnCause(ReturnReason) {
+      label = "Supplier Return Reason";
+   }
+   reference CatalogNoWithOrderNoRef(Contract, CustomerNo, CurrencyCode, CatalogNo) to DeliveredCatalogNoLov(Contract, CustomerNo, CurrencyCode, CatalogNo) {
+      copy OrderNo to OrderNo;
+      copy LineNo to LineNo;
+      copy RelNo to RelNo;
+      copy LineItemNo to LineItemNo;
+   }
+
+   reference CatalogNoWithShipmentRef(ShipmentId, Contract, CustomerNo, CatalogNo) to ShippedCatalogNosLov(ShipmentId, Contract, ReceiverId, CatalogNo) {
+      copy SourceRef1 to OrderNo;
+      copy SourceRef2 to LineNo;
+      copy SourceRef3 to RelNo;
+      copy SourceRef4 to LineItemNo;
+   }
+
+   reference CatalogNoRef2(Contract, CatalogNo) to SalesPartLov2(Contract, CatalogNo);
+   reference CustomerTaxUsageTypeRef(CustomerTaxUsageType) to CustomerTaxUsageType(CustomerTaxUsageType) {
+      label = "Customer Tax Usage Type";
+   }
+
+   action CheckForApproveForCredit;
+   action RemoveCreditApprovalInLines;
+
+}
+
+@Override
+entity ReturnMaterialReason {
+   attribute ReturnReasonCode Text {
+      format = uppercase;
+   }
+}
+
+------------------------------- ENUMERATIONS --------------------------------
+
+
+----------------------------------- QUERY -----------------------------------
+query ReturnMaterialReference {
+   from = "return_material";
+   lu = ReturnMaterial;
+   keys = RmaNo {
+      where = "RMA_NO = :RmaNo";
+   }
+   attribute RmaNo Number;
+   attribute CustomerNo Text;
+   attribute CurrencyCode Text;
+   attribute ShipmentId Number;
+}
+
+@Override
+query DeliveredCatalogNoLov {
+   from = "delivered_catalog_no_lov";
+   lu = CustomerOrderLine;
+   keys = OrderNo, Contract, CustomerNo, CurrencyCode, CatalogNo, LineNo, RelNo, LineItemNo;
+   ludependencies = CustomerOrderLine;
+   attribute OrderNo Text {
+      format = uppercase;
+      lovcolumn = [true];
+   }
+   attribute Contract Text {
+      label = "Site";
+      format = uppercase;
+      lovcolumn = [false];
+   }
+   attribute CustomerNo Text {
+      lovcolumn = [false];
+   }
+   attribute CurrencyCode Text {
+      lovcolumn = [false];
+   }
+   attribute CatalogNo Text {
+      label = "Sales Part";
+      format = uppercase;
+      lovcolumn = [true];
+   }
+   attribute CatalogDesc Text {
+      label = "Description";
+      lovcolumn = [true];
+   }
+   attribute LineNo Text {
+      lovcolumn = [true];
+   }
+   attribute RelNo Text {
+      label = "Del No";
+      lovcolumn = [true];
+   }
+   attribute LineItemNo Number {
+      lovcolumn = [true];
+   }
+   attribute CustomerPoNo Text {
+      label = "Customer PO No";
+      lovcolumn = [true];
+   }
+   attribute PossQtyToReturn Number {
+      label = "Possible Qty to Return";
+      lovcolumn = [true];
+   }
+   attribute QtyInvoiced Number {
+      lovcolumn = [true];
+   }
+   attribute QtyShipped Number {
+      label = "Qty Delivered";
+      lovcolumn = [true];
+   }
+   attribute QtyReturned Number {
+      lovcolumn = [true];
+   }
+   attribute PoOrderNo Text {
+      label = "PO Order No";
+      lovcolumn = [true];
+   }
+   attribute PoLineNo Number {
+      label = "PO Line No";
+      lovcolumn = [true];
+   }
+   attribute PoRelNo Number {
+      label = "PO Rel No";
+      lovcolumn = [true];
+   }
+   attribute SupplyCode Enumeration(OrderSupplyType) {
+      lovcolumn = [false];
+      fetch = "supply_code_db";
+   }
+}
+
+---------------------------------- ACTIONS ----------------------------------
+
+action RefreshLines {
+   initialcheck none;
+   ludependencies = ReturnMaterialLine;
+}
+
+action CancelReturnMaterialLine {
+   initialcheck implementation;
+   parameter Selection Text;
+   parameter CancelReason Text;
+   supportwarnings = [true];
+   ludependencies = ReturnMaterialLine, ReturnMaterial;
+}
+
+action CreateInvoiceFromReturn {
+   initialcheck implementation;
+   parameter Selection       Text;
+   parameter UseDebitInvRate Number;
+   ludependencies = ReturnMaterial;
+}
+--------------------------------- FUNCTIONS ---------------------------------
+function GetCatalogNoList List < Entity(SalesPartLov2) > {
+   parameter Contract Text;
+   where = "catalog_type_db != 'PKG' and CONTRACT = :Contract";
+}
+function GetPurchOrderNoList List < Entity(CustomerOrderLineRmaLov) > {
+   parameter OrderNo Text;
+   where = "((qty_shipped - qty_returned) >0) and (customer_po_no IS NOT NULL)";
+}
+function CatalogNoWithOrderNoList List < Entity(DeliveredCatalogNoLov) > {
+   parameter OrderNo Text;
+   parameter Contract Text;
+   parameter CustomerNo Text;
+   parameter CurrencyCode Text;
+   where = "(ORDER_NO = :OrderNo OR :OrderNo IS NULL) AND CONTRACT = :Contract AND CUSTOMER_NO = :CustomerNo AND CURRENCY_CODE = :CurrencyCode";
+}
+function CatalogNoWithShpmntNoList List < Entity(ShippedCatalogNosLov) > {
+   parameter ShipmentId Number;
+   parameter Contract Text;
+   parameter CustomerNo Text;
+   where = "(SHIPMENT_ID = :ShipmentId OR :ShipmentId IS NULL) AND CONTRACT = :Contract AND RECEIVER_ID = :CustomerNo";
+}
+function DebitInvoiceNoFilter List < Entity(InvoiceCustomerRmaLov) > {
+   parameter CurrencyCodeParent  Text;
+   parameter CustomerNoParent    Text;
+   parameter Objstate            Enumeration(ReturnMaterialLineState);
+   parameter CatalogNo           Text;
+   parameter OrderNo             Text;
+   parameter OrdNoParent         Text;
+   parameter ShipmentIdParent    Number;
+
+   where = "CURRENCY_CODE = :CurrencyCodeParent and DELIVERY_IDENTITY LIKE :CustomerNoParent and (NVL(:Objstate, ' ') != 'ReturnCompleted' and (qty_shipped - qty_returned > 0)) and
+   CATALOG_NO = NVL(:CatalogNo, CATALOG_NO) and ORDER_NO = NVL(:OrderNo, NVL(:OrdNoParent, ORDER_NO))
+   and ((:OrderNo IS NULL and :OrdNoParent IS NULL and :ShipmentIdParent IS NOT NULL and (ORDER_NO, LINE_NO, REL_NO, LINE_ITEM_NO) IN (SELECT sol.SOURCE_REF1, sol.SOURCE_REF2, sol.SOURCE_REF3, sol.SOURCE_REF4 FROM SHIPMENT_LINE_LOV sol WHERE sol.SHIPMENT_ID = :ShipmentIdParent)) OR EXISTS (SELECT 1 FROM DUAL))";
+}
+function OrderNoFilter List < Entity(CustomerOrderLineRmaLov) > {
+   parameter ReturnToVendorNo    Text;
+   parameter ReturnToContract    Text;
+   parameter Contract            Text;
+   parameter Company             Text;
+   parameter ReturnToCompany     Text;
+   parameter OrdNoParent         Text;
+   parameter ShipmentIdParent    Number;
+   parameter UsePriceInclTax     Boolean;
+
+   where = "(
+   ((:ReturnToVendorNo IS NOT NULL and VENDOR_NO = :ReturnToVendorNo and (:ReturnToContract IS NULL or (:Company != :ReturnToCompany and :ReturnToContract IS NOT NULL and :ReturnToContract != :Contract))) or (:ReturnToVendorNo IS NOT NULL and (:ReturnToContract IS NOT NULL and (:Company = :ReturnToCompany or :ReturnToContract = :Contract))) or :ReturnToVendorNo IS NULL)
+   and (((:Company != :ReturnToCompany and :ReturnToContract IS NOT NULL and :ReturnToContract != :Contract) and SUPPLY_CODE = 'IPD')  or (:Company = :ReturnToCompany or :ReturnToContract IS NULL or :ReturnToContract = :Contract))
+   and ORDER_NO = NVL(:OrdNoParent, ORDER_NO)
+   and ((:OrdNoParent IS NULL and :ShipmentIdParent IS NOT NULL and (ORDER_NO, LINE_NO, REL_NO, LINE_ITEM_NO) IN (SELECT sol.SOURCE_REF1, sol.SOURCE_REF2, sol.SOURCE_REF3, sol.SOURCE_REF4 FROM SHIPMENT_LINE_LOV sol WHERE sol.SHIPMENT_ID = :ShipmentIdParent)) or (:OrdNoParent IS NULL and :ShipmentIdParent IS NULL))
+   and ((QTY_SHIPPED - QTY_RETURNED > 0) AND USE_PRICE_INCL_TAX = :UsePriceInclTax)
+   )";
+}
+
+function GetSalesPartDefaults Structure(SalesPartInfo) {
+   parameter RmaNo          Number;
+   parameter OrderNo        Text;
+   parameter LineNo         Text;
+   parameter RelNo          Text;
+   parameter LineItemNo     Number;
+   parameter Company        Text;
+   parameter Contract       Text;
+   parameter CatalogNo      Text;
+   parameter CurrencyCode   Text;
+   parameter DateRequested  Date;
+}
+
+function GetPriceInfo Structure(PriceDetails) {
+   parameter TaxFromDefaults       Text;
+   parameter RmaNo                 Number;
+   parameter RmaLineNo             Number;
+   parameter OrderNo               Text;
+   parameter LineNo                Text;
+   parameter RelNo                 Text;
+   parameter LineItemNo            Number;
+   parameter Contract              Text;
+   parameter CatalogNo             Text;
+   parameter PriceConvFactor       Number;
+   parameter ConditionCode         Text;
+   parameter FeeCode               Text;
+   parameter QtyToReturn           Number;
+   parameter DebitInvoiceNo        Text;
+   parameter DebitInvoiceItemId    Number;
+   parameter DebitInvoiceSeriesId  Text;
+   parameter PurchaseOrderNo       Text;
+   parameter Company               Text;
+   parameter DeliveryType          Text;
+   parameter TaxLiability          Text;
+   parameter TaxLiabilityTypeDb    Text;
+   parameter TaxCalcStructureId    Text;
+   parameter CurrencyRate          Number;
+   parameter DebitInvoiceId        Number;
+}
+
+function CalculateLinePrices Structure(PriceDetails) {
+   parameter TaxFromDefaults      Text;
+   parameter RmaNo                Number;
+   parameter RmaLineNo            Number;
+   parameter OrderNo              Text;
+   parameter LineNo               Text;
+   parameter RelNo                Text;
+   parameter LineItemNo           Number;
+   parameter NetPriceCurr         Number;
+   parameter GrossPriceCurr       Number;
+   parameter TaxCode              Text;
+   parameter TaxCalcStructureId   Text;
+   parameter TaxClassId           Text;
+   parameter Company              Text;
+   parameter Contract             Text;
+   parameter DeliveryType         Text;
+   parameter CatalogNo            Text;
+   parameter TaxLiability         Text;
+   parameter TaxLiabilityTypeDb   Text;
+   parameter CurrencyRate         Number;
+   parameter DebitInvoiceId       Number;
+   parameter DebitInvoiceItemId   Number;
+   parameter NetAmtCurr           Number;
+   parameter GrossAmtCurr         Number;
+   parameter QtyToReturn          Number;
+   parameter PriceConvFactor      Number;
+   parameter DeliveryCountryDb    Text;
+}
+
+function CheckConnectedPromo Number {
+   parameter Selection Text;
+}
+function FindAndConnExpLicense Number {
+   parameter RmaNo      Number;
+   parameter RmaLineNo  Number;
+}
+function IsDebitInvoiceConnected Boolean {
+   parameter Selection Text;
+}
+
+function CheckQuantity Text {
+   parameter Selection Text;
+}
+
+function GetOrderInfoFromCatalogNo Structure(OrderInfo) {
+   parameter RmaNo              Number;
+   parameter RmaLineNo          Number;
+   parameter ShipmentId         Number;
+   parameter Contract           Text;
+   parameter Company            Text;
+   parameter OrderNo            Text;
+   parameter LineNo             Text;
+   parameter RelNo              Text;
+   parameter LineItemNo         Number;
+   parameter CustomerNo         Text;
+   parameter CurrencyCode       Text;
+   parameter CatalogNo          Text;
+   parameter Objstate           Enumeration(ReturnMaterialLineState);
+   parameter QtyToReturn        Number;
+   parameter PartNo             Text;
+   parameter ConfigurationId    Text;
+   parameter ConditionCode      Text;
+   parameter DeliveryType       Text;
+   parameter QtyToReturnInvUom  Number;
+   parameter RentalDb           Text;
+   parameter TaxLiability       Text;
+   parameter CurrencyRate       Number;
+   parameter ConvFactor         Number;
+   parameter InvertedConvFactor Number;
+   parameter PriceConvFactor    Number;
+}
+function GetOrderInfoFromPoNo Structure(PurchaseOrderInfo) {
+   parameter ShipmentId            Number;
+   parameter RmaNo                 Number;
+   parameter RmaLineNo             Number;
+   parameter CatalogNo             Text;
+   parameter Company               Text;
+   parameter Contract              Text;
+   parameter OrderNo               Text;
+   parameter CurrencyCode          Text;
+   parameter CustomerNo            Text;
+   parameter Objstate              Enumeration(ReturnMaterialLineState);
+   parameter QtyToReturn           Number;
+   parameter TaxFromDefaults       Text;
+   parameter DebitInvoiceNo        Text;
+   parameter DebitInvoiceItemId    Text;
+   parameter DebitInvoiceSeriesId  Text;
+   parameter DebitInvoiceId        Number;
+   parameter TaxCode               Text;
+   parameter TaxLiability          Text;
+   parameter TaxLiabilityTypeDb    Text;
+   parameter TaxCalcStructureId    Text;
+   parameter CatalogDesc           Text;
+   parameter PartNo                Text;
+   parameter ConfigurationId       Text;
+   parameter DeliveryType          Text;
+   parameter QtyToReturnInvUom     Number;
+   parameter RentalDb              Text;
+   parameter CurrencyRate          Number;
+   parameter ConvFactor            Number;
+   parameter InvertedConvFactor    Number;
+   parameter PriceConvFactor       Number;
+   parameter BaseUnitPriceInclTax  Number;
+   parameter BaseSaleUnitPrice     Number;
+   parameter SaleUnitPrice         Number;
+   parameter UnitPriceInclTax      Number;
+   parameter TaxClassId            Text;
+   parameter TaxAmountBase         Number;
+   parameter NetAmtBase            Number;
+   parameter GrossAmtBase          Number;
+   parameter TaxAmtCurr            Number;
+   parameter NetAmtCurr            Number;
+   parameter GrossAmtCurr          Number;
+}
+
+function GetInfoFromOrderNo Structure(OrderNoInfo) {
+   parameter RmaNo                 Number;
+   parameter RmaLineNo             Number;
+   parameter ShipmentId            Number;
+   parameter OrderNo               Text;
+   parameter LineNo                Text;
+   parameter RelNo                 Text;
+   parameter LineItemNo            Number;
+   parameter Contract              Text;
+   parameter Company               Text;
+   parameter CustomerNo            Text;
+   parameter CurrencyCode          Text;
+   parameter CatalogNo             Text;
+   parameter CatalogDesc           Text;
+   parameter PartNo                Text;
+   parameter ConfigurationId       Text;
+   parameter DeliveryType          Text;
+   parameter QtyToReturnInvUom     Number;
+   parameter RentalDb              Text;
+   parameter Objstate              Enumeration(ReturnMaterialLineState);
+   parameter DebitInvoiceNo        Text;
+   parameter QtyToReturn           Number;
+   parameter DebitInvoiceItemId    Number;
+   parameter DebitInvoiceSeriesId  Text;
+   parameter TaxCode               Text;
+   parameter TaxLiability          Text;
+   parameter TaxLiabilityTypeDb    Text;
+   parameter TaxCalcStructureId    Text;
+   parameter DebitInvoiceId        Number;
+   parameter CurrencyRate          Number;
+   parameter ConvFactor            Number;
+   parameter InvertedConvFactor    Number;
+   parameter PriceConvFactor       Number;
+   parameter BaseUnitPriceInclTax  Number;
+   parameter UnitPriceInclTax      Number;
+   parameter TaxClassId            Text;
+   parameter TaxAmountBase         Number;
+   parameter NetAmtBase            Number;
+   parameter GrossAmtBase          Number;
+   parameter TaxAmtCurr             Number;
+   parameter NetAmtCurr             Number;
+   parameter GrossAmtCurr           Number;
+}
+
+function CalculatePriceConversionFactor Number {
+   parameter CatchQty    Number;
+   parameter QtyToReturn Number;
+}
+
+function GetInspectionDefault Text {
+   parameter ReturnReasonCode Text;
+}
+function ValidateDeliveryType Structure(PriceDetails) {
+   parameter OrderNo              Text;
+   parameter LineNo               Text;
+   parameter RelNo                Text;
+   parameter LineItemNo           Number;
+   parameter RmaNo                Number;
+   parameter RmaLineNo            Number;
+   parameter TaxLiability         Text;
+   parameter TaxFromDefaults      Text;
+   parameter NetPriceCurr         Number;
+   parameter GrossPriceCurr       Number;
+   parameter TaxCode              Text;
+   parameter TaxCalcStructureId   Text;
+   parameter TaxClassId           Text;
+   parameter Company              Text;
+   parameter Contract             Text;
+   parameter DeliveryType         Text;
+   parameter CatalogNo            Text;
+   parameter TaxLiabilityTypeDb   Text;
+   parameter DebitInvoiceId       Number;
+   parameter DebitInvoiceItemId   Number;
+   parameter NetAmtCurr           Number;
+   parameter GrossAmtCurr         Number;
+   parameter QtyToReturn          Number;
+   parameter PriceConvFactor      Number;
+}
+function ValidateTaxLiability Structure(PriceDetails) {
+   parameter OrderNo              Text;
+   parameter LineNo               Text;
+   parameter RelNo                Text;
+   parameter LineItemNo           Number;
+   parameter RmaNo                Number;
+   parameter RmaLineNo            Number;
+   parameter TaxLiability         Text;
+   parameter NetPriceCurr         Number;
+   parameter GrossPriceCurr       Number;
+   parameter TaxCode              Text;
+   parameter TaxCalcStructureId   Text;
+   parameter TaxClassId           Text;
+   parameter Company              Text;
+   parameter Contract             Text;
+   parameter DeliveryType         Text;
+   parameter CatalogNo            Text;
+   parameter DebitInvoiceId       Number;
+   parameter DebitInvoiceItemId   Number;
+   parameter NetAmtCurr           Number;
+   parameter GrossAmtCurr         Number;
+   parameter QtyToReturn          Number;
+   parameter PriceConvFactor      Number;
+}
+function ValidateBaseSaleUnitPrice Structure(PriceDetails) {
+   parameter InputPrice           Number;
+   parameter TaxFromDefaults      Text;
+   parameter RmaNo                Number;
+   parameter RmaLineNo            Number;
+   parameter OrderNo              Text;
+   parameter LineNo               Text;
+   parameter RelNo                Text;
+   parameter LineItemNo           Number;
+   parameter GrossPriceCurr       Number;
+   parameter TaxCode              Text;
+   parameter TaxCalcStructureId   Text;
+   parameter TaxClassId           Text;
+   parameter Company              Text;
+   parameter Contract             Text;
+   parameter DeliveryType         Text;
+   parameter CatalogNo            Text;
+   parameter TaxLiability         Text;
+   parameter TaxLiabilityTypeDb   Text;
+   parameter DebitInvoiceId       Number;
+   parameter DebitInvoiceItemId   Number;
+   parameter NetAmtCurr           Number;
+   parameter GrossAmtCurr         Number;
+   parameter QtyToReturn          Number;
+   parameter PriceConvFactor      Number;
+}
+
+function ValidateBaseUnitPriceInclTax Structure(PriceDetails) {
+   parameter InputPrice           Number;
+   parameter TaxFromDefaults      Text;
+   parameter RmaNo                Number;
+   parameter RmaLineNo            Number;
+   parameter OrderNo              Text;
+   parameter LineNo               Text;
+   parameter RelNo                Text;
+   parameter LineItemNo           Number;
+   parameter NetPriceCurr         Number;
+   parameter TaxCode              Text;
+   parameter TaxCalcStructureId   Text;
+   parameter TaxClassId           Text;
+   parameter Company              Text;
+   parameter Contract             Text;
+   parameter DeliveryType         Text;
+   parameter CatalogNo            Text;
+   parameter TaxLiability         Text;
+   parameter TaxLiabilityTypeDb   Text;
+   parameter DebitInvoiceId       Number;
+   parameter DebitInvoiceItemId   Number;
+   parameter NetAmtCurr           Number;
+   parameter GrossAmtCurr         Number;
+   parameter QtyToReturn          Number;
+   parameter PriceConvFactor      Number;
+}
+function ConstructDate Timestamp {
+   parameter RentalEndDate Date;
+   parameter RentalEndTime Time;
+}
+function CalculateCatchQty Number {
+   parameter QtyToReturn      Number;
+   parameter PriceConvFactor  Number;
+   parameter CatchUnitEnabled Text;
+}
+function SalesPartGtinNumbers List < Entity(SalesPartGtinNoLov) > {
+   where = "SALES_TYPE_DB IN ('SALES', 'SALES RENTAL')";
+}
+//function ValidateGtinNo Structure(SalesPartInfo) {
+//   parameter RmaNo          Number;
+//   parameter OrderNo        Text;
+//   parameter LineNo         Text;
+//   parameter RelNo          Text;
+//   parameter LineItemNo     Number;
+//   parameter Contract       Text;
+//   parameter Company        Text;
+//   parameter CurrencyCode   Text;
+//   parameter DateRequested  Date;
+//   parameter GtinNo         Text;
+//}
+function GetTaxLiability List < Entity(TaxLiabilityLov) > {
+   parameter DeliveryCountryCode Text;
+   where = "country_code = :DeliveryCountryCode or country_code = '*'";
+}
+function GetOrderInfo Structure(OrderInfo) {
+   parameter Type                  Text;
+   parameter RmaNo                 Number;
+   parameter RmaLineNo             Number;
+   parameter PurchaseOrderNo       Text;
+   parameter DebitInvoiceNo        Text;
+   parameter DebitInvoiceItemId    Number;
+   parameter OrderNo               Text;
+   parameter Contract              Text;
+   parameter CatalogNo             Text;
+   parameter QtyToReturn           Number;
+   parameter DebitInvoiceSeriesId  Text;
+   parameter Objstate              Enumeration(ReturnMaterialLineState);
+}
+function GetBasePriceInCurrency Structure(SalesPriceInfo) {
+   parameter OrderNo        Text;
+   parameter RmaNo          Number;
+   parameter Contract       Text;
+   parameter SaleUnitPrice  Number;
+}
+-- GetSeriesInfo + GetInvoiceInfo
+function ValidateInvoiceSeries Structure(InvoiceSeriesInfo) {
+   parameter RmaNo                 Number;
+   parameter RmaLineNo             Number;
+   parameter ShipmentId            Number;
+   parameter DebitInvoiceNo        Text;
+   parameter DebitInvoiceItemId    Number;
+   parameter DebitInvoiceId        Number;
+   parameter OrderNo               Text;
+   parameter LineNo                Text;
+   parameter RelNo                 Text;
+   parameter LineItemNo            Number;
+   parameter Contract              Text;
+   parameter Company               Text;
+   parameter CatalogNo             Text;
+   parameter DebitInvoiceSeriesId  Text;
+   parameter CustomerNo            Text;
+   parameter CurrencyCode          Text;
+   parameter Objstate              Enumeration(ReturnMaterialLineState);
+   parameter QtyToReturn           Number;
+   parameter PriceConvFactor        Number;
+   parameter PartNo                 Text;
+   parameter ConfigurationId        Text;
+   parameter TaxLiability           Text;
+   parameter CurrencyRate           Number;
+   parameter ConvFactor             Number;
+   parameter InvertedConvFactor     Number;
+   parameter ConditionCode          Text;
+   parameter CatalogDesc            Text;
+   parameter DeliveryType           Text;
+   parameter QtyToReturnInvUom      Number;
+   parameter RentalDb               Text;
+   parameter PurchaseOrderNo        Text;
+}
+
+function ValidateOrderInfo Structure(DebitOrderInfo) {
+   parameter TaxFromDefaults        Text;
+   parameter RmaNo                  Number;
+   parameter RmaLineNo              Number;
+   parameter OrderNo                Text;
+   parameter LineNo                 Text;
+   parameter RelNo                  Text;
+   parameter LineItemNo             Number;
+   parameter Contract               Text;
+   parameter CatalogNo              Text;
+   parameter PriceConvFactor        Number;
+   parameter ConditionCode          Text;
+   parameter FeeCode                Text;
+   parameter QtyToReturn            Number;
+   parameter DebitInvoiceNo         Text;
+   parameter DebitInvoiceItemId     Number;
+   parameter DebitInvoiceSeriesId   Text;
+   parameter PurchaseOrderNo        Text;
+   parameter Company                Text;
+   parameter DeliveryType           Text;
+   parameter TaxLiability           Text;
+   parameter TaxLiabilityTypeDb     Text;
+   parameter TaxCalcStructureId     Text;
+   parameter CurrencyRate           Number;
+   parameter DebitInvoiceId         Number;
+   parameter CatchQty               Number;
+   parameter CatchUnitEnabled       Text;
+   parameter CalcpriceConvFlag      Boolean;
+   parameter Objstate               Enumeration(ReturnMaterialLineState);
+   parameter AllowQtyToReturnUpdate Text;
+   parameter ConvFactor             Number;
+   parameter InvertedConvFactor     Number;
+   parameter CatalogDesc            Text;
+   parameter QtyToReturnInvUom      Number;
+   parameter RentalDb               Text;
+   parameter ConfigurationId        Text;
+   parameter PartNo                 Text;
+   parameter BaseSaleUnitPrice      Number;
+   parameter BaseUnitPriceInclTax   Number;
+   parameter SaleUnitPrice          Number;
+   parameter UnitPriceInclTax       Number;
+   parameter TaxClassId             Text;
+   parameter MultipleTaxLines       Boolean;
+   parameter TaxAmountBase          Number;
+   parameter NetAmtBase             Number;
+   parameter GrossAmtBase           Number;
+   parameter TaxAmtCurr             Number;
+   parameter NetAmtCurr             Number;
+   parameter GrossAmtCurr           Number;
+   parameter FetchOrderInfoFlag     Boolean;
+}
+function GetOrderAndInvoiceInfo Structure(OrderInfo) {
+   parameter Type                   Text;
+   parameter RmaNo                  Number;
+   parameter RmaLineNo              Number;
+   parameter PurchaseOrderNo        Text;
+   parameter DebitInvoiceNo         Text;
+   parameter DebitInvoiceItemId     Number;
+   parameter OrderNo                Text;
+   parameter Contract               Text;
+   parameter Company                Text;
+   parameter CustomerNo             Text;
+   parameter CurrencyCode           Text;
+   parameter CatalogNo              Text;
+   parameter QtyToReturn            Number;
+   parameter DebitInvoiceSeriesId   Text;
+   parameter Objstate               Text;
+}
+function GetSeriesInfo Structure(SeriesInfo) {
+   parameter Company               Text;
+   parameter DebitInvoiceNo        Text;
+   parameter Contract              Text;
+   parameter CatalogNo             Text;
+}
+function IsValidNumber Number {
+   parameter LineNo Text;
+}
+
+function PriceFactorWithInvoiceInfo Structure(OrderRelatedInfo) {
+   parameter Company               Text;
+   parameter OrderNo               Text;
+   parameter LineNo                Text;
+   parameter RelNo                 Text;
+   parameter LineItemNo            Number;
+   parameter DebitInvoiceNo        Text;
+   parameter DebitInvoiceSeriesId  Text;
+}
+
+function GetOrderDataPriceInfo Structure(DebitOrderInfo) {
+   parameter RmaNo                  Number;
+   parameter RmaLineNo              Number;
+   parameter OrderNo                Text;
+   parameter LineNo                 Text;
+   parameter RelNo                  Text;
+   parameter LineItemNo             Number;
+   parameter Contract               Text;
+   parameter CatalogNo              Text;
+   parameter PriceConvFactor        Number;
+   parameter ConditionCode          Text;
+   parameter FeeCode                Text;
+   parameter QtyToReturn            Number;
+   parameter DebitInvoiceNo         Text;
+   parameter DebitInvoiceItemId     Number;
+   parameter DebitInvoiceSeriesId   Text;
+   parameter PurchaseOrderNo        Text;
+   parameter Company                Text;
+   parameter DeliveryType           Text;
+   parameter TaxLiability           Text;
+   parameter TaxLiabilityTypeDb     Text;
+   parameter TaxCalcStructureId     Text;
+   parameter CurrencyRate           Number;
+   parameter DebitInvoiceId         Number;
+   parameter AllowQtyToReturnUpdate Text;
+   parameter ConvFactor             Number;
+   parameter InvertedConvFactor     Number;
+   parameter CatalogDesc            Text;
+   parameter QtyToReturnInvUom      Number;
+   parameter RentalDb               Text;
+   parameter ConfigurationId        Text;
+   parameter PartNo                 Text;
+   parameter BaseSaleUnitPrice      Number;
+   parameter BaseUnitPriceInclTax   Number;
+   parameter SaleUnitPrice          Number;
+   parameter UnitPriceInclTax       Number;
+   parameter TaxClassId             Text;
+   parameter MultipleTaxLines       Boolean;
+   parameter TaxAmountBase          Number;
+   parameter NetAmtBase             Number;
+   parameter GrossAmtBase           Number;
+   parameter TaxAmtCurr             Number;
+   parameter NetAmtCurr             Number;
+   parameter GrossAmtCurr           Number;
+   parameter Objstate               Enumeration(ReturnMaterialLineState);
+}
+function GetQtyToReturnInv Number {
+   parameter QtyToReturn Number;
+   parameter ConvFactor Number;
+   parameter InvertedConvFactor Number;
+}
+-------------------------------- STRUCTURES ---------------------------------
+structure InvoiceSeriesInfo {
+   attribute DebitInvoiceSeriesId Text;
+   attribute SeriesNotExist       Boolean;
+   attribute DebitInvoiceItemId   Number;
+   attribute DebitInvoiceId       Number;
+   attribute PriceConvFactor      Number;
+   attribute OrderNo              Text;
+   attribute LineNo               Text;
+   attribute RelNo                Text;
+   attribute LineItemNo           Number;
+   attribute CatalogNo            Text;
+   attribute PartNo		          Text;
+   attribute ConfigurationId      Text;
+   attribute QtyToReturn          Number;
+   attribute TaxLiability         Text;
+   attribute CurrencyRate         Number;
+   attribute ConvFactor           Number;
+   attribute InvertedConvFactor   Number;
+   attribute ConditionCode        Text;
+   attribute CatalogDesc          Text;
+   attribute DeliveryType         Text;
+   attribute QtyToReturnInvUom    Number;
+   attribute RentalDb             Text;
+   attribute CustomerPoNo         Text;
+   attribute DebitInvValidated    Boolean;
+}
+structure SalesPartInfo {
+   attribute CatchUnitEnabled Text;
+   attribute CatchUnit        Text;
+   attribute CurrencyRate     Number;
+   attribute ConvFactor       Number;
+   attribute CurrencyType     Text;
+   attribute GtinNo           Text;
+   attribute SalesUnit        Text;
+   attribute InventoryUnit    Text;
+   attribute Taxable          Text;
+   attribute CatalogDesc      Text;
+   attribute FeeCode          Text;
+   attribute DeliveryType     Text;
+   attribute PartNo           Text;
+   attribute ScrapUnit        Text;
+   attribute ReceiveUnit      Text;
+   attribute PriceValidated   Boolean;
+   attribute CatalogNo        Text;
+}
+
+structure PriceInfo {
+   attribute SalesUnitPrice           Number;
+   attribute SaleUnitPriceInclTax     Number;
+   attribute BaseSaleUnitPrice        Number;
+   attribute BaseSaleUnitPriceInclTax Number;
+   attribute LineTotal                Number;
+   attribute GrossTotalBase           Number;
+   attribute LineTotalCurr            Number;
+   attribute GrossTotalCurr           Number;
+   attribute VatCode                  Text;
+   attribute TaxClassId               Text;
+   attribute OrderCatalogNo           Text;
+   attribute PriceConvFactor          Number;
+   attribute ConditionCode            Text;
+}
+structure PriceDetails {
+   attribute NetPriceBase         Number;
+   attribute GrossPriceBase       Number;
+   attribute NetPriceCurr         Number;
+   attribute GrossPriceCurr       Number;
+   attribute MultipleTax          Boolean;
+   attribute TaxCode              Text;
+   attribute TaxCalcStructureId   Text;
+   attribute TaxClassId           Text;
+   attribute TaxFromDefaults      Text;
+   attribute LineNetCurrAmount    Number;
+   attribute LineGrossCurrAmount  Number;
+   attribute LineTaxDomAmount     Number;
+   attribute LineNetDomAmount     Number;
+   attribute LineGrossDomAmount   Number;
+   attribute LineTaxCurrAmount    Number;
+   attribute PriceConvFactor      Number;
+   attribute ConditionCode        Text;
+   attribute InfoMessage          Text;
+   attribute TaxLiabilityType     Text;
+   attribute FetchTaxFromDefaults Text;
+   attribute OrderValidated       Text;
+   attribute CoPackChgLineSeqNo   Number;
+}
+structure LineTotals {
+   attribute LineTaxDomAmount      Number;
+   attribute LineNetDomAmount      Number;
+   attribute LineGrossDomAmount    Number;
+   attribute LineTaxCurrAmount     Number;
+   attribute LineNetCurrAmount     Number;
+   attribute LineGrossCurrAmount   Number;
+   attribute TaxCalcStructureId    Text;
+   attribute TaxFromDefaults       Text;
+}
+
+structure OrderInfo {
+   attribute DebitInvoiceSeriesId Text;
+   attribute DebitInvoiceId       Number;
+   attribute RentalNo             Number;
+   attribute DebitInvoiceItemId   Number;
+   attribute DebitInvoiceNo       Text;
+   attribute PriceConvFactor      Number;
+   attribute OrderNo              Text;
+   attribute LineNo               Text;
+   attribute RelNo                Text;
+   attribute LineItemNo           Number;
+   attribute CatalogNo            Text;
+   attribute PartNo		          Text;
+   attribute ConfigurationId      Text;
+   attribute QtyToReturn          Number;
+   attribute TaxLiability         Text;
+   attribute CurrencyRate         Number;
+   attribute ConvFactor           Number;
+   attribute InvertedConvFactor   Number;
+   attribute ConditionCode        Text;
+   attribute CatalogDesc          Text;
+   attribute DeliveryType         Text;
+   attribute QtyToReturnInvUom    Number;
+   attribute RentalDb             Text;
+   attribute CustomerPoNo         Text;
+   attribute InternalPoNo         Text;
+   attribute DeliveryCountryCode  Text;
+   attribute PoOrderNo            Text;
+   attribute PoLineNo             Text;
+   attribute PoRelNo              Text;
+   attribute ErrorMessage         Text;
+   attribute OrderValidated       Text;
+   attribute TaxCode              Text;
+   attribute DebitInvValidated    Boolean;
+}
+
+structure PurchaseOrderInfo {
+   attribute RentalNo             Number;
+   attribute PriceConvFactor      Number;
+   attribute OrderNo              Text;
+   attribute LineNo               Text;
+   attribute RelNo                Text;
+   attribute LineItemNo           Number;
+   attribute CatalogNo            Text;
+   attribute CatalogDesc          Text;
+   attribute PartNo		          Text;
+   attribute ConfigurationId      Text;
+   attribute QtyToReturn          Number;
+   attribute TaxLiability         Text;
+   attribute CurrencyRate         Number;
+   attribute ConvFactor           Number;
+   attribute InvertedConvFactor   Number;
+   attribute ConditionCode        Text;
+   attribute DeliveryType         Text;
+   attribute QtyToReturnInvUom    Number;
+   attribute RentalDb             Text;
+   attribute DeliveryCountryCode  Text;
+   attribute PoOrderNo            Text;
+   attribute PoLineNo             Text;
+   attribute PoRelNo              Text;
+   attribute ErrorMessage         Text;
+   attribute BaseSaleUnitPrice    Number;
+   attribute BaseUnitPriceInclTax Number;
+   attribute SaleUnitPrice        Number;
+   attribute UnitPriceInclTax     Number;
+   attribute MultipleTaxLines     Boolean;
+   attribute TaxCode              Text;
+   attribute TaxCalcStructureId   Text;
+   attribute TaxClassId           Text;
+   attribute TaxFromDefaults      Text;
+   attribute NetAmtCurr           Number;
+   attribute TaxAmtCurr           Number;
+   attribute GrossAmtCurr         Number;
+   attribute TaxAmountBase        Number;
+   attribute LineNetDomAmount     Number;
+   attribute NetAmtBase           Number;
+   attribute GrossAmtBase         Number;
+   attribute OrderValidated       Text;
+}
+structure OrderNoInfo {
+   attribute RentalNo             Number;
+   attribute PriceConvFactor      Number;
+   attribute OrderNo              Text;
+   attribute LineNo               Text;
+   attribute RelNo                Text;
+   attribute LineItemNo           Number;
+   attribute CatalogNo            Text;
+   attribute CatalogDesc          Text;
+   attribute PartNo		          Text;
+   attribute ConfigurationId      Text;
+   attribute QtyToReturn          Number;
+   attribute TaxLiability         Text;
+   attribute CurrencyRate         Number;
+   attribute ConvFactor           Number;
+   attribute InvertedConvFactor   Number;
+   attribute ConditionCode        Text;
+   attribute DeliveryType         Text;
+   attribute QtyToReturnInvUom    Number;
+   attribute RentalDb             Text;
+   attribute DeliveryCountryCode  Text;
+   attribute CustomerPoNo         Text;
+   attribute PoOrderNo            Text;
+   attribute PoLineNo             Text;
+   attribute PoRelNo              Text;
+   attribute ErrorMessage         Text;
+   attribute BaseSaleUnitPrice    Number;
+   attribute BaseUnitPriceInclTax Number;
+   attribute SaleUnitPrice        Number;
+   attribute UnitPriceInclTax     Number;
+   attribute MultipleTaxLines     Boolean;
+   attribute TaxCode              Text;
+   attribute TaxCalcStructureId   Text;
+   attribute TaxClassId           Text;
+   attribute TaxFromDefaults      Text;
+   attribute NetAmtCurr           Number;
+   attribute TaxAmtCurr           Number;
+   attribute GrossAmtCurr         Number;
+   attribute TaxAmountBase        Number;
+   attribute LineNetDomAmount     Number;
+   attribute NetAmtBase           Number;
+   attribute GrossAmtBase         Number;
+   attribute DebitInvoiceNo       Text;
+   attribute OrderValidated       Text;
+}
+structure SalesPriceInfo {
+   attribute Price    Number;
+   attribute CurrencyRate  Number;
+}
+structure SeriesInfo {
+   attribute SeriesId Text;
+   attribute SeriesNotExist Boolean;
+   attribute SeriesValidated Boolean;
+}
+structure InvoiceInfo {
+   attribute DebitInvoiceItemId Number;
+   attribute DebitInvoiceId Number;
+}
+//structure OrderData {
+//   attribute DebitInvoiceItemId Number;
+//   attribute DebitInvoiceId Number;
+//}
+structure DebitOrderInfo {
+   attribute NetPriceBase        Number;
+   attribute GrossPriceBase      Number;
+   attribute NetPriceCurr        Number;
+   attribute GrossPriceCurr      Number;
+   attribute MultipleTax         Boolean;
+   attribute TaxCode             Text;
+   attribute TaxCalcStructureId  Text;
+   attribute TaxClassId          Text;
+   attribute LineNetCurrAmount   Number;
+   attribute LineGrossCurrAmount Number;
+   attribute LineTaxDomAmount    Number;
+   attribute LineNetDomAmount    Number;
+   attribute LineGrossDomAmount  Number;
+   attribute LineTaxCurrAmount   Number;
+   attribute OrderNo             Text;
+   attribute LineNo              Text;
+   attribute RelNo               Text;
+   attribute LineItemNo          Number;
+   attribute CatalogNo           Text;
+   attribute PriceConvFactor     Number;
+   attribute ConditionCode       Text;
+   attribute QtyToReturn         Number;
+   attribute DeliveryType        Text;
+   attribute TaxLiability        Text;
+   attribute CurrencyRate        Number;
+   attribute ConvFactor          Number;
+   attribute InvertedConvFactor  Number;
+   attribute CatalogDesc         Text;
+   attribute QtyToReturnInvUom   Number;
+   attribute RentalDb            Text;
+   attribute CustomerPoNo        Text;
+   attribute ConfigurationId     Text;
+   attribute PartNo		         Text;
+   attribute CatchQty            Number;
+   attribute CoPackChgLineSeqNo  Number;
+   attribute InfoMessage         Text;
+}
+
+structure OrderRelatedInfo {
+   attribute PriceConvFactor    Number;
+   attribute DebitInvoiceItemId Number;
+   attribute DebitInvoiceId     Number;
+}

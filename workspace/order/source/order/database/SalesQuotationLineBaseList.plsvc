@@ -1,0 +1,2717 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     SalesQuotationLineBaseList
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+-- 2022-01-31  ThKrlk   SCZ-17384, Modified Add_Values_To_Duplicated_Attr() by assigning 0 to quote_line_struct_rec_.discount when duplicating the SQ line
+-- 2022-01-26  NiDalk   SCZ-17458, Modified Validate_Customer_Part_No___ to fetch catalog_no correctly.
+-- 2021-04-08  Skanlk   SCZ-14204, Modified Calculate_Line_Total___ and Get_Quote_Price___ by adding a new condition to check whether it is a new line or not to prevent
+-- 2021-04-08           replacing a manually entered discount when entering the quantity for a new line.
+-- 2021-04-01  ApWilk   Bug 158539(SCZ-14282), Added the function FetchPeriodRounding() to fetch the correct periodic rounding from the site level.
+-- 2021-01-29  Skanlk   SCZ-13274, Modified Calculate_Quote_Line_Prices___() and Calculate_Line_Total___() by adding a condition to
+-- 2021-01-29           check whether the tax_calc_method_ is "NOT_USED" or not and sales part is taxable, before setting the source references.
+-- 2021-01-26  Skanlk   SCZ-13325, Modified Validate_Catalog_No___() to retrieve a value for Delivery Type when creating a new SQ line.
+-- 2020-12-04  PamPlk   Bug 156222(SCZ-12747)Modified Calculate_Quote_Line_Prices___() to pass the correct delivery country code 
+-- 2020-12-04           when fetching the tax info by calling the GetPrices method.
+-- 2020-10-13  NiDalk   SCZ-11880, Renamed Get_Tax_Liability_Type___ to Get_Cus_Tax_Liability_Type_Db___ to fetch db value.
+-- 2020-07-16  PamPlk   Bug 152585(SCZ-9275), Added Is_Valid_Price_List___ and modified the method Validate_Catalog_No___.
+-- 2020-06-08  MalLlk   GESPRING20-4617, Modified Add_Values_To_Duplicated_Attr() to pass the value part_price to Calc_Free_Of_Charge_Tax_Basis___().
+-- 2020-03-13  MaEelk   SCXTEND-2207, Made Duplicate Functionality work.
+-- 2019-11-13  ChJalk   SCXTEND-518, Modified Get_Available_Quantity___ to fetch the 
+-- 2019-11-13           available quantity correctly for the ownership 'COMPANY RENTAL ASSET'.
+-- 2019-10-29  MaEelk   SCXTEND-1167, Restructured the function Validate_Sale_Unit_Price___ and modified its calling places
+-- 2019-10-25  MaEelk   SCXTEND-1118, Restructured Calculate_Quote_Line_Prices___ and modified its calling places
+-- 2019-10-21  MaEelk   SCXTEND-1118, Removed the structure PriceStructure since its contents already exist in to QuoteLineStruct
+-- 2018-12-12  SeJalk   SCUXXW4-986,Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Get_Ship_Via_Desc___ (
+  ship_via_code_ IN VARCHAR2) RETURN VARCHAR2
+IS
+BEGIN
+   RETURN Mpccom_Ship_Via_API.Get_Description(ship_via_code_);
+END Get_Ship_Via_Desc___;
+
+FUNCTION Get_Delivery_Terms_Desc___ (
+  delivery_terms_ IN VARCHAR2) RETURN VARCHAR2
+IS
+BEGIN
+   RETURN Order_Delivery_Term_API.Get_Description(delivery_terms_);
+END Get_Delivery_Terms_Desc___;
+
+FUNCTION Get_Reason_Description___ (
+  reason_id_ IN VARCHAR2) RETURN VARCHAR2
+IS
+BEGIN
+   RETURN Lose_Win_Reason_API.Get_Reason_Description(reason_id_);
+END Get_Reason_Description___;
+
+FUNCTION Get_Cancel_Reason_Description___ (
+  cancel_reason_ IN VARCHAR2) RETURN VARCHAR2
+IS
+BEGIN
+   RETURN Order_Cancel_Reason_API.GET_REASON_DESCRIPTION(cancel_reason_);
+END Get_Cancel_Reason_Description___;
+
+FUNCTION Create_Pq_For_Source___ (
+   selection_ IN VARCHAR2) RETURN VARCHAR2
+IS
+   records_                 json_array_t := json_array_t.parse(selection_);
+   current_selection_       VARCHAR2(32000);
+   price_query_list_        VARCHAR2(32000);
+   source_attr_             VARCHAR2(32000);
+   price_query_id_          NUMBER;
+   quotation_no_            order_quotation_line_tab.quotation_no%TYPE;
+   line_no_                 order_quotation_line_tab.line_no%TYPE;
+   rel_no_                  order_quotation_line_tab.rel_no%TYPE;
+   line_item_no_            order_quotation_line_tab.line_item_no%TYPE;
+BEGIN
+   FOR i_ IN 0 .. records_.get_size - 1 LOOP      
+      current_selection_ := records_.get_string(i_);
+      Client_SYS.Add_To_Attr('SOURCE', 'ORDER_QUOTATION_LINE', source_attr_);
+      
+      quotation_no_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'QUOTATION_NO');
+      line_no_      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_NO');
+      rel_no_       := Client_SYS.Get_Key_Reference_Value(current_selection_, 'REL_NO');
+      line_item_no_ := to_number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_ITEM_NO'));
+      
+      Client_SYS.Add_To_Attr('SOURCE_REF1', quotation_no_, source_attr_);
+      Client_SYS.Add_To_Attr('SOURCE_REF2', line_no_, source_attr_);
+      Client_SYS.Add_To_Attr('SOURCE_REF3', rel_no_, source_attr_);
+      Client_SYS.Add_To_Attr('SOURCE_REF4', line_item_no_, source_attr_);
+      
+      Order_Quotation_Line_Initial_Check___(quotation_no_, line_no_, rel_no_, line_item_no_);
+      Price_Query_API.Create_Pq_For_Source(price_query_id_, source_attr_);
+      
+      price_query_list_ := price_query_list_ || '(PriceQueryId eq ' || price_query_id_ || ' ) or ';
+
+   END LOOP;
+  
+   RETURN SUBSTR(price_query_list_, 0, LENGTH(price_query_list_)-4);
+END Create_Pq_For_Source___;
+
+
+FUNCTION Validate_Catalog_No___ (
+	validation_rec_         IN Quote_Line_Struct_Rec,
+	is_new_                 IN BOOLEAN,
+	supply_country_db_      IN VARCHAR2,
+	currency_code_          IN VARCHAR2,
+	tax_from_def_           IN VARCHAR2,
+	tax_code_flag_          IN BOOLEAN,
+	tax_edited_             IN BOOLEAN,
+	rental_chargable_days_  IN NUMBER,
+   info$_                  OUT VARCHAR2) RETURN Quote_Line_Struct_Rec
+IS
+   rec_              Quote_Line_Struct_Rec;
+   attr_             VARCHAR2(32000);
+   sales_part_rec_   Sales_Part_API.Public_Rec;
+   line_delail_rec_  Quote_Line_Struct_Rec;
+   catalog_no_       Order_Quotation_line_tab.catalog_no%TYPE;
+BEGIN
+	rec_        := validation_rec_;
+   catalog_no_ := validation_rec_.catalog_no;
+   IF (catalog_no_ IS NULL) THEN
+      rec_.success := FALSE;
+      RETURN rec_;
+   END IF;
+	Client_SYS.Clear_Attr(attr_);
+   Client_SYS.Add_To_Attr('BUY_QTY_DUE', rec_.buy_qty_due, attr_);
+   IF (rec_.rental) THEN
+      Client_SYS.Add_To_Attr('RENTAL_DB', 'TRUE', attr_);
+   ELSE
+      Client_SYS.Add_To_Attr('RENTAL_DB', 'FALSE', attr_);
+   END IF;
+   IF (rec_.duplicated_line = 'TRUE') THEN
+      Client_SYS.Add_To_Attr('TAX_CODE', rec_.tax_code, attr_);
+   END IF;
+   
+   Order_Quotation_Line_API.Get_Line_Defaults__(info$_, attr_, rec_.catalog_no, rec_.quotation_no);
+   sales_part_rec_      := Sales_Part_API.Get(rec_.contract, rec_.catalog_no);
+   rec_.price_unit_meas := sales_part_rec_.price_unit_meas;
+   
+   IF (rec_.duplicated_line = 'FALSE' OR rec_.duplicated_line IS NULL) THEN
+      rec_.delivery_type   := sales_part_rec_.delivery_type;
+   END IF;
+
+   
+   IF (Sales_Part_API.Get_Configurable_Db(rec_.contract, rec_.catalog_no) = 'TRUE') THEN 
+      rec_.configurable := TRUE;
+   ELSE
+      rec_.configurable := FALSE;
+   END IF;
+   rec_.sales_price_group_id     := sales_part_rec_.sales_price_group_id;
+   rec_.cost_level_db            := Inventory_Part_API.Get_Invent_Part_Cost_Level_Db(rec_.contract, sales_part_rec_.part_no );
+   rec_.input_unit_meas_group_id := Inventory_Part_API.Get_Input_Unit_Meas_Group_Id(rec_.contract, sales_part_rec_.part_no);
+    IF (Input_Unit_meas_Group_API.Is_Usage_Allowed(Inventory_Part_API.Get_Input_Unit_Meas_Group_Id(rec_.contract, sales_part_rec_.part_no), 'ORDER') = 'TRUE') THEN 
+      rec_.input_uom_group := TRUE;
+   ELSE
+      rec_.input_uom_group := FALSE;
+   END IF;
+   rec_.gtin_no := Sales_Part_API.Get_Gtin_No(rec_.contract, rec_.catalog_no, rec_.input_unit_meas);
+   IF (sales_part_rec_.catalog_type = 'PKG') THEN
+      rec_.inactive_comp_exist := Sales_Part_Package_API.Exist_Inactive_Components(rec_.contract, rec_.catalog_no);
+   END IF;
+   rec_.catalog_type := Client_SYS.Get_Item_Value('CATALOG_TYPE_DB', attr_);
+   IF (rec_.catalog_no != catalog_no_) THEN
+       rec_.original_part_no := catalog_no_;
+   END IF;
+   rec_.buy_qty_due           := TO_NUMBER(Client_SYS.Get_Item_Value('BUY_QTY_DUE', attr_));
+   rec_.catalog_desc          := Client_SYS.Get_Item_Value('CATALOG_DESC', attr_);
+   rec_.currency_rate         := TO_NUMBER(Client_SYS.Get_Item_Value('CURRENCY_RATE', attr_));
+   rec_.conv_factor           := TO_NUMBER(Client_SYS.Get_Item_Value('CONV_FACTOR', attr_));
+   rec_.inverted_conv_factor  := TO_NUMBER(Client_SYS.Get_Item_Value('INVERTED_CONV_FACTOR', attr_));
+   rec_.price_conv_factor     := TO_NUMBER(Client_SYS.Get_Item_Value('PRICE_CONV_FACTOR', attr_));
+   rec_.part_price            := TO_NUMBER(Client_SYS.Get_Item_Value('PART_PRICE', attr_));
+   rec_.price_source          := Pricing_Source_API.encode(Client_SYS.Get_Item_Value('PRICE_SOURCE', attr_));
+   rec_.set_price_source      := 'TRUE';
+   IF (rec_.buy_qty_due = 0) THEN
+      rec_.price_source := 'UNSPECIFIED'; 
+   END IF;
+   rec_.price_source_id    := Client_SYS.Get_Item_Value('PRICE_SOURCE_ID', attr_);
+   rec_.price_list_no      := Client_SYS.Get_Item_Value('PRICE_LIST_NO', attr_);   
+   rec_.input_unit_meas    := Client_SYS.Get_Item_Value('INPUT_UNIT_MEAS', attr_);
+   rec_.input_conv_factor  := TO_NUMBER(Client_SYS.Get_Item_Value('INPUT_CONV_FACTOR', attr_));
+   rec_.part_level := Client_SYS.Get_Item_Value('PART_LEVEL_DB', attr_);
+   rec_.part_level_id      := Client_SYS.Get_Item_Value('PART_LEVEL_ID', attr_);
+   rec_.customer_level  := Client_SYS.Get_Item_Value('CUSTOMER_LEVEL_DB', attr_);
+   rec_.customer_level_id  := Client_SYS.Get_Item_Value('CUSTOMER_LEVEL_ID', attr_);
+   -- Prevent using the source price when a template record is used.
+   IF (NOT((rec_.price_freeze = 'FROZEN') AND (is_new_ OR rec_.duplicated_line = 'TRUE'))) THEN
+      rec_.sale_unit_price          := TO_NUMBER(Client_SYS.Get_Item_Value('SALE_UNIT_PRICE', attr_));
+      rec_.unit_price_incl_tax      := TO_NUMBER(Client_SYS.Get_Item_Value('UNIT_PRICE_INCL_TAX', attr_));
+      rec_.base_sale_unit_price     := TO_NUMBER(Client_SYS.Get_Item_Value('BASE_SALE_UNIT_PRICE', attr_));
+      rec_.base_unit_price_incl_tax := TO_NUMBER(Client_SYS.Get_Item_Value('BASE_UNIT_PRICE_INCL_TAX', attr_));
+   END IF;
+   rec_.sales_unit_measure          := Client_SYS.Get_Item_Value('SALES_UNIT_MEASURE', attr_);
+   rec_.discount                    := TO_NUMBER(Client_SYS.Get_Item_Value('DISCOUNT', attr_));
+   rec_.cost                        := TO_NUMBER(Client_SYS.Get_Item_Value('COST', attr_));
+   
+   IF (rec_.duplicated_line = 'FALSE') THEN
+      rec_.tax_code                    := Client_SYS.Get_Item_Value('TAX_CODE', attr_);
+      rec_.price_list_no               := Client_SYS.Get_Item_Value('PRICE_LIST_NO', attr_);             
+      rec_.condition_code              := Client_SYS.Get_Item_Value('CONDITION_CODE', attr_);
+   END IF;
+
+   rec_.part_no                     := Client_SYS.Get_Item_Value('PART_NO', attr_);
+   rec_.order_supply_type           := Order_Supply_Type_API.Encode(Client_SYS.Get_Item_Value('ORDER_SUPPLY_TYPE', attr_));
+   rec_.vendor_no                   := Client_SYS.Get_Item_Value('VENDOR_NO', attr_);
+   rec_.customer_part_no            := Client_SYS.Get_Item_Value('CUSTOMER_PART_NO', attr_);
+   rec_.customer_part_conv_factor   := TO_NUMBER(Client_SYS.Get_Item_Value('CUSTOMER_PART_CONV_FACTOR', attr_));
+   rec_.customer_part_unit_meas     := Client_SYS.Get_Item_Value('CUSTOMER_PART_UNIT_MEAS', attr_);
+   rec_.self_billing                := Client_SYS.Get_Item_Value('SELF_BILLING_DB', attr_);
+   
+   IF (Client_SYS.Get_Item_Value('PRICE_SOURCE_NET_PRICE_DB', attr_) = 'TRUE') THEN 
+      rec_.price_source_net_price := TRUE;
+   ELSE
+      rec_.price_source_net_price := FALSE;
+   END IF;
+   rec_.cust_part_invert_conv_fact  := TO_NUMBER(Client_SYS.Get_Item_Value('CUST_PART_INVERT_CONV_FACT', attr_));
+   rec_.price_qty_due               := rec_.buy_qty_due * rec_.price_conv_factor;   
+   
+   IF (rec_.buy_qty_due IS NOT NULL) THEN
+      rec_.sale_unit_price := NVL(rec_.sale_unit_price, 0);
+      rec_.unit_price_incl_tax := NVL(rec_.unit_price_incl_tax, 0);
+      rec_ := Calculate_Quote_Line_Prices___(rec_,
+                                             supply_country_db_,
+                                             currency_code_,
+                                             tax_from_def_,
+                                             tax_code_flag_,
+                                             is_new_,
+                                             tax_edited_);                                          
+
+   END IF;   
+   
+   line_delail_rec_ :=  Calculate_Line_Total___(
+                                       rec_.quotation_no,
+                                       rec_.line_no,
+                                       rec_.rel_no,
+                                       rec_.line_item_no,
+                                       tax_from_def_,
+                                       tax_code_flag_,
+                                       is_new_,
+                                       tax_edited_,
+                                       true,
+                                       rec_.tax_calc_structure_id,
+                                       rec_.tax_code,
+                                       rec_.contract,
+                                       rec_.customer_no,
+                                       rec_.ship_addr_no,
+                                       rec_.planned_due_date,
+                                       supply_country_db_,
+                                       rec_.delivery_type,
+                                       rec_.catalog_no,
+                                       rec_.tax_liability,
+                                       rec_.tax_liability_type,
+                                       currency_code_,
+                                       rec_.currency_rate,
+                                       rec_.buy_qty_due,
+                                       rec_.price_conv_factor,
+                                       NVL(rec_.sale_unit_price, 0),
+                                       NVL(rec_.unit_price_incl_tax, 0),
+                                       rec_.additional_discount,
+                                       rec_.quotation_discount,
+                                       rental_chargable_days_,
+                                       NULL,
+                                       rec_.discount);
+                                      
+   rec_.tax_amount_base          := line_delail_rec_.tax_amount_base;
+   rec_.net_amount_base          := line_delail_rec_.net_amount_base;
+   rec_.gross_amt_base           := line_delail_rec_.gross_amt_base;
+   rec_.tax_amount_currency      := line_delail_rec_.tax_amount_currency;
+   rec_.net_amount_curr          := line_delail_rec_.net_amount_curr;
+   rec_.gross_amt_curr           := line_delail_rec_.gross_amt_curr;
+   rec_.tax_calc_structure_id    := line_delail_rec_.tax_calc_structure_id;
+   rec_.discount_amount_curr     := line_delail_rec_.discount_amount_curr;
+   rec_.discount                 := line_delail_rec_.discount; 
+   rec_.fetch_tax_from_defaults  := line_delail_rec_.fetch_tax_from_defaults;
+   rec_.available_qty         := Get_Available_Quantity___ (rec_.catalog_no,
+                                                            rec_.part_no,
+                                                            rec_.contract,
+                                                            rec_.vendor_no,
+                                                            rec_.configuration_id,
+                                                            rec_.order_supply_type,
+                                                            rec_.condition_code,
+                                                            rec_.rental);   
+   
+   IF (rec_.buy_qty_due IS NOT NULL AND rec_.inverted_conv_factor != 0) THEN
+      rec_.revised_qty_due := rec_.buy_qty_due * rec_.conv_factor / rec_.inverted_conv_factor;
+   END IF; 
+   rec_.success := TRUE;
+   RETURN rec_;
+END Validate_Catalog_No___;
+
+
+FUNCTION Validate_Customer_Part_No___ (
+	quotation_no_           IN VARCHAR2,
+	customer_part_no_       IN VARCHAR2,
+	customer_no_            IN VARCHAR2,
+	contract_               IN VARCHAR2,	
+	buy_qty_due_            IN NUMBER,
+	price_conv_factor_      IN NUMBER,
+   configuration_id_       IN VARCHAR2,
+	line_no_                IN VARCHAR2,
+	rel_no_                 IN VARCHAR2,
+	line_item_no_           IN NUMBER,
+	sale_unit_price_        IN NUMBER,
+	unit_price_incl_tax_    IN NUMBER,
+	multiple_tax_lines_     IN BOOLEAN,
+	tax_code_               IN VARCHAR2,
+	tax_calc_structure_id_  IN VARCHAR2,
+	tax_class_id_           IN VARCHAR2,
+	ship_addr_no_           IN VARCHAR2,
+	planned_due_date_       IN DATE,
+	supply_country_db_      IN VARCHAR2,
+	delivery_type_          IN VARCHAR2,
+	catalog_no_             IN VARCHAR2,
+	tax_liability_          IN VARCHAR2,
+	tax_liability_type_db_  IN VARCHAR2,
+	currency_code_          IN VARCHAR2,
+	currency_rate_          IN NUMBER,
+	tax_from_def_           IN VARCHAR2,
+	tax_code_flag_          IN BOOLEAN,
+	new_line_               IN BOOLEAN,
+	tax_edited_             IN BOOLEAN,	
+	additional_discount_    IN NUMBER,
+	quote_discount_         IN NUMBER,
+   rental_chargable_days_  IN NUMBER,
+   duplicated_line_        IN VARCHAR2,
+	info$_                  OUT VARCHAR2) RETURN Quote_Line_Struct_Rec
+IS
+   attr_             VARCHAR2(32000);
+   temp_catalog_no_  VARCHAR2(25);
+   rec_              Quote_Line_Struct_Rec;
+   line_price_rec_   Quote_Line_Struct_Rec;
+
+BEGIN
+	Client_SYS.Clear_Attr(attr_);
+   Client_SYS.Add_To_Attr('BUY_QTY_DUE', buy_qty_due_, attr_);
+   IF (rec_.duplicated_line = 'TRUE') THEN
+      Client_SYS.Add_To_Attr('TAX_CODE', rec_.tax_code, attr_);
+   END IF;
+
+   Order_Quotation_Line_API.Get_Cust_Part_No_Defaults__(info$_, attr_, quotation_no_, customer_part_no_);
+   rec_.catalog_no                  := Client_SYS.Get_Item_Value('CATALOG_NO', attr_);
+   
+   IF rec_.catalog_no IS NULL THEN
+      rec_.catalog_no := catalog_no_;
+   END IF;
+
+   rec_.price_unit_meas             := Sales_Part_API.Get_Price_Unit_Meas(contract_, rec_.catalog_no);
+   rec_.sales_price_group_id        := Sales_Part_API.Get_Sales_Price_Group_Id(contract_, rec_.catalog_no);
+   rec_.cost_level_db               := Inventory_Part_API.Get_Invent_Part_Cost_Level_Db(contract_, Sales_Part_API.Get_Part_No(contract_, rec_.catalog_no));
+   rec_.input_unit_meas_group_id    := Inventory_Part_API.Get_Input_Unit_Meas_Group_Id(contract_, rec_.catalog_no);                                    
+   rec_.buy_qty_due                 := Client_SYS.Get_Item_Value('BUY_QTY_DUE', attr_);
+   rec_.currency_rate               := to_number(Client_SYS.Get_Item_Value('CURRENCY_RATE', attr_));
+   rec_.conv_factor                 := to_number(Client_SYS.Get_Item_Value('CONV_FACTOR', attr_));
+   rec_.inverted_conv_factor        := to_number(Client_SYS.Get_Item_Value('INVERTED_CONV_FACTOR', attr_));
+   rec_.price_conv_factor           := to_number(Client_SYS.Get_Item_Value('PRICE_CONV_FACTOR', attr_));
+   rec_.part_price                  := to_number(Client_SYS.Get_Item_Value('PART_PRICE', attr_));
+   rec_.price_source                := Client_SYS.Get_Item_Value('PRICE_SOURCE', attr_);
+   rec_.set_price_source            := 'TRUE';
+   rec_.price_source_id             := Client_SYS.Get_Item_Value('PRICE_SOURCE_ID', attr_);
+   rec_.price_list_no               := Client_SYS.Get_Item_Value('PRICE_LIST', attr_);
+   rec_.sales_unit_measure          := Client_SYS.Get_Item_Value('SALES_UNIT_MEASURE', attr_);
+   rec_.discount                    := to_number(Client_SYS.Get_Item_Value('DISCOUNT', attr_));
+   rec_.cost                        := to_number(Client_SYS.Get_Item_Value('COST', attr_));
+   rec_.part_no                     := Client_SYS.Get_Item_Value('PART_NO', attr_);
+   rec_.tax_code                    := Client_SYS.Get_Item_Value('TAX_CODE', attr_);
+   rec_.order_supply_type           := Order_Supply_Type_API.Encode(Client_SYS.Get_Item_Value('ORDER_SUPPLY_TYPE', attr_));
+   rec_.catalog_type                := Client_SYS.Get_Item_Value('CATALOG_TYPE_DB', attr_);  
+   rec_.customer_part_conv_factor   := to_number(Client_SYS.Get_Item_Value('CUSTOMER_PART_CONV_FACTOR', attr_));
+   rec_.customer_part_unit_meas     := Client_SYS.Get_Item_Value('CUSTOMER_PART_UNIT_MEAS', attr_);
+   rec_.cust_part_invert_conv_fact  := to_number(Client_SYS.Get_Item_Value('CUST_PART_INVERT_CONV_FACT', attr_));   
+   rec_.price_qty_due               := rec_.buy_qty_due * rec_.price_conv_factor;
+   rec_.self_billing                := Client_SYS.Get_Item_Value('SELF_BILLING_DB', attr_);
+   IF (NOT((rec_.price_freeze = 'FROZEN') AND (new_line_ OR duplicated_line_ = 'TRUE'))) THEN
+      rec_.sale_unit_price          := TO_NUMBER(Client_SYS.Get_Item_Value('SALE_UNIT_PRICE', attr_));      
+      rec_.base_sale_unit_price     := TO_NUMBER(Client_SYS.Get_Item_Value('BASE_SALE_UNIT_PRICE', attr_));      
+   END IF;
+   IF (duplicated_line_ = 'FALSE') THEN
+      rec_.price_list_no            := Client_SYS.Get_Item_Value('PRICE_LIST', attr_);  
+   END IF;
+   rec_.quotation_no := quotation_no_;
+   rec_.line_no := line_no_;
+   rec_.rel_no := rel_no_;
+   rec_.line_item_no := line_item_no_;
+   rec_.sale_unit_price := sale_unit_price_;
+   rec_.unit_price_incl_tax := unit_price_incl_tax_;
+   rec_.multiple_tax_lines := multiple_tax_lines_;
+   rec_.tax_code := tax_code_;
+   rec_.tax_calc_structure_id := tax_calc_structure_id_;
+   rec_.tax_class_id := tax_class_id_;
+   rec_.contract := contract_;
+   rec_.customer_no := customer_no_;
+   rec_.ship_addr_no := ship_addr_no_;
+   rec_.planned_due_date := planned_due_date_;
+   rec_.delivery_type := delivery_type_;
+   rec_.tax_liability := tax_liability_;
+   rec_.tax_liability_type := tax_liability_type_db_;
+   rec_.currency_rate := currency_rate_;
+   -- line prices
+   IF (rec_.buy_qty_due IS NOT NULL) THEN
+      rec_ := Calculate_Quote_Line_Prices___(rec_,
+                                          supply_country_db_,
+                                          currency_code_,
+                                          tax_from_def_,
+                                          tax_code_flag_,
+                                          new_line_,
+                                          tax_edited_);                                          
+   END IF;
+   line_price_rec_ :=  Calculate_Line_Total___(
+                                       quotation_no_,
+                                       line_no_,
+                                       rel_no_,
+                                       line_item_no_,
+                                       tax_from_def_,
+                                       tax_code_flag_,
+                                       new_line_,
+                                       tax_edited_,
+                                       true,
+                                       tax_calc_structure_id_,
+                                       tax_code_,
+                                       contract_,
+                                       customer_no_,
+                                       ship_addr_no_,
+                                       planned_due_date_,
+                                       supply_country_db_,
+                                       delivery_type_,
+                                       catalog_no_,
+                                       tax_liability_,
+                                       tax_liability_type_db_,
+                                       currency_code_,
+                                       currency_rate_,
+                                       buy_qty_due_,
+                                       price_conv_factor_,
+                                       NVL(rec_.sale_unit_price, 0),
+                                       NVL(rec_.unit_price_incl_tax, 0),
+                                       additional_discount_,
+                                       quote_discount_,
+                                       rental_chargable_days_,
+                                       NULL,
+                                       rec_.discount);
+                                       
+   rec_.tax_amount_base          := line_price_rec_.tax_amount_base;
+   rec_.net_amount_base          := line_price_rec_.net_amount_base;
+   rec_.gross_amt_base           := line_price_rec_.gross_amt_base;
+   rec_.tax_amount_currency      := line_price_rec_.tax_amount_currency;
+   rec_.net_amount_curr          := line_price_rec_.net_amount_curr;
+   rec_.gross_amt_curr           := line_price_rec_.gross_amt_curr;
+   rec_.tax_calc_structure_id    := line_price_rec_.tax_calc_structure_id;
+   rec_.discount_amount_curr     := line_price_rec_.discount_amount_curr;
+   rec_.discount                 := line_price_rec_.discount;
+   rec_.fetch_tax_from_defaults  := line_price_rec_.fetch_tax_from_defaults;
+   rec_.available_qty            := Get_Available_Quantity___ (rec_.catalog_no,
+                                                               rec_.part_no,
+                                                               contract_,
+                                                               rec_.vendor_no,
+                                                               configuration_id_,
+                                                               rec_.order_supply_type,
+                                                               rec_.condition_code,
+                                                               rec_.rental);
+                                                            
+   IF (rec_.buy_qty_due IS NOT NULL AND rec_.inverted_conv_factor != 0) THEN
+      rec_.revised_qty_due := rec_.buy_qty_due * rec_.conv_factor / rec_.inverted_conv_factor;
+   END IF;
+   RETURN rec_;
+END Validate_Customer_Part_No___;
+
+FUNCTION Validate_Buy_Qty_Due___ (
+	quotation_no_                  IN VARCHAR2,
+   line_no_                       IN VARCHAR2,
+   rel_no_                        IN VARCHAR2,
+   line_item_no_                  IN NUMBER,
+   catalog_no_                    IN VARCHAR2,
+   buy_qty_due_                   IN NUMBER,
+   price_list_no_                 IN VARCHAR2,
+   effectivity_date_              IN DATE,
+   condition_code_                IN VARCHAR2,
+   customer_level_db_             IN VARCHAR2,
+   customer_level_id_             IN VARCHAR2,
+   unformatted_discount_          IN NUMBER,
+   char_price_                    IN NUMBER,
+   configured_line_price_id_      IN NUMBER,
+   part_no_                       IN VARCHAR2,
+   configuration_id_              IN VARCHAR2,
+   price_freeze_db_               IN VARCHAR2,
+   sale_unit_price_               IN NUMBER,
+   base_sale_unit_price_          IN NUMBER,
+   base_unit_price_incl_tax_      IN NUMBER,
+   is_new_                        IN BOOLEAN,
+   assign_discount_               IN BOOLEAN,
+   demand_code_db_                IN VARCHAR2,
+   demand_order_ref1_             IN VARCHAR2,
+   demand_order_ref2_             IN VARCHAR2,
+   multiple_tax_lines_            IN BOOLEAN,
+   tax_code_                      IN VARCHAR2,
+   tax_calc_structure_id_         IN VARCHAR2,
+   tax_class_id_                  IN VARCHAR2,
+   contract_                      IN VARCHAR2,
+   customer_no_                   IN VARCHAR2,
+   ship_addr_no_                  IN VARCHAR2,
+   planned_due_date_              IN DATE,
+   supply_country_db_             IN VARCHAR2,
+   delivery_type_                 IN VARCHAR2,
+   tax_liability_                 IN VARCHAR2,
+   tax_liability_type_db_         IN VARCHAR2,
+   currency_code_                 IN VARCHAR2,
+   currency_rate_                 IN NUMBER,
+   tax_from_def_                  IN VARCHAR2,
+   charged_item_                  IN VARCHAR2,
+   conv_factor_                   IN NUMBER,
+   inverted_conv_factor_          IN NUMBER,
+   order_supply_type_             IN VARCHAR2,
+   catalog_type_                  IN VARCHAR2,
+   rental_                        IN BOOLEAN,
+   revised_qty_due_               IN NUMBER,
+   desired_qty_                   IN NUMBER,
+   price_unit_meas_               IN VARCHAR2,
+	sales_unit_measure_            IN VARCHAR2,
+	price_conv_factor_             IN NUMBER,
+   customer_part_conv_factor_     IN NUMBER,
+   cust_part_invert_conv_fact_    IN NUMBER,
+   additional_discount_           IN NUMBER,
+   quote_discount_                IN NUMBER,
+   rental_chargable_days_         IN NUMBER,
+   duplicated_line_               IN VARCHAR2,
+   discount_                      IN NUMBER) RETURN Quote_Line_Struct_Rec
+IS
+   rec_              Quote_Line_Struct_Rec;
+   sales_part_rec_   Sales_Part_API.Public_Rec;
+   line_price_rec_   Quote_Line_Struct_Rec;
+BEGIN
+   IF (buy_qty_due_ IS NULL) THEN
+      rec_.success := FALSE;
+      RETURN rec_;
+   END IF;
+   IF (rental_) THEN
+       rec_.success := TRUE;
+   END IF;
+   
+	rec_ := Get_Quote_Price___(quotation_no_,
+                     line_no_,
+                     rel_no_,
+                     line_item_no_,
+                     catalog_no_,
+                     buy_qty_due_,
+                     price_list_no_,
+                     effectivity_date_,
+                     condition_code_,
+                     customer_level_db_,
+                     customer_level_id_,
+                     unformatted_discount_,
+                     char_price_,
+                     configured_line_price_id_,
+                     part_no_,
+                     configuration_id_,
+                     price_freeze_db_, 
+                     sale_unit_price_,
+                     base_sale_unit_price_,
+                     base_unit_price_incl_tax_,
+                     is_new_,
+                     assign_discount_,
+                     demand_code_db_,
+                     demand_order_ref1_,
+                     demand_order_ref2_,
+                     multiple_tax_lines_,
+                     tax_code_,
+                     tax_calc_structure_id_,
+                     tax_class_id_,
+                     contract_,
+                     customer_no_,
+                     ship_addr_no_,
+                     planned_due_date_ ,
+                     supply_country_db_,
+                     delivery_type_,
+                     tax_liability_,
+                     tax_liability_type_db_,
+                     currency_code_,
+                     currency_rate_,
+                     tax_from_def_,
+                     rental_,
+                     rental_chargable_days_,
+                     duplicated_line_);
+      
+   rec_.revised_qty_due := revised_qty_due_;
+   rec_.desired_qty     := desired_qty_;
+   IF (buy_qty_due_ IS NOT NULL AND inverted_conv_factor_ != 0) THEN
+      rec_.revised_qty_due := buy_qty_due_ * conv_factor_ / inverted_conv_factor_;
+   END IF;
+   IF (desired_qty_ IS NULL OR desired_qty_ < 0) THEN
+       rec_.desired_qty := buy_qty_due_;
+   END IF;
+   IF (rec_.price_freeze = 'FREE') THEN -- FREE
+    -- unit of measure
+      sales_part_rec_         := Sales_Part_API.Get(contract_, catalog_no_);
+      rec_.price_unit_meas    := sales_part_rec_.Price_Unit_Meas;
+      rec_.sales_unit_measure := sales_part_rec_.Sales_Unit_Meas;
+      rec_.price_conv_factor  := sales_part_rec_.Price_Conv_Factor;
+   ELSE
+      rec_.price_unit_meas    := price_unit_meas_;
+      rec_.sales_unit_measure := sales_unit_measure_;
+      rec_.price_conv_factor  := price_conv_factor_;
+   END IF;
+   rec_.cost := NVL (Update_Cost___ (
+                     contract_,
+                     part_no_,
+                     configuration_id_,
+                     condition_code_,
+                     rec_.buy_qty_due,
+                     conv_factor_,
+                     inverted_conv_factor_,
+                     charged_item_,
+                     order_supply_type_,
+                     customer_no_,
+                     catalog_type_,
+                     quotation_no_,
+                     line_no_,
+                     rel_no_,
+                     catalog_no_,
+                     rental_), 0);                 
+                     
+   IF (rec_.price_freeze = 'FREE') THEN -- FREE
+      IF (rec_.price_conv_factor != price_conv_factor_ AND rec_.price_conv_factor IS NOT NULL) THEN
+         Client_SYS.Add_Info(lu_name_, 'Price Conversion Factor has changed from :P1 to :P2 for part :P3.', price_conv_factor_, rec_.price_conv_factor, catalog_no_ );
+      END IF;
+      IF (rec_.sales_unit_measure != sales_unit_measure_) THEN
+          Client_SYS.Add_Info(lu_name_, 'Sales Unit of Measure has changed from :P1 to :P2 for part :P3.', sales_unit_measure_, rec_.sales_unit_measure, catalog_no_ );
+      END IF;
+      IF (rec_.price_unit_meas != price_unit_meas_) THEN
+         Client_SYS.Add_Info(lu_name_, 'Price Unit of Measure has changed from :P1 to :P2 for part :P3.', price_unit_meas_, rec_.price_unit_meas, catalog_no_ );
+      END IF;      
+   END IF;
+   rec_.price_qty_due := rec_.buy_qty_due * rec_.price_conv_factor;
+   
+   IF ((NVL(rec_.discount,0) = 0) AND (is_new_)) THEN
+      rec_.discount := discount_;
+   END IF;
+   
+   line_price_rec_ :=  Calculate_Line_Total___(
+                                       quotation_no_,
+                                       line_no_,
+                                       rel_no_,
+                                       line_item_no_,
+                                       tax_from_def_,
+                                       true,
+                                       is_new_,
+                                       false,
+                                       true,
+                                       tax_calc_structure_id_,
+                                       tax_code_,
+                                       contract_,
+                                       customer_no_,
+                                       ship_addr_no_,
+                                       planned_due_date_,
+                                       supply_country_db_,
+                                       delivery_type_,
+                                       catalog_no_,
+                                       tax_liability_,
+                                       tax_liability_type_db_,
+                                       currency_code_,
+                                       currency_rate_,
+                                       buy_qty_due_,
+                                       price_conv_factor_,
+                                       NVL(rec_.sale_unit_price, 0),
+                                       NVL(rec_.unit_price_incl_tax, 0),
+                                       additional_discount_,
+                                       quote_discount_,
+                                       rental_chargable_days_,
+                                       NULL,
+                                       rec_.discount);
+   
+   rec_.tax_amount_base          := line_price_rec_.tax_amount_base;
+   rec_.net_amount_base          := line_price_rec_.net_amount_base;
+   rec_.gross_amt_base           := line_price_rec_.gross_amt_base;
+   rec_.tax_amount_currency      := line_price_rec_.tax_amount_currency;
+   rec_.net_amount_curr          := line_price_rec_.net_amount_curr;
+   rec_.gross_amt_curr           := line_price_rec_.gross_amt_curr;
+   rec_.tax_calc_structure_id    := line_price_rec_.tax_calc_structure_id;
+   rec_.discount_amount_curr     := line_price_rec_.discount_amount_curr;
+   rec_.discount                 := line_price_rec_.discount;
+   rec_.fetch_tax_from_defaults  := line_price_rec_.fetch_tax_from_defaults;
+  
+   IF (buy_qty_due_ != rec_.buy_qty_due) THEN
+      rec_.customer_part_buy_qty := NULL;
+   END IF;
+   IF (customer_part_conv_factor_ IS NULL) THEN
+      rec_.customer_part_buy_qty := NULL;
+   ELSE
+      IF (cust_part_invert_conv_fact_ IS NOT NULL) THEN 
+         rec_.customer_part_conv_factor := cust_part_invert_conv_fact_;
+      ELSE
+         rec_.customer_part_conv_factor := 1;
+      END IF;
+      IF (rec_.customer_part_buy_qty IS NULL) THEN 
+         rec_.customer_part_buy_qty := rec_.buy_qty_due /cust_part_invert_conv_fact_ * cust_part_invert_conv_fact_;
+      END IF;      
+   END IF;
+   rec_.success := TRUE;
+   RETURN rec_;
+END Validate_Buy_Qty_Due___;
+
+
+FUNCTION Set_Quote_Price_And_Totals___ (
+	quotation_no_                  IN VARCHAR2,
+   line_no_                       IN VARCHAR2,
+   rel_no_                        IN VARCHAR2,
+   line_item_no_                  IN NUMBER,
+   catalog_no_                    IN VARCHAR2,
+   buy_qty_due_                   IN NUMBER,
+   price_list_no_                 IN VARCHAR2,
+   effectivity_date_              IN DATE,
+   condition_code_                IN VARCHAR2,
+   customer_level_db_             IN VARCHAR2,
+   customer_level_id_             IN VARCHAR2,
+   unformatted_discount_          IN NUMBER,
+   char_price_                    IN NUMBER,
+   configured_line_price_id_      IN NUMBER,
+   part_no_                       IN VARCHAR2,
+   configuration_id_              IN VARCHAR2,
+   price_freeze_db_               IN VARCHAR2, 
+   sale_unit_price_               IN NUMBER,
+   base_sale_unit_price_          IN NUMBER,
+   base_unit_price_incl_tax_      IN NUMBER,
+   is_new_                        IN BOOLEAN,
+   assign_discount_               IN BOOLEAN,
+   demand_code_db_                IN VARCHAR2,
+   demand_order_ref1_             IN VARCHAR2,
+   demand_order_ref2_             IN VARCHAR2,
+   multiple_tax_lines_            IN BOOLEAN,
+   tax_code_                      IN VARCHAR2,
+   tax_calc_structure_id_         IN VARCHAR2,
+   tax_class_id_                  IN VARCHAR2,
+   contract_                      IN VARCHAR2,
+   customer_no_                   IN VARCHAR2,
+   ship_addr_no_                  IN VARCHAR2,
+   planned_due_date_              IN DATE,
+   supply_country_db_             IN VARCHAR2,
+   delivery_type_                 IN VARCHAR2,
+   tax_liability_                 IN VARCHAR2,
+   tax_liability_type_db_         IN VARCHAR2,
+   currency_code_                 IN VARCHAR2,
+   currency_rate_                 IN NUMBER,
+   tax_from_def_                  IN VARCHAR2,
+   rental_                        IN BOOLEAN,
+   revised_qty_due_               IN NUMBER,
+   desired_qty_                   IN NUMBER,
+	price_conv_factor_             IN NUMBER,
+   additional_discount_           IN NUMBER,
+   quote_discount_                IN NUMBER,
+   rental_chargable_days_         IN NUMBER,
+   duplicated_line_               IN VARCHAR2) RETURN Quote_Line_Struct_Rec
+IS
+   rec_ Quote_Line_Struct_Rec;
+   line_price_rec_        Quote_Line_Struct_Rec;
+BEGIN
+   IF buy_qty_due_ IS NULL THEN
+      rec_.success := FALSE;
+      RETURN rec_;
+   END IF;       
+	rec_ := Get_Quote_Price___(quotation_no_,
+                     line_no_,
+                     rel_no_,
+                     line_item_no_,
+                     catalog_no_,
+                     buy_qty_due_,
+                     price_list_no_,
+                     effectivity_date_,
+                     condition_code_,
+                     customer_level_db_,
+                     customer_level_id_,
+                     unformatted_discount_,
+                     char_price_,
+                     configured_line_price_id_,
+                     part_no_,
+                     configuration_id_,
+                     price_freeze_db_,
+                     sale_unit_price_,
+                     base_sale_unit_price_,
+                     base_unit_price_incl_tax_,
+                     is_new_,
+                     assign_discount_,
+                     demand_code_db_,
+                     demand_order_ref1_,
+                     demand_order_ref2_,
+                     multiple_tax_lines_,
+                     tax_code_,
+                     tax_calc_structure_id_,
+                     tax_class_id_,
+                     contract_,
+                     customer_no_,
+                     ship_addr_no_,
+                     planned_due_date_ ,
+                     supply_country_db_,
+                     delivery_type_,
+                     tax_liability_,
+                     tax_liability_type_db_,
+                     currency_code_,
+                     currency_rate_,
+                     tax_from_def_,
+                     rental_,
+                     rental_chargable_days_,
+                     duplicated_line_);
+      
+   rec_.revised_qty_due := revised_qty_due_;
+   rec_.desired_qty := desired_qty_;
+  
+   line_price_rec_ :=  Calculate_Line_Total___(
+                                       quotation_no_,
+                                       line_no_,
+                                       rel_no_,
+                                       line_item_no_,
+                                       tax_from_def_,
+                                       true,
+                                       is_new_,
+                                       false,
+                                       true,
+                                       tax_calc_structure_id_,
+                                       tax_code_,
+                                       contract_,
+                                       customer_no_,
+                                       ship_addr_no_,
+                                       planned_due_date_,
+                                       supply_country_db_,
+                                       delivery_type_,
+                                       catalog_no_,
+                                       tax_liability_,
+                                       tax_liability_type_db_,
+                                       currency_code_,
+                                       currency_rate_,
+                                       buy_qty_due_,
+                                       price_conv_factor_,
+                                       NVL(rec_.sale_unit_price, 0),
+                                       NVL(rec_.unit_price_incl_tax, 0),
+                                       additional_discount_,
+                                       quote_discount_,
+                                       rental_chargable_days_,
+                                       NULL,
+                                       rec_.discount);
+   
+   rec_.tax_amount_base          := line_price_rec_.tax_amount_base;
+   rec_.net_amount_base          := line_price_rec_.net_amount_base;
+   rec_.gross_amt_base           := line_price_rec_.gross_amt_base;
+   rec_.tax_amount_currency      := line_price_rec_.tax_amount_currency;
+   rec_.net_amount_curr          := line_price_rec_.net_amount_curr;
+   rec_.gross_amt_curr           := line_price_rec_.gross_amt_curr;
+   rec_.tax_calc_structure_id    := line_price_rec_.tax_calc_structure_id;
+   rec_.discount_amount_curr     := line_price_rec_.discount_amount_curr;
+   rec_.discount                 := line_price_rec_.discount;
+   rec_.fetch_tax_from_defaults  := line_price_rec_.fetch_tax_from_defaults;
+   rec_.success := TRUE;
+   RETURN rec_;
+END Set_Quote_Price_And_Totals___;
+
+
+FUNCTION Get_Quote_Price___(
+   quotation_no_                 IN VARCHAR2,
+   line_no_                      IN VARCHAR2,
+   rel_no_                       IN VARCHAR2,
+   line_item_no_                 IN NUMBER,
+   catalog_no_                   IN VARCHAR2,
+   buy_qty_due_                  IN NUMBER,
+   price_list_no_                IN VARCHAR2,
+   effectivity_date_             IN DATE,
+   condition_code_               IN VARCHAR2,
+   customer_level_db_            IN VARCHAR2,
+   customer_level_id_            IN VARCHAR2,
+   unformatted_discount_         IN NUMBER,
+   char_price_                   IN NUMBER,
+   configured_line_price_id_     IN NUMBER,
+   part_no_                      IN VARCHAR2,
+   configuration_id_             IN VARCHAR2,
+   price_freeze_db_              IN VARCHAR2, 
+   sale_unit_price_              IN NUMBER,
+   base_sale_unit_price_         IN NUMBER,
+   base_unit_price_incl_tax_     IN NUMBER,
+   is_new_                       IN BOOLEAN,
+   assign_discount_              IN BOOLEAN,
+   demand_code_db_               IN VARCHAR2,
+   demand_order_ref1_            IN VARCHAR2,
+   demand_order_ref2_            IN VARCHAR2,
+   multiple_tax_lines_           IN BOOLEAN,
+   tax_code_                     IN VARCHAR2,
+   tax_calc_structure_id_        IN VARCHAR2,
+   tax_class_id_                 IN VARCHAR2,
+   contract_                     IN VARCHAR2,
+   customer_no_                  IN VARCHAR2,
+   ship_addr_no_                 IN VARCHAR2,
+   planned_due_date_             IN DATE,
+   supply_country_db_            IN VARCHAR2,
+   delivery_type_                IN VARCHAR2,
+   tax_liability_                IN VARCHAR2,
+   tax_liability_type_db_        IN VARCHAR2,
+   currency_code_                IN VARCHAR2,
+   currency_rate_                IN NUMBER,
+   tax_from_def_                 IN VARCHAR2,
+   rental_                       IN BOOLEAN,
+   rental_chargable_days_        IN NUMBER,
+   duplicated_line_              IN VARCHAR2) RETURN Quote_Line_Struct_Rec
+IS
+   rec_                             Quote_Line_Struct_Rec; 
+   attr_                            VARCHAR2(32000);
+   use_price_incl_tax_              VARCHAR2(5);
+   estimate_connection_exists_      BOOLEAN;
+   base_unit_price_                 NUMBER;
+   base_sale_unit_price_incl_tax_   NUMBER;
+   rental_chgble_days_              NUMBER;
+BEGIN
+   rec_.quotation_no := quotation_no_;
+   rec_.line_no := line_no_;
+   rec_.rel_no := rel_no_;
+   rec_.line_item_no := line_item_no_;
+   rec_.multiple_tax_lines := multiple_tax_lines_;
+   rec_.tax_code := tax_code_;
+   rec_.tax_calc_structure_id := tax_calc_structure_id_;
+   rec_.tax_class_id := tax_class_id_;
+   rec_.contract := contract_;
+   rec_.customer_no := customer_no_;
+   rec_.ship_addr_no := ship_addr_no_;
+   rec_.planned_due_date := planned_due_date_;
+   rec_.delivery_type := delivery_type_;
+   rec_.catalog_no := catalog_no_;
+   rec_.tax_liability := tax_liability_;
+   rec_.tax_liability_type := tax_liability_type_db_;
+   rec_.currency_rate := currency_rate_;
+
+   rec_.buy_qty_due           := buy_qty_due_;
+   rec_.sale_unit_price       := sale_unit_price_;
+   rec_.base_sale_unit_price  := base_sale_unit_price_;
+   
+   IF (buy_qty_due_ IS NULL) THEN   
+      rec_.buy_qty_due := 0;  
+   END IF;
+   rec_.price_freeze := price_freeze_db_;
+   rec_.char_price      := char_price_;
+   use_price_incl_tax_  := Order_Quotation_API.Get_Use_Price_Incl_Tax_Db(quotation_no_);
+   IF (rec_.buy_qty_due = 0) THEN
+      rec_.price_source                := 'UNSPECIFIED'; 
+      rec_.price_source_id             := NULL;    
+      rec_.price_freeze                := 'FREE';
+      base_unit_price_                 := base_sale_unit_price_;
+      base_sale_unit_price_incl_tax_   := base_unit_price_incl_tax_;
+   ELSE  
+      rental_chgble_days_ := null;
+      IF (rental_) THEN
+         rental_chgble_days_ := rental_chargable_days_;
+      END IF;
+
+      Order_Quotation_Line_API.Get_Quote_Line_Price(attr_,
+                                                   quotation_no_,
+                                                   line_no_,
+                                                   rel_no_,
+                                                   line_item_no_,
+                                                   catalog_no_ ,
+                                                   rec_.buy_qty_due,
+                                                   price_list_no_,
+                                                   effectivity_date_,
+                                                   condition_code_,
+                                                   customer_level_db_,
+                                                   customer_level_id_,
+                                                   rental_chgble_days_);
+      IF (NOT is_new_) THEN
+         rec_.discount := NVL(unformatted_discount_, 0);  
+         IF (Order_Quote_Line_Discount_API.Check_Manual_Rows(quotation_no_, line_no_, rel_no_, line_item_no_)) THEN
+            rec_.discount := Order_Quotation_Line_API.Get_Discount(quotation_no_, line_no_, rel_no_, line_item_no_);
+         ELSIF (assign_discount_) THEN
+            rec_.discount := to_number(Client_SYS.Get_Item_Value('DISCOUNT', attr_));
+         END IF;
+      END IF;
+      
+      IF (use_price_incl_tax_ = 'TRUE') THEN
+         rec_.part_price                := TO_NUMBER(Client_SYS.Get_Item_Value('UNIT_PRICE_INCL_TAX', attr_));
+         base_sale_unit_price_incl_tax_ := TO_NUMBER(Client_SYS.Get_Item_Value('BASE_UNIT_PRICE_INCL_TAX', attr_));
+      ELSE
+         rec_.part_price   := TO_NUMBER(Client_SYS.Get_Item_Value('SALE_UNIT_PRICE', attr_));
+         base_unit_price_  := TO_NUMBER(Client_SYS.Get_Item_Value('BASE_SALE_UNIT_PRICE', attr_));
+      END IF;
+      rec_.currency_rate      := TO_NUMBER(Client_SYS.Get_Item_Value('CURRENCY_RATE', attr_));
+      rec_.price_source       := Client_SYS.Get_Item_Value('PRICE_SOURCE_DB', attr_);
+      rec_.set_price_source   := 'TRUE';
+      rec_.price_source_id    := Client_SYS.Get_Item_Value('PRICE_SOURCE_ID', attr_);
+      
+      rec_.part_level      := Client_SYS.Get_Item_Value('PART_LEVEL_DB', attr_);
+      rec_.part_level_id      := Client_SYS.Get_Item_Value('PART_LEVEL_ID', attr_);
+      rec_.customer_level  := Client_SYS.Get_Item_Value('CUSTOMER_LEVEL_DB', attr_);
+      rec_.customer_level_id  := Client_SYS.Get_Item_Value('CUSTOMER_LEVEL_ID', attr_);
+      IF (Client_SYS.Get_Item_Value('PRICE_SOURCE_NET_PRICE_DB', attr_) = 'TRUE') THEN
+         rec_.price_source_net_price := TRUE;
+      ELSE
+         rec_.price_source_net_price := FALSE;
+      END IF;            
+   END IF;
+   IF (configuration_id_ != '*') THEN
+      Config_Char_Price_API.Get_Calculated_Char_Prices(rec_.char_price,
+                                                      rec_.calc_char_price,
+                                                      configured_line_price_id_,
+                                                      NVL(part_no_, catalog_no_),
+                                                      price_list_no_,
+                                                      configuration_id_,
+                                                      effectivity_date_);
+   END IF;
+   
+   IF ((rec_.price_freeze = 'FREE')  OR (is_new_ AND duplicated_line_ = 'FALSE')) THEN
+      IF (use_price_incl_tax_ = 'TRUE') THEN
+         rec_.unit_price_incl_tax      := rec_.part_price;
+         rec_.base_unit_price_incl_tax := base_sale_unit_price_incl_tax_;
+      ELSE
+         rec_.sale_unit_price       := rec_.part_price;
+         rec_.base_sale_unit_price  := base_unit_price_;
+      END IF;      
+   END IF;
+   IF (Client_SYS.Get_Item_Value('PRICE_SOURCE_DB', attr_) != 'PRICE BREAKS' AND rec_.buy_qty_due != 0) THEN
+      -- CalculateCharPrice() ligic IN EE start --
+       IF (demand_code_db_ = 'EXT' AND demand_order_ref1_ IS NOT NULL AND demand_order_ref2_ IS NOT NULL) THEN
+         estimate_connection_exists_ := TRUE;
+      ELSE
+         estimate_connection_exists_ := FALSE;
+      END IF;
+      IF (estimate_connection_exists_) THEN
+         rec_.calc_price_curr := rec_.sale_unit_price;
+         rec_.calc_char_price := 0;
+         rec_.char_price      := 0;
+      ELSE
+         rec_.calc_price_curr := rec_.Part_Price + NVL(rec_.calc_char_price,0);
+      END IF;
+      -- CalculateCharPrice() ligic IN EE ends --
+      IF (rec_.price_freeze = 'FREE') THEN
+         IF (use_price_incl_tax_ = 'TRUE') THEN
+            rec_.unit_price_incl_tax := rec_.part_price + NVL(rec_.char_price, 0) ;
+         ELSE
+            rec_.sale_unit_price := rec_.part_price + NVL(rec_.char_price, 0);
+         END IF; 
+         
+         rec_ := Calculate_Quote_Line_Prices___(rec_,
+                                             supply_country_db_,
+                                             currency_code_,
+                                             tax_from_def_,
+                                             false,
+                                             is_new_,
+                                             false);         
+      END IF;     
+   END IF;
+   IF (rec_.price_freeze = 'FROZEN') THEN
+      rec_.base_sale_unit_price := rec_.sale_unit_price * currency_rate_;
+   END IF;
+   rec_.sale_unit_price          := NVL(rec_.sale_unit_price, 0);
+   rec_.part_price               := NVL(rec_.part_price, 0);
+   rec_.sale_unit_price          := NVL(rec_.sale_unit_price, 0);
+   rec_.unit_price_incl_tax      := NVL(rec_.unit_price_incl_tax, 0);
+   rec_.base_unit_price_incl_tax := NVL(rec_.base_unit_price_incl_tax, 0);
+  RETURN rec_;
+END Get_Quote_Price___;
+
+
+FUNCTION Calculate_Quote_Line_Prices___(
+   quote_line_rec_        IN Quote_Line_Struct_Rec,
+   supply_country_db_     IN VARCHAR2,
+   currency_code_         IN VARCHAR2,
+   tax_from_def_          IN VARCHAR2,
+   tax_code_flag_         IN BOOLEAN,
+	new_line_              IN BOOLEAN,
+	tax_edited_            IN BOOLEAN)RETURN Quote_Line_Struct_Rec
+IS
+   order_ref1_                VARCHAR2(40);
+   order_ref2_                VARCHAR2(40);
+   order_ref3_                VARCHAR2(40);
+   order_ref4_                VARCHAR2(40);
+   tax_from_diff_source_      VARCHAR2(5) :='FALSE';
+   delivery_country_db_       VARCHAR2(5) := '';
+   source_ref_type_           VARCHAR2(20) := 'ORDER_QUOTATION_LINE';  
+   curr_rounding_             NUMBER := 16;
+   attr_                      VARCHAR2(200);
+   multi_tax_lines_           VARCHAR2(5);
+--   line_no_val_               VARCHAR2(100);
+   price_details_rec_         Quote_Line_Struct_Rec := quote_line_rec_;
+   tax_calc_method_           company_tax_control_tab.external_tax_cal_method%TYPE;
+   single_occur_              VARCHAR2(5);
+   company_                   VARCHAR2(20);
+   dummy_                     VARCHAR2(100);
+BEGIN 
+   IF (price_details_rec_.multiple_tax_lines) THEN
+      multi_tax_lines_ := 'TRUE';
+   ELSE
+      multi_tax_lines_ := 'FALSE';
+   END IF ;  
+   company_                                 := Site_API.Get_Company(price_details_rec_.contract);
+   tax_calc_method_                         := Company_Tax_Control_API.Get_External_Tax_Cal_Method_Db(company_);
+   single_occur_                            := NVL(Order_Quotation_Line_API.Get_Single_Occ_Addr_Flag( price_details_rec_.quotation_no,
+                                                                                                      price_details_rec_.line_no,
+                                                                                                      price_details_rec_.rel_no,
+                                                                                                      price_details_rec_.line_item_no), 'FALSE');
+                                                                                                      
+   Order_Quotation_Line_API.Get_Line_Address_Info(dummy_, dummy_, delivery_country_db_, dummy_, dummy_, dummy_, dummy_, dummy_,
+                                                  price_details_rec_.quotation_no, price_details_rec_.line_no, price_details_rec_.rel_no, price_details_rec_.line_item_no, company_);
+ 	delivery_country_db_ := NVL(delivery_country_db_, Cust_Ord_Customer_Address_API.Get_Country_Code(price_details_rec_.customer_no, price_details_rec_.ship_addr_no));                                                           
+   IF (tax_code_flag_ AND tax_calc_method_ = 'NOT_USED') THEN
+      order_ref1_ := NULL;
+      order_ref2_ := NULL;
+      order_ref3_ := NULL;
+      order_ref4_ := NULL;
+   ELSE   
+      order_ref1_ := price_details_rec_.quotation_no;
+      IF (tax_calc_method_ = 'NOT_USED' AND (Sales_Part_API.Get_Taxable_Db(price_details_rec_.contract, price_details_rec_.catalog_no) = 'TRUE')) THEN
+         order_ref2_ := price_details_rec_.line_no;
+         order_ref3_ := price_details_rec_.rel_no;
+         order_ref4_ := TO_CHAR(price_details_rec_.line_item_no);
+      ELSE
+         order_ref2_ := NVL(price_details_rec_.line_no, '*');
+         order_ref3_ := NVL(price_details_rec_.rel_no, '*');
+         order_ref4_ := NVL(TO_CHAR(price_details_rec_.line_item_no), '*');  
+      END IF;
+   END IF; 
+   
+   price_details_rec_.fetch_tax_from_defaults := tax_from_def_;
+
+   IF (tax_calc_method_ != 'NOT_USED') THEN
+      price_details_rec_.fetch_tax_from_defaults := 'FALSE';
+   ELSE
+      IF (price_details_rec_.fetch_tax_from_defaults = 'FALSE') THEN
+         IF (new_line_ AND NOT tax_edited_) THEN
+            price_details_rec_.fetch_tax_from_defaults := 'TRUE';
+         END IF;
+      END IF;
+   END IF;
+  
+   Tax_Handling_Order_Util_API.Get_Prices(price_details_rec_.base_sale_unit_price,
+                                          price_details_rec_.base_unit_price_incl_tax,
+                                          price_details_rec_.sale_unit_price,
+                                          price_details_rec_.unit_price_incl_tax,
+                                          multi_tax_lines_,
+                                          price_details_rec_.tax_code,
+                                          price_details_rec_.tax_calc_structure_id,
+                                          price_details_rec_.tax_class_id,
+                                          order_ref1_,
+                                          order_ref2_,
+                                          order_ref3_,
+                                          order_ref4_,
+                                          '*',
+                                          source_ref_type_,
+                                          price_details_rec_.contract,
+                                          price_details_rec_.customer_no,
+                                          price_details_rec_.ship_addr_no,
+                                          TRUNC(NVL(price_details_rec_.planned_due_date, Site_API.Get_Site_Date(price_details_rec_.contract))),
+                                          supply_country_db_,
+                                          price_details_rec_.delivery_type,
+                                          price_details_rec_.catalog_no,
+                                          Order_Quotation_API.Get_Use_Price_Incl_Tax_Db(price_details_rec_.quotation_no),
+                                          currency_code_,
+                                          price_details_rec_.currency_rate,
+                                          price_details_rec_.fetch_tax_from_defaults,
+                                          price_details_rec_.tax_liability,
+                                          price_details_rec_.tax_liability_type,
+                                          delivery_country_db_,
+                                          curr_rounding_,
+                                          tax_from_diff_source_,
+                                          attr_);                                     
+   IF (multi_tax_lines_ = 'TRUE') THEN
+      price_details_rec_.multiple_tax_lines := TRUE;
+   ELSE
+      price_details_rec_.multiple_tax_lines := FALSE;
+   END IF ;
+   IF price_details_rec_.fetch_tax_from_defaults = 'FALSE' AND tax_calc_method_ = 'NOT_USED' THEN
+      price_details_rec_.fetch_tax_from_defaults := 'FALSE';
+   ELSE
+      price_details_rec_.fetch_tax_from_defaults := null;
+   END IF;
+   
+   
+   RETURN  price_details_rec_ ;         
+END Calculate_Quote_Line_Prices___;
+
+FUNCTION Calculate_Line_Total___(
+   quotation_no_             IN VARCHAR2,
+   line_no_                  IN VARCHAR2,
+   rel_no_                   IN VARCHAR2,
+   line_item_no_             IN NUMBER,
+   tax_from_defaults_        IN VARCHAR2,
+   tax_code_flag_            IN BOOLEAN,
+   new_line_                 IN BOOLEAN,
+   tax_edited_               IN BOOLEAN,
+   recalc_line_disc_         IN BOOLEAN,
+   tax_calc_structure_id_    IN VARCHAR2,
+   tax_code_                 IN VARCHAR2,
+   contract_                 IN VARCHAR2,
+   customer_no_              IN VARCHAR2,
+   ship_addr_no_             IN VARCHAR2,
+   planned_due_date_         IN DATE,
+   supply_country_db_        IN VARCHAR2,
+   delivery_type_            IN VARCHAR2,
+   catalog_no_               IN VARCHAR2,
+   tax_liability_            IN VARCHAR2,
+   tax_liability_type_db_    IN VARCHAR2,
+   currency_code_            IN VARCHAR2,
+   currency_rate_            IN NUMBER,
+   buy_qty_due_              IN NUMBER,
+   price_conv_factor_        IN NUMBER,
+   sale_unit_price_          IN NUMBER,
+   unit_price_incl_tax_      IN NUMBER,
+   additional_discount_      IN NUMBER,
+   quote_discount_           IN NUMBER,
+   rental_chargable_days_    IN NUMBER,
+   free_of_charge_tax_basis_ IN NUMBER,
+   discount_                 IN NUMBER)  RETURN Quote_Line_Struct_Rec
+IS
+   order_ref1_                VARCHAR2(40);
+   order_ref2_                VARCHAR2(40);
+   order_ref3_                VARCHAR2(40);
+   order_ref4_                VARCHAR2(40);
+   source_ref_type_           VARCHAR2(20) :='ORDER_QUOTATION_LINE';
+   tax_from_diff_source_      VARCHAR2(5) :='FALSE';
+   delivery_country_db_       VARCHAR2(5) := '';
+   attr_                      VARCHAR2(200);
+   use_price_                 VARCHAR2(5);   
+   line_price_rec_            Quote_Line_Struct_Rec := NULL;
+   total_discount_            NUMBER;
+   gross_amt_curr_            NUMBER;
+   net_total_curr_            NUMBER;
+   tax_calc_method_           company_tax_control_tab.external_tax_cal_method%TYPE;
+   use_price_incl_tax_        BOOLEAN;
+   planned_ship_date_         DATE;
+BEGIN
+   use_price_ :=  Order_Quotation_API.Get_Use_Price_Incl_Tax_Db(quotation_no_);
+   IF (use_price_ = 'TRUE') THEN
+      use_price_incl_tax_ := TRUE;
+   ELSE
+      use_price_incl_tax_ := FALSE;
+   END IF;
+   tax_calc_method_                       := Company_Tax_Control_API.Get_External_Tax_Cal_Method_Db(Site_API.Get_Company(contract_));      
+   line_price_rec_.net_amount_curr       := sale_unit_price_;
+   line_price_rec_.gross_amt_curr        := unit_price_incl_tax_;
+   line_price_rec_.tax_calc_structure_id := tax_calc_structure_id_;
+
+   IF (tax_code_flag_ AND tax_calc_method_ = 'NOT_USED') THEN
+      order_ref1_ := NULL;
+      order_ref2_ := NULL;
+      order_ref3_ := NULL;
+      order_ref4_ := NULL;
+   ELSE 
+      order_ref1_ := quotation_no_;
+      IF (tax_calc_method_ = 'NOT_USED' AND (Sales_Part_API.Get_Taxable_Db(line_price_rec_.contract, line_price_rec_.catalog_no) = 'TRUE')) THEN
+         order_ref2_ := line_no_;
+         order_ref3_ := rel_no_;
+         order_ref4_ := TO_CHAR(line_item_no_);
+      ELSE 
+         order_ref2_ := NVL(line_no_, '*');
+         order_ref3_ := NVL(rel_no_, '*');
+         order_ref4_ := NVL(TO_CHAR(line_item_no_), '*');  
+      END IF;
+   END IF;   
+   
+   line_price_rec_.fetch_tax_from_defaults := tax_from_defaults_;
+   IF (tax_calc_method_ != 'NOT_USED') THEN
+      line_price_rec_.fetch_tax_from_defaults := 'FALSE';
+   ELSE
+      IF ( line_price_rec_.fetch_tax_from_defaults = 'FALSE') THEN
+         IF (new_line_ AND NOT tax_edited_) THEN
+             line_price_rec_.fetch_tax_from_defaults := 'TRUE';
+         END IF;
+      END IF;
+   END IF;
+   
+   IF (NOT new_line_) THEN
+      IF (use_price_ = 'TRUE') THEN      
+         gross_amt_curr_ := (buy_qty_due_ * price_conv_factor_ * unit_price_incl_tax_ * rental_chargable_days_); -- ROUNDING
+         Get_Total_Discount___ ( quotation_no_,
+                                 line_no_ ,
+                                 rel_no_ ,
+                                 line_item_no_ ,
+                                 recalc_line_disc_,
+                                 use_price_incl_tax_,
+                                 gross_amt_curr_,
+                                 additional_discount_,
+                                 quote_discount_,
+                                 sale_unit_price_,
+                                 unit_price_incl_tax_,
+                                 buy_qty_due_,
+                                 price_conv_factor_,
+                                 line_price_rec_.discount_amount_curr,
+                                 total_discount_,
+                                 line_price_rec_.discount);
+         line_price_rec_.gross_amt_curr := gross_amt_curr_ - total_discount_;              
+      ELSE  
+         
+         net_total_curr_:= (buy_qty_due_ * price_conv_factor_ * sale_unit_price_ * rental_chargable_days_);
+         Get_Total_Discount___ ( quotation_no_,
+                                 line_no_ ,
+                                 rel_no_ ,
+                                 line_item_no_ ,
+                                 recalc_line_disc_,
+                                 use_price_incl_tax_,
+                                 net_total_curr_,
+                                 additional_discount_,
+                                 quote_discount_,
+                                 sale_unit_price_,
+                                 unit_price_incl_tax_,
+                                 buy_qty_due_,
+                                 price_conv_factor_,
+                                 line_price_rec_.discount_amount_curr,
+                                 total_discount_,
+                                 line_price_rec_.discount);
+         line_price_rec_.net_amount_curr := net_total_curr_- total_discount_;
+      END IF;
+   ELSE
+      line_price_rec_.discount := discount_;
+   END IF;
+   planned_ship_date_ := TRUNC(NVL(planned_due_date_, Site_API.Get_Site_Date(contract_)));
+   Tax_Handling_Order_Util_API.Get_Amounts(
+                                          line_price_rec_.tax_amount_base,
+                                          line_price_rec_.net_amount_base,
+                                          line_price_rec_.gross_amt_base,
+                                          line_price_rec_.tax_amount_currency,
+                                          line_price_rec_.net_amount_curr,
+                                          line_price_rec_.gross_amt_curr,
+                                          line_price_rec_.tax_calc_structure_id,
+                                          order_ref1_,
+                                          order_ref2_,
+                                          order_ref3_,
+                                          order_ref4_,
+                                          '*',
+                                          source_ref_type_,
+                                          NULL,
+                                          contract_,
+                                          customer_no_,
+                                          ship_addr_no_,
+                                          planned_ship_date_,
+                                          supply_country_db_,
+                                          delivery_type_,
+                                          catalog_no_,
+                                          use_price_,
+                                          currency_code_,
+                                          currency_rate_,
+                                          line_price_rec_.fetch_tax_from_defaults,
+                                          tax_code_,
+                                          tax_liability_,
+                                          tax_liability_type_db_,
+                                          delivery_country_db_,
+                                          free_of_charge_tax_basis_,
+                                          tax_from_diff_source_,
+                                          NULL,
+                                          NULL,
+                                          attr_);
+    
+   IF line_price_rec_.fetch_tax_from_defaults = 'FALSE' AND tax_calc_method_ = 'NOT_USED' THEN
+      line_price_rec_.fetch_tax_from_defaults := 'FALSE';
+   ELSE
+      line_price_rec_.fetch_tax_from_defaults := null;
+   END IF; 
+   RETURN line_price_rec_;   
+END Calculate_Line_Total___;
+
+PROCEDURE Get_Total_Discount___ (
+   quotation_no_           IN VARCHAR2,
+   line_no_                IN VARCHAR2,
+   rel_no_                 IN VARCHAR2,
+   line_item_no_           IN NUMBER,
+   recalc_line_disc_       IN BOOLEAN,
+   use_price_incl_tax_     IN BOOLEAN,
+   gross_amt_curr_         IN NUMBER,
+   additional_disc_        IN NUMBER,
+   quote_disc_             IN NUMBER,
+   sale_unit_price_        IN NUMBER,
+   unit_price_incl_tax_    IN NUMBER,
+   buy_qty_due_            IN NUMBER,
+   price_conv_factor_      IN NUMBER,
+   discount_amount_curr_   OUT NUMBER,
+   total_discount_         OUT NUMBER,  
+   discount_               OUT NUMBER 
+   )
+IS
+   unit_price_       NUMBER;
+   addidtional_disc_ NUMBER;
+   order_disc_amt_   NUMBER; 
+BEGIN
+   IF (use_price_incl_tax_) THEN
+      unit_price_ := unit_price_incl_tax_;
+   ELSE
+      unit_price_ := sale_unit_price_;
+   END IF;
+   IF (recalc_line_disc_) THEN
+      Order_Quote_Line_Discount_API.Calculate_Discount__(discount_, 
+                                                         discount_amount_curr_,
+                                                         quotation_no_,
+                                                         line_no_,
+                                                         rel_no_,
+                                                         line_item_no_,
+                                                         unit_price_,
+                                                         buy_qty_due_,
+                                                         price_conv_factor_);
+   ELSE
+      discount_amount_curr_ := Order_Quote_Line_Discount_API.Get_Total_Line_Discount(quotation_no_,
+                                                      line_no_,
+                                                      rel_no_,
+                                                      line_item_no_,
+                                                      buy_qty_due_,
+                                                      price_conv_factor_,
+                                                      2); -- Rounding issue
+   END IF;
+   addidtional_disc_ := (gross_amt_curr_ - discount_amount_curr_) * ROUND(NVL(additional_disc_,0) / 100, 2); -- CURR ROUNDING ISSUE
+   order_disc_amt_   := (gross_amt_curr_ - discount_amount_curr_) * ROUND(NVL(quote_disc_,0)/ 100, 2);
+   total_discount_   := discount_amount_curr_ + addidtional_disc_ + order_disc_amt_;                                                   
+END Get_Total_Discount___;
+
+
+
+FUNCTION Get_Next_Rel_No___ (
+	quotation_no_  IN VARCHAR2,
+	line_no_       IN VARCHAR2,
+	line_item_no_  IN NUMBER,
+	contract_      IN VARCHAR2) RETURN VARCHAR2
+IS
+BEGIN
+	RETURN Order_Quotation_Line_API.Get_Next_Rel_No(quotation_no_, line_no_, line_item_no_, contract_);
+END Get_Next_Rel_No___;
+
+
+PROCEDURE Exist_Line_No___ (
+	quotation_no_  IN VARCHAR2,
+	line_no_       IN VARCHAR2,
+	rel_no_        IN VARCHAR2,
+	line_item_no_  IN NUMBER)
+IS
+BEGIN
+	Order_Quotation_Line_API.Exist_Line_No(quotation_no_, line_no_, rel_no_, line_item_no_);
+END Exist_Line_No___;
+
+
+FUNCTION Exist_Line_No___ (
+	quotation_no_  IN VARCHAR2,
+	line_no_       IN VARCHAR2,
+	rel_no_        IN VARCHAR2,
+	line_item_no_  IN NUMBER) RETURN VARCHAR2
+IS
+BEGIN
+	Order_Quotation_Line_API.Exist_Line_No(quotation_no_, line_no_, rel_no_, line_item_no_);
+   RETURN NULL;
+END Exist_Line_No___;
+
+
+FUNCTION Get_Available_Quantity___ (
+	catalog_no_          IN VARCHAR2,
+	part_no_             IN VARCHAR2,
+	contract_            IN VARCHAR2,
+	vendor_no_           IN VARCHAR2,
+	configuration_id_    IN VARCHAR2,
+	order_supply_type_   IN VARCHAR2,
+	condition_code_      IN VARCHAR2,
+   rental_              IN BOOLEAN) RETURN NUMBER
+IS
+   sup_contract_  VARCHAR2(30);
+   ownership_     VARCHAR2(20);
+   rental_db_     VARCHAR2(5) := 'FALSE';
+BEGIN
+	$IF (Component_Purch_SYS.INSTALLED) $THEN
+      sup_contract_ := NVL(Supplier_API.Get_Acquisition_Site(vendor_no_), contract_);
+   $ELSE
+      sup_contract_ := contract_;
+   $END
+   IF NOT(rental_) THEN
+      ownership_ := 'COMPANY OWNED';
+   ELSE
+      ownership_ := 'COMPANY RENTAL ASSET';
+      rental_db_ := 'TRUE';
+   END IF;
+   RETURN Reserve_Customer_Order_API.Get_Available_Qty(sup_contract_,
+                                                      NVL(part_no_,catalog_no_),
+                                                      configuration_id_,
+                                                      NULL,
+                                                      NULL,
+                                                      NULL,
+                                                      NULL,
+                                                      order_supply_type_,
+                                                      ownership_,
+                                                      NULL,
+                                                      NULL,
+                                                      condition_code_,
+                                                      vendor_no_,
+                                                      'TRUE',
+                                                      rental_db_);
+END Get_Available_Quantity___;
+
+FUNCTION Pack_Line_Keys___(
+	selection_ IN VARCHAR2) RETURN Line_Detail_Structure_Rec
+IS
+   selection_in_        VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_   VARCHAR2(32000);
+   quotation_no_        Order_Quotation_Line_tab.quotation_no%TYPE;
+   line_no_             Order_Quotation_Line_tab.line_no%TYPE;
+   rel_no_              Order_Quotation_Line_tab.rel_no%TYPE;
+   line_item_no_        Order_Quotation_Line_tab.line_item_no%TYPE;
+   rec_                 Line_Detail_Structure_Rec;
+   lose_win_note_       Order_Quotation_Line_tab.lose_win_note%TYPE;
+   reason_id_           Order_Quotation_Line_tab.reason_id%TYPE;
+   
+   CURSOR Get_won_reason IS
+      SELECT REASON_ID, LOSE_WIN_NOTE FROM ORDER_QUOTATION_LINE_TAB
+      WHERE  QUOTATION_NO  = quotation_no_
+      AND    LINE_NO       = line_no_
+      AND    REL_NO        = rel_no_
+      AND    LINE_ITEm_NO  = line_item_no_;
+    
+BEGIN
+   rec_.same_order := TRUE;
+   WHILE (INSTR(selection_in_, ';') > 0) LOOP
+      current_selection_     := substr(selection_in_, 0, INSTR(selection_in_, ';'));
+      IF (quotation_no_ IS NULL) THEN
+          quotation_no_      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'QUOTATION_NO');
+      ELSE
+         IF (quotation_no_ != Client_SYS.Get_Key_Reference_Value(current_selection_, 'QUOTATION_NO')) THEN
+            rec_.same_order := FALSE;
+            RETURN rec_;
+         END IF;
+      END IF;
+      line_no_               := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_NO');
+      rel_no_                := Client_SYS.Get_Key_Reference_Value(current_selection_, 'REL_NO');
+      line_item_no_          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_ITEM_NO');
+    
+      IF (rec_.line_no_arr IS NULL) THEN
+         rec_.line_no_arr := line_no_;
+         -- add won reason only if one recod selected
+         OPEN Get_won_reason;
+         FETCH Get_won_reason INTO reason_id_, lose_win_note_;
+         CLOSE Get_won_reason;
+         rec_.reason_id := reason_id_;
+         rec_.lose_win_note := lose_win_note_;
+      ELSE
+         rec_.line_no_arr := rec_.line_no_arr || ';' || line_no_;
+         rec_.reason_id := '';
+         rec_.lose_win_note := '';
+      END IF;
+      IF (rec_.rel_no_arr IS NULL) THEN
+         rec_.rel_no_arr := rel_no_;
+      ELSE
+         rec_.rel_no_arr := rec_.rel_no_arr || ';' || rel_no_;
+      END IF;
+      IF (rec_.line_item_no_arr IS NULL) THEN
+         rec_.line_item_no_arr := line_item_no_;
+      ELSE
+         rec_.line_item_no_arr := rec_.line_item_no_arr || ';' || line_item_no_;
+      END IF;
+      selection_in_          := substr(selection_in_, INSTR(selection_in_, ';')+1);
+   END LOOP;
+
+   rec_.quotation_no := quotation_no_;
+   RETURN rec_;
+END Pack_Line_Keys___;
+
+
+FUNCTION Get_Characteristics___(
+	selection_ IN VARCHAR2) RETURN Characteristic_Structure_Rec
+IS
+   characteristic_ids_  VARCHAR2(20000) := NULL;
+   configuration_ids_   VARCHAR2(20000) := NULL;
+   part_nos_            VARCHAR2(20000) := NULL;
+   configuration_id_    Order_Quotation_Line_tab.configuration_id%TYPE;
+   part_no_             VARCHAR2(100) := NULL;
+   wanted_del_date_     DATE;
+   rec_  Characteristic_Structure_Rec;
+   quotation_no_        Order_Quotation_Line_tab.quotation_no%TYPE;
+   line_no_             Order_Quotation_Line_tab.line_no%TYPE;
+   rel_no_              Order_Quotation_Line_tab.rel_no%TYPE;
+   line_item_no_        Order_Quotation_Line_tab.line_item_no%TYPE;
+   attr_                VARCHAR2(20000);
+   records_                 json_array_t := json_array_t.parse(selection_);
+   current_selection_       VARCHAR2(32000);
+BEGIN   
+   Client_SYS.Clear_Attr(attr_); 
+   FOR i_ IN 0 .. records_.get_size - 1 LOOP 
+      current_selection_ := records_.get_string(i_);
+      quotation_no_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'QUOTATION_NO');
+      line_no_      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_NO');
+      rel_no_       := Client_SYS.Get_Key_Reference_Value(current_selection_, 'REL_NO');
+      line_item_no_ := to_number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_ITEM_NO'));
+      Client_SYS.Add_To_Attr('CONNECTED_ID1', quotation_no_, attr_);
+      Client_SYS.Add_To_Attr('CONNECTED_ID2', line_no_, attr_);
+      Client_SYS.Add_To_Attr('CONNECTED_ID3', rel_no_, attr_);
+      Client_SYS.Add_To_Attr('CONNECTED_ID4', line_item_no_, attr_);
+      -- Get the wanted delivery date of first selected line
+      IF (wanted_del_date_ IS NULL) THEN   
+         wanted_del_date_ := Order_Quotation_Line_API.Get_Wanted_Delivery_Date(quotation_no_, line_no_, rel_no_, line_item_no_);
+      END IF;
+      
+      part_no_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PART_NO');
+      IF (part_nos_ IS NULL) THEN
+         part_nos_ := part_no_ || ',';
+      ELSIF (part_no_ IS NOT NULL AND INSTR(part_nos_, part_no_ || ',') = 0) THEN
+         part_nos_ := part_nos_ || part_no_ || ',';
+      END IF;
+     
+      configuration_id_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONFIGURATION_ID');
+      IF (configuration_ids_ IS NULL) THEN
+         configuration_ids_ := configuration_id_ || ',';
+      ELSIF (configuration_id_ IS NOT NULL AND INSTR(configuration_ids_, configuration_id_) = 0) THEN
+         configuration_ids_ := configuration_ids_ || configuration_id_ || ',';
+      END IF;     
+   END LOOP;
+   IF (configuration_ids_ IS NOT NULL) THEN
+      configuration_ids_ := SUBSTR(configuration_ids_, 1, LENGTH(configuration_ids_) - 1);
+   END IF;
+   $IF Component_Cfgchr_SYS.INSTALLED $THEN
+      Config_Manager_API.Get_Common_Characteristic_Ids(characteristic_ids_, configuration_ids_);
+   $END
+   IF (part_nos_ IS NOT NULL) THEN
+      rec_.part_nos := SUBSTR(part_nos_, 1, LENGTH(part_nos_) - 1);
+   END IF;
+   rec_.characteristic_ids := characteristic_ids_;
+   rec_.wanted_delivery_date := wanted_del_date_;
+   rec_.connected_id_attr := attr_;
+   
+   RETURN rec_;
+END Get_Characteristics___;
+
+FUNCTION Get_Next_From_List (
+   attr_  IN     VARCHAR2,
+   ptr_   IN OUT NOCOPY NUMBER,
+   value_ IN OUT NOCOPY VARCHAR2 ) RETURN BOOLEAN
+IS
+   from_  NUMBER;
+   to_    NUMBER;   
+BEGIN
+   from_ := nvl(ptr_, 1);
+   to_   := instr(attr_, Client_Sys.record_separator_, from_);
+   IF (to_ > 0) THEN
+      value_ := substr(attr_, from_, to_-from_);
+      ptr_   := to_+1;
+      RETURN(TRUE);
+   ELSE
+      RETURN(FALSE);
+   END IF;
+END Get_Next_From_List;
+
+
+PROCEDURE Replace_Char_Value_For_Configs___ (
+   connected_id_attr_    IN VARCHAR2,
+   characteristic_id_    IN VARCHAR2,
+   characteristic_value_ IN VARCHAR2,
+   info$_                OUT VARCHAR2 ) 
+IS 
+BEGIN  
+   $IF Component_Cfgchr_SYS.INSTALLED $THEN
+      Config_Manager_API.Replace_Char_Value_For_Configs(info$_, connected_id_attr_, 'CUSTOMERQUOTE', characteristic_id_, characteristic_value_);
+   $ELSE
+      NULL;
+   $END
+END Replace_Char_Value_For_Configs___;
+
+
+FUNCTION Validate_Classification_Defaults___ (
+	classification_unit_meas_  IN VARCHAR2,
+	catalog_no_                IN VARCHAR2,
+	classification_part_no_    IN VARCHAR2,
+	classification_standard_   IN VARCHAR2,
+	contract_                  IN VARCHAR2,
+	classifcation_part_edited_ IN BOOLEAN) RETURN Classification_Defaults_Structure_Rec
+IS
+   rec_ Classification_Defaults_Structure_Rec;
+BEGIN
+   rec_.catalog_no               :=catalog_no_;
+   rec_.classification_unit_meas := classification_unit_meas_;
+   rec_.classification_part_no   := classification_part_no_;
+   rec_.classification_standard  := classification_standard_;
+   
+   IF (classifcation_part_edited_) THEN
+      Assortment_Node_API.Get_Class_UoM_By_Class_No(rec_.classification_unit_meas, rec_.classification_part_no, rec_.classification_standard);                
+   END IF;
+
+   Assortment_Node_API.Get_Classification_Defaults(rec_.classification_unit_meas,
+                                                   rec_.catalog_no, 
+                                                   rec_.classification_part_no,
+                                                   rec_.classification_standard,
+                                                   'FALSE');                                                   
+
+   Sales_Part_API.Validate_Classification_Data(contract_,
+                                              rec_.classification_standard, 
+                                              rec_.classification_part_no, 
+                                              rec_.classification_unit_meas);
+
+   RETURN rec_;         
+END Validate_Classification_Defaults___;
+
+
+FUNCTION Update_Cost___ (
+	contract_               IN VARCHAR2,
+	part_no_                IN VARCHAR2,
+	configuration_id_       IN VARCHAR2,
+	condition_code_         IN VARCHAR2,
+	buy_qty_due_            IN NUMBER,
+	conv_factor_            IN NUMBER,
+	inverted_conv_factor_   IN NUMBER,
+	charged_item_           IN VARCHAR2,
+	order_supply_type_      IN VARCHAR2,
+	customer_no_            IN VARCHAR2,
+	catalog_type_           IN VARCHAR2,
+	quotation_no_           IN VARCHAR2,
+	line_no_                IN VARCHAR2,
+	rel_no_                 IN VARCHAR2,
+	catalog_no_             IN VARCHAR2,
+	rental_                 IN BOOLEAN) RETURN NUMBER
+IS
+   cost_ NUMBER;
+BEGIN
+   IF (Inventory_Part_API.Get_Invent_Part_Cost_Level_Db(contract_, part_no_) != 'COST PER CONFIGURATION') THEN
+      IF (rental_) THEN
+         RETURN 0;
+      ELSE
+         IF (part_no_ IS NOT NULL) THEN
+            cost_ := Sales_Cost_Util_API.Get_Cost_Incl_Sales_Overhead(contract_,
+                                                                     part_no_,
+                                                                     NVL(configuration_id_, '*'),
+                                                                     condition_code_,
+                                                                     buy_qty_due_ * conv_factor_ / inverted_conv_factor_,
+                                                                     charged_item_,
+                                                                     order_supply_type_,
+                                                                     customer_no_,
+                                                                     NULL);
+         ELSE
+            IF (catalog_type_ = 'PKG') THEN
+               Order_Quotation_Line_API.Get_Calculated_Pkg_Cost(cost_,
+                                                               quotation_no_,
+                                                               line_no_,
+                                                               rel_no_);
+            ELSE
+               cost_ := Sales_Part_API.Get_Cost(contract_,catalog_no_);
+            END IF;
+         END IF;
+      END IF;
+   END IF;
+   RETURN cost_;
+END Update_Cost___;
+
+
+FUNCTION Validate_Sale_Unit_Price___ (
+   validation_rec_            IN Quote_Line_Struct_Rec,
+	supply_country_db_         IN VARCHAR2,
+	currency_code_             IN VARCHAR2,
+	tax_from_def_              IN VARCHAR2,
+	tax_code_flag_             IN BOOLEAN,
+	new_line_                  IN BOOLEAN,
+	tax_edited_                IN BOOLEAN,	
+	quote_discount_            IN NUMBER,
+	customer_no_pay_           IN VARCHAR2,
+	validate_base_price_       IN BOOLEAN,
+   rental_chargable_days_     IN NUMBER) RETURN Quote_Line_Struct_Rec
+IS
+   rec_                 Quote_Line_Struct_Rec;
+   use_price_incl_tax_  VARCHAR2(5);
+   line_delail_rec_     Quote_Line_Struct_Rec;
+BEGIN
+   rec_ := validation_rec_;
+   
+	use_price_incl_tax_        := Order_Quotation_API.Get_Use_Price_Incl_Tax_Db(rec_.quotation_no);
+   IF (NOT validate_base_price_) THEN
+      IF (use_price_incl_tax_ = 'TRUE') THEN
+         Customer_Order_Pricing_API.Get_Base_Price_In_Currency(rec_.base_unit_price_incl_tax,
+                                                                rec_.currency_rate ,
+                                                                NVL(customer_no_pay_, rec_.customer_no),
+                                                                rec_.contract,
+                                                                currency_code_,
+                                                                rec_.unit_price_incl_tax); 
+      ELSE
+         Customer_Order_Pricing_API.Get_Base_Price_In_Currency(rec_.base_sale_unit_price,
+                                                                rec_.currency_rate ,
+                                                                NVL(customer_no_pay_, rec_.customer_no),
+                                                                rec_.contract,
+                                                                currency_code_,
+                                                                rec_.sale_unit_price);
+      END IF;      
+   ELSE 
+      IF (use_price_incl_tax_ = 'TRUE') THEN
+         Customer_Order_Pricing_API.Get_Sales_Price_In_Currency(rec_.unit_price_incl_tax,
+                                                                rec_.currency_rate ,
+                                                                NVL(customer_no_pay_, rec_.customer_no),
+                                                                rec_.contract,
+                                                                currency_code_,
+                                                                rec_.base_unit_price_incl_tax); 
+      ELSE
+         Customer_Order_Pricing_API.Get_Sales_Price_In_Currency(rec_.sale_unit_price,
+                                                                rec_.currency_rate ,
+                                                                NVL(customer_no_pay_, rec_.customer_no),
+                                                                rec_.contract,
+                                                                currency_code_,
+                                                                rec_.base_sale_unit_price);
+      END IF;
+   END IF;
+   
+   rec_.sale_unit_price := NVL(rec_.sale_unit_price, 0);
+   rec_.unit_price_incl_tax := NVL(rec_.unit_price_incl_tax, 0);
+   
+   rec_ := Calculate_Quote_Line_Prices___(rec_,
+                                          supply_country_db_,
+                                          currency_code_,
+                                          tax_from_def_,
+                                          tax_code_flag_,
+                                          new_line_,
+                                          tax_edited_); 
+
+   rec_.sale_unit_price := NVL(rec_.sale_unit_price, 0);
+   rec_.unit_price_incl_tax := NVL(rec_.unit_price_incl_tax, 0);
+      
+   line_delail_rec_ :=  Calculate_Line_Total___(
+                                    rec_.quotation_no,
+                                    rec_.line_no,
+                                    rec_.rel_no,
+                                    rec_.line_item_no,
+                                    tax_from_def_,
+                                    tax_code_flag_,
+                                    new_line_,
+                                    tax_edited_,
+                                    true,
+                                    rec_.tax_calc_structure_id,
+                                    rec_.tax_code,
+                                    rec_.contract,
+                                    rec_.customer_no,
+                                    rec_.ship_addr_no,
+                                    rec_.planned_due_date,
+                                    supply_country_db_,
+                                    rec_.delivery_type,
+                                    rec_.catalog_no,
+                                    rec_.tax_liability,
+                                    rec_.tax_liability_type,
+                                    currency_code_,
+                                    rec_.currency_rate,
+                                    rec_.buy_qty_due,
+                                    rec_.price_conv_factor,
+                                    NVL(rec_.sale_unit_price, 0),
+                                    NVL(rec_.unit_price_incl_tax, 0),
+                                    rec_.additional_discount,
+                                    quote_discount_,
+                                    rental_chargable_days_,
+                                    NULL,
+                                    rec_.discount);
+                                      
+   rec_.tax_amount_base          := line_delail_rec_.tax_amount_base;
+   rec_.net_amount_base          := line_delail_rec_.net_amount_base;
+   rec_.gross_amt_base           := line_delail_rec_.gross_amt_base;
+   rec_.tax_amount_currency      := line_delail_rec_.tax_amount_currency;
+   rec_.net_amount_curr          := line_delail_rec_.net_amount_curr;
+   rec_.gross_amt_curr           := line_delail_rec_.gross_amt_curr;
+   rec_.tax_calc_structure_id    := line_delail_rec_.tax_calc_structure_id;
+   rec_.discount_amount_curr     := line_delail_rec_.discount_amount_curr;
+   rec_.discount                 := line_delail_rec_.discount;
+   rec_.fetch_tax_from_defaults  := line_delail_rec_.fetch_tax_from_defaults;
+   RETURN rec_;
+END Validate_Sale_Unit_Price___;
+
+FUNCTION Calculate_Prices___ (
+	quotation_no_           IN VARCHAR2,
+	line_no_                IN VARCHAR2,
+	rel_no_                 IN VARCHAR2,
+	line_item_no_           IN NUMBER,
+	sale_unit_price_        IN NUMBER,
+	unit_price_incl_tax_    IN NUMBER,
+	multiple_tax_lines_     IN BOOLEAN,
+	tax_code_               IN VARCHAR2,
+	tax_calc_structure_id_  IN VARCHAR2,
+	tax_class_id_           IN VARCHAR2,
+	contract_               IN VARCHAR2,
+	customer_no_            IN VARCHAR2,
+	ship_addr_no_           IN VARCHAR2,
+	planned_due_date_       IN DATE,
+	supply_country_db_      IN VARCHAR2,
+	delivery_type_          IN VARCHAR2,
+	catalog_no_             IN VARCHAR2,
+	tax_liability_          IN VARCHAR2,
+	tax_liability_type_db_  IN VARCHAR2,
+	currency_code_          IN VARCHAR2,
+	currency_rate_          IN NUMBER,
+	tax_from_def_           IN VARCHAR2,
+	tax_code_flag_          IN BOOLEAN,
+	new_line_               IN BOOLEAN,
+	tax_edited_             IN BOOLEAN,	
+	buy_qty_due_            IN NUMBER,
+	price_conv_factor_      IN NUMBER,
+	additional_discount_    IN NUMBER,
+	quote_discount_         IN NUMBER,
+   rental_chargable_days_  IN NUMBER) RETURN Quote_Line_Struct_Rec 
+IS
+   rec_              Quote_Line_Struct_Rec;
+   line_delail_rec_  Quote_Line_Struct_Rec;
+
+BEGIN
+   rec_.quotation_no := quotation_no_;
+   rec_.line_no := line_no_;
+   rec_.rel_no := rel_no_;
+   rec_.line_item_no := line_item_no_;
+   rec_.sale_unit_price := NVL(sale_unit_price_, 0);
+   rec_.unit_price_incl_tax := NVL(unit_price_incl_tax_, 0);
+   rec_.multiple_tax_lines := multiple_tax_lines_;
+   rec_.tax_code := tax_code_;
+   rec_.tax_calc_structure_id := tax_calc_structure_id_;
+   rec_.tax_class_id := tax_class_id_;
+   rec_.contract := contract_;
+   rec_.customer_no := customer_no_;
+   rec_.ship_addr_no := ship_addr_no_;
+   rec_.planned_due_date := planned_due_date_;
+   rec_.delivery_type := delivery_type_;
+   rec_.catalog_no := catalog_no_;
+   rec_.tax_liability := tax_liability_;
+   rec_.tax_liability_type := tax_liability_type_db_;
+   rec_.currency_rate := currency_rate_;
+
+   rec_ := Calculate_Quote_Line_Prices___(rec_,
+                                        supply_country_db_,
+                                        currency_code_,
+                                        tax_from_def_,
+                                        tax_code_flag_,
+                                        new_line_,
+                                        tax_edited_);         
+
+   line_delail_rec_ :=  Calculate_Line_Total___(
+                                    quotation_no_,
+                                    line_no_,
+                                    rel_no_,
+                                    line_item_no_,
+                                    tax_from_def_,
+                                    tax_code_flag_,
+                                    new_line_,
+                                    tax_edited_,
+                                    true,
+                                    tax_calc_structure_id_,
+                                    tax_code_,
+                                    contract_,
+                                    customer_no_,
+                                    ship_addr_no_,
+                                    planned_due_date_,
+                                    supply_country_db_,
+                                    delivery_type_,
+                                    catalog_no_,
+                                    tax_liability_,
+                                    tax_liability_type_db_,
+                                    currency_code_,
+                                    currency_rate_,
+                                    buy_qty_due_,
+                                    price_conv_factor_,
+                                    NVL(rec_.sale_unit_price, 0),
+                                    NVL(rec_.unit_price_incl_tax, 0),
+                                    additional_discount_,
+                                    quote_discount_,
+                                    rental_chargable_days_, 
+                                    NULL,
+                                    rec_.discount);
+                                      
+   rec_.tax_amount_base          := line_delail_rec_.tax_amount_base;
+   rec_.net_amount_base          := line_delail_rec_.net_amount_base;
+   rec_.gross_amt_base           := line_delail_rec_.gross_amt_base;
+   rec_.tax_amount_currency      := line_delail_rec_.tax_amount_currency;
+   rec_.net_amount_curr          := line_delail_rec_.net_amount_curr;
+   rec_.gross_amt_curr           := line_delail_rec_.gross_amt_curr;
+   rec_.tax_calc_structure_id    := line_delail_rec_.tax_calc_structure_id;
+   rec_.discount_amount_curr     := line_delail_rec_.discount_amount_curr;
+   rec_.discount                 := line_delail_rec_.discount;
+   rec_.fetch_tax_from_defaults  := line_delail_rec_.fetch_tax_from_defaults;
+   RETURN rec_;
+END Calculate_Prices___;
+
+
+FUNCTION Get_Cus_Tax_Liability_Type_Db___ (
+	tax_liability_ IN VARCHAR2,
+	customer_no_   IN VARCHAR2,
+	ship_addr_no_  IN VARCHAR2) RETURN VARCHAR2
+IS
+BEGIN
+   RETURN Tax_Liability_API.Get_Tax_Liability_Type_Db(tax_liability_, 
+                                                      Cust_Ord_Customer_Address_API.Get_Country_Code(customer_no_, ship_addr_no_));
+END Get_Cus_Tax_Liability_Type_Db___;
+
+-- This function is needed since delivery country is fetched dynamically
+FUNCTION Fetch_Tax_Liability___ (
+	quotation_no_  IN VARCHAR2,
+	line_no_       IN VARCHAR2,
+	rel_no_        IN VARCHAR2,
+	line_item_no_  IN NUMBER,
+	company_       IN VARCHAR2,
+	customer_no_   IN VARCHAR2,
+	ship_addr_no_  IN VARCHAR2) RETURN Objid_Arr
+IS
+   delivery_country_code_  VARCHAR2(5);
+   dummy_                  VARCHAR2(100);
+   base_collection_        Objid_Arr := Objid_Arr();
+    
+    CURSOR Get_Tax_Liability_list IS
+      SELECT *
+      FROM TAX_LIABILITY_LOV
+      WHERE ((COUNTRY_CODE = delivery_country_code_ OR COUNTRY_CODE = '*') OR (delivery_country_code_ IS NULL));
+ 
+ BEGIN
+   Order_Quotation_Line_API.Get_Line_Address_Info(dummy_, dummy_, delivery_country_code_, dummy_, dummy_, dummy_, dummy_, dummy_,
+                                                  quotation_no_, line_no_, rel_no_, line_item_no_, company_);
+   delivery_country_code_ := NVL(delivery_country_code_, Cust_Ord_Customer_Address_API.Get_Country_Code(customer_no_, ship_addr_no_));
+   IF (delivery_country_code_ IS NULL AND (Customer_Info_API.Get_Customer_Category_Db(customer_no_) = 'CUSTOMER' OR Customer_Info_API.Get_Customer_Category_Db(customer_no_) IS NULL)) THEN
+      delivery_country_code_ := NULL;
+   END IF;
+
+   FOR rec_ IN Get_Tax_Liability_list LOOP
+      base_collection_.extend;
+      base_collection_(base_collection_.last) := rec_.objid;
+   END LOOP;
+ 
+   RETURN base_collection_;
+END Fetch_Tax_Liability___;
+
+
+-- This function is needed since tax liability type is fetched dynamically
+FUNCTION Tax_Code_Filter___ (
+	tax_liability_    IN VARCHAR2,
+	customer_no_      IN VARCHAR2,
+	ship_addr_no_     IN VARCHAR2,
+	contract_         IN VARCHAR2,
+	planned_due_date_ IN DATE,
+	company_          IN VARCHAR2,
+	catalog_no_       IN VARCHAR2) RETURN Objid_Arr
+IS
+   base_collection_     Objid_Arr := Objid_Arr();
+   tax_liability_type_  Tax_Liability_tab.Tax_Liability_type%TYPE;
+   CURSOR Get_restricted_Tax_Code IS
+   SELECT * 
+   FROM TAX_CODE_RESTRICTED
+   WHERE COMPANY = company_
+   AND (VALID_FROM <= TRUNC(NVL(planned_due_date_, Site_API.Get_Site_Date(contract_))) AND
+                         VALID_UNTIL >= TRUNC(NVL(planned_due_date_, Site_API.Get_Site_Date(contract_))));
+                         
+   CURSOR Get_restricted_Tax_Exempt_Code IS
+   SELECT * 
+   FROM TAX_CODE_EXEMPT_RESTRICTED
+   WHERE COMPANY = company_
+   AND (VALID_FROM <= TRUNC(NVL(planned_due_date_, Site_API.Get_Site_Date(contract_))) AND
+                         VALID_UNTIL >= TRUNC(NVL(planned_due_date_, Site_API.Get_Site_Date(contract_))));                      
+BEGIN  
+	tax_liability_type_ := Tax_Liability_API.Get_Tax_Liability_Type_Db(tax_liability_, 
+                                                      Cust_Ord_Customer_Address_API.Get_Country_Code(customer_no_, ship_addr_no_));
+   IF (Sales_Part_API.Get_Taxable_Db(contract_,catalog_no_) = 'TRUE' AND tax_liability_type_ = 'TAX') THEN
+      FOR rec_ IN Get_restricted_Tax_Code LOOP
+         base_collection_.extend;
+         base_collection_(base_collection_.last) := rec_.objid;
+      END LOOP;    
+   ELSE
+      FOR rec_ IN Get_restricted_Tax_Exempt_Code LOOP
+         base_collection_.extend;
+         base_collection_(base_collection_.last) := rec_.objid;
+      END LOOP;  
+   END IF;
+   RETURN base_collection_;
+END Tax_Code_Filter___;
+
+
+FUNCTION Get_Freight_Price_List_No___ (
+	contract_            IN VARCHAR2,
+	ship_via_code_       IN VARCHAR2,
+	freight_map_id_      IN VARCHAR2,
+	forward_agent_id_    IN VARCHAR2,
+	use_price_incl_tax_  IN BOOLEAN,
+	vendor_no_           IN VARCHAR2,
+	order_supply_type_   IN VARCHAR2) RETURN VARCHAR2
+IS
+   price_incl_tax_ VARCHAR2(5);
+BEGIN
+   IF (use_price_incl_tax_) THEN
+      price_incl_tax_ := 'TRUE';
+   ELSE
+      price_incl_tax_ := 'FALSE';
+   END IF;
+   IF ((order_supply_type_ = 'PD' OR order_supply_type_ = 'IPD') AND vendor_no_ IS NOT NULL) THEN
+      RETURN Freight_Price_List_Direct_API.Get_Active_Freight_List_No(contract_,
+                                                                     ship_via_code_,
+                                                                     freight_map_id_,
+                                                                     forward_agent_id_,
+                                                                     price_incl_tax_,
+                                                                     vendor_no_);
+   ELSE
+      RETURN Freight_Price_List_Base_API.Get_Active_Freight_List_No(contract_,
+                                                                     ship_via_code_,
+                                                                     freight_map_id_,
+                                                                     forward_agent_id_,
+                                                                     price_incl_tax_);
+   END IF;
+END Get_Freight_Price_List_No___;
+
+
+FUNCTION Validate_Gtin_No___ (
+	gtin_no_                   IN VARCHAR2,
+	contract_                  IN VARCHAR2,
+	input_unit_meas_group_id_  IN VARCHAR2,
+    set_catalog_no_            IN BOOLEAN) RETURN Gtin_Structure_Rec
+IS
+   rec_        Gtin_Structure_Rec;
+   unit_code_  VARCHAR2(30);
+BEGIN
+   IF set_catalog_no_ THEN
+      Sales_Part_API.Validate_Catalog_No_By_Gtin_No(rec_.catalog_no, gtin_no_, contract_);
+   END IF;
+   IF (LENGTH(gtin_no_) = 14) THEN
+      unit_code_ := Part_Gtin_Unit_Meas_API.Get_Unit_Code_For_Gtin14(gtin_no_);
+      IF (unit_code_ IS NOT NULL) THEN  
+         rec_.input_conv_factor  := Input_Unit_Meas_API.Get_Conversion_Factor(input_unit_meas_group_id_, unit_code_);
+         rec_.input_unit_meas    := unit_code_;
+      END IF;
+   END IF;
+	RETURN rec_;
+END Validate_Gtin_No___;
+
+
+FUNCTION Get_Configuration_Info___ (
+	part_no_                IN VARCHAR2,
+	planned_delivery_date_  IN DATE,
+	configuration_id_       IN VARCHAR2) RETURN Configuration_Info_Structure_Rec
+IS
+   rec_ Configuration_Info_Structure_Rec;
+BEGIN
+   $IF (Component_Cfgchr_SYS.INSTALLED) $THEN
+      rec_.rev_for_date       := Config_Part_Spec_Rev_API.Get_Spec_Rev_For_Date(part_no_, planned_delivery_date_, 'FALSE');
+      rec_.revision_no        := Configuration_Spec_API.Get_Spec_Revision_No(part_no_, configuration_id_);
+      rec_.cfg_chr_installed  := TRUE;
+   $ELSE
+      rec_.cfg_chr_installed  := FALSE;
+   $END
+   RETURN rec_;
+END Get_Configuration_Info___;
+
+
+FUNCTION Get_Valid_Price_List___ (
+	price_list_no_    IN VARCHAR2,
+	contract_         IN VARCHAR2,
+	catalog_no_       IN VARCHAR2,
+	customer_no_      IN VARCHAR2,
+	currency_code_    IN VARCHAR2,
+	effectivity_date_ IN DATE,
+	sales_price_type_ IN VARCHAR2) RETURN Price_List_Structure_Rec
+IS
+   rec_ Price_List_Structure_Rec;
+BEGIN
+   rec_.price_list_no := price_list_no_;
+	Sales_Price_List_API.Get_Valid_Price_List(rec_.customer_level_db,
+                                             rec_.customer_level_id,
+                                             rec_.price_list_no,
+                                             contract_,
+                                             catalog_no_,
+                                             customer_no_,
+                                             currency_code_,
+                                             effectivity_date_,
+                                             NULL, 
+                                             sales_price_type_ );
+                                             RETURN rec_;
+END Get_Valid_Price_List___;
+
+
+FUNCTION Calculate_Discount_Amount___ (
+	quotation_no_        IN VARCHAR2,
+	line_no_             IN VARCHAR2,
+	rel_no_              IN VARCHAR2,
+	line_item_no_        IN NUMBER,
+	buy_qty_due_         IN NUMBER,
+	price_conv_factor_   IN NUMBER) RETURN NUMBER
+IS
+BEGIN
+	RETURN Order_Quote_Line_Discount_API.Get_Total_Line_Discount(quotation_no_,
+                                                                line_no_, rel_no_, 
+                                                                line_item_no_,
+                                                                buy_qty_due_, 
+                                                                price_conv_factor_);
+END Calculate_Discount_Amount___;
+
+
+FUNCTION Get_Part_No___(
+	contract_   IN VARCHAR2,
+	catalog_no_ IN VARCHAR2) RETURN VARCHAR2
+IS
+BEGIN
+	RETURN Sales_Part_API.Get_Part_No(contract_, catalog_no_);
+END Get_Part_No___;
+
+
+PROCEDURE Replace_Quotation_Line___ (
+   identity1_    IN VARCHAR2,
+   identity2_    IN VARCHAR2,
+   identity3_    IN VARCHAR2,
+   identity4_    IN NUMBER,
+   contract_     IN VARCHAR2,
+   catalog_no_   IN VARCHAR2,
+   buy_quantity_ IN NUMBER,
+   desired_qty_  IN NUMBER,
+   info$_ OUT VARCHAR2 ) 
+IS   
+BEGIN
+   Order_Config_Util_API.Replace_Quotation_Line(info$_,identity1_, identity2_, identity3_, identity4_, contract_, catalog_no_, buy_quantity_, desired_qty_);
+END Replace_Quotation_Line___;
+
+
+FUNCTION Check_Part_Availability___ (
+	contract_         IN VARCHAR2,
+	catalog_no_       IN VARCHAR2,
+	vendor_no_        IN VARCHAR2,
+	part_no_          IN VARCHAR2,
+	purchase_part_no_ IN VARCHAR2) RETURN BOOLEAN
+IS
+   supply_site_         VARCHAR2(30) := NULL;
+   supply_site_part_no_ VARCHAR2(25);
+BEGIN
+   $IF (Component_Purch_SYS.INSTALLED) $THEN
+      supply_site_ := Supplier_API.Get_Acquisition_Site(vendor_no_);
+   $END
+   IF (supply_site_ IS NOT NULL) THEN
+      supply_site_part_no_ := Get_Supply_Site_Part_No___(supply_site_,contract_, catalog_no_, vendor_no_); 
+      IF (supply_site_part_no_ IS NOT NULL) THEN
+         RETURN TRUE;
+      ELSE
+         RETURN (Inventory_Part_API.Part_Exist(supply_site_, NVL(part_no_, purchase_part_no_)) = 1);
+      END IF;
+   ELSE
+      RETURN (part_no_ IS NOT null);
+   END IF;    
+END Check_Part_Availability___;
+
+
+FUNCTION Ger_Param_For_Inventory_Planning___ (
+	contract_            IN VARCHAR2,
+	catalog_no_          IN VARCHAR2,
+	vendor_no_           IN VARCHAR2,
+	part_no_             IN VARCHAR2,
+   order_supply_type_   IN VARCHAR2) RETURN Inventory_Planning_Param_Structure_Rec
+IS
+   supply_site_   VARCHAR2(30) := NULL;
+   rec_           Inventory_Planning_Param_Structure_Rec;
+BEGIN
+	$IF (Component_Purch_SYS.INSTALLED) $THEN
+      supply_site_ := Supplier_API.Get_Acquisition_Site(vendor_no_);
+   $END
+   IF (supply_site_ IS NOT NULL) THEN
+      rec_.part_no :=  NVL(Get_Supply_Site_Part_No___(supply_site_,contract_, catalog_no_, vendor_no_), part_no_); 
+   ELSE
+      rec_.part_no := part_no_;
+   END IF;
+   IF (order_supply_type_ IN ('IPT', 'IPD')) THEN
+      rec_.contract := supply_site_;
+   ELSE
+      rec_.contract := contract_;
+   END IF;
+   IF (Order_Supply_Demand_API.Open_Projects_Exist(rec_.contract) = 'FALSE') THEN
+      rec_.project_id := '*';
+   ELSE
+      rec_.project_id := '#';
+   END IF;
+   RETURN rec_;
+END Ger_Param_For_Inventory_Planning___;
+
+
+FUNCTION Get_Supply_Site_Part_No___ (
+	supply_site_   IN VARCHAR2,
+	contract_      IN VARCHAR2,
+	catalog_no_    IN VARCHAR2,
+	vendor_no_     IN VARCHAR2) RETURN VARCHAR2
+IS
+   part_no_ VARCHAR2(25);
+BEGIN
+   IF (supply_site_ IS NOT NULL) THEN
+      part_no_ :=  Sales_Part_API.Get_Supply_Site_Part_No__(supply_site_, contract_, catalog_no_, vendor_no_);
+   END IF;
+   RETURN part_no_;
+END Get_Supply_Site_Part_No___;
+
+
+FUNCTION Get_Currency_Rate_Defaults___ (
+	contract_      IN VARCHAR2,
+	customer_no_   IN VARCHAR2,
+	currency_code_ IN VARCHAR2) RETURN BOOLEAN
+IS
+   company_     VARCHAR2(20);
+   curr_type_   VARCHAR2(10);
+   conv_factor_ NUMBER;
+   rate_        NUMBER;
+   tmp_date_    DATE;
+BEGIN
+   company_   := Site_API.Get_Company(contract_);
+   tmp_date_  := Site_API.Get_Site_Date(contract_);
+   Invoice_Library_API.Get_Currency_Rate_Defaults(curr_type_, conv_factor_, rate_, company_, currency_code_,
+                                                     tmp_date_, 'CUSTOMER', customer_no_);
+   RETURN TRUE;
+END Get_Currency_Rate_Defaults___;
+
+-- This function is used just to refresh quotation lines in client using ludependencies when needed
+PROCEDURE Refresh_Quotation_Lines___
+IS
+BEGIN
+   NULL;
+END Refresh_Quotation_Lines___;
+
+
+FUNCTION Is_Run_Capability_Check_Enabled___ (
+	supply_site_       IN VARCHAR2,
+   part_no_           IN VARCHAR2,
+   catalog_no_        IN VARCHAR2,
+   objstate_          IN VARCHAR2,
+   configurable_      IN BOOLEAN,
+   configuration_id_  IN VARCHAR2,
+   quotation_no_      IN VARCHAR2,
+   planned_due_date_  IN DATE,
+   supply_code_db_    IN VARCHAR2,
+   buy_qty_due_       IN NUMBER) RETURN BOOLEAN
+IS
+   sourcing_option_            VARCHAR2(50) := Sales_Part_API.Get_Sourcing_Option_Db(supply_site_, part_no_);
+   is_check_ok_on_supply_site_ BOOLEAN := Sales_Part_API.Check_Exist(supply_site_, part_no_) = 1 AND ((sourcing_option_ IN ('DOPORDER', 'INVENTORYORDER') AND Sales_Part_API.Get_Part_No(supply_site_, part_no_) IS NOT NULL) OR (sourcing_option_ = 'SHOPORDER' AND Inventory_Part_API.Get_Type_Code_Db(supply_site_, part_no_) IN ('1', '2')));
+BEGIN
+   RETURN quotation_no_ IS NOT NULL AND catalog_no_ IS NOT NULL AND planned_due_date_ IS NOT NULL AND buy_qty_due_ > 0 AND objstate_ IN ('Planned', 'Released', 'Revised', 'Rejected', 'Won') AND 
+         ((configurable_ AND configuration_id_ IS NOT NULL AND configuration_id_ != '*') OR (supply_code_db_ IN ('DOP', 'IO') AND part_no_ IS NOT NULL) OR (supply_code_db_ = 'SO') OR (supply_code_db_ IN ('IPT', 'IPD') AND is_check_ok_on_supply_site_));
+END Is_Run_Capability_Check_Enabled___;
+
+PROCEDURE Add_Values_To_Duplicated_Attr (
+   attr_ IN OUT VARCHAR2)
+IS
+   validation_rec_              Quote_Line_Struct_Rec;
+   quote_line_struct_rec_       Quote_Line_Struct_Rec;
+   line_price_rec_              Quote_Line_Struct_Rec;
+   dummy_text_                  VARCHAR2(2000) := NULL;  
+   dummy_number_                NUMBER := NULL;
+   configurable_                VARCHAR2(2000) := 'NOT CONFIGURED';
+   input_uom_group_             VARCHAR2(5) := 'FALSE';
+   price_source_net_price_      VARCHAR2(5) := 'FALSE';
+   order_quotation_rec_         Order_Quotation_API.Public_Rec;
+   free_of_charge_tax_basis_    NUMBER;
+   classification_defaults_rec_ Classification_Defaults_Structure_Rec;
+   classification_unit_meas_    VARCHAR2(10);
+   classification_standard_     VARCHAR2(25);
+   char_price_                  NUMBER := TO_NUMBER(Client_SYS.Get_Item_Value('CHAR_PRICE', attr_));
+   configured_line_price_id_    NUMBER := to_number(Client_SYS.Get_Item_Value('CONFIGURED_LINE_PRICE_ID', attr_));
+BEGIN
+  
+   Client_SYS.Set_Item_Value('NOTE_ID', dummy_number_, attr_);
+   Client_SYS.Set_Item_Value('NOTE_TEXT', dummy_text_, attr_);
+   Client_SYS.Set_Item_Value('LINE_ITEM_NO', 0, attr_);
+   Client_SYS.Set_Item_Value('CON_LINE_ITEM_NO', 0, attr_);
+   Client_SYS.Set_Item_Value('CONFIGURATION_ID', '*', attr_);
+   Client_SYS.Set_Item_Value('EVALUATE_DEFAULT_INFO', 'TRUE', attr_);
+   Client_SYS.Set_Item_Value('DEMAND_CODE', dummy_text_, attr_);
+   Client_SYS.Set_Item_Value('DEMAND_ORDER_REF1', dummy_text_, attr_);
+   Client_SYS.Set_Item_Value('DEMAND_ORDER_REF2', dummy_text_, attr_);
+   
+   validation_rec_.catalog_no := Client_SYS.Get_Item_Value('CATALOG_NO', attr_);
+   validation_rec_.contract := Client_SYS.Get_Item_Value('CONTRACT', attr_);
+   validation_rec_.quotation_no := Client_SYS.Get_Item_Value('QUOTATION_NO', attr_);
+   validation_rec_.line_no := Client_SYS.Get_Item_Value('LINE_NO', attr_);
+   validation_rec_.rel_no := Client_SYS.Get_Item_Value('REL_NO', attr_);
+   validation_rec_.line_item_no := Client_SYS.Get_Item_Value('LINE_ITEM_NO', attr_);   
+   validation_rec_.input_unit_meas := Client_SYS.Get_Item_Value('INPUT_UNIT_MEAS', attr_);
+   validation_rec_.buy_qty_due := Client_SYS.Get_Item_Value('BUY_QTY_DUE', attr_);
+   validation_rec_.rental := (Client_SYS.Get_Item_Value('RENTAL_DB', attr_) = 'TRUE');
+   validation_rec_.sale_unit_price := Client_SYS.Get_Item_Value('SALE_UNIT_PRICE', attr_);
+   validation_rec_.unit_price_incl_tax := Client_SYS.Get_Item_Value('UNIT_PRICE_INCL_TAX', attr_);
+   validation_rec_.customer_no := Client_SYS.Get_Item_Value('CUSTOMER_NO', attr_);
+   validation_rec_.ship_addr_no := Client_SYS.Get_Item_Value('SHIP_ADDR_NO', attr_);
+   validation_rec_.planned_due_date := Client_SYS.Get_Item_Value_To_Date('PLANNED_DUE_DATE', attr_, lu_name_);
+   validation_rec_.tax_code := Client_SYS.Get_Item_Value('TAX_CODE', attr_);   
+   validation_rec_.tax_class_id := Client_SYS.Get_Item_Value('TAX_CLASS_ID', attr_);
+   validation_rec_.tax_calc_structure_id := Client_SYS.Get_Item_Value('TAX_CALC_STRUCTURE_ID', attr_);
+   validation_rec_.tax_liability := Client_SYS.Get_Item_Value('TAX_LIABILITY', attr_);
+   validation_rec_.tax_liability_type := Client_SYS.Get_Item_Value('TAX_LIABILITY_TYPE_DB', attr_);
+   validation_rec_.additional_discount := Client_SYS.Get_Item_Value('ADDITIONAL_DISCOUNT', attr_);
+   validation_rec_.quotation_discount := Client_SYS.Get_Item_Value('QUOTATION_DISCOUNT', attr_); 
+   validation_rec_.delivery_type := Client_SYS.Get_Item_Value('DELIVERY_TYPE', attr_); 
+   validation_rec_.price_list_no := Client_SYS.Get_Item_Value('PRICE_LIST_NO', attr_);
+   validation_rec_.condition_code := Client_SYS.Get_Item_Value('CONDITION_CODE', attr_);
+   validation_rec_.price_freeze := Client_SYS.Get_Item_Value('PRICE_FREEZE_DB', attr_);
+   validation_rec_.duplicated_line  := Client_SYS.Get_Item_Value('DUPLICATED_LINE', attr_);
+   validation_rec_.multiple_tax_lines := (Client_SYS.Get_Item_Value('MULTIPLE_TAX_LINES', attr_) = 'TRUE');
+   validation_rec_.charged_item := Client_SYS.Get_Item_Value('CHARGED_ITEM', attr_);
+   validation_rec_.order_supply_type := Client_SYS.Get_Item_Value('ORDER_SUPPLY_TYPE', attr_);
+   validation_rec_.revised_qty_due := Client_SYS.Get_Item_Value('REVISED_QTY_DUE', attr_);
+   validation_rec_.desired_qty := Client_SYS.Get_Item_Value('DESIRED_QTY', attr_);
+   validation_rec_.fetch_tax_from_defaults := Client_SYS.Get_Item_Value('FETCH_TAX_FROM_DEFAULTS', attr_);
+   validation_rec_.additional_discount := Client_SYS.Get_Item_Value('ADDITIONAL_DISCOUNT', attr_);
+   validation_rec_.quote_discount := Client_SYS.Get_Item_Value('QUOTE_DISCOUNT', attr_);
+   validation_rec_.rental_chargable_days := NVL(Client_SYS.Get_Item_Value('CHARGEABLE_DAYS', attr_), 1);
+
+   classification_unit_meas_ := Client_SYS.Get_Item_Value('CLASSIFICATION_UNIT_MEAS', attr_);
+   classification_standard_  := Client_SYS.Get_Item_Value('CLASSIFICATION_STANDARD', attr_);
+  
+   Client_SYS.Set_Item_Value('FETCH_TAX_CODES', 'FALSE', attr_);
+   Client_SYS.Set_Item_Value('SET_TAX_FROM_ORIGIN', 'TRUE', attr_);
+   
+   order_quotation_rec_ := Order_Quotation_API.Get(validation_rec_.quotation_no);
+   
+   -- General Validation for th Catalog No Starts
+   quote_line_struct_rec_ := Validate_Catalog_No___(validation_rec_, true, order_quotation_rec_.supply_country, order_quotation_rec_.currency_code, 'FALSE', true, false, validation_rec_.rental_chargable_days, dummy_text_);
+
+   IF (quote_line_struct_rec_.success) THEN
+      IF (quote_line_struct_rec_.inactive_comp_exist = 1) THEN
+         Error_SYS.Record_General(lu_name_, 'NOTACTIVE: The specified component part is not active for sale.');
+      END IF;
+      quote_line_struct_rec_.discount := 0;
+      Client_SYS.Set_Item_Value('PRICE_UNIT_MEAS', quote_line_struct_rec_.price_unit_meas, attr_);
+      IF (quote_line_struct_rec_.configurable) THEN
+         configurable_ :=       'CONFIGURED';
+      END IF;
+      Client_SYS.Set_Item_Value('CONFIGURABLE', configurable_, attr_);
+      Client_SYS.Set_Item_Value('COST_LEVEL_DB', quote_line_struct_rec_.cost_level_db, attr_);
+      Client_SYS.Set_Item_Value('INPUT_UNIT_MEAS_GROUP_ID', quote_line_struct_rec_.input_unit_meas_group_id, attr_);
+      IF (quote_line_struct_rec_.input_uom_group) THEN
+         input_uom_group_ := 'TRUE';
+      END IF;
+      Client_SYS.Set_Item_Value('INPUT_UOM_GROUP', input_uom_group_, attr_);
+      Client_SYS.Set_Item_Value('GTIN_NO', quote_line_struct_rec_.gtin_no, attr_);
+   --   rec_.inactive_comp_exist := quote_line_struct_rec_.inactive_comp_exist;
+      Client_SYS.Set_Item_Value('CATALOG_TYPE', quote_line_struct_rec_.catalog_type, attr_);
+      Client_SYS.Set_Item_Value('ORIGINAL_PART_NO', quote_line_struct_rec_.original_part_no, attr_);
+      Client_SYS.Set_Item_Value('BUY_QTY_DUE', quote_line_struct_rec_.buy_qty_due, attr_);
+      Client_SYS.Set_Item_Value('CATALOG_DESC', quote_line_struct_rec_.catalog_desc, attr_);
+      Client_SYS.Set_Item_Value('CURRENCY_RATE', quote_line_struct_rec_.currency_rate, attr_);
+      Client_SYS.Set_Item_Value('CONV_FACTOR', quote_line_struct_rec_.conv_factor, attr_);
+      Client_SYS.Set_Item_Value('INVERTED_CONV_FACTOR', quote_line_struct_rec_.inverted_conv_factor, attr_);
+      Client_SYS.Set_Item_Value('PRICE_CONV_FACTOR', quote_line_struct_rec_.price_conv_factor, attr_);
+      Client_SYS.Set_Item_Value('PART_PRICE', quote_line_struct_rec_.part_price, attr_);
+      Client_SYS.Set_Item_Value('PRICE_SOURCE', quote_line_struct_rec_.price_source, attr_);
+      Client_SYS.Set_Item_Value('SET_PRICE_SOURCE', quote_line_struct_rec_.set_price_source, attr_);
+      Client_SYS.Set_Item_Value('PRICE_SOURCE_ID', quote_line_struct_rec_.price_source_id, attr_);
+      Client_SYS.Set_Item_Value('INPUT_UNIT_MEAS', quote_line_struct_rec_.input_unit_meas, attr_);
+      Client_SYS.Set_Item_Value('INPUT_CONV_FACTOR', quote_line_struct_rec_.input_conv_factor, attr_);
+      Client_SYS.Set_Item_Value('PART_LEVEL', quote_line_struct_rec_.part_level, attr_);
+      Client_SYS.Set_Item_Value('PART_LEVEL_ID',  quote_line_struct_rec_.part_level_id, attr_);
+      Client_SYS.Set_Item_Value('CUSTOMER_LEVEL', quote_line_struct_rec_.customer_level, attr_);
+      Client_SYS.Set_Item_Value('CUSTOMER_LEVEL_ID', quote_line_struct_rec_.customer_level_id, attr_);
+      Client_SYS.Set_Item_Value('SALES_UNIT_MEASURE', quote_line_struct_rec_.sales_unit_measure, attr_);
+      Client_SYS.Set_Item_Value('DISCOUNT', quote_line_struct_rec_.discount, attr_);
+      Client_SYS.Set_Item_Value('COST', quote_line_struct_rec_.cost, attr_);
+--      Client_SYS.Set_Item_Value('TAX_CODE', quote_line_struct_rec_.tax_code, attr_);
+      Client_SYS.Set_Item_Value('PART_NO', quote_line_struct_rec_.part_no, attr_);
+   -- No Need to duplicate the order_supply_type connected to the part since the original value should be kept there.
+   --   Client_SYS.Set_Item_Value('ORDER_SUPPLY_TYPE', quote_line_struct_rec_.order_supply_type, attr_);
+      Client_SYS.Set_Item_Value('VENDOR_NO', quote_line_struct_rec_.vendor_no, attr_);
+   --   Client_SYS.Set_Item_Value('PRICE_LIST_NO', quote_line_struct_rec_.price_list_no, attr_);            
+   --   Client_SYS.Set_Item_Value('CONDITION_CODE', quote_line_struct_rec_.condition_code, attr_);
+      Client_SYS.Set_Item_Value('CUSTOMER_PART_NO', quote_line_struct_rec_.customer_part_no, attr_);
+      Client_SYS.Set_Item_Value('CUSTOMER_PART_CONV_FACTOR', quote_line_struct_rec_.customer_part_conv_factor, attr_);
+      Client_SYS.Set_Item_Value('CUSTOMER_PART_UNIT_MEAS', quote_line_struct_rec_.customer_part_unit_meas, attr_);
+      Client_SYS.Set_Item_Value('SELF_BILLING', quote_line_struct_rec_.self_billing, attr_);
+      IF (quote_line_struct_rec_.price_source_net_price) THEN
+         price_source_net_price_ := 'TRUE';
+      END IF;
+      Client_SYS.Set_Item_Value('PRICE_SOURCE_NET_PRICE', price_source_net_price_, attr_);
+      Client_SYS.Set_Item_Value('CUST_PART_INVERT_CONV_FACT', quote_line_struct_rec_.cust_part_invert_conv_fact, attr_);
+
+      IF (quote_line_struct_rec_.buy_qty_due IS NOT NULL) THEN
+         Client_SYS.Set_Item_Value('BASE_SALE_UNIT_PRICE', quote_line_struct_rec_.base_sale_unit_price, attr_);
+         Client_SYS.Set_Item_Value('BASE_UNIT_PRICE_INCL_TAX', quote_line_struct_rec_.base_unit_price_incl_tax, attr_);
+         Client_SYS.Set_Item_Value('SALE_UNIT_PRICE', quote_line_struct_rec_.sale_unit_price, attr_);
+         Client_SYS.Set_Item_Value('UNIT_PRICE_INCL_TAX', quote_line_struct_rec_.unit_price_incl_tax, attr_);
+   --      IF (quote_line_struct_rec_.multiple_tax_lines) THEN
+   --         multiple_tax_lines_ := 'TRUE';
+   --      END IF;
+   --      Client_SYS.Set_Item_Value('MULTIPLE_TAX_LINES', multiple_tax_lines_, attr_);
+      END IF;   
+--      Client_SYS.Set_Item_Value('TAX_CODE', quote_line_struct_rec_.tax_code, attr_);
+--      Client_SYS.Set_Item_Value('TAX_CLASS_ID', quote_line_struct_rec_.tax_class_id, attr_);
+      Client_SYS.Set_Item_Value('TAX_AMOUNT_BASE', quote_line_struct_rec_.tax_amount_base, attr_);
+      Client_SYS.Set_Item_Value('NET_AMOUNT_BASE', quote_line_struct_rec_.net_amount_base, attr_);
+      Client_SYS.Set_Item_Value('GROSS_AMT_BASE', quote_line_struct_rec_.gross_amt_base, attr_);
+      Client_SYS.Set_Item_Value('TAX_AMOUNT_CURRENCY', quote_line_struct_rec_.tax_amount_currency, attr_);
+      Client_SYS.Set_Item_Value('NET_AMOUNT_CURR', quote_line_struct_rec_.net_amount_curr, attr_);
+      Client_SYS.Set_Item_Value('GROSS_AMT_CURR', quote_line_struct_rec_.gross_amt_curr, attr_);
+--      Client_SYS.Set_Item_Value('TAX_CALC_STRUCTURE_ID', quote_line_struct_rec_.tax_calc_structure_id, attr_);
+      Client_SYS.Set_Item_Value('DISCOUNT_AMOUNT_CURR', quote_line_struct_rec_.discount_amount_curr, attr_);
+      Client_SYS.Set_Item_Value('DISCOUNT', quote_line_struct_rec_.discount, attr_); 
+      --Client_SYS.Set_Item_Value('FETCH_TAX_FROM_DEFAULTS', quote_line_struct_rec_.fetch_tax_from_defaults, attr_);
+      Client_SYS.Set_Item_Value('AVAILABLE_QTY', quote_line_struct_rec_.available_qty, attr_);   
+
+      IF (quote_line_struct_rec_.buy_qty_due IS NOT NULL AND quote_line_struct_rec_.inverted_conv_factor != 0) THEN
+         validation_rec_.revised_qty_due := quote_line_struct_rec_.revised_qty_due;
+         Client_SYS.Set_Item_Value('REVISED_QTY_DUE', quote_line_struct_rec_.revised_qty_due, attr_);
+      END IF; 
+      Client_SYS.Set_Item_Value('CLASSIFICATION_PART_NO', dummy_text_, attr_);
+      classification_unit_meas_ := Client_SYS.Get_Item_Value('CLASSIFICATION_UNIT_MEAS', attr_);
+      classification_standard_  := Client_SYS.Get_Item_Value('CLASSIFICATION_STANDARD', attr_);   
+
+      classification_defaults_rec_ := Validate_Classification_Defaults___ (classification_unit_meas_,
+                                                                           validation_rec_.catalog_no,
+                                                                           NULL,
+                                                                           classification_standard_,
+                                                                           validation_rec_.contract,
+                                                                           FALSE);
+      Client_SYS.Set_Item_Value('CLASSIFICATION_UNIT_MEAS', classification_defaults_rec_.classification_unit_meas, attr_);  
+      Client_SYS.Set_Item_Value('CLASSIFICATION_PART_NO', classification_defaults_rec_.classification_part_no, attr_);  
+      Client_SYS.Set_Item_Value('CLASSIFICATION_STANDARD', classification_defaults_rec_.classification_standard, attr_);  
+
+      -- General Validation for the Catalog No Ends
+      
+     -- Validation for Buy Qty Due Starts
+     line_price_rec_ := Validate_Buy_Qty_Due___ (
+                        validation_rec_.quotation_no,
+                        validation_rec_.line_no,
+                        validation_rec_.rel_no,
+                        validation_rec_.line_item_no,
+                        validation_rec_.catalog_no,
+                        validation_rec_.buy_qty_due,
+                        validation_rec_.price_list_no,
+                        order_quotation_rec_.price_effectivity_date,
+                        validation_rec_.condition_code,
+                        quote_line_struct_rec_.customer_level,
+                        quote_line_struct_rec_.customer_level_id,
+                        quote_line_struct_rec_.discount,
+                        char_price_,
+                        configured_line_price_id_,
+                        quote_line_struct_rec_.part_no,
+                        '*',
+                        validation_rec_.price_freeze,
+                        quote_line_struct_rec_.sale_unit_price,
+                        quote_line_struct_rec_.base_sale_unit_price,
+                        quote_line_struct_rec_.base_unit_price_incl_tax,
+                        true,
+                        TRUE,
+                        dummy_text_,
+                        dummy_text_,
+                        dummy_text_,
+                        validation_rec_.multiple_tax_lines,
+                        validation_rec_.tax_code,
+                        validation_rec_.tax_calc_structure_id,
+                        validation_rec_.tax_class_id,
+                        validation_rec_.contract,
+                        validation_rec_.customer_no,
+                        validation_rec_.ship_addr_no,
+                        validation_rec_.planned_due_date,
+                        order_quotation_rec_.supply_country,
+                        validation_rec_.delivery_type,
+                        validation_rec_.tax_liability,
+                        validation_rec_.tax_liability_type,
+                        order_quotation_rec_.currency_code,
+                        quote_line_struct_rec_.currency_rate,
+                        validation_rec_.fetch_tax_from_defaults,
+                        validation_rec_.charged_item,
+                        quote_line_struct_rec_.conv_factor,
+                        quote_line_struct_rec_.inverted_conv_factor,
+                        validation_rec_.order_supply_type,
+                        quote_line_struct_rec_.catalog_type,
+                        validation_rec_.rental,
+                        validation_rec_.revised_qty_due,
+                        validation_rec_.desired_qty,
+                        quote_line_struct_rec_.price_unit_meas,
+                        quote_line_struct_rec_.sales_unit_measure,
+                        quote_line_struct_rec_.price_conv_factor,
+                        quote_line_struct_rec_.customer_part_conv_factor,
+                        quote_line_struct_rec_.cust_part_invert_conv_fact,
+                        validation_rec_.additional_discount,
+                        validation_rec_.quote_discount,
+                        validation_rec_.rental_chargable_days,
+                        validation_rec_.duplicated_line,
+                        quote_line_struct_rec_.discount);
+
+      IF (line_price_rec_.success) THEN
+         Client_SYS.Set_Item_Value('PRICE_SOURCE', line_price_rec_.price_source, attr_);
+         Client_SYS.Set_Item_Value('SET_PRICE_SOURCE', line_price_rec_.set_price_source, attr_);
+         Client_SYS.Set_Item_Value('PRICE_SOURCE_ID', line_price_rec_.price_source_id, attr_);
+         Client_SYS.Set_Item_Value('PRICE_FREEZE', line_price_rec_.price_freeze, attr_);
+ 
+         Client_SYS.Set_Item_Value('CURRENCY_RATE', line_price_rec_.currency_rate, attr_);
+         Client_SYS.Set_Item_Value('DISCOUNT', line_price_rec_.discount, attr_);
+         Client_SYS.Set_Item_Value('PART_LEVEL', line_price_rec_.part_level, attr_);
+         Client_SYS.Set_Item_Value('PART_LEVEL_ID', line_price_rec_.part_level_id, attr_);
+         Client_SYS.Set_Item_Value('CUSTOMER_LEVEL', line_price_rec_.customer_level, attr_);
+         Client_SYS.Set_Item_Value('CUSTOMER_LEVEL_ID', line_price_rec_.customer_level_id, attr_);
+         IF (line_price_rec_.price_source_net_price) THEN
+            price_source_net_price_ := 'TRUE';
+         END IF;
+         Client_SYS.Set_Item_Value('PRICE_SOURCE_NET_PRICE', price_source_net_price_, attr_);
+
+         Client_SYS.Set_Item_Value('BASE_SALE_UNIT_PRICE', line_price_rec_.base_sale_unit_price, attr_);
+         Client_SYS.Set_Item_Value('CALC_PRICE_CURR', line_price_rec_.calc_price_curr, attr_);
+         Client_SYS.Set_Item_Value('CHAR_PRICE', line_price_rec_.char_price, attr_);
+         Client_SYS.Set_Item_Value('CALC_CHAR_PRICE', line_price_rec_.calc_char_price, attr_);
+
+--         Client_SYS.Set_Item_Value('TAX_CODE', quote_line_struct_rec_.tax_code, attr_);
+--         Client_SYS.Set_Item_Value('TAX_CALC_STRUCTURE_ID', quote_line_struct_rec_.tax_calc_structure_id, attr_);
+--         Client_SYS.Set_Item_Value('TAX_CLASS_ID', quote_line_struct_rec_.tax_class_id, attr_); 
+   
+         IF (line_price_rec_.price_freeze = 'FREE') THEN
+            Client_SYS.Set_Item_Value('PRICE_UNIT_MEAS', line_price_rec_.price_unit_meas, attr_);
+            Client_SYS.Set_Item_Value('SALES_UNIT_MEASURE', line_price_rec_.sales_unit_measure, attr_);
+            Client_SYS.Set_Item_Value('PRICE_CONV_FACTOR', line_price_rec_.price_conv_factor, attr_);
+
+            Client_SYS.Set_Item_Value('SALE_UNIT_PRICE', line_price_rec_.sale_unit_price, attr_);
+            Client_SYS.Set_Item_Value('PART_PRICE', line_price_rec_.part_price, attr_);
+            Client_SYS.Set_Item_Value('UNIT_PRICE_INCL_TAX', line_price_rec_.unit_price_incl_tax, attr_);
+            Client_SYS.Set_Item_Value('BASE_UNIT_PRICE_INCL_TAX', line_price_rec_.base_unit_price_incl_tax, attr_);
+         END IF;
+         
+         IF (line_price_rec_.cost IS NOT NULL) THEN
+            Client_SYS.Set_Item_Value('COST', line_price_rec_.cost, attr_);
+         END IF;
+         Client_SYS.Set_Item_Value('REVISED_QTY_DUE', line_price_rec_.revised_qty_due, attr_);
+         Client_SYS.Set_Item_Value('DESIRED_QTY_', line_price_rec_.desired_qty, attr_);
+         Client_SYS.Set_Item_Value('PRICE_QTY_DUE', line_price_rec_.price_qty_due, attr_);
+
+         Client_SYS.Set_Item_Value('TAX_AMOUNT_BASE', line_price_rec_.tax_amount_base, attr_);
+         Client_SYS.Set_Item_Value('NET_AMOUNT_BASE', line_price_rec_.net_amount_base, attr_);
+         Client_SYS.Set_Item_Value('GROSS_AMT_BASE', line_price_rec_.gross_amt_base, attr_);
+         Client_SYS.Set_Item_Value('TAX_AMOUNT_CURRENCY', line_price_rec_.tax_amount_currency, attr_);
+         Client_SYS.Set_Item_Value('NET_AMOUNT_CURR', line_price_rec_.net_amount_curr, attr_);
+         Client_SYS.Set_Item_Value('GROSS_AMT_CURR', line_price_rec_.gross_amt_curr, attr_);
+         
+         
+         Client_SYS.Set_Item_Value('TAX_CALC_STRUCTURE_ID', line_price_rec_.tax_calc_structure_id, attr_);
+         Client_SYS.Set_Item_Value('DISCOUNT_AMOUNT_CURR', line_price_rec_.discount_amount_curr, attr_);
+        
+         Client_SYS.Set_Item_Value('CUSTOMER_PART_BUY_QTY', line_price_rec_.customer_part_buy_qty, attr_);
+         Client_SYS.Set_Item_Value('CUSTOMER_PART_CONV_FACTOR', line_price_rec_.customer_part_conv_factor, attr_);         
+      END IF;
+
+      -- Validation for a part line Starts  
+      -- If it is a part line and if it is of free of charge
+      IF ((Client_SYS.Get_Item_Value('FREE_OF_CHARGE_DB', attr_) = 'TRUE') AND NOT(validation_rec_.rental)) THEN
+         Client_SYS.Set_Item_Value('PART_PRICE', 0, attr_); 
+         Client_SYS.Set_Item_Value('CALC_PRICE_CURR', 0, attr_); 
+         Client_SYS.Set_Item_Value('BASE_UNIT_PRICE_INCL_TAX', 0, attr_); 
+         Client_SYS.Set_Item_Value('BASE_SALE_UNIT_PRICE', 0, attr_);
+         Client_SYS.Set_Item_Value('SALE_UNIT_PRICE', 0, attr_);
+         Client_SYS.Set_Item_Value('UNIT_PRICE_INCL_TAX', 0, attr_);
+
+         IF (Client_SYS.Get_Item_Value('CALC_CHAR_PRICE', attr_) IS NOT NULL) THEN
+            Client_SYS.Set_Item_Value('CALC_CHAR_PRICE', 0, attr_);
+         END IF;
+         IF (Client_SYS.Get_Item_Value('CHAR_PRICE', attr_) IS NOT NULL) THEN
+            Client_SYS.Set_Item_Value('CHAR_PRICE', 0, attr_);
+         END IF;
+         Client_SYS.Set_Item_Value('DISCOUNT', 0, attr_);
+         Client_SYS.Set_Item_Value('PRICE_SOURCE', 'UNSPECIFIED', attr_);
+         Client_SYS.Set_Item_Value('PRICE_SOURCE_ID', dummy_text_, attr_);
+         Client_SYS.Set_Item_Value('PART_LEVEL', dummy_text_, attr_);
+         Client_SYS.Set_Item_Value('PART_LEVEL_ID', dummy_text_, attr_);
+         Client_SYS.Set_Item_Value('CUSTOMER_LEVEL', dummy_text_, attr_);
+         Client_SYS.Set_Item_Value('CUSTOMER_LEVEL_ID', dummy_text_, attr_);
+         free_of_charge_tax_basis_ := Calc_Free_Of_Charge_Tax_Basis___ (free_of_charge_tax_basis_,
+                                          validation_rec_.quotation_no,
+                                          validation_rec_.line_no,
+                                          validation_rec_.rel_no,
+                                          validation_rec_.line_item_no,
+                                          quote_line_struct_rec_.cost,
+                                          validation_rec_.revised_qty_due,
+                                          validation_rec_.customer_no,
+                                          validation_rec_.contract,
+                                          order_quotation_rec_.currency_code,
+                                          quote_line_struct_rec_.part_price,
+                                          TRUE);
+         Client_SYS.Set_Item_Value('FREE_OF_CHARGE_TAX_BASIS', free_of_charge_tax_basis_, attr_);
+
+         line_price_rec_ :=  Calculate_Line_Total___(
+                                          validation_rec_.quotation_no,
+                                          validation_rec_.line_no,
+                                          validation_rec_.rel_no,
+                                          validation_rec_.line_item_no,
+                                          'FALSE',
+                                          TRUE,
+                                          TRUE,
+                                          FALSE,
+                                          true,
+                                          validation_rec_.tax_calc_structure_id,
+                                          validation_rec_.tax_code,
+                                          validation_rec_.contract,
+                                          validation_rec_.customer_no,
+                                          validation_rec_.ship_addr_no,
+                                          validation_rec_.planned_due_date,
+                                          order_quotation_rec_.supply_country,
+                                          validation_rec_.delivery_type,
+                                          validation_rec_.catalog_no,
+                                          validation_rec_.tax_liability,
+                                          validation_rec_.tax_liability_type,
+                                          order_quotation_rec_.currency_code,
+                                          quote_line_struct_rec_.currency_rate,
+                                          quote_line_struct_rec_.buy_qty_due,
+                                          quote_line_struct_rec_.price_conv_factor,
+                                          0,
+                                          0,
+                                          validation_rec_.additional_discount,
+                                          validation_rec_.quotation_discount,
+                                          1,
+                                          free_of_charge_tax_basis_,
+                                          quote_line_struct_rec_.discount);
+         IF (order_quotation_rec_.free_of_chg_tax_pay_party = 'COMPANY') THEN
+            Client_SYS.Set_Item_Value('COMPANY_BEARING_TAX_AMOUNT_BASE', Order_Quotation_Line_API.Get_Comp_Bearing_Tax_Amount(validation_rec_.quotation_no, validation_rec_.line_no, validation_rec_.rel_no, validation_rec_.line_item_no), attr_);
+            Client_SYS.Set_Item_Value('TAX_AMOUNT_BASE', 0, attr_);
+            Client_SYS.Set_Item_Value('TAX_AMOUNT_CURRENCY', 0, attr_);
+            Client_SYS.Set_Item_Value('GROSS_AMT_BASE', 0, attr_);
+            Client_SYS.Set_Item_Value('GROSS_AMT_CURR', 0, attr_);
+         ELSE
+            Client_SYS.Set_Item_Value('COMPANY_BEARING_TAX_AMOUNT_BASE', dummy_number_, attr_);
+            Client_SYS.Set_Item_Value('TAX_AMOUNT_BASE', line_price_rec_.tax_amount_base, attr_);
+            Client_SYS.Set_Item_Value('GROSS_AMT_BASE', line_price_rec_.gross_amt_base, attr_);
+            Client_SYS.Set_Item_Value('GROSS_AMT_CURR', line_price_rec_.gross_amt_curr, attr_);        
+         END IF;
+
+         Client_SYS.Set_Item_Value('NET_AMOUNT_BASE', line_price_rec_.net_amount_base, attr_);
+         Client_SYS.Set_Item_Value('NET_AMOUNT_CURR', line_price_rec_.net_amount_curr, attr_);
+         Client_SYS.Set_Item_Value('TAX_CALC_STRUCTURE_ID', line_price_rec_.tax_calc_structure_id, attr_);
+         Client_SYS.Set_Item_Value('FETCH_TAX_FROM_DEFAULTS', line_price_rec_.fetch_tax_from_defaults, attr_);
+
+      END IF;
+      -- Validation for a part line Ends      
+   END IF;
+END Add_Values_To_Duplicated_Attr;
+
+FUNCTION Is_Valid_Price_List___ (
+   price_list_no_    IN VARCHAR2,
+   contract_         IN VARCHAR2,
+   catalog_no_       IN VARCHAR2,
+   customer_no_      IN VARCHAR2,
+   currency_code_    IN VARCHAR2,
+   effectivity_date_ IN DATE,
+   sales_price_type_ IN VARCHAR2,
+   buy_qty_due_      IN NUMBER,
+   min_duration_     IN NUMBER) RETURN VARCHAR2
+IS
+   valid_price_list_    VARCHAR2(5); 
+BEGIN
+   valid_price_list_ := Sales_Price_List_API.Is_Valid_Price_List(price_list_no_, contract_, catalog_no_, customer_no_, currency_code_, effectivity_date_, sales_price_type_, buy_qty_due_, min_duration_);
+   RETURN valid_price_list_;
+END Is_Valid_Price_List___;
+
+
+FUNCTION Fetch_Period_Rounding___ (
+   contract_ IN VARCHAR2) RETURN VARCHAR2
+IS
+   period_round_  VARCHAR2(20);
+BEGIN
+   $IF (Component_Rental_SYS.INSTALLED) $THEN
+      period_round_ := Site_Rental_Info_API.Get_Period_Rounding_Db(contract_);
+   $ELSE
+      NULL;   
+   $END 
+   RETURN period_round_;
+END Fetch_Period_Rounding___;

@@ -1,0 +1,306 @@
+--------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  ---------------------------------------------------------------
+-- 2022-01-26  ShWtlk  MF21R2-6685,  Modified CapabilityCheckDialog ok command to remove identity4 when navigating to CapabilityCheckResult page.
+-- 2021-12-03  ShWtlk  MF21R2-6026,  Added Navigation to CapabilityCheckResult page instead of the assistant.
+-- 2019-03-13  RaKAlk  MFUXXW4-2626, Connected CapabilityCheckCriticalPathAssistant.
+-- 2019-01-16  Akhalk  SCUXXW4-8207, Restructured to make the code generalised to use from different sources
+-- 2018-10-17  Akhalk  SCUXXW4-8207, Converted from dlgCapabilityCheck using MTG Version: 1.23
+--------------------------------------------------------------------------------------
+fragment RunCapabilityCheck;
+component ORDER;
+layer Core;
+description "Use this dialog to run a capability check for customer orders or sales quotations";
+
+include fragment CustomerOrderLineInitialCheck;
+include fragment OrderQuotationLineInitialCheck;
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+--------------------------------- COMMANDS ----------------------------------
+
+command InitCommand for CapabilityCheckStructure {
+   variable InitDetailsVar Structure(CapabilityCheckStructure);
+
+   execute {
+      call GetInitDetails(Site, SupplySite, PlannedDueDate, PlannedDeliveryDate, InterimHeader, Identity1, Identity2, Identity3, Identity4, CustomerNo, SupplyCode, InventoryPartNo, InterimDemandUsageType) into InitDetailsVar;
+      set RequiredDate = InitDetailsVar.RequiredDate;
+      set InterimHeaderDesc = InitDetailsVar.InterimHeaderDesc;
+      set AllocateFieldEditable = InitDetailsVar.AllocateFieldEditable;
+      if [InterimDemandUsageType = "CUSTOMERQUOTE"] {
+         set SupplySiteDueDate = InitDetailsVar.SupplySiteDueDate;
+      }
+      set SourcingOption = InitDetailsVar.SourcingOption;
+
+      if [SupplyCode in("IntPurchTrans", "IntPurchDir", "InventOrder")] {
+         set Allocate = "NeitherReserveNorAlloc";
+      }
+      if [SupplyCode = "ShopOrder" and Allocate = "ReserveAndAllocate"] {
+         set Allocate = "AllocateOnly";
+      }
+      if [not(AllocateFieldEditable)] {
+         set Allocate = "NeitherReserveNorAlloc";
+      }
+
+      set OrgPlannedDueDate = PlannedDueDate;
+      if [SourcingOption = "ShopOrder"] {
+         set SupplySiteSupplyCode = "SO";
+      }
+      if [SourcingOption = "DOPOrder"] {
+         set SupplySiteSupplyCode = "DOP";
+      }
+      if [SourcingOption = "InventoryOrder"] {
+         set SupplySiteSupplyCode = "IO";
+      }
+   }
+}
+--------------------------------- SELECTORS ---------------------------------
+
+---------------------------------- GROUPS -----------------------------------
+group CapabilityCheckGroup for CapabilityCheckStructure {
+   label = "";
+   field InventoryPartNo {
+      size = Medium;
+      editable = [false];
+   }
+   field Site {
+      size = Small;
+      editable = [false];
+   }
+   field SupplySite {
+      size = Small;
+      editable = [false];
+      visible = [SupplySite != null];
+   }
+   field PlannedDueDate {
+      size = Small;
+      editable = [false];
+      visible = [false];
+   }
+   field SupplySiteDueDate {
+      size = Small;
+      editable = [false];
+      visible = [SupplySiteDueDate != null];
+   }
+   field RequiredDate {
+      editable = [false];
+      size = Small;
+   }
+   field SupplyCode {
+      size = Small;
+      editable = [false];
+   }
+   field SourcingOption {
+      size = Small;
+      editable = [false];
+      visible = [SourcingOption != null];
+   }
+   field QuantityReq {
+      editable = [false];
+      size = Small;
+   }
+   field Allocate {
+      editable = [not SupplyCode in("IntPurchTrans", "IntPurchDir", "InventOrder") and AllocateFieldEditable];
+      defaulttoprevious = [true];
+      when [SupplyCode != "ShopOrder"] use subset Subset1;
+      when [SupplyCode = "ShopOrder"] use subset Subset2;
+   }
+}
+
+
+----------------------------------- LISTS -----------------------------------
+
+----------------------------------- CARDS -----------------------------------
+
+---------------------------------- DIALOGS ----------------------------------
+dialog CapabilityCheckDialog for CapabilityCheckStructure {
+   label = "Capability Check";
+   input(InterimDemandUsageType, Identity1, Identity2, Identity3, Identity4, Site, InventoryPartNo, QuantityReq,
+   PlannedDueDate, ConfigurationId, CustomerNo, SupplyCode, SupplySite, SupplySiteDueDate, CatalogNo, InterimHeader) {
+      command InitCommand;
+   }
+   group CapabilityCheckGroup;
+   commandgroup ButtonCmdGroup {
+
+      command Ok {
+         enabled = [Allocate != null];
+      }
+      command Cancel;
+   }
+}
+command Ok for CapabilityCheckStructure {
+   variable MessageVar {
+      type = Structure(StatusStructure);
+   }
+   execute {
+
+      call PerformCapabilityCheck(PlannedDueDate, SupplySiteDueDate, PlannedDeliveryDate, InterimHeader, Site, InventoryPartNo,
+      ConfigurationId, RequiredDate, OrgPlannedDueDate, QuantityReq, InterimDemandUsageType, Identity1,
+      Identity2, Identity3, Identity4, CustomerNo, Allocate, SupplyCode, SupplySiteSupplyCode,
+      SupplySite) into MessageVar;
+      if [MessageVar.Type = "CONFIRM" and MessageVar.InfoMessage != null] {
+
+         messagebox("",
+         information, "${MessageVar.InfoMessage}") {
+            when "Yes" {
+               @DynamicComponentDependency ORDSTR
+               navigate "page/CapabilityCheckResult/Page?$filter=Identity1 eq $[Identity1] and Identity2 eq $[Identity2] and Identity3 eq $[Identity3] and PartNo eq $[InventoryPartNo]";
+            }
+            when "No" {
+
+               exit OK;
+            }
+
+         }
+         exit OK;
+      }
+      if [MessageVar.Type = null and MessageVar.InfoMessage != null] {
+         alert("${MessageVar.InfoMessage}");
+      }
+   }
+}
+
+command Cancel for CapabilityCheckStructure {
+   enabled = [true];
+   label = "Cancel";
+   execute {
+      exit CANCEL;
+   }
+
+}
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+---------------------------------- ACTIONS ----------------------------------
+action PerformCapabilityCheck Structure(StatusStructure) {
+   initialcheck implementation;
+   parameter PlannedDueDate Date;
+   parameter SupplySiteDueDate Date;
+   parameter PlannedDeliveryDate Timestamp;
+   parameter InterimHeader Text;
+   parameter Contract Text;
+   parameter InventoryPartNo Text;
+   parameter ConfigurationId Text;
+   parameter RequiredDate Date;
+   parameter OrgPlannedDueDate Date;
+   parameter BuyQtyDue Number;
+   parameter InterimDemandUsageType Text;
+   parameter Identity1 Text;
+   parameter Identity2 Text;
+   parameter Identity3 Text;
+   parameter Identity4 Number;
+   parameter CustomerNo Text;
+   parameter Allocate Enumeration(CapabilityCheckAllocate);
+   parameter SupplyCode Enumeration(OrderSupplyType);
+   parameter SupplySiteSupplyCode Text;
+   parameter SupplySite Text;
+   supportwarnings = [true];
+   ludependencies = OrderQuotationLine, CustomerOrderLine;
+
+}
+--------------------------------- FUNCTIONS ---------------------------------
+function PreviousWorkDay Date {
+   parameter Site Text;
+   parameter SupplySite  Text;
+   parameter SupplySiteDueDate Date;
+   parameter PlannedDueDate Date;
+}
+
+function InterimGetDescription Text {
+   parameter InterimHeader Text;
+   parameter Identity1 Text;
+   parameter Identity2 Text;
+   parameter Identity3 Text;
+}
+
+function GetInitDetails Structure(CapabilityCheckStructure) {
+   parameter Site Text;
+   parameter SupplySite Text;
+   parameter PlannedDueDate Date;
+   parameter PlannedDeliveryDate Date;
+   parameter InterimHeader Text;
+   parameter Identity1 Text;
+   parameter Identity2 Text;
+   parameter Identity3 Text;
+   parameter Identity4 Number;
+   parameter CustomerNo Text;
+   parameter SupplyCode Enumeration(OrderSupplyType);
+   parameter InventoryPartNo Text;
+   parameter Source Text;
+}
+
+-------------------------------- STRUCTURES ---------------------------------
+structure StatusStructure {
+   attribute Type Text;
+   attribute InfoMessage Text;
+   attribute CtpRunId Number;
+   attribute PlannedDeliveryDate Timestamp;
+}
+
+structure CapabilityCheckStructure {
+   attribute InterimDemandUsageType Text {
+      label = "Interim Header Description";
+      maxlength = 100;
+   }
+   attribute Identity1 Text;
+   attribute Identity2 Text;
+   attribute Identity3 Text;
+   attribute Identity4 Number;
+   attribute Site Text {
+      label = "Site";
+      maxlength = 100;
+   }
+   attribute InventoryPartNo Text {
+      label = "Inventory Part No";
+      maxlength = 100;
+   }
+   attribute QuantityReq Number {
+      label = "Required Qty";
+   }
+   attribute PlannedDueDate Date {
+      label = "Planned Due Date";
+   }
+   attribute ConfigurationId Text;
+   attribute CustomerNo Text;
+   attribute SupplyCode Enumeration(OrderSupplyType) {
+      label = "Supply Code";
+      maxlength = 100;
+   }
+   attribute SupplySite Text {
+      label = "Supply Site";
+      maxlength = 100;
+   }
+   attribute SupplySiteDueDate Date {
+      label = "Supply Site Due Date";
+   }
+   attribute SourcingOption Enumeration(SourcingOption) {
+      label = "Sourcing Option";
+      maxlength = 100;
+   }
+   attribute CatalogNo Text;
+   attribute InterimHeader Text {
+      label = "Interim Header ID";
+      maxlength = 100;
+   }
+   attribute OrgPlannedDueDate Date {
+      label = "Org Planned Due Date";
+   }
+   attribute RequiredDate Date {
+      label = "Required Date";
+   }
+   attribute PlannedDeliveryDate Timestamp {
+      label = "PlannedDeliveryDate";
+   }
+   attribute Allocate Enumeration(CapabilityCheckAllocate) {
+      label = "Reservation and Allocation Options";
+      required = [true];
+      default = "Capability_Check_Allocate_API.DB_NEITHER_RESERVE_NOR_ALLOC";
+   }
+   attribute InterimHeaderDesc Text {
+      label = "Interim Header Description";
+      maxlength = 100;
+   }
+   attribute SupplySiteSupplyCode Text {
+      label = "SupplySiteSupplyCode";
+      maxlength = 100;
+   }
+   attribute AllocateFieldEditable Boolean;
+}
+

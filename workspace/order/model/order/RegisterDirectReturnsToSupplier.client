@@ -1,0 +1,344 @@
+
+----------------------------------------------------------------------------------------
+-- Date        Sign       History
+-- ----------  ------     --------------------------------------------------------------
+-- 2019-08-23  RaVdlk     SCUXXW4-23907, Moved code from RegisterDirectReturnsToSupplier.fragment
+----------------------------------------------------------------------------------------
+
+client RegisterDirectReturnsToSupplier;
+component ORDER;
+layer Core;
+
+--------------------------------- FRAGMENTS ---------------------------------
+@DynamicComponentDependency PURCH
+include fragment ValidSupplierLovSelector;
+include fragment ReturnMaterialLineInitialCheck;
+
+-------------------------------- ASSISTANTS ---------------------------------
+assistant DirectReturnsToSupplierAssistant using DirectReturnsToSuppliers {
+   label = "Direct Returns to Supplier";
+   savemode = OnLostFocus;
+   input(RmaNo, RmaLineNo);
+
+   init command {
+      execute {
+         call FetchRmaLineInformation(RmaNo, RmaLineNo) into RmaLineDetails;
+         set Contract = RmaLineDetails.Contract;
+         set Objstate = RmaLineDetails.State;
+         set ReturnReasonCode = RmaLineDetails.CustomerReason;
+         set ReturnToVendorNo = RmaLineDetails.ReturnToVendorNo;
+         set SupplierReturnReason = RmaLineDetails.SupplierReturnReason;
+         set CatalogNo = RmaLineDetails.CatalogNo;
+         set ConfigurationId = RmaLineDetails.ConfigurationId;
+         set ConditionCode = RmaLineDetails.ConditionCode;
+         set QtyToReturn = RmaLineDetails.QtyToReturn;
+         set QtyReceivedInvUom = RmaLineDetails.QtyReceivedInvUom;
+         set QtyReceived = RmaLineDetails.QtyReceived;
+         set QtyToReturnInvUom = RmaLineDetails.QtyToReturnInvUom;
+         set CreditInvoiceNo = RmaLineDetails.CreditInvoiceNo;
+         set NewQtyReceived = RmaLineDetails.NewQtyReceived;
+         set NewlyReceivedInv = RmaLineDetails.NewlyReceivedInv;
+         set ReturnUom = RmaLineDetails.ReturnUom;
+         set ConvFactor = RmaLineDetails.ConvFactor;
+         set InvertedConvFactor = RmaLineDetails.InvertedConvFactor;
+         set RemainingReturnQty = RmaLineDetails.RemainingReturnQty;
+         set RemainingReturnQtyInv = RmaLineDetails.RemainingReturnQtyInv;
+         set TotalReceivedQty = RmaLineDetails.TotalReceivedQty;
+         set TotalReceivedQtyInv = RmaLineDetails.TotalReceivedQtyInv;
+         set RecCount = RmaLineDetails.RecCount;
+         set TotalInvQtyToReturn = 0;
+         set PartNo = RmaLineDetails.PartNo;
+         set LatestReturnDate = RmaLineDetails.LatestReturnDate;
+         set ReceiptDate = RmaLineDetails.ReceiptDate;
+      }
+   }
+   singlestep {
+      group DirectReturnsToSupplierGroup;
+      group QuantitiesInSalesUomGroup;
+      group QuantitiesInInventoryUomGroup;
+      group IncludeAllLinesGroup;
+      list ReturnToSupplierList(ReturnToSupplierArray);
+   }
+   command Ok;
+   command Cancel;
+   command Apply;
+}
+--------------------------------- COMMANDS ----------------------------------
+command Ok for DirectReturnsToSuppliersVirtual {
+   label = "OK";
+   enabled = [true];
+   execute {
+      if [LatestReturnDate != null] {
+         if [LatestReturnDate < ReceiptDate] {
+            info("These parts are being received after the specified latest return date");
+         }
+      }
+      call ValidateQtyToReturn(Objkey)into TotalsStruct {
+         when FAIL {
+            error("${error.Message}");
+         }
+         when SUCCESS {
+            call RegisterDirectReturn(Objkey);
+            exit OK;
+         }
+      }
+   }
+}
+command Cancel for DirectReturnsToSuppliersVirtual {
+   label = "Close";
+   execute {
+
+   }
+}
+command Apply for DirectReturnsToSuppliersVirtual {
+   label = "Apply";
+   execute {
+      if [LatestReturnDate != null] {
+         if [LatestReturnDate < ReceiptDate] {
+            info("These parts are being received after the specified latest return date");
+         }
+      }
+      call ValidateQtyToReturn(Objkey)into TotalsStruct {
+         when FAIL {
+            error("${error.Message}");
+         }
+         when SUCCESS {
+            call RegisterDirectReturn(Objkey)
+               {
+               when SUCCESS {
+                  call ResetRowSelection(Objkey, TotalReceivedQty, TotalReceivedQtyInv, NewQtyReceived, NewlyReceivedInv, RemainingReturnQty, RemainingReturnQtyInv) {
+                     when FAIL {
+                        error("${error.Message}");
+                     }
+                  }
+               }
+            }
+         }
+      }
+      exit;
+   }
+}
+command DoAfterUpdate for DirectDeliveryReturnsVirtual {
+   bulkexecute {
+      ifany [not IncludeInReturn or QtyChanged] {
+         call UpdateTheHeader(parent.Objkey);
+      }
+   }
+}
+
+--------------------------------- SELECTORS ---------------------------------
+
+---------------------------------- GROUPS -----------------------------------
+group DirectReturnsToSupplierGroup for DirectReturnsToSuppliersVirtual {
+   label = " ";
+   field RmaNo;
+   field RmaLineNo;
+   field Contract {
+      size = Small;
+   }
+   field Objstate {
+      size = Small;
+   }
+   lov ReturnMaterialReasonRef with ReferenceReturnMaterialReasonSelector {
+      label = "Customer Return Reason";
+      description = ReturnMaterialReasonRef.ReturnReasonDescription;
+   }
+   @DynamicComponentDependency PURCH
+   lov ReturnToVendorNoRef with ReferenceValidSupplierLovSelector {
+      label = "Return To Supplier";
+      description = ReturnToVendorNoRef.VendorName;
+   }
+   lov ReturnCauseRef with ReferenceReturnCauseSelector {
+      label = "Supplier Return Reason";
+      description = ReturnCauseRef.Description;
+   }
+   lov CatalogNoRef with ReferenceSalesPartSelector {
+      label = "Sales Part";
+      description = CatalogNoRef.CatalogDesc;
+   }
+   field ConfigurationId {
+      size = Small;
+   }
+   lov ConditionCodeRef with ReferenceConditionCodeSelector {
+      label = "Condition Code";
+      description = ConditionCodeRef.Description;
+   }
+   measure QtyToReturn(ReturnUMRef.UnitCode);
+
+   field Credited {
+      size = Small;
+   }
+}
+
+group QuantitiesInSalesUomGroup for DirectReturnsToSuppliersVirtual {
+   label = "Quantities in Sales UoM";
+   field RemainingReturnQty;
+   field NewQtyReceived {
+      label = "Newly Received Qty";
+      validate command {
+         variable CalcVal {
+            type = Number;
+         }
+         execute {
+            if [NewQtyReceived > RemainingReturnQty] {
+               error("The newly received quantity cannot exceed the remaining return quantity");
+            }
+            call SetNewlyReceivedInv(NewQtyReceived, ConvFactor, InvertedConvFactor) into CalcVal;
+            set NewlyReceivedInv = CalcVal;
+         }
+      }
+   }
+   field TotalReceivedQty;
+   field SalesUom {
+      size = Small;
+   }
+}
+group QuantitiesInInventoryUomGroup for DirectReturnsToSuppliersVirtual {
+   label = "Quantities in Inventory UoM";
+   field RemainingReturnQtyInv {
+      visible = [PartNo != null];
+
+   }
+   field NewlyReceivedInv {
+      label = "Newly Received Qty";
+      visible = [PartNo != null];
+      validate command {
+         variable Result {
+            type = Number;
+         }
+         execute {
+            if [NewlyReceivedInv > RemainingReturnQtyInv] {
+               error("The newly received quantity cannot exceed the remaining return quantity");
+            }
+            call SetNewlyReceivedInv(NewlyReceivedInv, ConvFactor, InvertedConvFactor)into Result;
+            set NewQtyReceived = Result;
+         }
+      }
+   }
+   field TotalReceivedQtyInv {
+      visible = [PartNo != null];
+   }
+
+   field InventoryUnitMeas {
+      label = "Inventory UoM";
+      visible = [PartNo != null];
+      size = Small;
+   }
+}
+group IncludeAllLinesGroup for DirectReturnsToSuppliersVirtual {
+   label = "";
+   field IncludeAll {
+      editable = [true];
+   }
+   field RecCount {
+      visible = [false];
+   }
+}
+----------------------------------- LISTS -----------------------------------
+list ReturnToSupplierList for DirectDeliveryReturnsVirtual {
+   label = "";
+   editmode = SingleRowEdit;
+   crudactions {
+      after command DoAfterUpdate;
+   }
+   field IncludeInReturn {
+      validate command {
+         execute {
+            if [IncludeInReturn] {
+               call SetQtyToReturn(parent.Objkey, PartNo, DeliveredSalesQty, ReturnedSalesQty, DeliveredInvQty, ReturnedInvQty) into QtyToReturnValues;
+               set SalesQtyToReturn = QtyToReturnValues.SalesQtyToReturn;
+               set InvQtyToReturn = QtyToReturnValues.InvQtyToReturn;
+            }
+            else {
+               set SalesQtyToReturn = 0;
+               set InvQtyToReturn = 0;
+            }
+         }
+      }
+   }
+   field AltSourceRef4 {
+      size = Small;
+   }
+   field DateCreated;
+   field DeliveredInvQty {
+      columnvisible = [parent.PartNo != null];
+   }
+   field ReturnedInvQty {
+      columnvisible = [parent.PartNo != null];
+   }
+   field InvQtyToReturn {
+      columnvisible = [parent.PartNo != null];
+      validate command {
+         variable ParentInvertedConvFactor {
+            type = Number;
+         }
+         variable ParentConvFactor {
+            type = Number;
+         }
+         variable CalculatedVal {
+            type = Number;
+         }
+         execute {
+            if [InvQtyToReturn > 0] {
+               set IncludeInReturn = true;
+               set QtyChanged = true;
+               set ParentInvertedConvFactor = parent.InvertedConvFactor;
+               set ParentConvFactor = parent.ConvFactor;
+               call SetNewQtyReceived(InvQtyToReturn, ParentInvertedConvFactor, ParentConvFactor) into CalculatedVal;
+               set SalesQtyToReturn = CalculatedVal;
+            }
+            else {
+               set IncludeInReturn = false;
+            }
+         }
+      }
+   }
+   field SalesQtyToReturn {
+      validate command {
+         variable ParentInvertedConvFactor {
+            type = Number;
+         }
+         variable ParentConvFactor {
+            type = Number;
+         }
+         variable CalValue {
+            type = Number;
+         }
+         execute {
+            if [SalesQtyToReturn > 0] {
+               set IncludeInReturn = true;
+               set QtyChanged = true;
+               if [PartNo != null] {
+                  set ParentInvertedConvFactor = parent.InvertedConvFactor;
+                  set ParentConvFactor = parent.ConvFactor;
+                  call CalculateInvQtyToRtn(SalesQtyToReturn, ParentConvFactor, ParentInvertedConvFactor) into CalValue;
+                  set InvQtyToReturn = CalValue;
+               }
+            }
+            else {
+               set IncludeInReturn = false;
+            }
+         }
+      }
+   }
+   field QtyChanged {
+      columnexclude = [true];
+   }
+   field DeliveredSalesQty;
+   field ReturnedSalesQty;
+   field LotBatchNo {
+      size = Small;
+   }
+   field SerialNo {
+      size = Small;
+   }
+   field ConditionCodeRef.Description {
+      size = Small;
+      label = "Condition Code Description";
+   }
+   field ConditionCodeRef {
+      size = Small;
+      label = "Condition Code";
+   }
+   // fieldranking AltSourceRef4, DateCreated, DeliveredInvQty, ReturnedInvQty, DeliveredSalesQty, ReturnedSalesQty, LotBatchNo, SerialNo, ConditionCodeRef.Description, ConditionCodeRef;
+}

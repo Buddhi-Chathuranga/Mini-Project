@@ -1,0 +1,177 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     SerialReservationAssistant
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ------------------------------------------------------------------------------------------------
+--  211216  KETKLK  PJ21R2-3634, Modified get_serials_line cursor to get the reserved serial number from project deliverables.
+--  210927  GrGalk  SCZ-16432, Updated the DynamicComponentDependency as SHPORD instead of Shpord.
+--  190918  JaThlk  SCXTEND-485, Redesign of SerialReservationAssistant.
+--  181107  JaThlk  SCUXXW4-5821, Implemented SequenceGeneratorAssistant.
+--  181104  JaThlk  SCUXXW4-5821, Modified CRUD_Create___ to handle null values inside the cursor, get_serials_line.  
+--  181016  JaThlk  SCUXXW4-5821, Created.
+--------------------------------------------------------------------------------------------------------------------
+
+layer Core;
+   
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Serial_Reservation_Virtual_Rec )
+IS
+   line_rec_            Serial_No_Reservation_Virtual_Rec;
+   
+   CURSOR get_serials_line IS
+   SELECT part_no, serial_no, order_ref1, order_ref2, order_ref3, order_ref4, serial_reservation_source
+   FROM serial_no_reservation_tab
+   WHERE part_no = rec_.part_no AND NVL(order_ref1, 'DUMMY') = NVL(rec_.order_ref1, 'DUMMY') AND NVL(order_ref2, 'DUMMY') = NVL(rec_.order_ref2, 'DUMMY') 
+   AND NVL(order_ref3, 'DUMMY') = NVL(rec_.order_ref3, 'DUMMY') AND NVL(order_ref4, 0) = NVL(rec_.order_ref4, NVL(order_ref4,0));
+  
+BEGIN
+   
+   super(rec_);
+
+   OPEN get_serials_line;
+      LOOP
+         FETCH get_serials_line INTO line_rec_.part_no, line_rec_.serial_no, line_rec_.order_ref1, line_rec_.order_ref2, line_rec_.order_ref3, line_rec_.order_ref4, line_rec_.serial_reservation_source_db;
+         EXIT WHEN get_serials_line%NOTFOUND;
+         line_rec_.objkey            := sys_guid();
+         line_rec_.parent_objkey     := rec_.objkey;
+         line_rec_.reserved_check    := TRUE;
+         line_rec_.reservation_count := 1;
+         CRUD_Create___(line_rec_);
+      END LOOP;
+   CLOSE get_serials_line;
+END CRUD_Create___;
+   
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Serial_No_Reservation_Virtual_Rec )
+IS
+   struct_effectivity_db_  VARCHAR2(6);
+   line_rec_               Serial_No_Reservation_Virtual_Rec;
+BEGIN   
+   line_rec_ := rec_;
+   $IF Component_Mfgstd_SYS.INSTALLED $THEN
+      struct_effectivity_db_ := Effectivity_Control_API.Encode(Manuf_Part_Attribute_API.Get_Structure_Effectivity(line_rec_.contract, line_rec_.part_no)); 
+      IF struct_effectivity_db_ = 'SERIAL' THEN
+         IF (Is_Number___(line_rec_.serial_no) = 'FALSE') THEN
+            Error_SYS.Record_General(lu_name_, 'ALPHANUMERICNOTALLOWED: Alphanumeric serials :P1 are not allowed when structure effectivity for the part is :P2.', line_rec_.serial_no, Effectivity_Control_API.Decode(line_rec_.struct_effectivity_db));
+         END IF;
+      END IF; 
+   $END
+   IF line_rec_.reserved_check = FALSE THEN
+      Serial_No_Reservation_API.New(line_rec_.part_no, line_rec_.serial_no, line_rec_.order_ref1, line_rec_.order_ref2, line_rec_.order_ref3, line_rec_.order_ref4, line_rec_.serial_reservation_source_db);
+      line_rec_.reserved_check := TRUE;
+   END IF;
+   
+   super(line_rec_); 
+
+END CRUD_Create___;  
+
+
+@Override
+PROCEDURE CRUD_Delete___(   
+   rec_ IN Serial_No_Reservation_Virtual_Rec )
+IS
+
+BEGIN
+   Serial_No_Reservation_API.Remove(rec_.part_no, rec_.serial_no);  
+   super(rec_);
+       
+END CRUD_Delete___;
+
+
+@Override
+PROCEDURE CRUD_Default___ (
+   rec_  IN OUT Serial_No_Reservation_Virtual_Rec )
+IS
+
+BEGIN
+   rec_.reserved_check    := FALSE;
+   super(rec_);
+END CRUD_Default___;
+
+
+@DynamicComponentDependency SHPORD
+PROCEDURE Build_Serial_Structures___ (
+   order_ref1_ IN VARCHAR2,
+   order_ref2_ IN VARCHAR2,
+   order_ref3_ IN VARCHAR2 ) 
+IS
+   
+BEGIN
+   Shop_Material_Alloc_List_API.Build_If_Struct_Buildable(order_ref1_, order_ref2_, order_ref3_);
+END Build_Serial_Structures___;
+
+
+FUNCTION Is_Number___(
+   serial_no_ IN  VARCHAR2) RETURN VARCHAR2
+IS
+   number_type_   NUMBER;   
+BEGIN
+   number_type_ := TO_NUMBER(serial_no_);
+   RETURN 'TRUE';
+   EXCEPTION
+      WHEN VALUE_ERROR THEN
+      RETURN 'FALSE';
+END Is_Number___;
+
+
+PROCEDURE Create_Lines___ (
+   parent_objkey_                 IN VARCHAR2,
+   serial_list_                   IN CLOB,
+   contract_                      IN VARCHAR2,
+   part_no_                       IN VARCHAR2,
+   order_ref1_                    IN VARCHAR2,
+   order_ref2_                    IN VARCHAR2,
+   order_ref3_                    IN VARCHAR2,
+   order_ref4_                    IN NUMBER,
+   serial_reservation_source_db_  IN VARCHAR2,
+   info$_                        OUT VARCHAR2) 
+IS
+   serial_no_attr_      CLOB := CONCAT(serial_list_, Client_SYS.record_separator_);
+   serial_no_list_      CLOB := CONCAT(serial_list_, Client_SYS.record_separator_);
+   line_rec_            Serial_No_Reservation_Virtual_Rec;
+   serial_no_           VARCHAR2(50);
+
+BEGIN  
+   WHILE (INSTR(serial_no_list_, Client_SYS.record_separator_) > 0) LOOP
+      serial_no_                             := substr(serial_no_list_, 0, INSTR(serial_no_list_, Client_SYS.record_separator_) - 1);
+      line_rec_.objkey                       := sys_guid();
+      line_rec_.parent_objkey                := parent_objkey_;
+      line_rec_.serial_no                    := serial_no_;
+      line_rec_.contract                     := contract_;
+      line_rec_.part_no                      := part_no_;
+      line_rec_.order_ref1                   := order_ref1_;
+      line_rec_.order_ref2                   := order_ref2_;
+      line_rec_.order_ref3                   := order_ref3_;
+      line_rec_.order_ref4                   := order_ref4_;
+      line_rec_.from_sequence                := TRUE;
+      line_rec_.reserved_check               := TRUE;
+      line_rec_.serial_reservation_source_db := serial_reservation_source_db_;
+      line_rec_.reservation_count := 1;
+      
+      CRUD_Create___(line_rec_);
+      serial_no_list_ := SUBSTR(serial_no_list_, (INSTR(serial_no_list_, Client_SYS.record_separator_) + 1)); 
+   END LOOP;
+   info$_ := Serial_No_Reservation_API.New_Clob(serial_no_attr_, part_no_, order_ref1_, order_ref2_, order_ref3_, order_ref4_, serial_reservation_source_db_);
+ 
+END Create_Lines___;
+
+
+PROCEDURE Reftresh_Tabs___
+IS
+BEGIN
+	NULL;
+END Reftresh_Tabs___;
+
+
+PROCEDURE Reftresh_Serial_Part_Loc_Tab___
+IS
+BEGIN
+	NULL;
+END Reftresh_Serial_Part_Loc_Tab___;

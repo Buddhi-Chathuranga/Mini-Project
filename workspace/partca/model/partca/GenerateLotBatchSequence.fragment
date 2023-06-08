@@ -1,0 +1,295 @@
+fragment GenerateLotBatchSequence;
+component PARTCA;
+layer Core;
+description "Use this fragment to generate and reserve a sequence of lot batch numbers";
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+
+---------------------------------- DIALOGS ----------------------------------
+
+dialog LotBatchSequenceDialog for LotBatchSequenceStructure {
+   label = "Generate Lot/Batch Numbers";
+   input(Owner, Contract, PartNo, OrderRef1, OrderRef2, OrderRef3, OrderRef4, LotSize, ReservationType) {
+      command InitCommand;
+   }
+   group LotBatchSequenceGroup;
+
+   command Ok;
+   command Cancel;
+}
+
+---------------------------------- GROUPS -----------------------------------
+
+group LotBatchSequenceGroup for LotBatchSequenceStructure {
+   label = "Generate Lot Batch Sequence";
+   field LotBatchString;
+   field NumberOfBatches {
+      size = Small;
+      editable = [LotQuantityRule != "OneLotPerShopOrder"];
+      validate command {
+         execute {
+            if [NumberOfBatches >= 1] {
+               if [LotQuantityRule = "OneLotPerShopOrder"] {
+                  set NumberOfBatches = 1;
+               }
+               set QuantityPerBatch = "#{RevisedQtyDue/NumberOfBatches}";
+            }
+            else {
+               error("The number of batches must be 1 or greater.");
+               set NumberOfBatches = null;
+            }
+         }
+      }
+   }
+   field RevisedQtyDue {
+      size = Small;
+   }
+   field QuantityPerBatch {
+      size = Small;
+      validate command {
+         execute {
+            if [QuantityPerBatch < 1] {
+               error("The quantity per batch must be 1 or greater.");
+            }
+         }
+      }
+   }
+}
+
+--------------------------------- COMMANDS ----------------------------------
+
+command InitCommand for LotBatchSequenceStructure {
+   variable VarInitializeDialogInfo {
+      type = InitializeDialogInfoStructure;
+   }
+   execute {
+      call GetInitializeDialogInfo(Contract, PartNo, OrderRef1, OrderRef2, OrderRef3, ReservationType) into VarInitializeDialogInfo;
+      set QuantityPerBatch = VarInitializeDialogInfo.StdOrderSize;
+      set LotBatchString = VarInitializeDialogInfo.LotBatchString;
+      set LotQuantityRule = VarInitializeDialogInfo.LotQuantityRule;
+      set SumReservedQty = VarInitializeDialogInfo.SumQtyReservedOrd;
+      set RevisedQtyDue = "#{LotSize-SumReservedQty}";
+      if [RevisedQtyDue = null] {
+         alert("The order quantity could not be found.");
+         exit CANCEL;
+      }
+      if [QuantityPerBatch = 0 or QuantityPerBatch = null] {
+         if [RevisedQtyDue < 0] {
+            set QuantityPerBatch = 0;
+         }
+         else {
+            set QuantityPerBatch = RevisedQtyDue;
+         }
+      }
+      if [LotQuantityRule = "OneLotPerShopOrder"] {
+         set NumberOfBatches = 1;
+         if [RevisedQtyDue < 0] {
+            set QuantityPerBatch = 0;
+         }
+         else {
+            set QuantityPerBatch = RevisedQtyDue;
+			}
+      }
+      else {
+         if [RevisedQtyDue < QuantityPerBatch] {
+            set QuantityPerBatch = RevisedQtyDue;
+         }
+         // Prevent division by zero error message
+         if [RevisedQtyDue = 0 or RevisedQtyDue = null or QuantityPerBatch = 0 or QuantityPerBatch = null] {
+            set NumberOfBatches = 0;
+         }
+         else {
+            call CalcNumberOfBatches(RevisedQtyDue, QuantityPerBatch) into NumberOfBatches;
+         }
+		}
+   }
+}
+
+command Ok for LotBatchSequenceStructure {
+   enabled = [not(NumberOfBatches < 1 or NumberOfBatches = null or QuantityPerBatch < 1 or QuantityPerBatch = null)];
+   variable VarLotBatchString;
+   variable VarLotBatchExist {
+      type = Number;
+   }
+   variable VarShopOrderInfo {
+      type = ShopOrderInfoStructure;
+   }
+   variable VarTemp {
+      type = Number;
+   }
+   variable PriComMatExt {
+      type = Number;
+   }
+   execute {
+      if [LotBatchString = null] {
+         if [ReservationType = "ShopRequisition"] {
+            set VarLotBatchString = "${OrderRef1}-";
+         }
+         else {
+            set VarLotBatchString = "${OrderRef1}-${OrderRef2}-${OrderRef3}-";
+         }
+      }
+      else {
+         set VarLotBatchString = "${LotBatchString}-";
+      }
+      call GetMaxLotBatchNo(VarLotBatchString) into LotBatchNo;
+
+      //If the dialog is executed from Dispatch List then handle the creation of lot batch sequence in the dialog.
+      if [Owner = "tblOperations"] {
+         if [LotQuantityRule = "OneLotPerShopOrder" and NumberOfBatches != 1] {
+            error("Only one lot per order is allowed for this part");
+            exit;
+         }
+         if [ReservationType = "ShopOrder"] {
+            call CheckPriCompMaterialExt(OrderRef1, OrderRef2, OrderRef3) into PriComMatExt;
+            if [PriComMatExt = 1] {
+               set VarTemp = "#{SumReservedQty+QuantityPerBatch}";
+               if [LotSize = VarTemp] {
+                  confirm("Reserving Lot Number manually will prevent inheriting Lot Number from the component defined as Lot/Batch Orgin at the time of issuing material.") {
+                     when CANCEL {
+                        exit;
+                     }
+                  }
+                  call CreateReservedLots(PartNo, ReservationType, QuantityPerBatch, OrderRef1, OrderRef2, OrderRef3, OrderRef4, NumberOfBatches, LotBatchNo);
+               }
+            }
+            else {
+               call CreateReservedLots(PartNo, ReservationType, QuantityPerBatch, OrderRef1, OrderRef2, OrderRef3, OrderRef4, NumberOfBatches, LotBatchNo);
+            }
+         }
+      }
+      else {
+         if [LotQuantityRule = "OneLotPerShopOrder" and NumberOfBatches != 1] {
+            error("Only one lot per order is allowed for this part");
+            exit;
+         }
+         call LotBatchExist(OrderRef1, OrderRef2, OrderRef3, OrderRef4, ReservationType) into VarLotBatchExist;
+         if [LotQuantityRule = "OneLotPerShopOrder" and VarLotBatchExist = 1] {
+            error("Only one lot per order is allowed for this part");
+            exit;
+         }
+         if [ReservationType = "ShopOrder"] {
+            call GetShopOrderInfo(OrderRef1, OrderRef2, OrderRef3) into VarShopOrderInfo;
+            if [VarShopOrderInfo.PriComMatExt = 1] {
+               set VarTemp = "#{SumReservedQty+QuantityPerBatch}";
+               if [VarShopOrderInfo.SoLotSize = VarTemp] {
+                  confirm("Reserving Lot Number manually will prevent inheriting Lot Number from the component defined as Lot/Batch Origin at the time of issuing material.") {
+                     when CANCEL {
+                        exit;
+                     }
+                  }
+               }
+            }
+         }
+         call CreateReservedLots(PartNo, ReservationType, QuantityPerBatch, OrderRef1, OrderRef2, OrderRef3, OrderRef4, NumberOfBatches, LotBatchNo);
+      }
+      exit OK;
+   }
+}
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+
+-------------------------------- STRUCTURES ---------------------------------
+
+structure LotBatchSequenceStructure {
+   attribute Owner Text;
+   attribute Contract Text;
+   attribute PartNo Text;
+   attribute OrderRef1 Text;
+   attribute OrderRef2 Text;
+   attribute OrderRef3 Text;
+   attribute OrderRef4 Number;
+   attribute ReservationType Enumeration(ReservationType);
+   attribute LotSize Number;
+   attribute LotBatchString Text {
+      label = "Lot Batch String";
+      format = uppercase;
+   }
+   attribute NumberOfBatches Number {
+      label = "Number of Batches";
+   }
+   attribute RevisedQtyDue Number {
+      label = "Inventory Qty";
+      editable = [false];
+   }
+   attribute QuantityPerBatch Number {
+      label = "Qty Per Batch";
+   }
+   attribute LotQuantityRule Enumeration(LotQuantityRule);
+   attribute StdOrderSize Number;
+   attribute SumReservedQty Number;
+   attribute LotBatchNo Text;
+}
+
+structure InitializeDialogInfoStructure {
+   attribute StdOrderSize Number;
+   attribute LotBatchString Text;
+   attribute LotQuantityRule Enumeration(LotQuantityRule);
+   attribute SumQtyReservedOrd Number;
+}
+
+structure ShopOrderInfoStructure {
+   attribute PriComMatExt Number;
+   attribute SoLotSize Number;
+}
+
+--------------------------------- FUNCTIONS ---------------------------------
+
+function GetInitializeDialogInfo Structure(InitializeDialogInfoStructure) {
+   parameter Contract Text;
+   parameter PartNo Text;
+   parameter OrderRef1 Text;
+   parameter OrderRef2 Text;
+   parameter OrderRef3 Text;
+   parameter ReservationType Enumeration(ReservationType);
+}
+
+function CalcNumberOfBatches Number {
+   parameter RevisedQtyDue Number;
+   parameter QuantityPerBatch Number;
+}
+
+function GetMaxLotBatchNo Text {
+   parameter LotBatchString Text;
+}
+
+function LotBatchExist Number {
+   parameter OrderRef1 Text;
+   parameter OrderRef2 Text;
+   parameter OrderRef3 Text;
+   parameter OrderRef4 Number;
+   parameter ReservationType Enumeration(ReservationType);
+}
+
+function GetShopOrderInfo Structure(ShopOrderInfoStructure) {
+   parameter OrderRef1 Text;
+   parameter OrderRef2 Text;
+   parameter OrderRef3 Text;
+}
+
+function CheckPriCompMaterialExt Number {
+   parameter OrderRef1 Text;
+   parameter OrderRef2 Text;
+   parameter OrderRef3 Text;
+}
+
+---------------------------------- ACTIONS ----------------------------------
+
+action CreateReservedLots {
+   initialcheck none;
+   ludependencies = ReservedLotBatch, ShopOrderProp;
+   parameter PartNo Text;
+   parameter ReservationType Enumeration(ReservationType);
+   parameter QuantityPerBatch Number;
+   parameter OrderRef1 Text;
+   parameter OrderRef2 Text;
+   parameter OrderRef3 Text;
+   parameter OrderRef4 Number;
+   parameter NumberOfBatches Number;
+   parameter LotBatchNoReturn Text;
+}
+
+---------------------------- GENERATED FROM APF -----------------------------
+// MTG Version: 1.33
+// Enterprise Explorer Source: dlgLotBatchSequence
+// Language: en-US

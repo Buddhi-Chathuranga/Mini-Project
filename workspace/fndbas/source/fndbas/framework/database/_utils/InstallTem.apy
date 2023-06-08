@@ -1,0 +1,1790 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: InstallTem
+--
+--  Purpose: Provides install.tem system services in IFS Applications duriog installations.
+--
+--  NOTE!!! It is very important that this package don't have any dependencies or dependants.
+--          Dependencies 
+--
+--  IFS/Design Template Version 2.3
+--
+--  Date    Sign  History
+--  ------  ----  -----------------------------------------------------------
+--  110103  HAAR  Created.
+--  111219  MaBo  Added Installation_support and Enable/Disable triggers
+--  141128  ChMu  Modified Disable_Triggers___ to use User_Procedures(Bug#119168/TEBASE-768)
+-----------------------------------------------------------------------------
+
+DEFINE PKG           = INSTALL_TEM_SYS
+DEFINE TABLE         = INSTALL_TEM_SYS_TAB
+DEFINE SEQUENCE      = INSTALL_TEM_SYS_SEQ
+
+-----------------------------------------------------------------------------
+-------------------- VIEWS FOR SELECTS --------------------------------------
+-----------------------------------------------------------------------------
+
+
+-----------------------------------------------------------------------------
+-------------------- PACKAGES FOR METHODS -----------------------------------
+-----------------------------------------------------------------------------
+
+PROMPT Creating &PKG implementation
+
+CREATE OR REPLACE PACKAGE BODY &APPLICATION_OWNER..&PKG IS
+
+   stopped_             CONSTANT VARCHAR2(50)  := '<DISABLED_DURING_IFS_INSTALLATION>';
+   stopped_ial_         CONSTANT VARCHAR2(50)  := '<DISABLED_DURING_IFS_INSTALLATION_IAL>';
+   trigger_id_          CONSTANT VARCHAR2(50)  := '<DISABLE_ENABLE_TRIGGER>';
+   job_queue_proc_      CONSTANT VARCHAR2(50)  := '<JOB_QUEUE_PROCESSES>';
+   days_to_keep_        CONSTANT NUMBER        := &DAYS_TO_KEEP_INSTALL_LOG;
+   min_no_of_processes_ CONSTANT NUMBER        := 5;
+   def_no_of_processes_ CONSTANT NUMBER        := 16;
+   large_db_limit_      CONSTANT NUMBER        := 50000000;
+
+
+-----------------------------------------------------------------------------
+-------------------- SERVICE SPECIFIC IMPLEMENTATION METHOD DECLARATIONS ----
+-----------------------------------------------------------------------------
+
+PROCEDURE Pre_Installation___ (
+   parameter_ IN VARCHAR2 );
+
+PROCEDURE Post_Installation___ (
+   parameter_ IN VARCHAR2 );
+
+PROCEDURE Disable_Triggers___ (
+   parameter_ IN VARCHAR2 );
+
+PROCEDURE Enable_Triggers___ (
+   parameter_ IN VARCHAR2 );
+
+PROCEDURE Refresh_Customobjects___ (
+   parameter_ IN VARCHAR2 );
+
+PROCEDURE Compile_Base_Packages___ (
+   parameter_ IN VARCHAR2 );
+
+PROCEDURE Bi_Post_Install_Object___ (
+   parameter_ IN VARCHAR2 );
+
+PROCEDURE Bi_Post_Install_Data___ (
+   parameter_ IN VARCHAR2 );
+
+PROCEDURE Finalize_Dev_Deploy___ ( 
+   parameter_ IN VARCHAR2 );
+
+PROCEDURE Reset_Job_Queue_Processes___ (
+   previous_guid_ &TABLE..guid%TYPE );
+
+FUNCTION Identify_Large_Database___ RETURN NUMBER;
+
+PROCEDURE Enable_New_Processes___;
+
+FUNCTION Check_Queue_Process___ RETURN BOOLEAN;
+
+-----------------------------------------------------------------------------
+-------------------- SERVICE SPECIFIC IMPLEMENTATION METHODS ----------------
+-----------------------------------------------------------------------------
+
+FUNCTION Get_Init_Parameter___ (
+   parameter_name_   IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   value_ VARCHAR2(10);
+BEGIN
+   SELECT VALUE 
+   INTO   value_
+   FROM   v$parameter
+   WHERE  name = parameter_name_;
+   RETURN(value_);
+EXCEPTION
+   WHEN no_data_found THEN
+      RETURN(NULL);
+END Get_Init_Parameter___;
+
+PROCEDURE Disable_Idle_Dbms_Jobs___
+IS
+   TYPE num_arr IS TABLE OF NUMBER INDEX BY BINARY_INTEGER;
+   job_arr_     num_arr;
+   CURSOR get_all_jobs IS
+      SELECT job
+      FROM user_jobs
+      WHERE broken = 'N';
+   CURSOR get_job IS
+      SELECT job
+      FROM user_jobs
+      WHERE job NOT IN (SELECT job FROM dba_jobs_running)
+      AND broken = 'N';
+   PRAGMA autonomous_transaction;
+BEGIN
+   OPEN  get_all_jobs;
+   FETCH get_all_jobs BULK COLLECT INTO job_arr_;
+   CLOSE get_all_jobs;
+   FOR i IN nvl(job_arr_.FIRST,0)..nvl(job_arr_.LAST,-1) LOOP
+      Dbms_Job.Interval(job_arr_(i), 'SYSDATE+1');
+      Dbms_Job.Next_Date(job_arr_(i), SYSDATE+1);
+   END LOOP;
+   COMMIT;
+   OPEN  get_job;
+   FETCH get_job BULK COLLECT INTO job_arr_;
+   CLOSE get_job;
+   FOR i IN nvl(job_arr_.FIRST,0)..nvl(job_arr_.LAST,-1) LOOP
+      Dbms_Job.Broken(job_arr_(i), TRUE);
+   END LOOP;
+   COMMIT;
+END Disable_Idle_Dbms_Jobs___;
+
+FUNCTION Show_Dbms_Jobs___ RETURN NUMBER
+IS
+   num_of_jobs_ NUMBER := 0;
+   job_name_    VARCHAR2(4000);
+   proc_name_   VARCHAR2(100);
+   start_pos_   NUMBER;
+   CURSOR get_running_jobs IS
+      SELECT j.log_user owner, SUBSTR(j.what, 1, 4000) job_name
+        FROM user_jobs j, dba_jobs_running jr
+      WHERE j.job = jr.job;
+   
+   FUNCTION Get_Method___(
+      full_action_ IN VARCHAR2) RETURN VARCHAR2
+   IS
+      action_      VARCHAR2(4000);
+      pos_         NUMBER;
+   BEGIN
+      IF (full_action_ LIKE '%Batch_SYS.Run_Job__(job,%' ) THEN
+         pos_ := instr(full_action_, '''');
+         action_ := substr(full_action_, pos_ + 1, instr(full_action_, ''')', - 1) - pos_ - 1); -- extract the action..
+      ELSE
+         action_ := full_action_; -- not entered through Batch_SYS..
+      END IF;
+      RETURN(action_);
+   END Get_Method___;
+
+BEGIN
+   Dbms_Output.Put_Line(' ');
+   FOR rec IN get_running_jobs LOOP
+      num_of_jobs_ := num_of_jobs_ + 1;
+      IF (num_of_jobs_ = 1) THEN 
+         Dbms_Output.Put_Line(' ');
+         Dbms_Output.Put_Line('The following dbms_jobs are currently running');
+         Dbms_Output.Put_Line('=============================================');
+      END IF;
+      job_name_ := Get_Method___(rec.job_name);
+      Dbms_Output.Put_Line(rec.owner||' '||job_name_);
+      start_pos_ := INSTR(UPPER(job_name_), 'TRANSACTION_SYS.PROCESS_ALL_PENDING__');
+      IF (start_pos_ > 0) THEN
+         BEGIN
+            -- ifs_assert_safe mabose 20130823 
+            EXECUTE IMMEDIATE 'SELECT procedure_name FROM transaction_sys_local_tab WHERE ROWNUM < 2 AND queue_id = :queue_id_ AND state = ''Executing''' INTO proc_name_ USING SUBSTR(job_name_, start_pos_+38, INSTR(job_name_, ',', start_pos_+38)-(start_pos_+38));
+            Dbms_Output.Put_Line('   Running job: '||proc_name_);
+         EXCEPTION
+            WHEN OTHERS THEN
+               NULL;
+         END;
+      END IF;
+   END LOOP;
+   IF (num_of_jobs_ > 0) THEN 
+      Dbms_Output.Put_Line(' ');
+      Dbms_Output.Put_Line('If you do not want to wait until the currently running dbms_job background jobs are finished, you have to kill the jobs manually.');
+   END IF;
+   Dbms_Output.Put_Line(' ');
+   RETURN num_of_jobs_;
+END Show_Dbms_Jobs___;
+
+FUNCTION Show_Db_Obj_Invalid_Count___ RETURN NUMBER
+IS
+   i_ PLS_INTEGER := 0;
+   CURSOR get_inv_obj_count IS
+      SELECT object_type,COUNT(*) no_of_invalid
+      FROM   user_objects
+      WHERE  status = 'INVALID'
+      GROUP BY object_type
+      UNION
+      SELECT 'TEXT INDEX',COUNT(*) no_of_invalid 
+      FROM   user_indexes t 
+      WHERE  t.index_type = 'DOMAIN' 
+      AND    (t.domidx_opstatus != 'VALID' OR t.status = 'INPROGRS')
+      GROUP BY t.index_type;   
+BEGIN
+   Dbms_Output.Put_Line(' ');
+   Dbms_Output.Put_Line('Checking database objects');
+   Dbms_Output.Put_Line('=========================');
+   FOR rec_ IN get_inv_obj_count LOOP
+      IF i_ = 0 THEN
+         Dbms_Output.Put_Line(' ');
+         Dbms_Output.Put_Line('WARNING: The following number of invalid objects were found.');
+         Dbms_Output.Put_Line(' ');
+      END IF;
+      Dbms_Output.Put_Line(INITCAP(rec_.object_type)||RPAD(' ',20-LENGTH(rec_.object_type),' ')||rec_.no_of_invalid);
+      i_:=i_ + rec_.no_of_invalid;
+   END LOOP;
+   IF i_ = 0 THEN
+      Dbms_Output.Put_Line('OK.');
+   END IF;
+   RETURN i_;
+END Show_Db_Obj_Invalid_Count___;
+
+FUNCTION Show_Db_Obj_Debug_Count___ RETURN NUMBER
+IS
+   i_ PLS_INTEGER := 0;
+   CURSOR get_debug_obj_count IS
+      SELECT type, COUNT(*) no_of_invalid
+      FROM user_plsql_object_settings
+      WHERE plsql_debug = 'TRUE'
+      OR plsql_optimize_level < 2
+      GROUP BY type;   
+BEGIN
+   Dbms_Output.Put_Line(' ');
+   Dbms_Output.Put_Line('Checking database objects');
+   Dbms_Output.Put_Line('=========================');
+   FOR rec_ IN get_debug_obj_count LOOP
+      IF i_ = 0 THEN
+         Dbms_Output.Put_Line(' ');
+         Dbms_Output.Put_Line('WARNING: The following number of objects with debugging information were found.');
+         Dbms_Output.Put_Line(' ');
+      END IF;
+      Dbms_Output.Put_Line(INITCAP(rec_.type)||RPAD(' ',20-LENGTH(rec_.type),' ')||rec_.no_of_invalid);
+      i_:=i_ + rec_.no_of_invalid;
+   END LOOP;
+   IF i_ = 0 THEN
+      Dbms_Output.Put_Line('OK.');
+   END IF;
+   RETURN i_;
+END Show_Db_Obj_Debug_Count___;
+
+FUNCTION Show_Scheduler_Processes___ RETURN NUMBER
+IS
+   num_of_jobs_ NUMBER := 0;
+   proc_name_   VARCHAR2(300);
+   start_pos_   NUMBER;
+   CURSOR get_running_jobs IS
+      SELECT j.owner, j.job_name, j.comments, r.elapsed_time, r.session_id
+        FROM user_scheduler_running_jobs r, dba_scheduler_jobs j
+       WHERE j.job_name = r.job_name;
+BEGIN
+   FOR rec IN get_running_jobs LOOP
+      num_of_jobs_ := num_of_jobs_ + 1;
+      IF (num_of_jobs_ = 1) THEN
+         Dbms_Output.Put_Line(' ');
+         Dbms_Output.Put_Line('The following F1 jobs are currently running');
+         Dbms_Output.Put_Line('===========================================');
+      END IF;
+      Dbms_Output.Put(Rpad(rec.job_name, 25, ' '));
+      Dbms_Output.Put_Line(Ltrim(REPLACE(rec.comments, stopped_)));
+      start_pos_ := INSTR(UPPER(rec.comments), 'TRANSACTION_SYS.PROCESS_ALL_PENDING__');
+      IF (start_pos_ > 0) THEN
+         BEGIN
+            -- ifs_assert_safe mabose 20130823 
+            EXECUTE IMMEDIATE 'SELECT procedure_name FROM transaction_sys_local_tab WHERE ROWNUM < 2 AND sid = :sid AND queue_id = :queue_id_ AND state = ''Executing''' INTO proc_name_ USING rec.session_id, SUBSTR(rec.comments, start_pos_+38, INSTR(rec.comments, ',', start_pos_+38)-(start_pos_+38));
+            Dbms_Output.Put_Line('   Running job: '||proc_name_);
+         EXCEPTION
+            WHEN OTHERS THEN
+               NULL;
+         END;
+      END IF;
+   END LOOP;
+   IF (num_of_jobs_ > 0) THEN 
+      Dbms_Output.Put_Line(' ');
+      Dbms_Output.Put_Line('Use Install_Tem_SYS.Stop_Scheduler_Processes to stop all currently running F1 jobs if you do not want to wait until they finish.');
+   END IF;
+   Dbms_Output.Put_Line(' ');
+   RETURN num_of_jobs_;
+END Show_Scheduler_Processes___;
+
+FUNCTION Show_Jobs_Other_Schema___ RETURN NUMBER
+IS
+   i_ PLS_INTEGER := 0;
+   CURSOR check_jobs IS
+      SELECT owner, job_name
+      FROM   dba_scheduler_jobs
+      WHERE  enabled = 'TRUE'
+      AND ((owner NOT IN ('SYS', UPPER('&APPLICATION_OWNER'))
+      AND   owner NOT LIKE 'ORACLE%')
+      OR   (owner = 'SYS'
+      AND   job_name IN ('AUTO_SPACE_ADVISOR_JOB', 'GATHER_STATS_JOB')));
+BEGIN
+   Dbms_Output.Put_Line(' ');
+   Dbms_Output.Put_Line('Checking enabled jobs in other schema(s)');
+   Dbms_Output.Put_Line('========================================');
+   FOR rec_ IN check_jobs LOOP
+      IF i_ = 0 THEN
+         Dbms_Output.Put_Line(' ');
+         Dbms_Output.Put_Line('WARNING: These backgrounds jobs are enabled in other schemas');
+         Dbms_Output.Put_Line('         Verify that they do not interfere with the installation process');
+         Dbms_Output.Put_Line(' ');
+      END IF;
+      Dbms_Output.Put_Line(rec_.owner||RPAD(' ',31-LENGTH(rec_.owner),' ')||rec_.job_name);
+      i_:=i_ + 1;
+   END LOOP;
+   IF i_ = 0 THEN
+      Dbms_Output.Put_Line('OK.');
+   END IF;
+   RETURN i_;
+END Show_Jobs_Other_Schema___;
+
+FUNCTION Show_Triggers_Other_Schema___ RETURN NUMBER
+IS
+   i_ PLS_INTEGER := 0;
+   CURSOR check_jobs IS
+      SELECT owner, table_name, trigger_name
+      FROM  all_triggers
+      WHERE owner != UPPER('&APPLICATION_OWNER')
+      AND   table_owner = UPPER('&APPLICATION_OWNER')
+      AND status = 'ENABLED';
+BEGIN
+   Dbms_Output.Put_Line(' ');
+   Dbms_Output.Put_Line('Checking enabled triggers in other schema(s)');
+   Dbms_Output.Put_Line('============================================');
+   FOR rec_ IN check_jobs LOOP
+      IF i_ = 0 THEN
+         Dbms_Output.Put_Line(' ');
+         Dbms_Output.Put_Line('WARNING: These triggers are enabled on IFS Applications tables but in other schemas');
+         Dbms_Output.Put_Line('         Verify that they do not interfere with the installation process');
+         Dbms_Output.Put_Line(' ');
+         Dbms_Output.Put_Line('Owner'||RPAD(' ',46,' ')||'Table Name'||RPAD(' ',41,' ')||'Trigger Name');
+         Dbms_Output.Put_Line(' ');
+      END IF;
+      Dbms_Output.Put_Line(rec_.owner||RPAD(' ',51-LENGTH(rec_.owner),' ')||rec_.table_name||RPAD(' ',51-LENGTH(rec_.table_name),' ')||rec_.trigger_name);
+      i_:=i_ + 1;
+   END LOOP;
+   IF i_ = 0 THEN
+      Dbms_Output.Put_Line('OK.');
+   END IF;
+   RETURN i_;
+END Show_Triggers_Other_Schema___;
+
+
+
+PROCEDURE Pre_Installation___ (
+   parameter_ IN VARCHAR2 )
+IS
+   guid_  &TABLE..guid%TYPE;
+   previous_guid_  &TABLE..guid%TYPE;
+   reset_ BOOLEAN := FALSE;
+   CURSOR check_previous IS
+      SELECT guid
+      FROM &TABLE
+      WHERE log_id = 0;
+BEGIN
+   OPEN check_previous;
+   FETCH check_previous INTO previous_guid_;
+   IF check_previous%FOUND AND Get_Multi_Installation_Mode = FALSE THEN
+      CLOSE check_previous;
+      Finalize_Installation('RESET');
+      reset_ := TRUE;
+   ELSE
+      CLOSE check_previous;
+   END IF;
+   BEGIN
+      -- Create unique installation id
+      SELECT TO_CHAR(logon_time, 'YYYYMMDD HH24MISS')
+      INTO guid_
+      FROM sys.v_$session
+      WHERE audsid = userenv('SESSIONID')
+      AND ROWNUM < 2;
+      Dbms_Output.Put_Line(' ');
+      Dbms_Output.Put_Line('Installation ID: '||guid_);
+      Dbms_Output.Put_Line(' ');
+      INSERT INTO &TABLE
+         (log_id,
+          guid)
+      VALUES
+         (0,
+          guid_);
+   EXCEPTION
+      WHEN dup_val_on_index THEN
+         UPDATE &TABLE
+         SET guid = guid_
+         WHERE log_id = 0;
+   END;
+   --@ApproveTransactionStatement(2019-04-16,MABOSE)
+   COMMIT;
+   Disable_Triggers___('DDL_AUDIT_TRG');
+   IF reset_ THEN
+      Reset_Job_Queue_Processes___(previous_guid_);
+   END IF;
+   Enable_All_Queues__;
+END Pre_Installation___;
+   
+PROCEDURE Post_Installation___ (
+   parameter_ IN VARCHAR2 )
+IS
+BEGIN
+   NULL;
+END Post_Installation___;
+
+PROCEDURE Disable_Triggers___ (
+   parameter_ IN VARCHAR2 )
+IS
+   log_id_  &TABLE..log_id%TYPE;
+   dummy_   NUMBER;
+   method_  BOOLEAN;
+   stmt_    VARCHAR2(1000);
+   enable_  VARCHAR2(1000);
+   guid_    &TABLE..guid%TYPE := Get_Installation_Id_;
+   CURSOR get_method IS
+      SELECT 1
+      FROM   user_procedures
+      WHERE  object_name = 'INSTALLATION_SYS'
+      AND    procedure_name  = 'DISABLE_TRIGGER';
+   CURSOR get_trigger IS
+      SELECT trigger_name
+      FROM user_triggers
+      WHERE status = 'ENABLED'
+      AND trigger_name = NVL(parameter_, trigger_name);
+BEGIN
+   OPEN get_method;
+   FETCH get_method INTO dummy_;
+   IF get_method%FOUND THEN
+      CLOSE get_method;
+      method_ := TRUE;
+   ELSE
+      CLOSE get_method;
+      method_ := FALSE;
+   END IF;
+   FOR rec_ IN get_trigger LOOP
+      BEGIN
+         IF method_ THEN
+            stmt_ := 'BEGIN Installation_SYS.Disable_Trigger('''||rec_.trigger_name||''', TRUE); END;';
+            enable_ := 'BEGIN Installation_SYS.Enable_Trigger('''||rec_.trigger_name||''', TRUE); END;';
+         ELSE
+            stmt_ := 'ALTER TRIGGER '||rec_.trigger_name||' DISABLE';
+            enable_ := 'ALTER TRIGGER '||rec_.trigger_name||' ENABLE';
+         END IF;
+         -- ifs_assert_safe mabose 20130823 
+         EXECUTE IMMEDIATE stmt_;
+         SELECT &SEQUENCE..NEXTVAL
+         INTO   log_id_
+         FROM   dual;
+         INSERT INTO &TABLE
+            (log_id,
+             guid,
+             category,
+             text1,
+             text2,
+             text3,
+             created,
+             last_modified,
+             action)
+         VALUES
+            (log_id_,
+             guid_,
+             'ENABLE/DISABLE TRIGGER',
+             stmt_,
+             enable_,
+             rec_.trigger_name,
+             SYSDATE,
+             SYSDATE,
+             trigger_id_);
+      EXCEPTION
+         WHEN OTHERS THEN
+            Dbms_Output.Put_Line('Error disable trigger '||rec_.trigger_name||' before installation');
+            Dbms_Output.Put_Line(rec_.trigger_name);
+            Dbms_Output.Put_Line(SUBSTR(SQLERRM, 11, 2000));
+      END;
+   END LOOP;
+END Disable_Triggers___;
+
+PROCEDURE Enable_Triggers___ (
+   parameter_ IN VARCHAR2 )
+IS
+   status_ user_triggers.status%TYPE;
+   guid_   &TABLE..guid%TYPE := Get_Installation_Id_;
+   show_info_ BOOLEAN := FALSE;
+   CURSOR getlog IS
+      SELECT text2, text3, log_id
+      FROM &TABLE
+      WHERE action = trigger_id_
+      AND guid = guid_
+      AND category = 'ENABLE/DISABLE TRIGGER'
+      AND text4 IS NULL;
+   CURSOR get_trigger (trigger_ VARCHAR2) IS
+      SELECT status
+      FROM user_triggers
+      WHERE trigger_name = trigger_;
+BEGIN
+   FOR rec_ IN getlog LOOP
+      BEGIN
+         OPEN get_trigger (rec_.text3);
+         FETCH get_trigger INTO status_;
+         IF get_trigger%FOUND THEN
+            CLOSE get_trigger;
+            IF status_ = 'ENABLED' THEN
+               UPDATE &TABLE
+               SET text4 = 'Trigger already enabled during deployment',
+                   last_modified = SYSDATE
+               WHERE log_id = rec_.log_id;
+               -- ifs_assert_safe mabose 20140711 
+               EXECUTE IMMEDIATE 'BEGIN :show_info := Installation_SYS.Get_Show_Info; END;' USING OUT show_info_;
+               IF show_info_ THEN
+                  Dbms_Output.Put_Line('Enable_Trigger: Trigger '||rec_.text3|| ' already enabled during deployment.');
+               END IF;
+            ELSE
+               -- ifs_assert_safe mabose 20130823 
+               EXECUTE IMMEDIATE rec_.text2;
+               UPDATE &TABLE
+               SET text4 = 'Trigger enabled after database deployment',
+                   last_modified = SYSDATE
+               WHERE log_id = rec_.log_id;
+            END IF;
+         ELSE
+            CLOSE get_trigger;
+            UPDATE &TABLE
+            SET text4 = 'Trigger removed during deployment',
+                last_modified = SYSDATE
+            WHERE log_id = rec_.log_id;
+            -- ifs_assert_safe mabose 20140711 
+            EXECUTE IMMEDIATE 'BEGIN :show_info := Installation_SYS.Get_Show_Info; END;' USING OUT show_info_;
+            IF show_info_ THEN
+               Dbms_Output.Put_Line('Enable_Trigger: Trigger '||rec_.text3|| ' removed during deployment.');
+               END IF;
+            END IF;
+      EXCEPTION
+         WHEN OTHERS THEN
+            Dbms_Output.Put_Line('Error enable trigger after installation');
+            Dbms_Output.Put_Line(rec_.text2);
+            Dbms_Output.Put_Line(SUBSTR(SQLERRM, 11, 2000));
+      END;
+   END LOOP;
+END Enable_Triggers___;
+
+
+PROCEDURE Refresh_Customobjects___ (
+   parameter_ IN VARCHAR2 )
+IS
+   stmt_       VARCHAR2(200) := 'BEGIN Custom_Obj_SYS.Deploy_All_Custom_Objects; END;';
+   error_text_ VARCHAR2(2000);
+   
+   invalid_method EXCEPTION;
+   PRAGMA EXCEPTION_INIT(invalid_method, -6550);
+BEGIN
+   -- ifs_assert_safe mabose 20130823 
+   EXECUTE IMMEDIATE stmt_;
+EXCEPTION
+   WHEN invalid_method THEN
+      NULL;
+   WHEN OTHERS THEN
+      error_text_ := SQLERRM;
+      Dbms_Output.put_line('Unknown error when refreshing Custom Objects.');
+      Dbms_Output.put_line(error_text_);
+END Refresh_Customobjects___;
+
+
+PROCEDURE Bi_Post_Install_Object___ (
+   parameter_ IN VARCHAR2 )
+IS
+   stmt_       VARCHAR2(200) := 'BEGIN Biserv_Installation_API.Bi_Post_Installation_Object; END;';
+   
+   invalid_method EXCEPTION;
+   PRAGMA EXCEPTION_INIT(invalid_method, -6550);
+BEGIN
+   -- ifs_assert_safe mabose 20160219 
+   EXECUTE IMMEDIATE stmt_;
+EXCEPTION
+   WHEN invalid_method THEN
+      NULL;
+END Bi_Post_Install_Object___;
+
+
+PROCEDURE Bi_Post_Install_Data___ (
+   parameter_ IN VARCHAR2 )
+IS
+   stmt_       VARCHAR2(200) := 'BEGIN Biserv_Installation_API.Bi_Post_Installation_Data; END;';
+   
+   invalid_method EXCEPTION;
+   PRAGMA EXCEPTION_INIT(invalid_method, -6550);
+BEGIN
+   -- ifs_assert_safe mabose 20160219 
+   EXECUTE IMMEDIATE stmt_;
+EXCEPTION
+   WHEN invalid_method THEN
+      NULL;
+END Bi_Post_Install_Data___;
+
+
+PROCEDURE Compile_Base_Packages___ (
+   parameter_ IN VARCHAR2 )
+IS
+   package_name_ VARCHAR2(30);
+   CURSOR check_state IS
+      SELECT object_name
+      FROM user_objects
+      WHERE object_name IN ('DATABASE_SYS', 'INSTALLATION_SYS', 'DICTIONARY_SYS', 'ERROR_SYS', 'GENERAL_SYS', 'FND_SESSION_API')
+      AND object_type = 'PACKAGE BODY'
+      AND status = 'INVALID';
+   CURSOR get_debug_objects IS
+      SELECT name, type
+      FROM user_plsql_object_settings
+      WHERE name IN ('DATABASE_SYS', 'INSTALLATION_SYS', 'DICTIONARY_SYS', 'ERROR_SYS', 'GENERAL_SYS', 'FND_SESSION_API')
+      AND  (plsql_debug = 'TRUE'
+      OR    plsql_optimize_level < 2
+      OR    nls_length_semantics = 'BYTE')
+      ORDER BY DECODE(type, 'PACKAGE', 10,
+                            'PACKAGE BODY', 20,
+                            'TRIGGER', 30,
+                            'PROCEDURE', 40,
+                            'FUNCTION', 50,
+                            50 ), name;
+BEGIN
+   IF UPPER(SUBSTR(parameter_, 1, 1)) = 'Y' THEN
+      FOR obj_ IN get_debug_objects LOOP
+         BEGIN
+            IF ( obj_.type = 'PACKAGE' ) THEN
+               -- ifs_assert_safe mabose 20140711
+               EXECUTE IMMEDIATE 'ALTER PACKAGE ' || obj_.name || ' COMPILE SPECIFICATION PLSQL_OPTIMIZE_LEVEL=2 PLSQL_DEBUG=FALSE NLS_LENGTH_SEMANTICS=CHAR REUSE SETTINGS';
+               DBMS_Output.Put_Line('Setting correct length semantic and/or removing debugging information from package specification ' || obj_.name);
+            ELSIF ( obj_.type = 'PACKAGE BODY' ) THEN
+               -- ifs_assert_safe mabose 20140711
+               EXECUTE IMMEDIATE 'ALTER PACKAGE ' || obj_.name || ' COMPILE BODY PLSQL_OPTIMIZE_LEVEL=2 PLSQL_DEBUG=FALSE NLS_LENGTH_SEMANTICS=CHAR REUSE SETTINGS';
+               DBMS_Output.Put_Line('Setting correct length semantic and/or removing debugging information from package body ' || obj_.name);
+            ELSIF ( obj_.type = 'TRIGGER' ) THEN
+               -- ifs_assert_safe mabose 20140711
+               EXECUTE IMMEDIATE 'ALTER TRIGGER ' || obj_.name || ' COMPILE PLSQL_OPTIMIZE_LEVEL=2 PLSQL_DEBUG=FALSE NLS_LENGTH_SEMANTICS=CHAR REUSE SETTINGS';
+               DBMS_Output.Put_Line('Setting correct length semantic and/or removing debugging information from trigger ' || obj_.name);
+            ELSIF ( obj_.type = 'PROCEDURE' ) THEN
+               -- ifs_assert_safe mabose 20140711
+               EXECUTE IMMEDIATE 'ALTER PROCEDURE ' || obj_.name || ' COMPILE PLSQL_OPTIMIZE_LEVEL=2 PLSQL_DEBUG=FALSE NLS_LENGTH_SEMANTICS=CHAR REUSE SETTINGS';
+               DBMS_Output.Put_Line('Setting correct length semantic and/or removing debugging information from procedure ' || obj_.name);
+            ELSIF ( obj_.type = 'FUNCTION' ) THEN
+               -- ifs_assert_safe mabose 20140711
+               EXECUTE IMMEDIATE 'ALTER FUNCTION ' || obj_.name || ' COMPILE PLSQL_OPTIMIZE_LEVEL=2 PLSQL_DEBUG=FALSE NLS_LENGTH_SEMANTICS=CHAR REUSE SETTINGS';
+               DBMS_Output.Put_Line('Setting correct length semantic and/or removing debugging information from function ' || obj_.name);
+            END IF;
+         EXCEPTION
+            WHEN OTHERS THEN
+               DBMS_Output.Put_Line('Error removing debugging information from object ' || obj_.name);
+               DBMS_Output.Put_Line('Error message: ' || SQLERRM);
+         END;
+      END LOOP;
+   END IF;
+   OPEN check_state;
+   FETCH check_state INTO package_name_;
+   WHILE check_state%FOUND LOOP
+   -- ifs_assert_safe mabose 20131220
+      EXECUTE IMMEDIATE 'ALTER PACKAGE '||package_name_||' COMPILE BODY';
+      FETCH check_state INTO package_name_;
+   END LOOP;
+   CLOSE check_state;
+END Compile_Base_Packages___;
+
+
+PROCEDURE Finalize_Dev_Deploy___ ( 
+   parameter_ IN VARCHAR2 )
+IS 
+   found_ BOOLEAN := FALSE; 
+   valid_ BOOLEAN := TRUE; 
+   CURSOR get_post_methods IS 
+      SELECT INITCAP(SUBSTR(up.object_name, 1, LENGTH(up.object_name)-3)) || SUBSTR(up.object_name, -3) package_name, 
+             INITCAP(up.procedure_name) procedure_name, 
+             uo.status 
+      FROM user_procedures up, 
+           user_objects uo, 
+           v$session s 
+      WHERE up.object_name = uo.object_name 
+      AND uo.object_type = 'PACKAGE BODY' 
+      AND up.procedure_name IN ('POST_INSTALLATION_OBJECT', 'POST_INSTALLATION_DATA') 
+      AND s.audsid = userenv('sessionid') 
+      AND (parameter_ IS NULL
+      OR   UPPER(parameter_) <> 'SESSION'
+      OR   GREATEST(uo.created, uo.last_ddl_time, TO_DATE(uo.timestamp, 'YYYY-MM-DD-HH24:MI:SS')) >= s.logon_time) 
+      ORDER BY up.procedure_name DESC, up.object_name; 
+BEGIN 
+   FOR rec_ IN get_post_methods LOOP 
+      found_ := TRUE; 
+      Dbms_Output.Put_Line('Running ' || rec_.package_name || '.' || rec_.procedure_name || '...'); 
+      IF (rec_.status = 'INVALID') THEN 
+         BEGIN 
+            EXECUTE IMMEDIATE 'ALTER PACKAGE ' || rec_.package_name || ' COMPILE BODY'; 
+         EXCEPTION 
+            WHEN OTHERS THEN 
+               valid_ := FALSE;
+         END; 
+      END IF; 
+
+      IF valid_ THEN
+         BEGIN 
+            -- ifs_assert_safe mabose 20130823 
+            EXECUTE IMMEDIATE 'BEGIN ' || rec_.package_name || '.' || rec_.procedure_name || '; END;'; 
+         EXCEPTION 
+            WHEN OTHERS THEN 
+               ROLLBACK; 
+               Dbms_Output.Put_Line(SQLERRM); 
+         END; 
+         COMMIT; 
+      END IF;
+   END LOOP; 
+
+   IF (NOT found_) THEN 
+      Dbms_Output.Put_Line('No packages found, skipping...'); 
+   END IF; 
+END Finalize_Dev_Deploy___; 
+
+PROCEDURE Reset_Job_Queue_Processes___ (
+   previous_guid_ &TABLE..guid%TYPE )
+IS
+   job_queue_processes_ &TABLE..text1%TYPE;
+   log_id_              &TABLE..log_id%TYPE;
+   guid_                &TABLE..guid%TYPE := Get_Installation_Id_;
+   rowid_               ROWID;
+   CURSOR getlog IS
+      SELECT text1, rowid
+      FROM &TABLE
+      WHERE action = job_queue_proc_
+      AND guid = previous_guid_
+      AND category = 'JOB_QUEUE_PROCESSES'
+      AND text2 IS NULL;
+BEGIN
+   -- Save the old value
+   OPEN getlog;
+   FETCH getlog INTO job_queue_processes_, rowid_;
+   IF getlog%FOUND THEN
+      CLOSE getlog;
+      SELECT &SEQUENCE..NEXTVAL
+      INTO   log_id_
+      FROM   dual;
+      INSERT INTO &TABLE
+         (log_id,
+          guid,
+          category,
+          text1,
+          created,
+          last_modified,
+          action)
+      VALUES
+         (log_id_,
+          guid_,
+          'RESET_JOB_QUEUE_PROCESSES',
+          job_queue_processes_,
+          SYSDATE,
+          SYSDATE,
+          job_queue_proc_);
+      UPDATE &TABLE
+      SET text2 = 'Reset by next installation',
+          last_modified = SYSDATE
+      WHERE ROWID = rowid_;
+   ELSE
+      CLOSE getlog;
+   END IF;
+END Reset_Job_Queue_Processes___;
+
+FUNCTION Identify_Large_Database___ RETURN NUMBER
+IS
+   cnt_      NUMBER := 0;
+   num_rows_ NUMBER := 0;
+   CURSOR get_large_tables IS
+      SELECT table_name, num_rows
+      FROM User_Tables
+      WHERE num_rows IS NOT NULL
+      ORDER BY num_rows DESC;
+   rec_ get_large_tables%ROWTYPE;
+BEGIN
+   OPEN get_large_tables;
+   FETCH get_large_tables INTO rec_;
+   WHILE get_large_tables%FOUND AND cnt_ < 50 AND num_rows_ < large_db_limit_ LOOP
+      num_rows_ := num_rows_ + rec_.num_rows;
+      cnt_ := cnt_ + 1;
+      FETCH get_large_tables INTO rec_;
+   END LOOP;
+   CLOSE get_large_tables;
+   IF num_rows_ > large_db_limit_ THEN
+      RETURN 1;
+   ELSE
+      RETURN 0;
+   END IF;
+END Identify_Large_Database___;
+
+PROCEDURE Enable_New_Processes___
+IS
+   job_removed EXCEPTION;
+   PRAGMA      EXCEPTION_INIT(job_removed, -27476);
+   guid_  &TABLE..guid%TYPE := Get_Installation_Id_;
+   CURSOR get_processes IS
+      SELECT text3, log_id
+      FROM install_tem_sys_tab
+      WHERE guid = guid_
+      AND   text2 = 'INIT_PROCESSING'
+      AND   text4 IS NULL
+      AND   category = 'LU_INSTALLATION_SUPPORT';
+BEGIN
+   FOR rec_ IN get_processes LOOP
+      BEGIN
+         EXECUTE IMMEDIATE rec_.text3;
+         UPDATE install_tem_sys_tab
+         SET text4 = 'Background processing started',
+             last_modified = SYSDATE
+         WHERE log_id = rec_.log_id;
+      EXCEPTION
+         WHEN job_removed THEN
+            UPDATE install_tem_sys_tab
+            SET text4 = 'Background job removed by another process',
+                last_modified = SYSDATE
+            WHERE log_id = rec_.log_id;
+         WHEN OTHERS THEN
+            Dbms_Output.Put_Line('Error starting background processing');
+            Dbms_Output.Put_Line(rec_.text3);
+            Dbms_Output.Put_Line(SUBSTR(SQLERRM, 11, 2000));
+      END;
+   END LOOP;
+END Enable_New_Processes___;
+
+FUNCTION Check_Queue_Process___ RETURN BOOLEAN
+IS
+   dummy_    NUMBER;
+   CURSOR check_process IS
+      SELECT 1
+      FROM v$process
+      WHERE pname = 'CJQ0';
+BEGIN
+   OPEN check_process;
+   FETCH check_process INTO dummy_;
+   IF check_process%FOUND THEN
+      CLOSE check_process;
+      RETURN TRUE;
+   ELSE
+      CLOSE check_process;
+      RETURN FALSE;
+   END IF;
+END Check_Queue_Process___;
+
+-----------------------------------------------------------------------------
+-------------------- SERVICE SPECIFIC PRIVATE METHODS -----------------------
+-----------------------------------------------------------------------------
+
+PROCEDURE Alter_Job_Queue_Processes__ (
+   value_ IN VARCHAR2 )
+IS
+   continue_ BOOLEAN := TRUE;
+   counter_  NUMBER := 0;
+BEGIN
+   -- ifs_assert_safe mabose 20130823 
+   EXECUTE IMMEDIATE 'ALTER SYSTEM SET job_queue_processes='||to_char(to_number(value_))||' SCOPE=MEMORY';
+   IF Am_I_Multitenant=FALSE THEN
+      Dbms_Lock.Sleep(1);
+      WHILE continue_ AND counter_ < 20 LOOP
+         IF Check_Queue_Process___ THEN
+            IF value_ != '0' THEN
+               continue_ := FALSE;
+            ELSE
+               Dbms_Lock.Sleep(3);
+            END IF;
+         ELSE
+            IF value_ = '0' THEN
+               continue_ := FALSE;
+            ELSE
+               Dbms_Lock.Sleep(3);
+            END IF;
+         END IF;
+         counter_ := counter_ + 1;
+      END LOOP;
+   END IF;
+END Alter_Job_Queue_Processes__;
+
+PROCEDURE Disable_Dbms_Scheduler__ (
+   value_ IN VARCHAR2 )
+IS
+BEGIN
+   Dbms_Scheduler.Set_Scheduler_Attribute ('SCHEDULER_DISABLED', value_);
+END Disable_Dbms_Scheduler__;
+
+PROCEDURE Enable_All_Queues__
+IS
+   CURSOR get_queues IS 
+      SELECT name 
+      FROM all_queues
+      WHERE queue_type = 'NORMAL_QUEUE' 
+      AND TRIM(enqueue_enabled) = 'NO'
+      AND owner = UPPER('&APPLICATION_OWNER'); 
+BEGIN 
+   FOR rec_ IN get_queues LOOP 
+      Dbms_Aqadm.Start_Queue(rec_.name); 
+   END LOOP; 
+END Enable_All_Queues__;
+
+PROCEDURE Create_Context__
+IS
+   dummy_     NUMBER;
+   stmt_      VARCHAR2(4000);
+   error_msg_ VARCHAR2(4000);
+   ctx_error  EXCEPTION;
+   PRAGMA     EXCEPTION_INIT(ctx_error, -20000);
+   crlf_      CONSTANT VARCHAR2(2) := chr(13)||chr(10);
+BEGIN
+   BEGIN
+      Ctx_Ddl.Create_Policy('BLOB_POLICY', 'CTXSYS.AUTO_FILTER');
+      Dbms_Output.Put_Line('Policy BLOB_POLICY created');
+   EXCEPTION
+      WHEN ctx_error THEN
+         error_msg_ := UPPER(SQLERRM);
+         IF INSTR(error_msg_, 'DUPLICATE') > 0
+         OR  INSTR(error_msg_, 'ALREADY EXIST') > 0 THEN
+            Dbms_Output.Put_Line('The policy BLOB_POLICY already exists');
+         ELSE
+            Dbms_Output.Put_Line('Unhandled error:'||crlf_||error_msg_);
+         END IF;
+   END;
+END Create_Context__;
+
+PROCEDURE Cleanup__
+IS
+BEGIN
+   DELETE FROM &TABLE
+   WHERE created < SYSDATE - days_to_keep_;
+END Cleanup__;
+
+PROCEDURE Disable_Ial_Scheduler_Proc__
+IS
+   table_not_found EXCEPTION;
+   PRAGMA          EXCEPTION_INIT(table_not_found, -00942);   
+   TYPE ref_cursor IS REF CURSOR;
+   get_jobs        ref_cursor;
+   job_name_       VARCHAR2(128);
+   comments_       VARCHAR2(32767);
+   num_of_jobs_    NUMBER := 0;
+   stmt_           VARCHAR2(32767) := '
+      SELECT j.job_name, j.comments
+      FROM   batch_queue_method_tab m,
+             dba_scheduler_jobs     j,
+             dba_scheduler_job_args a
+      WHERE  m.method_name = ''Ial_Object_API.Do_Replication__''
+      AND    j.owner = Sys_Context(''USERENV'', ''CURRENT_SCHEMA'')
+      AND    j.owner = a.owner
+      AND    j.job_name = a.job_name
+      AND    a.argument_name = ''ACTION_''
+      AND    j.enabled = ''TRUE''
+      AND    (upper(a.value) LIKE ''TRANSACTION_SYS.PROCESS_ALL_PENDING__('' || m.queue_id || '')%'' OR
+              upper(a.value) LIKE ''TRANSACTION_SYS.PROCESS_ALL_PENDING__('' || m.queue_id || '',%'')';
+BEGIN
+   OPEN get_jobs FOR stmt_;   
+   LOOP
+      FETCH get_jobs INTO job_name_, comments_;
+      EXIT WHEN get_jobs%NOTFOUND;
+      num_of_jobs_ := num_of_jobs_ + 1;
+      IF (num_of_jobs_ = 1) THEN 
+         Dbms_Output.Put_Line(' ');
+         Dbms_Output.Put_Line('The following scheduled F1 jobs were disabled');
+         Dbms_Output.Put_Line('=============================================');
+      END IF;
+      Dbms_Scheduler.Disable(job_name_, TRUE);
+      Dbms_Scheduler.Set_Attribute(job_name_, 'COMMENTS', stopped_ial_ || ' ' || comments_);
+      Dbms_Output.Put(Rpad(job_name_, 50, ' '));
+      Dbms_Output.Put_Line(Ltrim(REPLACE(comments_, stopped_ial_)));
+   END LOOP;
+
+   CLOSE get_jobs;
+EXCEPTION
+   WHEN table_not_found THEN
+      NULL;
+   WHEN OTHERS THEN      
+      IF (get_jobs%ISOPEN) THEN
+         CLOSE get_jobs;
+      END IF;
+      RAISE;
+END Disable_Ial_Scheduler_Proc__;
+
+
+PROCEDURE Stop_Ial_Scheduler_Proc__
+IS
+   table_not_found EXCEPTION;
+   PRAGMA          EXCEPTION_INIT(table_not_found, -00942);   
+   TYPE ref_cursor IS REF CURSOR;
+   get_jobs        ref_cursor;   
+   job_name_       VARCHAR2(128);
+   i_              NUMBER := 0;
+   stmt_           VARCHAR2(32767) := '
+      SELECT j.job_name
+      FROM   transaction_sys_local_tab t, all_scheduler_jobs j
+      WHERE  t.state = ''Executing''
+      AND    t.procedure_name = ''Ial_Object_API.Do_Replication__''
+      AND    j.owner = ''&APPLICATION_OWNER''
+      AND    j.job_name = ''F1JOB_'' || t.process_id';
+BEGIN
+   OPEN get_jobs FOR stmt_;   
+   LOOP
+      FETCH get_jobs INTO job_name_;
+      EXIT WHEN get_jobs%NOTFOUND;
+      Dbms_Scheduler.Stop_Job(job_name_);
+      i_ := i_ + 1;
+      IF (i_ = 1) THEN
+         Dbms_Output.Put_Line(' ');
+         Dbms_Output.Put_Line('The following running F1 jobs are stopped');
+         Dbms_Output.Put_Line('=========================================');
+      END IF;
+      Dbms_Output.Put_Line(Rpad(job_name_, 31, ' '));      
+   END LOOP;
+   CLOSE get_jobs;
+EXCEPTION
+   WHEN table_not_found THEN
+      NULL;
+   WHEN OTHERS THEN      
+      IF (get_jobs%ISOPEN) THEN
+         CLOSE get_jobs;
+      END IF;
+      RAISE;
+END Stop_Ial_Scheduler_Proc__;
+
+
+PROCEDURE Enable_Ial_Scheduler_Proc__
+IS
+   num_of_jobs_ NUMBER := 0;
+   CURSOR get_jobs IS
+      SELECT '"'||job_name||'"' job_name,
+             nvl(comments, '-') comments
+        FROM user_scheduler_jobs
+        WHERE  comments LIKE stopped_ial_ || '%';
+BEGIN
+   FOR rec IN get_jobs LOOP
+      num_of_jobs_ := num_of_jobs_ + 1;
+      IF (num_of_jobs_ = 1) THEN 
+         Dbms_Output.Put_Line(' ');
+         Dbms_Output.Put_Line('The following scheduled F1 jobs are enabled');
+         Dbms_Output.Put_Line('===========================================');
+      END IF;
+      Dbms_Output.Put(Rpad(rec.job_name, 31, ' '));
+      IF (Instr(rec.comments, stopped_ial_) > 0) THEN
+         Dbms_Scheduler.Enable(rec.job_name);
+         Dbms_Scheduler.Set_Attribute(rec.job_name,
+                                      'COMMENTS',
+                                      Ltrim(REPLACE(rec.comments, stopped_ial_)));
+      END IF;
+      Dbms_Output.Put(Rpad('Enabled:', 11, ' '));
+      Dbms_Output.Put_Line(Ltrim(REPLACE(rec.comments, stopped_ial_)));
+   END LOOP;
+   Dbms_Output.Put_Line(' ');
+END Enable_Ial_Scheduler_Proc__;
+
+
+-----------------------------------------------------------------------------
+-------------------- SERVICE SPECIFIC PROTECTED METHODS ---------------------
+-----------------------------------------------------------------------------
+
+FUNCTION Get_Installation_Id_ RETURN VARCHAR2
+IS
+   guid_ &TABLE..guid%TYPE;
+   PROCEDURE Store_Guid
+   IS
+      PRAGMA autonomous_transaction;
+   BEGIN
+      INSERT INTO &TABLE
+            (log_id,
+             guid)
+      VALUES
+            (0,
+            guid_);
+      COMMIT;
+   END Store_Guid;
+BEGIN
+   BEGIN
+      SELECT guid
+      INTO guid_
+      FROM &TABLE
+      WHERE log_id = 0;
+   EXCEPTION
+      WHEN no_data_found THEN
+         SELECT TO_CHAR(logon_time, 'YYYYMMDD HH24MISS')
+         INTO guid_
+         FROM sys.v_$session
+         WHERE audsid = userenv('SESSIONID')
+         AND ROWNUM < 2;
+         Store_Guid;
+   END;
+   RETURN guid_;
+END Get_Installation_Id_;
+
+-----------------------------------------------------------------------------
+-------------------- SERVICE SPECIFIC PUBLIC METHODS ------------------------
+-----------------------------------------------------------------------------
+
+FUNCTION Disable_Show_Dbms_Jobs RETURN NUMBER
+IS
+BEGIN
+   Disable_Idle_Dbms_Jobs___;
+   RETURN(Show_Dbms_Jobs___);
+END Disable_Show_Dbms_Jobs;
+
+PROCEDURE Disable_Show_Dbms_Jobs
+IS
+   count_   NUMBER;
+BEGIN
+   Disable_Idle_Dbms_Jobs___;
+   count_ := Show_Dbms_Jobs___;
+END Disable_Show_Dbms_Jobs;
+
+PROCEDURE Disable_Scheduler_Processes
+IS
+   num_of_jobs_ NUMBER := 0;
+   CURSOR get_jobs IS
+      SELECT DISTINCT '"'||usj.job_name||'"' job_name,
+             nvl(usj.comments, '-') comments,
+             usj.enabled            enabled,
+             TO_CHAR(NULL)          task_name,
+             TO_CHAR(NULL)          task_comment
+      FROM user_scheduler_jobs usj
+      UNION
+      SELECT DISTINCT '"'||upet.task_name||'"' job_name,
+             TO_CHAR(NULL)          comments,
+             TO_CHAR(NULL)          enabled,
+             upet.task_name         task_name,
+             upet.task_comment      task_comment
+      FROM  user_parallel_execute_tasks upet;
+BEGIN
+   FOR rec IN get_jobs LOOP
+      num_of_jobs_ := num_of_jobs_ + 1;
+      IF (num_of_jobs_ = 1) THEN 
+         Dbms_Output.Put_Line(' ');
+         Dbms_Output.Put_Line('The following scheduled F1 jobs were disabled');
+         Dbms_Output.Put_Line('=============================================');
+      END IF;
+      IF rec.task_name IS NULL THEN
+         IF rec.enabled = 'TRUE' THEN
+            Dbms_Scheduler.Disable(rec.job_name, TRUE);
+            Dbms_Scheduler.Set_Attribute(rec.job_name,
+                                         'COMMENTS',
+                                         stopped_ || ' ' || rec.comments);
+            Dbms_Output.Put(Rpad(rec.job_name, 50, ' '));
+            Dbms_Output.Put_Line(Ltrim(REPLACE(rec.comments, stopped_)));
+         END IF;
+      ELSE
+         Dbms_Parallel_Execute.Drop_Task(rec.task_name);
+         Dbms_Output.Put(Rpad(rec.task_name, 50, ' '));
+         Dbms_Output.Put_Line(Ltrim(rec.task_comment));
+      END IF;
+   END LOOP;
+END Disable_Scheduler_Processes;
+
+PROCEDURE Enable_Scheduler_Processes 
+IS
+   num_of_jobs_ NUMBER := 0;
+   CURSOR get_jobs IS
+      SELECT '"'||job_name||'"' job_name,
+             nvl(comments, '-') comments
+        FROM user_scheduler_jobs;
+BEGIN
+   FOR rec IN get_jobs LOOP
+      num_of_jobs_ := num_of_jobs_ + 1;
+      IF (num_of_jobs_ = 1) THEN 
+         Dbms_Output.Put_Line(' ');
+         Dbms_Output.Put_Line('The following scheduled F1 jobs are enabled');
+         Dbms_Output.Put_Line('===========================================');
+      END IF;
+      Dbms_Output.Put(Rpad(rec.job_name, 31, ' '));
+      IF (Instr(rec.comments, stopped_) > 0) THEN
+         Dbms_Scheduler.Enable(rec.job_name);
+         Dbms_Scheduler.Set_Attribute(rec.job_name,
+                                      'COMMENTS',
+                                      Ltrim(REPLACE(rec.comments, stopped_)));
+      END IF;
+      Dbms_Output.Put(Rpad('Enabled:', 11, ' '));
+      Dbms_Output.Put_Line(Ltrim(REPLACE(rec.comments, stopped_)));
+   END LOOP;
+   Dbms_Output.Put_Line(' ');
+END Enable_Scheduler_Processes;
+
+PROCEDURE Show_Db_Obj_Invalid_Count
+IS
+   i_ NUMBER;
+BEGIN
+   i_ := Show_Db_Obj_Invalid_Count___;
+END Show_Db_Obj_Invalid_Count;    
+
+
+FUNCTION Show_Db_Obj_Invalid_Count RETURN NUMBER
+IS
+BEGIN
+   RETURN(Show_Db_Obj_Invalid_Count___);
+END Show_Db_Obj_Invalid_Count;    
+
+PROCEDURE Show_Debug_Status
+IS
+   status_ v$parameter.value%TYPE;
+BEGIN
+   IF Get_Init_Parameter___('plsql_debug') = 'TRUE' 
+   OR Get_Init_Parameter___('plsql_optimize_level') < '2' THEN
+      Dbms_Output.Put_Line('WARNING: Plsql debugging information is turned on in this database instance!');
+   END IF;
+END Show_Debug_Status;
+
+PROCEDURE Show_Db_Obj_Debug_Count
+IS
+   i_ NUMBER;
+BEGIN
+   i_ := Show_Db_Obj_Debug_Count___;
+END Show_Db_Obj_Debug_Count;    
+
+
+FUNCTION Show_Db_Obj_Debug_Count RETURN NUMBER
+IS
+BEGIN
+   RETURN(Show_Db_Obj_Debug_Count___);
+END Show_Db_Obj_Debug_Count;
+
+
+FUNCTION Show_Db_Obj_Debug_Exist RETURN NUMBER
+IS
+   i_ NUMBER;
+   j_ NUMBER;
+BEGIN
+   i_ := Show_Db_Obj_Debug_Count___;
+   SELECT DECODE(i_, 0, 0, 1)
+   INTO j_
+   FROM dual;
+   RETURN(j_);
+END Show_Db_Obj_Debug_Exist;    
+
+PROCEDURE Show_Dbms_Jobs
+IS
+   num_of_jobs_ NUMBER := 0;
+BEGIN
+   num_of_jobs_ := Show_Dbms_Jobs___;
+END Show_Dbms_Jobs;
+
+FUNCTION Show_Dbms_Jobs RETURN NUMBER
+IS
+BEGIN
+   RETURN(Show_Dbms_Jobs___);
+END Show_Dbms_Jobs;
+
+PROCEDURE Show_Scheduler_Processes
+IS
+   num_of_jobs_ NUMBER := 0;
+BEGIN
+   num_of_jobs_ := Show_Scheduler_Processes___;
+END Show_Scheduler_Processes;
+
+FUNCTION Show_Scheduler_Processes RETURN NUMBER
+IS
+BEGIN
+   RETURN(Show_Scheduler_Processes___);
+END Show_Scheduler_Processes;
+
+FUNCTION Show_Jobs_Other_Schema RETURN NUMBER
+IS
+BEGIN
+   RETURN(Show_Jobs_Other_Schema___);
+END Show_Jobs_Other_Schema;
+
+PROCEDURE Show_Jobs_Other_Schema
+IS
+   num_of_jobs_ NUMBER := 0;
+BEGIN
+   num_of_jobs_ := Show_Jobs_Other_Schema___;
+END Show_Jobs_Other_Schema;
+
+FUNCTION Show_Jobs_Trgs_Other_Schema RETURN NUMBER
+IS
+BEGIN
+   RETURN(Show_Jobs_Other_Schema___ + Show_Triggers_Other_Schema___);
+END Show_Jobs_Trgs_Other_Schema;
+
+PROCEDURE Show_Jobs_Trgs_Other_Schema
+IS
+   num_of_jobs_ NUMBER := 0;
+BEGIN
+   num_of_jobs_ := Show_Jobs_Other_Schema___ + Show_Triggers_Other_Schema___;
+END Show_Jobs_Trgs_Other_Schema;
+
+PROCEDURE Reset_Job_Queue_Processes 
+IS
+   job_queue_processes_ &TABLE..text1%TYPE;
+   log_id_              &TABLE..log_id%TYPE;
+   guid_                &TABLE..guid%TYPE := Get_Installation_Id_;
+   CURSOR getlog IS
+      SELECT text1, log_id
+      FROM &TABLE
+      WHERE action = job_queue_proc_
+      AND guid = guid_
+      AND category = 'JOB_QUEUE_PROCESSES'
+      AND text2 IS NULL;
+BEGIN
+   OPEN getlog;
+   FETCH getlog INTO job_queue_processes_, log_id_;
+   IF getlog%FOUND THEN
+      CLOSE getlog;
+      -- Set back to previous value or def_no_of_processes_ if it has null
+      Alter_Job_Queue_Processes__(Nvl(job_queue_processes_, def_no_of_processes_));
+      UPDATE &TABLE
+      SET text2 = 'Job queue processes reverted to '||job_queue_processes_,
+          last_modified = SYSDATE
+      WHERE log_id = log_id_;
+   ELSE
+      CLOSE getlog;
+      -- Set to default value, i.e. def_no_of_processes_, if no log is found
+      Alter_Job_Queue_Processes__(def_no_of_processes_);
+   END IF;
+END Reset_Job_Queue_Processes;
+
+PROCEDURE Set_Job_Queue_Processes (
+   in_no_of_processes_ IN VARCHAR2 )
+IS
+   no_of_processes_     NUMBER;
+   job_queue_processes_ &TABLE..text1%TYPE;
+   log_id_              &TABLE..log_id%TYPE;
+   guid_                &TABLE..guid%TYPE := Get_Installation_Id_;
+   rowid_               ROWID;
+   CURSOR getlog IS
+      SELECT text1, rowid
+      FROM &TABLE
+      WHERE action = job_queue_proc_
+      AND guid = guid_
+      AND category IN ('JOB_QUEUE_PROCESSES', 'RESET_JOB_QUEUE_PROCESSES');
+BEGIN
+   BEGIN
+      SELECT TRUNC(TO_NUMBER(in_no_of_processes_)) INTO no_of_processes_ FROM dual;
+   EXCEPTION
+      WHEN invalid_number THEN
+         no_of_processes_ := def_no_of_processes_;
+         Dbms_Output.Put_Line('PROMPT '||in_no_of_processes_||' is not a correct value for job queue processes interval! By default, '||def_no_of_processes_||' will be used');
+   END;
+   IF no_of_processes_ < min_no_of_processes_ THEN
+      no_of_processes_ := def_no_of_processes_;
+      Dbms_Output.Put_Line('PROMPT '||in_no_of_processes_||' is not a correct value for job queue processes interval! By default, '||def_no_of_processes_||' will be used');
+   END IF;
+   -- Save the old value
+   OPEN getlog;
+   FETCH getlog INTO job_queue_processes_, rowid_;
+   IF getlog%FOUND THEN
+      CLOSE getlog;
+      DELETE FROM &TABLE WHERE ROWID = rowid_;
+   ELSE
+      CLOSE getlog;
+      job_queue_processes_ := Get_Init_Parameter___('job_queue_processes');
+   END IF;
+   Alter_Job_Queue_Processes__(no_of_processes_);
+   SELECT &SEQUENCE..NEXTVAL
+   INTO   log_id_
+   FROM   dual;
+   INSERT INTO &TABLE
+      (log_id,
+       guid,
+       category,
+       text1,
+       created,
+       last_modified,
+       action)
+   VALUES
+      (log_id_,
+       guid_,
+       'JOB_QUEUE_PROCESSES',
+       job_queue_processes_,
+       SYSDATE,
+       SYSDATE,
+       job_queue_proc_);
+END Set_Job_Queue_Processes;
+
+
+PROCEDURE Stop_Scheduler_Processes
+IS
+   already_stopped EXCEPTION;
+   PRAGMA EXCEPTION_INIT(already_stopped, -27366);
+   i_ NUMBER := 0;
+   CURSOR get_running_jobs IS
+      SELECT r.job_name
+        FROM user_scheduler_running_jobs r;
+BEGIN
+   Install_Tem_SYS.Disable_Scheduler_Processes;
+   FOR rec IN get_running_jobs LOOP
+      BEGIN
+         Dbms_Scheduler.Stop_Job(rec.job_name);
+         i_ := i_ + 1;
+         IF (i_ = 1) THEN
+            Dbms_Output.Put_Line(' ');
+            Dbms_Output.Put_Line('The following running F1 jobs are stopped');
+            Dbms_Output.Put_Line('=========================================');
+         END IF;
+         Dbms_Output.Put_Line(Rpad(rec.job_name, 31, ' '));
+      EXCEPTION
+         WHEN already_stopped THEN
+             NULL;
+      END;
+   END LOOP;
+END Stop_Scheduler_Processes;
+
+PROCEDURE Installation_Support (
+   action_    IN VARCHAR2,
+   parameter_ IN VARCHAR2,
+   module_    IN VARCHAR2 DEFAULT NULL )
+IS
+BEGIN
+   CASE UPPER(action_)
+      WHEN 'PRE_INSTALLATION' THEN
+         Pre_Installation___(parameter_);
+      WHEN 'POST_INSTALLATION' THEN
+         Post_Installation___(parameter_);
+      WHEN 'DISABLE_TRIGGERS' THEN
+         Disable_Triggers___(parameter_);
+      WHEN 'ENABLE_TRIGGERS' THEN
+         Enable_Triggers___(parameter_);
+      WHEN 'COMPILE_BASE_PACKAGES' THEN
+         Compile_Base_Packages___(parameter_);
+      WHEN 'REFRESH_CUSTOMOBJECTS' THEN
+         Refresh_Customobjects___(parameter_);
+      WHEN 'BI_POST_INSTALLATION_OBJECT' THEN
+         Bi_Post_Install_Object___(parameter_);
+      WHEN 'BI_POST_INSTALLATION_DATA' THEN
+         Bi_Post_Install_Data___(parameter_);
+      WHEN 'FINALIZE_DEV_DEPLOY' THEN
+         Finalize_Dev_Deploy___(parameter_);
+      ELSE
+         NULL;
+   END CASE;
+END Installation_Support;
+
+PROCEDURE Lu_Installation_Support (
+   lu_        IN VARCHAR2,
+   action_    IN VARCHAR2,
+   parameter_ IN VARCHAR2 DEFAULT NULL )
+IS
+   log_id_ &TABLE..log_id%TYPE;
+   guid_   &TABLE..guid%TYPE := Get_Installation_Id_;
+   installation_mode_ BOOLEAN := FALSE;
+BEGIN
+   -- ifs_assert_safe mabose 20140331 
+   EXECUTE IMMEDIATE 'BEGIN :installation_mode := Installation_SYS.Get_Installation_Mode; END;' USING OUT installation_mode_;
+   IF installation_mode_ THEN
+      SELECT &SEQUENCE..NEXTVAL
+      INTO   log_id_
+      FROM   dual;
+      INSERT INTO &TABLE
+         (log_id,
+          guid,
+          category,
+          text1,
+          text2,
+          text3,
+          created,
+          last_modified,
+          action)
+      VALUES
+         (log_id_,
+          guid_,
+          'LU_INSTALLATION_SUPPORT',
+          lu_,
+          action_,
+          parameter_,
+          SYSDATE,
+          SYSDATE,
+          '<LU_INSTALLATION_SUPPORT>');
+   END IF;
+END Lu_Installation_Support;
+
+
+PROCEDURE Finalize_Installation (
+   complete_ VARCHAR2 DEFAULT 'FALSE' )
+IS
+   appowner_    VARCHAR2(30) := UPPER('&APPLICATION_OWNER');
+   compile_all_ BOOLEAN := FALSE;
+   multi_delivery_ BOOLEAN := Get_Multi_Installation_Mode;
+   previous_guid_  INSTALL_TEM_SYS_TAB.guid%TYPE;
+   CURSOR check_top_exist IS
+      SELECT guid
+      FROM INSTALL_TEM_SYS_TAB
+      WHERE log_id = 0;
+BEGIN
+   OPEN check_top_exist;
+   FETCH check_top_exist INTO previous_guid_;
+   IF check_top_exist%FOUND THEN
+      CLOSE check_top_exist;
+      IF complete_ = 'TRUE' THEN
+         IF multi_delivery_ = FALSE THEN
+            --@ApproveDynamicStatement(2016-11-07,mabose)
+            EXECUTE IMMEDIATE 'BEGIN SYS.Utl_Recomp.Recomp_Parallel(8, :schema_); END;' USING appowner_;
+            -- ifs_assert_safe mabose 20140417 
+            EXECUTE IMMEDIATE 'BEGIN Database_SYS.Installation_Summary; END;';
+         END IF;
+      ELSIF complete_ = 'MULTI' THEN
+         --@ApproveDynamicStatement(2016-11-07,mabose)
+         EXECUTE IMMEDIATE 'BEGIN Database_SYS.Compile_All_Invalid_Objects; END;';
+         --@ApproveDynamicStatement(2019-11-26,mabose)
+         EXECUTE IMMEDIATE 'BEGIN Database_SYS.Compile_Schema_(:ial_owner, :compile_other_schema, FALSE); END;' USING '&IAL_OWNER', '&COMPILE_OTHER_SCHEMA';
+         -- ifs_assert_safe mabose 20140417 
+         EXECUTE IMMEDIATE 'BEGIN Database_SYS.Installation_Summary; END;';
+      ELSE
+         -- ifs_assert_safe mabose 20140129
+         EXECUTE IMMEDIATE 'BEGIN Installation_SYS.Create_Component_Package(TRUE); END;';
+		 Dbms_Output.Put_Line('Previous Installation with ID: '||previous_guid_||' was aborted. Settings from this installation will be reverted.');
+         Enable_Triggers___(NULL);
+      END IF;
+      IF complete_ != 'RESET' THEN
+         IF (multi_delivery_ = TRUE
+         AND complete_ = 'TRUE') THEN
+            NULL;
+         ELSE
+            Reset_Job_Queue_Processes;
+            Enable_Scheduler_Processes;
+            IF complete_ IN ('TRUE', 'MULTI') THEN
+               Enable_New_Processes___;
+            END IF;
+         END IF;
+      END IF;
+      IF (multi_delivery_ = TRUE
+      AND complete_ = 'TRUE') THEN
+         NULL;
+      ELSE
+         BEGIN
+            DELETE FROM install_tem_sys_tab
+            WHERE log_id = 0;
+         EXCEPTION
+            WHEN no_data_found THEN
+               NULL;
+         END;
+      END IF;
+   ELSE
+      CLOSE check_top_exist;
+   END IF;
+END Finalize_Installation;
+
+
+FUNCTION User_Exist (
+   username_ IN VARCHAR2 ) RETURN NUMBER
+IS
+   dummy_ NUMBER;
+   CURSOR check_exist IS
+      SELECT 1
+      FROM dba_users
+      WHERE username = username_;
+BEGIN
+   OPEN check_exist;
+   FETCH check_exist INTO dummy_;
+   IF check_exist%FOUND THEN
+      CLOSE check_exist;
+      RETURN 1;
+   ELSE
+      CLOSE check_exist;
+      RETURN 0;
+   END IF;
+END User_Exist;
+
+FUNCTION Get_Multi_Installation_Mode RETURN BOOLEAN
+IS
+   text1_ &TABLE..text1%TYPE;
+BEGIN
+   BEGIN
+      SELECT text1
+      INTO text1_
+      FROM &TABLE
+      WHERE log_id = 0;
+   EXCEPTION
+      WHEN no_data_found THEN
+         text1_ := NULL;
+   END;
+   IF text1_ = 'multi' THEN
+      RETURN TRUE;
+   ELSE
+      RETURN FALSE;
+   END IF;
+END Get_Multi_Installation_Mode;
+
+PROCEDURE Set_Multi_Installation_Mode (
+   multi_delivery_mode_ IN BOOLEAN DEFAULT FALSE )
+IS
+   guid_  &TABLE..guid%TYPE;
+   text1_ &TABLE..text1%TYPE;
+BEGIN
+   IF multi_delivery_mode_ THEN
+      text1_ := 'multi';
+   ELSE
+      text1_ := NULL;
+   END IF;
+   BEGIN
+      -- Create unique installation id
+      SELECT TO_CHAR(logon_time, 'YYYYMMDD HH24MISS')
+      INTO guid_
+      FROM sys.v_$session
+      WHERE audsid = userenv('SESSIONID')
+      AND ROWNUM < 2;
+      Dbms_Output.Put_Line(' ');
+      Dbms_Output.Put_Line('Installation ID: '||guid_);
+      Dbms_Output.Put_Line(' ');
+      INSERT INTO &TABLE
+         (log_id,
+          guid,
+          text1)
+      VALUES
+         (0,
+          guid_,
+          text1_);
+   EXCEPTION
+      WHEN dup_val_on_index THEN
+         UPDATE &TABLE
+         SET text1 = text1_
+         WHERE log_id = 0;
+   END;
+END Set_Multi_Installation_Mode;
+
+FUNCTION Disabled_Rowkey_Exist RETURN NUMBER
+IS
+   dummy_ NUMBER;
+BEGIN
+   SELECT COUNT(*)
+   INTO dummy_
+   FROM user_objects
+   WHERE object_name = 'DATABASE_SYS';
+   IF dummy_ > 0 THEN
+      -- ifs_assert_safe mabose 20140905
+      EXECUTE IMMEDIATE 'SELECT 1
+                         FROM user_tab_columns
+                         WHERE column_name = ''ROWKEY''
+                         AND  (nullable = ''Y'' OR default_on_null = ''NO'')
+                         AND table_name IN (SELECT object_name 
+                                             FROM user_objects 
+                                             WHERE object_type = ''TABLE''
+                                             AND SUBSTR(object_name, INSTR(object_name, ''_'', -1)) NOT IN (''_CFT'', ''_OLD'')
+                                             AND NOT REGEXP_LIKE(SUBSTR(object_name, INSTR(object_name, ''_'', -1)+1),''[0..9]''))
+                         AND ROWNUM < 2' INTO dummy_;
+      IF NVL(dummy_, 0) > 0 THEN
+         RETURN Identify_Large_Database___;
+      ELSE
+         RETURN 0;
+      END IF;
+   ELSE
+      RETURN 0;
+   END IF;
+EXCEPTION
+   WHEN no_data_found THEN
+      RETURN 0;
+   WHEN OTHERS THEN
+      RETURN Identify_Large_Database___;
+END Disabled_Rowkey_Exist;
+
+
+FUNCTION Unconverted_Lob_Exist RETURN NUMBER
+IS
+   dummy_ NUMBER;
+BEGIN
+   SELECT COUNT(*)
+   INTO dummy_
+   FROM dual
+   WHERE EXISTS 
+   (SELECT 1
+    FROM user_objects o, user_tab_columns c, user_lobs l
+    WHERE o.object_name = c.table_name
+    AND o.object_type = 'TABLE'
+    AND o.temporary = 'N'
+    AND SUBSTR(o.object_name, INSTR(o.object_name, '_', -1)) != '_OLD'
+    AND NOT REGEXP_LIKE(SUBSTR(o.object_name, INSTR(o.object_name, '_', -1)+1),'[0..9]')
+    AND c.table_name = l.table_name
+    AND c.column_name = l.column_name
+    AND (l.securefile = 'NO' OR l.in_row = 'NO')
+    AND c.table_name NOT LIKE 'VMO%TAB'
+    AND c.table_name NOT LIKE 'DR$%'
+    AND NOT EXISTS
+    (SELECT 1
+     FROM ctx_user_indexes t
+     WHERE t.idx_table = c.table_name
+     AND t.idx_text_name = c.column_name)
+    AND NOT EXISTS (
+     SELECT 1
+     FROM user_queue_tables q
+     WHERE q.queue_table = c.table_name));
+   IF dummy_ > 0 THEN
+      RETURN Identify_Large_Database___;
+   ELSE
+      RETURN 0;
+   END IF;
+EXCEPTION
+   WHEN OTHERS THEN
+      RETURN Identify_Large_Database___;
+END Unconverted_Lob_Exist;
+
+FUNCTION Dbms_Scheduler_Enabled RETURN VARCHAR2
+IS
+   scheduler_disabled_ VARCHAR2(10);
+BEGIN
+   DBMS_Scheduler.Get_Scheduler_Attribute('SCHEDULER_DISABLED', scheduler_disabled_);
+   IF NVL(scheduler_disabled_, 'FALSE') = 'FALSE' THEN
+      RETURN 'TRUE';
+   ELSE
+      RETURN 'FALSE';
+   END IF;
+END Dbms_Scheduler_Enabled;
+
+FUNCTION Nls_Length_Semantic_Is_Char RETURN VARCHAR2
+IS
+BEGIN
+   IF Get_Init_Parameter___('nls_length_semantics') = 'CHAR' THEN
+      RETURN 'TRUE';
+   ELSE
+      RETURN 'FALSE';
+   END IF;
+END Nls_Length_Semantic_Is_Char;
+
+FUNCTION Installation_Running RETURN BOOLEAN
+IS
+   dummy_ NUMBER;
+   CURSOR check_installation IS
+      SELECT 1
+      FROM gv$session
+      WHERE module = 'IFS Applications Installer'
+      AND action = 'Main Thread';
+BEGIN
+   OPEN check_installation;
+   FETCH check_installation INTO dummy_;
+   IF check_installation%FOUND THEN
+      CLOSE check_installation;
+      RETURN TRUE;
+   ELSE
+      CLOSE check_installation;
+      RETURN FALSE;
+   END IF;
+END Installation_Running;
+
+PROCEDURE Gather_Initial_Statistics
+IS
+BEGIN
+   DBMS_Stats.Gather_Dictionary_Stats;
+   DBMS_Stats.Gather_Database_Stats;
+END Gather_Initial_Statistics;
+
+FUNCTION Background_Processing_On RETURN VARCHAR2
+IS
+BEGIN
+   IF Check_Queue_Process___ THEN
+      IF Am_I_Multitenant
+      AND Get_Init_Parameter___('job_queue_processes') < 1 THEN
+         RETURN 'FALSE';
+      END IF;
+      RETURN 'TRUE';
+   ELSE
+      RETURN 'FALSE';
+   END IF;
+END Background_Processing_On;
+
+FUNCTION Am_I_Multitenant RETURN BOOLEAN
+IS
+   dummy_ NUMBER;
+   CURSOR check_multitenant IS
+      SELECT 1
+      FROM v$database
+      WHERE cdb = 'YES';
+BEGIN
+   OPEN check_multitenant;
+   FETCH check_multitenant INTO dummy_;
+   IF check_multitenant%FOUND THEN
+      CLOSE check_multitenant;
+      RETURN TRUE;
+   ELSE
+      CLOSE check_multitenant;
+      RETURN FALSE;
+   END IF;
+END Am_I_Multitenant ;
+
+-----------------------------------------------------------------------------
+-------------------- FOUNDATION1 METHODS ------------------------------------
+-----------------------------------------------------------------------------
+-- Init
+--   Dummy procedure that can be called at database startup to ensure that
+--   this package is loaded into memory for performance reasons only.
+-----------------------------------------------------------------------------
+
+PROCEDURE Init
+IS
+BEGIN
+   NULL;
+END Init;
+
+END &PKG;
+/
+SHOW ERROR
+
+UNDEFINE PKG
+UNDEFINE TABLE
+UNDEFINE SEQUENCE

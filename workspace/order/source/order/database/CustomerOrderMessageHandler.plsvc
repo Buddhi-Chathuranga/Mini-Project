@@ -1,0 +1,153 @@
+----------------------------------------------------------------------------------------------------
+--
+--  Logical unit: CustomerOrderMessageHandler
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+-- ---------- ------ ------------------------------------------------------------------------------
+-- 2018-08-17 HaPulk SCUXXW4-8380, Converted from dlgCustomerOrderTransfer using MTG Version: 1.26
+---------------------------------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Do_Resend_Message___(
+   message_type_const_      IN VARCHAR2,
+   printed_flag_            IN VARCHAR2,
+   printed_                 IN VARCHAR2,
+   dispatch_advice_sent_db_ IN VARCHAR2,
+   objstate_                IN VARCHAR2 ) RETURN Resend_Order_Message_Structure_Rec
+IS
+   resend_order_message_structure_rec_ Resend_Order_Message_Structure_Rec;
+BEGIN
+   resend_order_message_structure_rec_.resend_order := FALSE;
+   IF message_type_const_ = 'MSGTYPE_Confirm' THEN
+      IF printed_flag_ = printed_ THEN              
+            resend_order_message_structure_rec_.document := 'Customer Order';
+            resend_order_message_structure_rec_.resend_order := TRUE;
+      END IF;
+   ELSIF message_type_const_ = 'MSGTYPE_DispAdv' THEN
+      IF dispatch_advice_sent_db_ = 'SENT' THEN
+         resend_order_message_structure_rec_.document := 'Dispatch Advice';
+         resend_order_message_structure_rec_.resend_order := TRUE;
+      END IF;
+   ELSIF message_type_const_ = 'MSGTYPE_DelNote' THEN
+      IF objstate_ = 'Printed' THEN                                    
+         resend_order_message_structure_rec_.document := 'Delivery Note';
+         resend_order_message_structure_rec_.resend_order := TRUE;            
+      END IF;
+   END IF;
+   --resend_order_structure_rec_.resend_order := TRUE;    
+   --resend_order_structure_rec_.document := 'Customer Order';
+   RETURN resend_order_message_structure_rec_;
+END Do_Resend_Message___;
+
+PROCEDURE Send_Message___ (
+   message_type_const_       IN VARCHAR2,
+   order_no_                 IN VARCHAR2,
+   media_code_               IN VARCHAR2,
+   delnote_no_               IN VARCHAR2,
+   invoice_id_               IN VARCHAR2,
+   online_ordrsp_processing_ IN VARCHAR2)
+IS
+   message_type_ VARCHAR2(200);   
+   attr_         VARCHAR2(32000);
+BEGIN             
+   IF message_type_const_ = 'MSGTYPE_DispAdv' THEN
+      Dispatch_Advice_Utility_API.Send_Dispatch_Advice(delnote_no_, media_code_);
+   ELSIF message_type_const_ = 'MSGTYPE_ShipDelNote' THEN
+      Customer_Order_Transfer_API.Send_Direct_Delivery(delnote_no_, order_no_, media_code_, NULL);
+   ELSE
+      IF message_type_const_ = 'MSGTYPE_Confirmation' THEN 
+         message_type_ := '501';
+      ELSIF message_type_const_ = 'MSGTYPE_ProFormaInv' THEN
+         message_type_ := '502';
+      ELSIF message_type_const_ = 'MSGTYPE_Confirm' THEN
+         message_type_ := '40';
+      ELSIF message_type_const_ = 'MSGTYPE_DispAdv' THEN
+         message_type_ := '105';
+      ELSIF message_type_const_ = 'MSGTYPE_DelNote' THEN 
+         message_type_ := '110';
+      ELSIF message_type_const_ = 'MSGTYPE_ShipDelNote' THEN 
+         message_type_ := '120';
+      ELSIF message_type_const_ = 'MSGTYPE_Invoice' THEN 
+         message_type_ := '510';
+      ELSIF message_type_const_ = 'MSGTYPE_SendInvoice' THEN 
+         message_type_ := '511';
+      ELSIF message_type_const_ = 'MSGTYPE_Pricat' THEN 
+         message_type_ := '9999';
+      END IF;      
+      Client_SYS.Add_To_Attr ('START_EVENT', message_type_, attr_);      
+      Client_SYS.Add_To_Attr ('MEDIA_CODE', media_code_, attr_);    
+      Client_SYS.Add_To_Attr ('PRINT', '', attr_);    
+
+      IF message_type_const_ = 'MSGTYPE_Invoice' THEN
+         Client_SYS.Add_To_Attr ('INVOICE_ID', invoice_id_, attr_);
+         Client_SYS.Add_To_Attr ('SEND', 'TRUE', attr_);
+         Client_SYS.Add_To_Attr ('END', '', attr_);
+         Customer_Order_Flow_API.Start_Print_Invoice__ (attr_);
+      ELSIF message_type_const_ = 'MSGTYPE_SendInvoice' THEN
+         Client_SYS.Add_To_Attr ('INVOICE_ID', invoice_id_, attr_);
+         Client_SYS.Add_To_Attr ('SEND', 'TRUE', attr_);   
+         Client_SYS.Add_To_Attr ('END', '', attr_);
+         Customer_Order_Flow_API.Start_Print_Invoice__(attr_);
+      ELSIF message_type_const_ = 'MSGTYPE_Invoice' THEN
+         Client_SYS.Add_To_Attr ('INVOICE_ID', invoice_id_, attr_);
+         Client_SYS.Add_To_Attr ('SEND', 'TRUE', attr_);
+         Client_SYS.Add_To_Attr ('RESEND', 'TRUE', attr_);
+         Client_SYS.Add_To_Attr ('END', '', attr_);         
+         Customer_Order_Flow_API.Start_Print_Invoice__(attr_);
+      ELSE
+         Client_SYS.Add_To_Attr ('ORDER_NO', order_no_, attr_);
+         IF message_type_const_ = 'MSGTYPE_Confirm' THEN
+            Client_SYS.Add_To_Attr ('ONLINE_ORDRSP_PROCESSING', online_ordrsp_processing_, attr_);
+            Client_SYS.Add_To_Attr ('END', '', attr_);
+            Customer_Order_Flow_API.Start_Print_Order_Conf__(attr_);    
+         ELSIF message_type_const_ = 'MSGTYPE_DelNote' THEN
+            Client_SYS.Add_To_Attr ('DELNOTE_NO', delnote_no_, attr_);
+            Client_SYS.Add_To_Attr ('END', '', attr_);
+            Customer_Order_Flow_API.Start_Print_Delivery_Note__(attr_);                            
+         END IF;                                                                                     
+      END IF;                      
+   END IF;            
+END Send_Message___;
+
+FUNCTION Customer_Order_Message_Info___(
+   order_no_           IN VARCHAR2,   
+   receiver_           IN VARCHAR2,
+   delnote_no_         IN VARCHAR2,
+   message_type_const_ IN VARCHAR2 ) RETURN Customer_Order_Message_Structure_Rec
+IS
+   customer_order_message_structure_rec_ Customer_Order_Message_Structure_Rec;   
+   ordrsp_site_  VARCHAR2(5);
+BEGIN
+   IF message_type_const_ = 'MSGTYPE_Confirm' THEN
+      customer_order_message_structure_rec_.message_type := 'ORDRSP';
+      customer_order_message_structure_rec_.window_title := 'Send Order Confirmation';
+      customer_order_message_structure_rec_.printed_flag := Customer_Order_API.Get_Order_Conf(order_no_);
+      ordrsp_site_ := Cust_Ord_Customer_API.Get_Acquisition_Site(Customer_Order_API.Get_Customer_No(order_no_));
+      customer_order_message_structure_rec_.online_ordrsp_processing := Site_Discom_Info_API.Get_Exec_Ord_Change_Online_Db(ordrsp_site_);
+      customer_order_message_structure_rec_.printed := Order_Confirmation_Printed_API.Decode('Y');  
+   ELSIF message_type_const_ = 'MSGTYPE_DispAdv' THEN
+      customer_order_message_structure_rec_.message_type := 'DESADV';
+      customer_order_message_structure_rec_.window_title := 'Send Dispatch Advice Message';
+      customer_order_message_structure_rec_.dispatch_advice_sent_db := Delivery_Note_API.Get_Dispatch_Advice_Sent_Db(delnote_no_); 
+   ELSIF message_type_const_ = 'MSGTYPE_DelNote' THEN
+      customer_order_message_structure_rec_.message_type := 'DIRDEL';
+      customer_order_message_structure_rec_.window_title := 'Send Direct Delivery Message';
+      customer_order_message_structure_rec_.objstate := Delivery_Note_API.Get_Objstate(delnote_no_);
+   ELSIF message_type_const_ = 'MSGTYPE_ShipDelNote' THEN
+      customer_order_message_structure_rec_.message_type := 'DIRDEL';
+      customer_order_message_structure_rec_.window_title := 'Send Direct Delivery Message';
+   ELSIF message_type_const_ = 'MSGTYPE_Invoice' THEN
+      customer_order_message_structure_rec_.message_type := 'INVOIC'; 
+      customer_order_message_structure_rec_.window_title := 'Send Customer Invoice';
+   ELSIF message_type_const_ = 'MSGTYPE_SendInvoice' THEN
+      customer_order_message_structure_rec_.message_type := 'INVOIC';
+      customer_order_message_structure_rec_.window_title := 'Send Customer Invoice';
+   END IF;
+   customer_order_message_structure_rec_.media_code := Cust_Ord_Customer_API.Get_Default_Media_Code (receiver_, customer_order_message_structure_rec_.message_type);
+   
+   RETURN customer_order_message_structure_rec_;
+END Customer_Order_Message_Info___;

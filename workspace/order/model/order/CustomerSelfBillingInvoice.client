@@ -1,0 +1,438 @@
+-----------------------------------------------------------------------------------------------------
+-- Date        Sign     History
+-- ----------  ------   -----------------------------------------------------------------------------
+-- 2021-02-23  DhAplk   SC2020R1-12660, Corrected CustPriceConvFactor param in GetAmounts method call in CustUnitPartPrice field.
+-- 2020-03-06  MaEelk   SCXTEND-2227, Enabled the Dulicate Functionality.
+-- 2018-12-05  KHVESE   SCUXXW4-9475, Implemented.
+-- 2018-11-27  HPETSE   SCUXXW4-9475, Converted from frmSelfBillingInvoice using MTG Version: 1.33
+-----------------------------------------------------------------------------------------------------
+
+client CustomerSelfBillingInvoice;
+component ORDER;
+layer Core;
+projection CustomerSelfBillingInvoiceHandling;
+include fragment ValidCustomerAgreementLovSelector;
+include fragment NonRentalSalesPartLovSelector;
+include fragment CustomerInfoCustcategoryPubSelector;
+include fragment UnmatchedSbiDeliveriesSelector;
+include fragment AddSelfBillingLinesAssistant;
+include fragment UpdateSalesPartPricesFromSbDialog;
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+
+navigator {
+   entry CustomerSelfBillingInvoiceNavEntry parent OrderNavigator.InvoicingSelfBilling at index 400 {
+      label = "Customer Self-Billing Invoice";
+      page Form;
+   }
+}
+
+-------------------------------- MAIN PAGES ---------------------------------
+
+page Form using SelfBillingHeaderSet {
+   label = "Customer Self-Billing Invoice";
+   startupmode = search;
+   stateindicator SelfBillingHeaderStateIndicator;
+   selector SelfBillingHeaderSelector;
+   group SelfBillingInvoiceGroup;
+   group SelfBillingInvoiceAmountsGroup;
+   list SelfBillingItemList(SelfBillingItemArray);
+
+   commandgroup ModifyCmdGroup {
+
+      command AddLinesCommand;
+      command UnmatchandRemoveAllLinesCommand;
+      command CreateCustomerInvoiceCommand;
+   }
+}
+
+-------------------------------- ASSISTANTS ---------------------------------
+
+--------------------------------- COMMANDS ----------------------------------
+
+command AddLinesCommand for SelfBillingHeader {
+   label = "Add Lines";
+   mode = SingleRecord;
+   enabled = [Objstate = "Preliminary"];
+   execute {
+      assistant AddSBLinesAssistant(SbiNo, CustomerId, CustomerIdRef.Name, CurrencyCode, Company) {
+         when OK {
+            exit OK;
+            refresh;
+         }
+      }
+   }
+}
+
+command UnmatchandRemoveAllLinesCommand for SelfBillingHeader {
+   label = "Unmatch and Remove All Lines";
+   mode = SingleRecord;
+   enabled = [Objstate = "Preliminary" and LinesToInvoice > 0];
+   execute {
+      call UnmatchAll();
+   }
+}
+
+command CreateCustomerInvoiceCommand for SelfBillingHeader {
+   label = "Create Customer Invoice";
+   mode = SingleRecord;
+   enabled = [Objstate = "Preliminary" and LinesToInvoice > 0];
+   variable ProvisionalPriceExistVar {
+      type = Text;
+   }
+   execute {
+      if [SbReferenceNo = null] {
+         warning("'SB Reference No' must have a value before creating the Customer Invoice.");
+         exit;
+      }
+      call ProvisionalPriceExist(SbiNo) into ProvisionalPriceExistVar;
+      if [ProvisionalPriceExistVar = "FALSE"] {
+         confirm("Self-Billing Invoice will be created.") {
+            when CANCEL {
+               exit;
+            }
+         }
+      }
+      else {
+         confirm("Matched customer order lines with provisional price exist. Do you want those provisional prices unchecked and the invoice created?") {
+            when CANCEL {
+               exit;
+            }
+         }
+      }
+      call CreateInvoice(Company, CustomerId);
+   }
+}
+
+command CustomerInvoiceCommand for SelfBillingItem {
+   label = "Customer Invoice";
+   mode = SelectedRecords;
+   enabled = [Objstate = "InvoiceCreated"];
+   bulkexecute {
+      bulknavigate "page/CustomerOrderInvoices/List?$filter=Company eq $[parent.Company] and InvoiceId eq $[InvoiceId]";
+   }
+}
+
+command CustomerOrderCommand for SelfBillingItem {
+   label = "Customer Order";
+   mode = SelectedRecords;
+   enabled = [true];
+   bulkexecute {
+      bulknavigate "page/CustomerOrder/Form?$filter=OrderNo eq $[OrderNo]";
+   }
+}
+
+command UnmatchandRemoveCommand for SelfBillingItem {
+   label = "Unmatch and Remove";
+   mode = SelectedRecords;
+   enabled = [Objstate != "InvoiceCreated"];
+   bulkexecute {
+      bulkcall UnmatchLine(SbiNo, SbiLineNo) {
+         continueonerror = [true];
+         when FAIL {
+            error("${error.Message}");
+         }
+//         ! TODO: The hide selection needs to be handled parially, request SCUXXW4-14249. For now implemented with LU dependency
+//         when SUCCESS {
+//            hideselection();
+//         }
+      }
+   }
+}
+
+command UpdatePriceOnMatchedOrderLineCommand for SelfBillingItem {
+   label = "Update Price on Matched Order Line";
+   mode = SelectedRecords;
+   // Code review note: The inquire code has bug in IEE client. So we considered command to be enabled when all records fulfill the requirement.
+   enabled = [CustomerOrderLineRef.PriceFreeze != "FROZEN" and Objstate != "InvoiceCreated" and DiscountAmount = 0 and Discount = 0];
+   bulkexecute {
+      confirm("Price/Currency on Customer Order Line(s) will be updated.") {
+         when OK {
+            bulkcall ModifySaleUnitPrice(OrderNo, LineNo, RelNo, LineItemNo, CustPartPrice) {
+               continueonerror = [true];
+               when FAIL {
+                  error("${error.Message}");
+               }
+            }
+         }
+      }
+   }
+}
+
+command UpdateSalesPartPricesCommand for SelfBillingItem {
+   label = "Update Sales Part Prices";
+   mode = SingleRecord;
+   enabled = [Objstate != "InvoiceCreated" and DiscountAmount = 0 and Discount = 0];
+   variable AgreementIdVar {
+      type = Text;
+   }
+   execute {
+      if [PriceSource = "Agreement"] {
+         call GetPriceSourceId(OrderNo, LineNo, RelNo, LineItemNo) into AgreementIdVar;
+      }
+      dialog UpdateSalesPartPricesFromSbDialog(CustomerNo, Contract, CatalogNo, CustomerPartNo, CurrencyCode, CustPartPrice, AgreementIdVar) into(NewAgreementIdVar) {
+         when OK {
+            if [NewAgreementIdVar != null and NewAgreementIdVar != ""] {
+               messagebox("", question, "Customer Agreement ${NewAgreementIdVar} has been created. Would you like to view the Customer Agreement now?") {
+                  when "Yes" {
+                     navigate "page/CustomerAgreement/Form?contexts=Company:$[parent.Company]&$filter=AgreementId eq $[NewAgreementIdVar]";
+                     exit OK;
+                  }
+                  when "No" {
+                     exit OK;
+                  }
+               }
+            }
+            refresh;
+         }
+      }
+   }
+}
+
+command AddChargesCommand for SelfBillingItem {
+   label = "Add Charges";
+   mode = SelectedRecords;
+   enabled = [Objstate != "InvoiceCreated"];
+   bulkexecute {
+      //! TODO: Need to navigate to charge tab on customer order page
+      bulknavigate "page/CustomerOrder/Form?$filter=OrderNo eq $[OrderNo]";
+   }
+}
+
+--------------------------------- SELECTORS ---------------------------------
+
+@Override
+selector SelfBillingHeaderSelector for SelfBillingHeader {
+   // TODO! IntSbiNo has been added as a Number attribute to be used in order by. It can be replace with alternative solution if framework give any in future.
+   orderby = IntSbiNo;
+   label = "${SbiNo} - ${CustomerId} - ${CustomerIdRef.Name} - ${Objstate}";
+   static SbiNo;
+   static CustomerId;
+   static CustomerIdRef.Name {
+      label = "Customer Name";
+   }
+   badge Objstate {
+      emphasis Progress1 = [Objstate = "Preliminary"];
+      emphasis Progress12 = [Objstate = "InvoiceCreated"];
+      style = TextOnly;
+   }
+
+}
+
+---------------------------------- GROUPS -----------------------------------
+
+group SelfBillingInvoiceGroup for SelfBillingHeader {
+   label = "";
+   field SbiNo;
+   lov CustomerIdRef with ReferenceCustomerInfoCustcategoryPubSelector {
+      label = "Customer";
+      contactwidget {
+         enabled = [CustomerId != null];
+         source = Customer;
+      }
+      description = CustomerIdRef.Name;
+      validate command {
+         execute {
+            call GetCurrencyCode(CustomerId) into CurrencyCode;
+         }
+      }
+   }
+   field CompanyRef {
+      editable = [LinesToInvoice = 0 or LinesToInvoice = null];
+   }
+   field SbReferenceNo {
+      editable = [Objstate != "InvoiceCreated"];
+   }
+   field LinesToInvoice;
+   field ModifiedDate;
+}
+
+group SelfBillingInvoiceAmountsGroup for SelfBillingHeader {
+   label = "Amounts";
+   field GrossAmount;
+   field MatchedNetAmount;
+   field TaxAmount;
+   field CurrencyCodeRef;
+}
+
+----------------------------------- LISTS -----------------------------------
+
+list SelfBillingItemList for SelfBillingItem {
+   label = "Lines";
+   // TODO! IntDelnoteNo has been added as a Number attribute to be used in order by. It can be replace with alternative solution if framework give any in future.
+   orderby = IntDelnoteNo, DelivNo, SbiLineNo;
+   field SbiLineNo;
+   field DelnoteNo;
+   field InvoiceNo;
+   field SeriesId {
+      size = Small;
+   }
+   field OrderNo;
+   field LineNo {
+      size = Small;
+   }
+   field RelNo {
+      size = Small;
+   }
+   field Contract {
+      size = Small;
+   }
+   field CatalogNo;
+   field CustomerOrderLineRef.CatalogDesc {
+      label = "Description";
+   }
+   field CustomerPartNo;
+   field BuyQtyDue;
+   field SalesUnitMeas {
+      size = Small;
+      searchable = false;
+   }
+   field PriceQty {
+      searchable = false;
+   }
+   field CustomerOrderLineRef.PriceUnitMeas {
+      size = Small;
+      label = "Price UoM";
+   }
+   field CustomerQty;
+   field CustUnitSalesQty;
+   field PartPrice {
+      preserveprecision = [true];
+   }
+   field PriceSource;
+   field CustUnitPartPrice {
+      editable = [Objstate != "InvoiceCreated"];
+      preserveprecision = [true];
+      validate command {
+         variable AmountsStructVar {
+            type = AmountsStruct;
+         }
+         execute {
+            set CustPartConvFactorVar = CustomerOrderLineRef.CustomerPartConvFactor;
+            if [CustPartConvFactorVar = null or CustPartConvFactorVar = ""] {
+               set CustPartConvFactorVar = 1;
+            }
+            set CustPartInvConvFactorVar = CustomerOrderLineRef.CustPartInvertConvFactor;
+            if [CustPartInvConvFactorVar = null or CustPartInvConvFactorVar = ""] {
+               set CustPartInvConvFactorVar = 1;
+            }
+            // The feilds not used in the client will always return null in the interpolation and needs to be first assign to a variable.
+            set CustPriceConvFactorVar = CustPriceConvFactor;
+            set PriceConvFactorVar = PriceConvFactor;
+            set CustPartPrice = "#{CustUnitPartPrice/(CustPartConvFactorVar*PriceConvFactorVar*CustPriceConvFactorVar)/CustPartInvConvFactorVar}";
+
+            call GetAmounts(parent.Company, OrderNo, LineNo, RelNo, LineItemNo, CustUnitPartPrice, CustUnitSalesQty, CustPriceConvFactor, parent.CurrencyCode) into AmountsStructVar;
+            set CustNetCurrAmount = AmountsStructVar.CustNetCurrAmount;
+         }
+      }
+   }
+   field CustPartPrice {
+      preserveprecision = [true];
+   }
+   field CalculatedNetPriceCurr {
+      searchable = false;
+   }
+   field TotalOrderLineDiscount;
+   field DeliveredQty;
+   field CustomerOrderDeliveryRef.QtyInvoiced {
+      label = "Invoiced Qty";
+   }
+   field CustomerOrderDeliveryRef.QtyToInvoice {
+      label = "Total Qty to Invoice";
+   }
+   field QtyToMatch;
+   field CurrencyCode {
+      size = Small;
+   }
+   field ConsignmentStock {
+      size = Small;
+      enumerationtrue = "CONSIGNMENT STOCK";
+      enumerationfalse = "No CONSIGNMENT STOCK";
+   }
+   field PayTermId {
+      size = Small;
+   }
+   field OrderId {
+      size = Small;
+   }
+   field GrossCurrAmount;
+   field TaxCurrAmount;
+   field NetCurrAmount;
+   field CustNetCurrAmount;
+   field CloseDelivery {
+      size = Small;
+   }
+   badge Objstate {
+      label = "Customer Self-Billing Invoice Line Status";
+      emphasis Progress7 = [Objstate = "Matched"];
+      emphasis Progress12 = [Objstate = "InvoiceCreated"];
+      style = TextOnly;
+   }
+   field WantedDeliveryDate;
+   field DateDelivered;
+   badge CustomerOrderLineRef.Objstate {
+      label = "CO Line Status";
+      emphasis Progress3 = [CustomerOrderLineRef.Objstate = "Released"];
+      emphasis Progress5 = [CustomerOrderLineRef.Objstate = "Reserved"];
+      emphasis Progress7 = [CustomerOrderLineRef.Objstate = "Picked"];
+      emphasis Progress10 = [CustomerOrderLineRef.Objstate = "Delivered"];
+      emphasis Progress8 = [CustomerOrderLineRef.Objstate = "PartiallyDelivered"];
+      emphasis StateCancelled = [CustomerOrderLineRef.Objstate = "Cancelled"];
+      emphasis Progress12 = [CustomerOrderLineRef.Objstate = "Invoiced"];
+      style = TextOnly;
+   }
+   field MessageId;
+   field MessageRow;
+   field MatchedDate;
+   field MatchType;
+   field DeliveryNoteRef.ShipmentId {
+      label = "Shipment ID";
+   }
+   field ReasonRef {
+      editable = [Objstate != "InvoiceCreated"];
+      size = Small;
+   }
+   field CustPriceConvFactor {
+      size = Small;
+      searchable = false;
+   }
+   fieldranking SbiLineNo, DelnoteNo, InvoiceNo, OrderNo, LineNo, CustomerQty, CustUnitPartPrice, CustPartPrice, NetCurrAmount, CustNetCurrAmount;
+
+   commandgroup NavigateCmdGroup {
+
+      command CustomerOrderCommand;
+      command CustomerInvoiceCommand;
+      command AddChargesCommand;
+   }
+   commandgroup ModifyCmdGroup {
+      command UnmatchandRemoveCommand;
+      command UpdatePriceOnMatchedOrderLineCommand;
+      command UpdateSalesPartPricesCommand;
+   }
+
+}
+
+----------------------------------- CARDS -----------------------------------
+
+---------------------------------- DIALOGS ----------------------------------
+
+---------------------------------- CHARTS -----------------------------------
+
+--------------------------------- CALENDARS ---------------------------------
+
+---------------------------------- SHEETS -----------------------------------
+
+----------------------------- STATE INDICATORS ------------------------------
+
+@Override
+stateindicator SelfBillingHeaderStateIndicator for SelfBillingHeader {
+   state "Preliminary" {
+      completed = 0%;
+      emphasis Progress1 = [Objstate = "Preliminary"];
+   }
+   state "InvoiceCreated" {
+      completed = 100%;
+      emphasis Progress12 = [Objstate = "InvoiceCreated"];
+   }
+}
+

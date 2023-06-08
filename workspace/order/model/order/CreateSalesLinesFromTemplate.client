@@ -1,0 +1,422 @@
+------------------------------------------------------------------------------------------------------------
+-- Date        Sign       History
+-- ----------  ------   ------------------------------------------------------------------------------------
+-- 2021-07-26  ChFolk   SCZ-15615(Bug-160007), Modified calling places of SalesComplementaryParts to pass values for the newly added parameters.
+-- 2021-06-07  Skanlk   Bug 159500(SCZ-15113), Modified CreateSqLinesOrCoLinesFromTemplateAssistant by adding a new condition to
+-- 2021-06-07           check the template is order or sales quotation.
+-- 2019-08-17  MalLlk   SCUXXW4-22978, Renamed the client CreateSalesLinesFromTemplateAssistant to CreateSalesLinesFromTemplate.
+-- 2019-07-04  MiKulk   SCUXXW4-22978, Supporting to move assistant CreateSqLinesOrCoLinesFromTemplateAssistant to a seperate projection.
+-- 2019-04-29  ChBnlk   SCUXXW4-8515, Corrected according to the code review suggestions.
+-- 2019-03-31  ChBnlk   SCUXXW4-18290, Properly handled info returned from Create_Order_Lines_From_Template___.
+-- 2019-03-31  ChBnlk   SCUXXW4-18288, Corrected issues reported through this bug.
+-- 2019-03-28  ChBnlk   SCUXXW4-18216, Added validation to PeriodTo and OrderPeriodTo fields.
+-- 2019-03-28  ChBnlk   SCUXXW4-8377, Implemented the Customer Order Template dialog.
+-- 2019-03-19  ChBnlk   SCUXXW4-8517, Implemented the Sales Quotation Template dialog.
+-- 2019-01-14  JeLise   SCUXXW4-8515, Converted from dlgOrderQuotationTemplate using MTG Version: 1.34
+------------------------------------------------------------------------------------------------------------
+
+client CreateSalesLinesFromTemplate;
+component ORDER;
+layer Core;
+
+// Use this client to call modal assistant to create either Sales Quotation lines for a specfic Sales Quotation header or
+// Customer Order Lines for a specific Customer Order header using a template or other orders or quotations as a template.;
+
+--------------------------------- FRAGMENTS ---------------------------------
+@DynamicComponentDependency RENTAL
+include fragment RentalLineFieldCommon;
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+
+-------------------------------- MAIN PAGES ---------------------------------
+assistant CreateSqLinesOrCoLinesFromTemplateAssistant using CreateSqLinesOrCoLinesFromTemplateVirtualSet {
+   label = "Create Lines from Template";
+   savemode = OnLostFocus;
+   input(CustomerNo, CustomerName, Contract, StartQuotationNo, StartOrderNo);
+   init command {
+      variable DefaultValuesVar {
+         type = Structure(TemplateStructure);
+      }
+      execute {
+         set QuotationNo = " ";
+
+         call FetchDefaults(CustomerNo, Contract, StartQuotationNo, StartOrderNo) into DefaultValuesVar;
+         if [StartOrderNo != null] {
+            set OrderSelectionMethod = "UseTemplate";
+         }
+         if [StartQuotationNo != null] {
+            set QuotationSelectionMethod = "UseTemplate";
+         }
+         set TemplateId = DefaultValuesVar.TemplateId;
+         set LatestQuotationNo = DefaultValuesVar.LatestQuotationNo;
+         set LatestDateEntered = DefaultValuesVar.LatestDateEntered;
+         set PeriodTo = DefaultValuesVar.PeriodTo;
+         set LatestOrderNo = DefaultValuesVar.LatestOrderNo;
+         set LatestOrderDateEntered = DefaultValuesVar.LatestOrderDateEntered;
+         set OrderPeriodTo = DefaultValuesVar.PeriodTo;
+
+         set PlannedRentalStartDateEditable = DefaultValuesVar.PlannedRentalStartDateEditable;
+         set PlannedRentalStartTimeEditable = DefaultValuesVar.PlannedRentalStartTimeEditable;
+
+      }
+   }
+   steps {
+      step {
+         group CustomerGroup;
+         group TemplateGroup;
+         group RentalDatesGroup {
+            visible = [IsRentalInstalled];
+         }
+
+         list TemplateLineList(TemplateLineArray);
+      }
+      final step {
+
+      }
+      cancelled step {
+
+      }
+   }
+   finish command {
+      enabled = [not component.TemplateLineList.IsEmpty];
+      variable RecordVar Text;
+
+      execute {
+         if [StartQuotationNo != null] {
+            call CreateQuoteLinesFromTemplate(Objkey, Contract, StartQuotationNo, PlannedRentalStartDateEditable, PlannedRentalStartTimeEditable, PlannedRentalEndDateEditable, PlannedRentalEndTimeEditable) into KeyList;
+            if [KeyList != null] {
+               assistant SalesComplementaryParts.ComplementaryPartsAssistant(RecordVar, "QUOTE", KeyList, null, false) {
+                  when CANCEL {
+                     navigate "page/SalesQuotation/Form?$filter=QuotationNo eq $[StartQuotationNo]";
+
+                  }
+               }
+            }
+         }
+
+         if [StartOrderNo != null] {
+            call CreateOrderLinesFromTemplate(Objkey, Contract, StartOrderNo, PlannedRentalStartDateEditable, PlannedRentalStartTimeEditable, PlannedRentalEndDateEditable, PlannedRentalEndTimeEditable) into KeyList;
+            if [KeyList != null] {
+               assistant SalesComplementaryParts.ComplementaryPartsAssistant(RecordVar, "ORDER", KeyList, null, false) {
+                  when CANCEL {
+                     navigate "page/CustomerOrder/Form?$filter=OrderNo eq $[StartOrderNo]";
+
+                  }
+               }
+            }
+         }
+
+      }
+   }
+   cancel command {
+      execute {
+         exit CANCEL;
+      }
+   }
+}
+
+--------------------------------- COMMANDS ----------------------------------
+
+--------------------------------- SELECTORS ---------------------------------
+
+---------------------------------- GROUPS -----------------------------------
+group CustomerGroup for CreateSqLinesOrCoLinesFromTemplateVirtual {
+   label = "";
+   field CustomerNo {
+      size = Small;
+      contactwidget {
+         enabled = [true];
+         source = Customer;
+      }
+   }
+   field CustomerName;
+}
+
+group TemplateGroup for CreateSqLinesOrCoLinesFromTemplateVirtual {
+   label = "Template Selection";
+   field QuotationSelectionMethod {
+      visible = [StartQuotationNo != null];
+      required = [true];
+      validate command {
+         execute {
+            set TemplateId = null;
+            call ClearRecords(Objkey);
+            if [QuotationSelectionMethod = "UseLatestQuotationNo" and LatestQuotationNo != null] {
+               call PopulateQuoteLines(Objkey, LatestQuotationNo, PeriodFrom, PeriodTo, CustomerNo, Contract, QuotationSelectionMethod, TemplateId, "QUOTATIO");
+
+            }
+            if [QuotationSelectionMethod = "UseLatestOrderNo" and LatestOrderNo != null] {
+               call PopulateQuoteLines(Objkey, LatestOrderNo, OrderPeriodFrom, OrderPeriodTo, CustomerNo, Contract, QuotationSelectionMethod, TemplateId, "ORDER");
+
+            }
+
+         }
+      }
+   }
+   field OrderSelectionMethod {
+      visible = [StartOrderNo != null];
+      required = [true];
+      validate command {
+         execute {
+
+            set TemplateId = null;
+            call ClearRecords(Objkey);
+            if [OrderSelectionMethod = "UseLatestOrderNo" and LatestOrderNo != null] {
+               call PopulateOrderLines(Objkey, LatestOrderNo, OrderPeriodFrom, OrderPeriodTo, CustomerNo, Contract, OrderSelectionMethod, TemplateId, "ORDER");
+            }
+
+         }
+
+      }
+
+   }
+   lov TemplateIdRef with ReferenceCustomerOrderTemplateSelector {
+      visible = [(StartQuotationNo != null and QuotationSelectionMethod = "UseTemplate") or(StartOrderNo != null and OrderSelectionMethod = "UseTemplate")];
+      description = TemplateIdRef.Description;
+      validate command {
+         execute {
+
+            if [TemplateId != null] {
+               if [(StartQuotationNo != null and QuotationSelectionMethod = "UseTemplate")] {
+                  call PopulateQuoteLines(Objkey, QuotationNo, PeriodFrom, PeriodTo, CustomerNo, Contract, QuotationSelectionMethod, TemplateId, "TEMPLATE");
+               }
+               if [StartOrderNo != null and OrderSelectionMethod = "UseTemplate"] {
+                  call PopulateOrderLines(Objkey, OrderNo, PeriodFrom, PeriodTo, CustomerNo, Contract, OrderSelectionMethod, TemplateId, "TEMPLATE");
+               }
+
+            }
+
+         }
+
+      }
+
+   }
+   field LatestQuotationNo {
+      size = Small;
+      visible = [StartQuotationNo != null and QuotationSelectionMethod = "UseLatestQuotationNo"];
+
+   }
+   field LatestDateEntered {
+      size = Small;
+      visible = [StartQuotationNo != null and QuotationSelectionMethod = "UseLatestQuotationNo"];
+   }
+   field PeriodFrom {
+      size = Small;
+      visible = [StartQuotationNo != null and QuotationSelectionMethod = "UseQuotationPeriod"];
+      validate command {
+         execute {
+            call PopulateQuoteLines(Objkey, QuotationNo, PeriodFrom, PeriodTo, CustomerNo, Contract, QuotationSelectionMethod, TemplateId, "PERIOD");
+         }
+      }
+   }
+   field PeriodTo {
+      size = Small;
+      visible = [StartQuotationNo != null and QuotationSelectionMethod = "UseQuotationPeriod"];
+      validate command {
+         execute {
+            call PopulateQuoteLines(Objkey, QuotationNo, PeriodFrom, PeriodTo, CustomerNo, Contract, QuotationSelectionMethod, TemplateId, "PERIOD");
+         }
+      }
+   }
+   lov QuotationNoRef with ReferenceQuotationsPerSiteLovSelector {
+      size = Small;
+      visible = [StartQuotationNo != null and QuotationSelectionMethod = "UseQuotationNo"];
+      validate command {
+         execute {
+            call PopulateQuoteLines(Objkey, QuotationNo, PeriodFrom, PeriodTo, CustomerNo, Contract, QuotationSelectionMethod, TemplateId, "QUOTATIO");
+         }
+      }
+
+   }
+   field QuotationNoRef.DateEntered {
+      size = Small;
+      visible = [StartQuotationNo != null and QuotationSelectionMethod = "UseQuotationNo"];
+   }
+   lov OrderNoRef with ReferenceOrdersPerSiteLovSelector {
+      size = Small;
+      visible = [(StartQuotationNo != null and QuotationSelectionMethod = "UseOrderNo") or(StartOrderNo != null and OrderSelectionMethod = "UseOrderNo")];
+      validate command {
+         execute {
+            if [StartQuotationNo != null and QuotationSelectionMethod = "UseOrderNo"] {
+               call PopulateQuoteLines(Objkey, OrderNo, PeriodFrom, PeriodTo, CustomerNo, Contract, QuotationSelectionMethod, TemplateId, "ORDER");
+            }
+            if [StartOrderNo != null and OrderSelectionMethod = "UseOrderNo"] {
+               call PopulateOrderLines(Objkey, OrderNo, PeriodFrom, PeriodTo, CustomerNo, Contract, OrderSelectionMethod, TemplateId, "ORDER");
+            }
+
+
+         }
+
+      }
+
+   }
+   field OrderNoRef.DateEntered {
+      size = Small;
+      visible = [(StartQuotationNo != null and QuotationSelectionMethod = "UseOrderNo") or(StartOrderNo != null and OrderSelectionMethod = "UseOrderNo")];
+   }
+   field LatestOrderNo {
+      size = Small;
+      visible = [(StartQuotationNo != null and QuotationSelectionMethod = "UseLatestOrderNo") or(StartOrderNo != null and OrderSelectionMethod = "UseLatestOrderNo")];
+   }
+   field LatestOrderDateEntered {
+      size = Small;
+      visible = [(StartQuotationNo != null and QuotationSelectionMethod = "UseLatestOrderNo") or(StartOrderNo != null and OrderSelectionMethod = "UseLatestOrderNo")];
+   }
+   field OrderPeriodFrom {
+      size = Small;
+      visible = [(StartQuotationNo != null and QuotationSelectionMethod = "UseOrderPeriod") or(StartOrderNo != null and OrderSelectionMethod = "UseOrderPeriod")];
+      validate command {
+         execute {
+            if [StartQuotationNo != null and QuotationSelectionMethod = "UseOrderPeriod"] {
+               call PopulateQuoteLines(Objkey, OrderNo, OrderPeriodFrom, OrderPeriodTo, CustomerNo, Contract, QuotationSelectionMethod, TemplateId, "ORDPERIO");
+            }
+            if [StartOrderNo != null and OrderSelectionMethod = "UseOrderPeriod"] {
+               call PopulateOrderLines(Objkey, OrderNo, OrderPeriodFrom, OrderPeriodTo, CustomerNo, Contract, OrderSelectionMethod, TemplateId, "ORDER");
+            }
+
+         }
+      }
+   }
+   field OrderPeriodTo {
+      size = Small;
+      visible = [(StartQuotationNo != null and QuotationSelectionMethod = "UseOrderPeriod") or(StartOrderNo != null and OrderSelectionMethod = "UseOrderPeriod")];
+      validate command {
+         execute {
+            if [StartQuotationNo != null and QuotationSelectionMethod = "UseOrderPeriod"] {
+               call PopulateQuoteLines(Objkey, OrderNo, OrderPeriodFrom, OrderPeriodTo, CustomerNo, Contract, QuotationSelectionMethod, TemplateId, "ORDPERIO");
+            }
+            if [StartOrderNo != null and OrderSelectionMethod = "UseOrderPeriod"] {
+               call PopulateOrderLines(Objkey, OrderNo, OrderPeriodFrom, OrderPeriodTo, CustomerNo, Contract, OrderSelectionMethod, TemplateId, "ORDER");
+            }
+
+         }
+      }
+   }
+}
+group RentalDatesGroup for CreateSqLinesOrCoLinesFromTemplateVirtual {
+   label = "Planned Rental Dates";
+   @DynamicComponentDependency RENTAL
+   field PlannedRentalStartDateEditable {
+      size = Small;
+      validate command {
+         variable RentalStartDateVar Structure(RentalStartDateStructure);
+         execute {
+            call SetRentalStartDateTime(PlannedRentalStartDateEditable, PlannedRentalStartTimeEditable) into RentalStartDateVar;
+            set PlannedRentalStartDateEditable = RentalStartDateVar.PlannedRentalStartDateEditable;
+            set PlannedRentalStartTimeEditable = RentalStartDateVar.PlannedRentalStartTimeEditable;
+
+         }
+      }
+   }
+   @DynamicComponentDependency RENTAL
+   field PlannedRentalStartTimeEditable {
+      size = Small;
+      validate command {
+         variable RentalStartDateVar Structure(RentalStartDateStructure);
+         execute {
+            call SetRentalStartDateTime(PlannedRentalStartDateEditable, PlannedRentalStartTimeEditable) into RentalStartDateVar;
+            set PlannedRentalStartDateEditable = RentalStartDateVar.PlannedRentalStartDateEditable;
+            set PlannedRentalStartTimeEditable = RentalStartDateVar.PlannedRentalStartTimeEditable;
+         }
+      }
+   }
+   @DynamicComponentDependency RENTAL
+   field PlannedRentalEndDateEditable {
+      size = Small;
+      validate command
+         {
+         variable RentalEndDateVar Structure(RentalEndDateStructure);
+         execute {
+            call SetRentalEndDateTime(PlannedRentalEndDateEditable, PlannedRentalEndTimeEditable) into RentalEndDateVar;
+            set PlannedRentalEndDateEditable = RentalEndDateVar.PlannedRentalEndDateEditable;
+            set PlannedRentalEndTimeEditable = RentalEndDateVar.PlannedRentalEndTimeEditable;
+         }
+      }
+   }
+   field PlannedRentalEndTimeEditable {
+      size = Small;
+
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+list TemplateLineList for TemplateLineVirtual {
+   editmode = MultiRowEdit;
+   label = "Template Lines";
+
+   orderby = QuotationNo, LineNo, RelNo;
+
+   field StandardQty
+      {
+      validate command {
+         execute {
+            if [StandardQty < 0] {
+               warning("The quantity must not be less than zero!");
+            }
+         }
+
+      }
+
+   }
+
+   field StandardQty2;
+   field SalesPartRef.SalesUnitMeas {
+      size = Small;
+      label = "UoM";
+   }
+   field Contract {
+      size = Small;
+   }
+   field CustomerPartNo {
+      size = Medium;
+   }
+   field CatalogNo {
+      size = Medium;
+   }
+   field Description;
+   field ConditionCode {
+      size = Small;
+   }
+   field RentalDb {
+      size = Small;
+   }
+   field QuotationNo {
+      columnexclude = [true];
+   }
+   field LineNo {
+      columnexclude = [true];
+   }
+   field RelNo {
+      columnexclude = [true];
+   }
+   field RowType {
+      columnexclude = [true];
+   }
+   field Objstate {
+      columnexclude = [true];
+   }
+
+   // fieldranking StandardQty, StandardQty2, SalesPartRef.SalesUnitMeas, Contract, CustomerPartNo, CatalogNo, Description, ConditionCode, RentalDb;
+}
+
+----------------------------------- CARDS -----------------------------------
+
+---------------------------------- DIALOGS ----------------------------------
+
+---------------------------------- CHARTS -----------------------------------
+
+--------------------------------- CALENDARS ---------------------------------
+
+---------------------------------- SHEETS -----------------------------------
+
+----------------------------- STATE INDICATORS ------------------------------
+
+----------------------------------- TREES -----------------------------------
+
+---------------------------------- PLUGINS ----------------------------------
+
+------------------------------- IMAGE VIEWERS -------------------------------
+
+
+
+

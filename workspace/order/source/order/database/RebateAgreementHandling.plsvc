@@ -1,0 +1,573 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: RebateAgreementHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+-- ----------  ------  --------------------------------------------------------------------------------
+-- 2021-02-18  PamPlk  SC2020R1-12485, Added methods GetSalesUnitOfMeasure and Get_Catalog_Description___.
+-- 2021-02-17  MaEelk  SC2020R1-12487, Removed the call to Rebate_Agreement_Receiver_Initial_Check___ from Save_Receivers___.
+-- 2020-09-18  DhAplk  SC2020R1-9875, Corrected the name of Add_Customers_To_List___ action.  
+-- 2019-06-27  MaEelk  SCUXXW4-16320, Merged LCS Bug 145088.
+-- 2018-11-19  MaEelk  SCUXXW4-8282, Added Copy_Rebate_Agreement___, Fetch_Agreement_Defaults___ and Fetch_Currency_Rate___.
+-- 2018-11-13  MAHPLK  CUXXW4-8237, Added methods Add_Customers_To_list___, Connect_Receiver_Where_Stmt___, 
+-- 2018-11-13          Cust_Ord_Cust1_Lov_Where___, Cust_Ord_Cust2_Lov_Where___, Hit_Counts___, Save_Receivers___
+-- 2018-10-19  Mikulk  SCUXXW4-9350, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Rebate_Unit_Meas___(
+   company_         IN VARCHAR2,
+   rebate_criteria_ IN VARCHAR2 )  RETURN VARCHAR2
+IS
+   unit_meas_ VARCHAR2(30); 
+BEGIN
+    unit_meas_ := Rebate_Agreement_API.Get_Rebate_Unit_Meas(company_, Rebate_Criteria_API.Decode(rebate_criteria_));
+    RETURN unit_meas_;
+END Rebate_Unit_Meas___;
+
+
+FUNCTION Default_Currency___(
+   default_company_var_ IN VARCHAR2 )  RETURN VARCHAR2
+IS
+   
+BEGIN
+   RETURN Company_Finance_API.Get_Currency_Code(default_company_var_);
+END Default_Currency___;
+
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Connect_Receivers_Virtual_Rec )
+IS
+   line_rec_ Cust_To_Be_Added_Virtual_Rec;
+   CURSOR get_rebate_receviers IS
+      SELECT customer_no, agreement_priority
+      FROM REBATE_AGREEMENT_RECEIVER 
+      WHERE agreement_id = rec_.agreement_id;
+BEGIN   
+   super(rec_);
+   FOR rebate_receviers_rec_ IN get_rebate_receviers LOOP
+      line_rec_.objkey               := sys_guid();
+      line_rec_.parent_objkey        := rec_.objkey;
+      line_rec_.agreement_id         := rec_.agreement_id;
+      line_rec_.customer_no          := rebate_receviers_rec_.customer_no;
+      line_rec_.agreement_priority   := rebate_receviers_rec_.agreement_priority;  
+      line_rec_.receiver_added       := TRUE;
+      line_rec_.added_by_customer_list := FALSE;
+      CRUD_Create___(line_rec_);
+   END LOOP;
+END CRUD_Create___;
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Cust_To_Be_Added_Virtual_Rec )
+IS
+   info_  VARCHAR2(32000);
+BEGIN
+   super(rec_);
+   IF (rec_.receiver_added = FALSE AND rec_.added_by_customer_list = FALSE) THEN
+      Rebate_Agreement_Receiver_API.New(info_, rec_.agreement_id, rec_.customer_no, rec_.agreement_priority);
+   END IF;
+END CRUD_Create___;
+
+
+@Override
+PROCEDURE CRUD_Delete___(
+   rec_ IN Cust_To_Be_Added_Virtual_Rec )
+IS   
+   info_  VARCHAR2(32000); 
+BEGIN
+   super(rec_);
+   IF Rebate_Agreement_Receiver_API.Exists(rec_.agreement_id, rec_.customer_no) THEN
+      Rebate_Agreement_Receiver_API.Remove(info_, rec_.agreement_id, rec_.customer_no);
+   END IF;
+END CRUD_Delete___;
+
+
+@Override
+PROCEDURE CRUD_Update___(
+   old_ IN Cust_To_Be_Added_Virtual_Rec,
+   new_ IN Cust_To_Be_Added_Virtual_Rec )
+IS
+   info_  VARCHAR2(32000); 
+BEGIN   
+   super(old_, new_);
+   IF (old_.agreement_priority != new_.agreement_priority) THEN
+      Rebate_Agreement_Receiver_API.Modify(info_, new_.agreement_id, new_.customer_no, new_.agreement_priority);
+   END IF;
+END CRUD_Update___;
+
+
+FUNCTION Cust_Ord_Cust2_Lov_Where___(
+   parent_objkey_   IN VARCHAR2,
+   agreement_id_    IN VARCHAR2,
+   hierarchy_id_    IN VARCHAR2,
+   customer_level_  IN NUMBER) RETURN Objid_Arr
+IS
+   customers_        VARCHAR2(32000);
+   delim_            VARCHAR2(5) := NULL;
+   parent_key_       Connect_Receivers_Virtual_Key;
+   base_collection_  Objid_Arr := Objid_Arr();
+   objid_            VARCHAR2(100);
+   
+   TYPE dynamic_cursor_type   IS REF CURSOR;
+   dynamic_cursor_            dynamic_cursor_type;
+   stmt_                VARCHAR2(32000);
+   customers_stmt_added_    BOOLEAN:= FALSE;
+   hierarchy_id_stmt_added_ BOOLEAN:= FALSE;
+BEGIN
+   parent_key_.objkey := parent_objkey_;   
+   FOR cust_rec_ IN Get_Cust_To_Be_Added_Array___(parent_key_) LOOP 
+      IF (cust_rec_.customer_no IS NOT NULL) THEN
+         customers_ := customers_ || delim_ || '''' || cust_rec_.customer_no || '''';
+         delim_ := ', ';
+      END IF;   
+   END LOOP;
+   
+   stmt_ := 'SELECT objid ' || 
+            ' FROM CUST_ORD_CUST2  ' ||
+            ' WHERE customer_no NOT IN (SELECT customer_no FROM '||
+                              ' REBATE_AGREEMENT_RECEIVER WHERE agreement_id = :agreement_id_) ';
+                              
+   
+   IF customers_ IS NOT NULL THEN
+      customers_stmt_added_ := TRUE;
+      stmt_ := stmt_ || ' AND customer_no NOT IN ( SELECT regexp_substr(:customers_ , ''[^,]+'', 1, level) from dual ' ||
+                               ' CONNECT BY regexp_substr(:customers_ , ''[^,]+'', 1, level) is not null ) ';
+   END IF;
+   
+   IF hierarchy_id_ != '*' THEN
+      hierarchy_id_stmt_added_ := TRUE;
+      stmt_ := stmt_ || 'AND customer_no IN (SELECT ct.customer_no FROM  ' ||
+                           '  CUST_HIERARCHY_STRUCT ct '||
+                           '  WHERE ct.hierarchy_id =  :hierarchy_id_' ||
+                           '  AND Cust_Hierarchy_Struct_API.Get_Level_No( :hierarchy_id_, ct.customer_no) = :customer_level_)';  
+   END IF;   
+    
+   IF (customers_stmt_added_  AND hierarchy_id_stmt_added_) THEN   
+      @ApproveDynamicStatement(2018-11-10,MAHPLK)
+      OPEN dynamic_cursor_ FOR stmt_ USING agreement_id_, customers_, customers_, hierarchy_id_, hierarchy_id_, customer_level_;      
+      
+   ELSIF (customers_stmt_added_)  AND (NOT hierarchy_id_stmt_added_) THEN
+      @ApproveDynamicStatement(2018-11-10,MAHPLK)
+      OPEN dynamic_cursor_ FOR stmt_ USING agreement_id_, customers_, customers_;     
+      
+   ELSIF (NOT customers_stmt_added_)  AND (hierarchy_id_stmt_added_) THEN 
+      @ApproveDynamicStatement(2018-11-10,MAHPLK)
+      OPEN dynamic_cursor_ FOR stmt_ USING agreement_id_, hierarchy_id_, hierarchy_id_, customer_level_;      
+      
+   ELSE
+      @ApproveDynamicStatement(2018-11-10,MAHPLK)
+      OPEN dynamic_cursor_ FOR stmt_ USING agreement_id_;      
+      
+   END IF;
+   
+   LOOP
+      FETCH dynamic_cursor_ INTO objid_;
+      EXIT WHEN dynamic_cursor_%NOTFOUND;
+      IF objid_ IS NOT NULL THEN
+         base_collection_.extend;
+         base_collection_(base_collection_.last) := objid_;
+      END IF;
+   END LOOP;
+   CLOSE dynamic_cursor_;
+   
+   RETURN base_collection_;
+END Cust_Ord_Cust2_Lov_Where___;
+
+
+FUNCTION Cust_Ord_Cust1_Lov_Where___(
+   parent_objkey_   IN VARCHAR2,
+   agreement_id_    IN VARCHAR2,
+   hierarchy_id_    IN VARCHAR2,
+   customer_level_  IN NUMBER) RETURN Objid_Arr
+IS
+   customers_        VARCHAR2(32000);
+   delim_            VARCHAR2(5) := NULL;
+   parent_key_       Connect_Receivers_Virtual_Key;
+   base_collection_  Objid_Arr := Objid_Arr();
+   objid_            VARCHAR2(100);
+   
+   TYPE dynamic_cursor_type   IS REF CURSOR;
+   dynamic_cursor_            dynamic_cursor_type;
+   stmt_                VARCHAR2(32000);
+   customers_stmt_added_    BOOLEAN:= FALSE;
+   hierarchy_id_stmt_added_ BOOLEAN:= FALSE;
+BEGIN
+   parent_key_.objkey := parent_objkey_;   
+   FOR cust_rec_ IN Get_Cust_To_Be_Added_Array___(parent_key_) LOOP 
+      IF (cust_rec_.customer_no IS NOT NULL) THEN
+         customers_ := customers_ || delim_ || '''' || cust_rec_.customer_no || '''';
+         delim_ := ', ';
+      END IF;   
+   END LOOP;
+   
+   stmt_ := 'SELECT objid ' || 
+            ' FROM CUST_ORD_CUST1  ' ||
+            ' WHERE customer_no NOT IN (SELECT customer_no FROM '||
+                              ' REBATE_AGREEMENT_RECEIVER WHERE agreement_id = :agreement_id_) ';
+                              
+   
+   IF customers_ IS NOT NULL THEN
+      customers_stmt_added_ := TRUE;
+      stmt_ := stmt_ || ' AND customer_no NOT IN ( SELECT regexp_substr(:customers_ , ''[^,]+'', 1, level) from dual ' ||
+                               ' CONNECT BY regexp_substr(:customers_ , ''[^,]+'', 1, level) is not null) ';
+   END IF;
+   
+   IF hierarchy_id_ != '*' THEN
+      hierarchy_id_stmt_added_ := TRUE;
+      stmt_ := stmt_ || 'AND customer_no IN (SELECT ct.customer_no FROM  ' ||
+                           '  CUST_HIERARCHY_STRUCT ct '||
+                           '  WHERE ct.hierarchy_id =  :hierarchy_id_' ||
+                           '  AND Cust_Hierarchy_Struct_API.Get_Level_No( :hierarchy_id_, ct.customer_no) = :customer_level_)';  
+   END IF;   
+     
+   IF (customers_stmt_added_  AND hierarchy_id_stmt_added_) THEN   
+      @ApproveDynamicStatement(2018-11-10,MAHPLK)
+      OPEN dynamic_cursor_ FOR stmt_ USING agreement_id_, customers_, customers_, hierarchy_id_, hierarchy_id_, customer_level_;      
+      
+   ELSIF (customers_stmt_added_)  AND (NOT hierarchy_id_stmt_added_) THEN
+      @ApproveDynamicStatement(2018-11-10,MAHPLK)
+      OPEN dynamic_cursor_ FOR stmt_ USING agreement_id_, customers_, customers_;     
+      
+   ELSIF (NOT customers_stmt_added_)  AND (hierarchy_id_stmt_added_) THEN 
+      @ApproveDynamicStatement(2018-11-10,MAHPLK)
+      OPEN dynamic_cursor_ FOR stmt_ USING agreement_id_, hierarchy_id_, hierarchy_id_, customer_level_;      
+      
+   ELSE
+      @ApproveDynamicStatement(2018-11-10,MAHPLK)
+      OPEN dynamic_cursor_ FOR stmt_ USING agreement_id_;      
+      
+   END IF;
+   
+   LOOP
+      FETCH dynamic_cursor_ INTO objid_;
+      EXIT WHEN dynamic_cursor_%NOTFOUND;
+      IF objid_ IS NOT NULL THEN
+         base_collection_.extend;
+         base_collection_(base_collection_.last) := objid_;
+      END IF;
+   END LOOP;
+   CLOSE dynamic_cursor_;
+   
+   RETURN base_collection_;
+END Cust_Ord_Cust1_Lov_Where___;
+
+
+FUNCTION Connect_Receiver_Where_Stmt___(   
+   hierarchy_id_        IN VARCHAR2,
+   customer_level_      IN NUMBER,
+   customer_no_         IN VARCHAR2,
+   customer_name_       IN VARCHAR2,
+   cust_group_          IN VARCHAR2,
+   cust_price_group_    IN VARCHAR2) RETURN VARCHAR2
+IS
+   attr_                VARCHAR2(32000);
+   cust_no_where_       VARCHAR2(4000);
+   cust_name_where_     VARCHAR2(4000);
+   cust_group_where_    VARCHAR2(4000);
+   cust_price_group_where_    VARCHAR2(4000);   
+   where_stmt_          VARCHAR2(32000);
+BEGIN
+   where_stmt_ := NULL;
+   IF hierarchy_id_ != '*' THEN
+      where_stmt_ := 'AND customer_no IN (SELECT ct.customer_no FROM  ' ||
+                           '  CUST_HIERARCHY_STRUCT ct '||
+                           '  WHERE ct.hierarchy_id =  :hierarchy_id_ ' ||
+                           '  AND Cust_Hierarchy_Struct_API.Get_Level_No( :hierarchy_id_ , ct.customer_no) = :customer_level_ ) ';  
+   END IF;
+   IF customer_no_ IS NOT NULL THEN
+      Client_SYS.Clear_Attr(attr_);
+      Client_SYS.Add_To_Attr('customer_no', customer_no_, attr_);
+      cust_no_where_ := Report_SYS.Parse_Where_Expression(attr_); 
+      
+      IF cust_no_where_ IS NOT NULL THEN
+         where_stmt_ := where_stmt_ || ' AND ' || cust_no_where_;         
+      END IF;
+   END IF;
+   
+   IF customer_name_ IS NOT NULL THEN
+      Client_SYS.Clear_Attr(attr_);
+      Client_SYS.Add_To_Attr('name', customer_name_, attr_);
+      cust_name_where_ := Report_SYS.Parse_Where_Expression(attr_); 
+      
+      IF cust_name_where_ IS NOT NULL THEN
+         where_stmt_ := where_stmt_ || ' AND ' || cust_name_where_;
+      END IF;  
+   END IF;
+   
+   IF cust_group_ IS NOT NULL THEN
+      Client_SYS.Clear_Attr(attr_);
+      Client_SYS.Add_To_Attr('cust_grp', cust_group_, attr_);
+      cust_group_where_ := Report_SYS.Parse_Where_Expression(attr_); 
+      
+      IF cust_group_where_ IS NOT NULL THEN
+         where_stmt_ := where_stmt_ || ' AND ' || cust_group_where_;
+      END IF;   
+   END IF;
+   
+   IF cust_price_group_ IS NOT NULL THEN
+      Client_SYS.Clear_Attr(attr_);
+      Client_SYS.Add_To_Attr('cust_price_group_id', cust_price_group_, attr_);
+      cust_price_group_where_ := Report_SYS.Parse_Where_Expression(attr_); 
+      
+      IF cust_price_group_where_ IS NOT NULL THEN
+         where_stmt_ := where_stmt_ || ' AND ' || cust_price_group_where_;
+      END IF;  
+   END IF;   
+                              
+   RETURN where_stmt_;
+END Connect_Receiver_Where_Stmt___;
+
+
+FUNCTION Hit_Counts___(   
+   agreement_id_        IN VARCHAR2,
+   hierarchy_id_        IN VARCHAR2,
+   customer_level_      IN NUMBER,
+   customer_no_         IN VARCHAR2,
+   customer_name_       IN VARCHAR2,
+   cust_group_          IN VARCHAR2,
+   cust_price_group_    IN VARCHAR2) RETURN NUMBER
+IS
+   hits_                    NUMBER;
+   stmt_                    VARCHAR2(32000);
+   where_stmt_              VARCHAR2(32000);   
+   TYPE dynamic_cursor_type IS REF CURSOR;
+   dynamic_cursor_          dynamic_cursor_type; 
+BEGIN
+   
+   where_stmt_ := Connect_Receiver_Where_Stmt___( hierarchy_id_, customer_level_, 
+                                           customer_no_, customer_name_, cust_group_ , cust_price_group_);                             
+   
+   stmt_ := 'SELECT count(*) ' ||
+            ' FROM CUST_ORD_CUST1  ' ||
+            ' WHERE customer_no NOT IN (SELECT customer_no FROM '||
+                              ' REBATE_AGREEMENT_RECEIVER WHERE agreement_id = :agreement_id_ ) ' || where_stmt_ ;
+   
+   IF hierarchy_id_ != '*' THEN
+      @ApproveDynamicStatement(2018-11-10,MAHPLK)
+      OPEN dynamic_cursor_ FOR stmt_ USING agreement_id_, hierarchy_id_, hierarchy_id_, customer_level_;
+   ELSE
+      @ApproveDynamicStatement(2018-11-10,MAHPLK)
+      OPEN dynamic_cursor_ FOR stmt_ USING agreement_id_;
+   END IF;
+   FETCH dynamic_cursor_ INTO hits_;
+   CLOSE dynamic_cursor_;
+   
+   RETURN hits_;
+END Hit_Counts___;
+
+PROCEDURE Add_Customers_To_List___(
+   parent_objkey_       IN VARCHAR2,
+   agreement_id_        IN VARCHAR2,
+   hierarchy_id_        IN VARCHAR2,
+   customer_level_      IN NUMBER,
+   customer_no_         IN VARCHAR2,
+   customer_name_       IN VARCHAR2,
+   cust_group_          IN VARCHAR2,
+   cust_price_group_    IN VARCHAR2) 
+IS
+   stmt_                        VARCHAR2(32000);
+   selected_customer_no_        VARCHAR2(50);
+   line_rec_                    Cust_To_Be_Added_Virtual_Rec;
+   where_stmt_                  VARCHAR2(32000);
+   TYPE dynamic_cursor_type     IS REF CURSOR;
+   dynamic_cursor_              dynamic_cursor_type;   
+
+BEGIN
+   
+   where_stmt_ := Connect_Receiver_Where_Stmt___(hierarchy_id_, customer_level_, 
+                                           customer_no_, customer_name_, cust_group_ , cust_price_group_);    
+   
+   stmt_ := 'SELECT customer_no ' ||
+            ' FROM CUST_ORD_CUST1  ' ||
+            ' WHERE customer_no NOT IN (SELECT customer_no FROM '||
+                                      ' REBATE_AGREEMENT_RECEIVER WHERE agreement_id = :agreement_id_ ) ' || where_stmt_ || ' ORDER BY 1 ';
+                              
+   IF hierarchy_id_ != '*' THEN
+      @ApproveDynamicStatement(2018-11-10,MAHPLK)
+      OPEN dynamic_cursor_ FOR stmt_ USING agreement_id_, hierarchy_id_, hierarchy_id_, customer_level_;
+   ELSE
+      @ApproveDynamicStatement(2018-11-10,MAHPLK)
+      OPEN dynamic_cursor_ FOR stmt_ USING agreement_id_;
+   END IF;
+   
+   LOOP
+      FETCH dynamic_cursor_ INTO selected_customer_no_;      
+      EXIT WHEN dynamic_cursor_%NOTFOUND;
+      IF selected_customer_no_ IS NOT NULL THEN
+         line_rec_.objkey               := sys_guid();
+         line_rec_.parent_objkey        := parent_objkey_;
+         line_rec_.agreement_id         := agreement_id_;
+         line_rec_.customer_no          := selected_customer_no_;
+         line_rec_.agreement_priority   := 1;  
+         line_rec_.receiver_added       := FALSE;
+         line_rec_.added_by_customer_list := TRUE;
+         CRUD_Create___(line_rec_);
+      END IF;
+   END LOOP;
+   CLOSE dynamic_cursor_;
+END Add_Customers_To_List___;
+
+PROCEDURE Save_Receivers___(
+   parent_objkey_ IN VARCHAR2) 
+IS
+   parent_key_          Connect_Receivers_Virtual_Key;
+   info_                VARCHAR2(32000);    
+   old_                 Cust_To_Be_Added_Virtual_Rec;
+   new_                 Cust_To_Be_Added_Virtual_Rec;
+   key_                 Cust_To_Be_Added_Virtual_Key;
+BEGIN
+   parent_key_.objkey := parent_objkey_; 
+   
+   FOR rec_ IN Get_Cust_To_Be_Added_Array___(parent_key_) LOOP      
+      IF (rec_.receiver_added = 'FALSE' AND rec_.added_by_customer_list = 'TRUE') THEN
+         Rebate_Agreement_Receiver_API.New(info_, rec_.agreement_id, rec_.customer_no, rec_.agreement_priority);
+         key_.objkey := rec_.objkey;
+         old_ := Get_Record___(key_);
+         new_ := old_;
+         new_.receiver_added := TRUE; 
+         CRUD_Update___(old_, new_);
+      END IF;      
+   END LOOP;
+END Save_Receivers___;
+
+FUNCTION Fetch_Agreement_Defaults___(
+   agreement_id_ IN VARCHAR2 )  RETURN Agreement_Defaults_Structure_Rec
+IS
+   agreement_rec_                 Rebate_Agreement_API.Public_Rec;    
+   agreement_defaults_rec_        Agreement_Defaults_Structure_Rec;
+BEGIN
+   agreement_rec_ := Rebate_Agreement_API.Get(agreement_id_);
+   agreement_defaults_rec_.company := agreement_rec_.company;
+   agreement_defaults_rec_.currency_code := agreement_rec_.currency_code;
+   agreement_defaults_rec_.from_date := SYSDATE;
+   RETURN agreement_defaults_rec_;
+END Fetch_Agreement_Defaults___;
+
+FUNCTION Fetch_Currency_Rate___(
+   copy_from_currency_code_ IN VARCHAR2,
+   copy_to_currency_code_   IN VARCHAR2,
+   copy_to_company_         IN VARCHAR2)  RETURN NUMBER
+IS
+	curr_type_     VARCHAR2(10);
+	conv_factor_   NUMBER; 
+   rate_          NUMBER;
+   temp_rate_     NUMBER;  
+   currency_rate_ NUMBER;
+BEGIN
+	Invoice_Library_API.Get_Currency_Rate_Defaults(curr_type_, conv_factor_, rate_, copy_to_company_,  copy_from_currency_code_, SYSDATE, 'CUSTOMER', NULL);
+	temp_rate_ := rate_ / conv_factor_;
+	Invoice_Library_API.Get_Currency_Rate_Defaults(curr_type_, conv_factor_, rate_, copy_to_company_, copy_to_currency_code_, SYSDATE, 'CUSTOMER', NULL);
+	currency_rate_ := temp_rate_*(conv_factor_/rate_);
+   RETURN currency_rate_;
+END Fetch_Currency_Rate___;
+
+FUNCTION Copy_Rebate_Agreement___ (
+   copy_from_agreement_id_        IN VARCHAR2,
+   copy_from_valid_from_          IN DATE,
+   copy_to_agreement_id_          IN VARCHAR2,
+   copy_to_agreement_description_ IN VARCHAR2,
+   copy_to_valid_from_            IN DATE,
+   copy_to_currency_code_         IN VARCHAR2,
+   copy_to_company_               IN VARCHAR2,
+   copy_to_currency_rate_         IN NUMBER,
+   copy_document_text_            IN BOOLEAN,
+   copy_notes_                    IN BOOLEAN ) RETURN VARCHAR2
+IS
+   to_agreement_id_ VARCHAR2(20) := copy_to_agreement_id_;
+   copy_doc_text_   NUMBER := 0;
+   copy_note_text_  NUMBER := 0;
+BEGIN
+   IF (copy_document_text_) THEN
+     copy_doc_text_ := 1; 
+   END IF;
+   IF (copy_notes_) THEN
+      copy_note_text_ := 1;   
+   END IF;
+   Rebate_Agreement_API.Copy_Agreement__(to_agreement_id_, 
+                                        copy_from_agreement_id_, 
+                                        copy_from_valid_from_, 
+                                        copy_to_agreement_description_, 
+                                        copy_to_currency_code_, 
+                                        copy_to_company_,
+                                        copy_to_valid_from_, 
+                                        copy_to_currency_rate_, 
+                                        copy_doc_text_, 
+                                        copy_note_text_);
+   RETURN to_agreement_id_;
+END Copy_Rebate_Agreement___;
+
+FUNCTION Get_Assortment_Node_Id___ (
+   assortment_id_      IN VARCHAR2,
+   structure_level_    IN NUMBER) RETURN Objid_Arr
+IS
+   base_collection_         Objid_Arr := Objid_Arr();
+   
+   CURSOR get_assortment_node IS
+      SELECT objid
+      FROM assortment_node_rebates;
+   
+   CURSOR get_assortment_node_rebates IS
+      SELECT objid
+      FROM assortment_node_rebates
+      WHERE assortment_id = assortment_id_ 
+      AND  structure_level = structure_level_;
+BEGIN  
+   
+   IF assortment_id_ IS NULL AND structure_level_ IS NULL THEN
+      FOR rec_ IN get_assortment_node LOOP
+         base_collection_.extend;
+         base_collection_(base_collection_.last) := rec_.objid;
+      END LOOP;
+   ELSE
+      FOR rec_ IN get_assortment_node_rebates LOOP
+         base_collection_.extend;
+         base_collection_(base_collection_.last) := rec_.objid;
+      END LOOP;
+   END IF;
+   RETURN base_collection_;
+END Get_Assortment_Node_Id___;
+
+FUNCTION Fetch_Assorment_Info___(
+   hierarchy_id_ IN VARCHAR2,
+   company_      IN VARCHAR2 )  RETURN Assortment_Info_Structure_Rec
+IS
+   cust_hierarchy_rebate_rec_	    Cust_Hierarchy_Rebate_Attr_API.Public_Rec;
+   assortment_info_structure_rec_ Assortment_Info_Structure_Rec;   
+BEGIN
+   cust_hierarchy_rebate_rec_ := Cust_Hierarchy_Rebate_Attr_API.Get(hierarchy_id_, company_);
+   assortment_info_structure_rec_.assortment_id :=  cust_hierarchy_rebate_rec_.assortment_id;
+   assortment_info_structure_rec_.structure_level :=  cust_hierarchy_rebate_rec_.structure_level;
+   RETURN assortment_info_structure_rec_;
+END Fetch_Assorment_Info___;
+
+@Override
+PROCEDURE CRUD_Default_Copy___ (
+   rec_  IN OUT Rebate_Agreement_Rec )
+IS
+BEGIN
+   rec_.use_hierarchy := (rec_.hierarchy_id != '*');   
+   super(rec_);   
+   rec_.agreement_id := NULL;
+END CRUD_Default_Copy___;
+
+FUNCTION Get_Sales_Unit_Of_Measure___ (
+   company_    IN VARCHAR2,
+   catalog_no_ IN VARCHAR2) RETURN VARCHAR2
+IS
+BEGIN
+	RETURN Sales_Part_API.Get_Company_Unique_Uom(catalog_no_, company_);
+END Get_Sales_Unit_Of_Measure___;
+
+
+FUNCTION Get_Catalog_Description___ (
+   catalog_no_ IN VARCHAR2) RETURN VARCHAR2
+IS
+BEGIN
+   RETURN PART_CATALOG_API.Get_Description(catalog_no_);
+END Get_Catalog_Description___;

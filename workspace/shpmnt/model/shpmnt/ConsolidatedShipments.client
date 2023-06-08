@@ -1,0 +1,346 @@
+
+--  Date       Sign    History
+--  ---------  ------  ---------------------------------------------------------
+--  2021-06-01 RoJalk  SC21R2-1030, Included the command PackingDetailsMainCmdGroup in PackaccordingPackingProposalCommand.
+--  2021-03-11 SBalLK  SC2020R1-12873, Added dynamic dependency for navigator entries.
+--  2020-08-24 ErRalk  SC2020R1-1420, Removed Concationation of SenderID and Description.
+--  2020-02-19 Aabalk  SCSPRING20-1687, Added LocationNo filter to filter out shipment inventory locations based on Sender Type and ID.
+--  2019-12-13 MeAblk  SCSPRING20-728, Added SenderType and SenderId.
+--  2019-10-31 AyAmlk  SCXTEND-1202, Added the startup mode as search.
+--  2019-06-27 ErRalk  SCUXXW4-21568, Added cosmetic changes.
+--  2019-06-18 JaBalk  SCUXXW4-15272, Added error messages if negative values entered for Volume Capacity and Weight Capacity.
+--  2019-05-14 RasDlk  SCUXXW4-20746, Renamed the Multiple Description fields on the Search Panel of the Consolidated Shipments Page.
+--  2019-02-13 KuBaLk  SCUXXW4-16138, Added ShipmentStateIndicator fragment and status badges.
+--  2019-01-10 RasDlk  SCUXXW4-12904, Passed NULL for the LocationNo parameter in StartShipmentMain method.
+--  2018-12-17 SBalLK  SCUXXW4-14953, Modified by grouping commands and resolved the enable/disable issue in commands.
+--  2018-07-05 RoJalk  SCUXXW4-4834, Converted tbwOverviewConsolidatedShipments using MTG Version: 1.23
+--  ---------  ------  ---------------------------------------------------------
+
+client ConsolidatedShipments;
+component SHPMNT;
+layer Core;
+projection ConsolidatedShipmentsHandling;
+
+include fragment InventoryLocation7Selector;
+include fragment MpccomShipViaLovSelector;
+include fragment UserAllowedSiteLovSelector;
+include fragment ExecuteShipmentEvent;
+include fragment ShipmentStateIndicator;
+include fragment ShipmentsCommands;
+include fragment ShipmentTypeSelector;
+include fragment ShipmentSenderSelector;
+
+-------------------------------- MAIN PAGES ---------------------------------
+
+
+--------------------------------- COMMANDS ----------------------------------
+
+
+----------------------------- VISUAL COMPONENTS -----------------------------
+
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+
+navigator {
+   entry ShipmentManagementConsolidatedShipmentsNavEntry parent ShpmntNavigator.ShipmentManagementOutboundShipment at index 200 {
+      label = "Consolidated Shipments";
+      page List;
+   }
+
+   @DynamicComponentDependency ORDER
+   entry SalesConsolidatedShipmentsNavEntry parent OrderNavigator.ShippingShipmentDelivery at index 200 {
+      label = "Consolidated Shipments";
+      page List;
+   }
+}
+-------------------------------- MAIN PAGES ---------------------------------
+
+page List using ShipmentSet {
+   label = "Consolidated Shipments";
+   startupmode = search;
+   list OverviewConsolidatedShipmentsList {
+      details = "page/ConsolidatedShipment/Form?$filter=ShipmentId eq $[ShipmentId]";
+
+   }
+}
+
+-------------------------------- ASSISTANTS ---------------------------------
+
+--------------------------------- COMMANDS ----------------------------------
+
+command BeforeSaveCommand for Shipment {
+   bulkexecute {
+      ifany [(ShipViaCode != original.ShipViaCode or RouteId != original.RouteId or PlannedShipDate != original.PlannedShipDate
+      or ForwardAgentId != original.ForwardAgentId or ShipInventoryLocationNo != original.ShipInventoryLocationNo) and(ShipmentsConnected = 1)] {
+         confirm("The connected shipment(s) will be updated, but the connected source lines of these shipment(s) will not be automatically updated. Changes will not be reflected in already printed shipping documents.") {
+            when CANCEL {
+               exit CANCEL;
+            }
+         }
+      }
+      ifany [(ShipmentType != null and ShipmentType != original.ShipmentType) and(ShipmentsConnected = 1)] {
+         confirm("The connected shipment(s) will be updated, but the connected source lines of these shipment(s) will not be automatically updated.") {
+            when CANCEL {
+               exit CANCEL;
+            }
+         }
+      }
+   }
+}
+command DeliverCommand for Shipment {
+   label = "Deliver";
+   mode = SelectedRecords;
+   enabled = [substring(AllowedShipOperations, 2, 1) != "*"];
+   bulkexecute {
+      confirm("The shipment(s) connected to the consolidated shipment(s) will be delivered") {
+         when OK {
+            call StartShipmentMain(Selection, 60, NULL) {
+               when SUCCESS {
+                  hideselection();
+               }
+               when FAIL {
+                  error("${error.Message}");
+               }
+            }
+         }
+      }
+   }
+}
+command SendDispatchAdviceCommand for Shipment {
+   label = "Send Dispatch Advice";
+   mode = SelectedRecords;
+   enabled = [substring(AllowedShipOperations, 11, 1) != "*"];
+   bulkexecute {
+      call StartShipmentMain(Selection, 1300, NULL) {
+         when SUCCESS {
+            hideselection();
+         }
+         when FAIL {
+            error("${error.Message}");
+         }
+      }
+   }
+}
+command DeliveryNoteAnalysisCommand for Shipment {
+   label = "Delivery Note Analysis";
+   mode = SelectedRecords;
+   enabled = [DeliveryNotesExist = 1];
+   variable DeliveryNoteNoListVar {
+      type = Text;
+   }
+   bulkexecute {
+      call GetConsolShipDelnoteNos(Selection) into DeliveryNoteNoListVar;
+      navigate "page/ShipmentDeliveryNoteAnalysis/Form?$filter=${DeliveryNoteNoListVar}";
+   }
+}
+command ShipmentLinesCommand for Shipment {
+   label = "Shipment Lines";
+   mode = SelectedRecords;
+   enabled = [ShipmentsConnected = 1];
+   bulkexecute {
+      bulknavigate "page/ShipmentLines/List?$filter=ParentConsolShipmentId eq $[ShipmentId]";
+   }
+}
+
+--------------------------------- SELECTORS ---------------------------------
+
+---------------------------------- GROUPS -----------------------------------
+
+----------------------------------- LISTS -----------------------------------
+
+list OverviewConsolidatedShipmentsList for Shipment {
+
+   crudactions {
+      before command BeforeSaveCommand;
+   }
+
+   field ShipmentId;
+   lov ContractRef with ReferenceUserAllowedSiteLovSelector;
+   field SenderType;
+   lov SenderIdRef with ReferenceShipmentSenderSelector;
+   field SenderDescription {
+      label = "Sender Description";
+   }
+   fieldset Objstate;
+   field PlannedShipDate {
+      size = Large;
+   }
+   field PlannedShipPeriodRef;
+   field ActualShipDate {
+      size = Large;
+   }
+   field AutoConnectionBlockedDb;
+   field CreatedDate;
+   field NextStepinShipmentFlow {
+      size = Large;
+      searchable = false;
+   }
+   lov ShipmentTypeRef with ShipmentTypeShipmentLovSelector {
+      advancedview ShipmentTypeShipmentLovList;
+   }
+   lov ShipViaCodeRef with ReferenceMpccomShipViaLovSelector {
+      description = ShipViaCodeRef.Description;
+      validate command {
+         variable ShipViaInformationStructVar {
+            type = ShipViaInformationStruct;
+         }
+         execute {
+            call GetShipViaInformation(ShipViaCode, UomForWeight, UomForVolume) into ShipViaInformationStructVar;
+            set TransportUnitType = ShipViaInformationStructVar.TransportUnitType;
+            set WeightCapacity = ShipViaInformationStructVar.WeightCapacity;
+            set VolumeCapacity = ShipViaInformationStructVar.VolumeCapacity;
+         }
+      }
+   }
+   field ApproveBeforeDeliveryDb;
+   field TransportUnitTypeRef {
+      validate command {
+         variable TransportUnitTypeInformationStructVar {
+            type = TransportUnitTypeInformationStruct;
+         }
+         execute {
+            call GetTransportUnitInformation(TransportUnitType, UomForWeight, UomForVolume) into TransportUnitTypeInformationStructVar;
+            set WeightCapacity = TransportUnitTypeInformationStructVar.WeightCapacity;
+            set VolumeCapacity = TransportUnitTypeInformationStructVar.VolumeCapacity;
+         }
+      }
+   }
+   field TransportUnitTypeRef.Description {
+      editable = [false];
+      label = "Transport Unit Type Description";
+   }
+   field RouteIdRef {
+      validate command {
+         execute {
+            call GetRouteConnectedForwarder(RouteId) into ForwardAgentId;
+         }
+      }
+   }
+   field RouteIdRef.Description {
+      label = "Route Description";
+   }
+   field ForwardAgentIdRef {
+      contactwidget {
+         enabled = [ForwardAgentId != null];
+         source = Person;
+      }
+   }
+   field ForwardAgentIdRef.Name {
+      label = "Forwarder Name";
+   }
+   field NoteText {
+      searchable = false;
+   }
+   lov ShipInventoryLocationNoRef with ReferenceInventoryLocation7Selector using LocationNoFilter(Contract, SenderType, SenderId);
+   field ManualVolume;
+   field OperativeVolume;
+   field VolumeCapacity {
+      validate command {
+         execute {
+            if [VolumeCapacity < 0] {
+               error("Volume Capacity must be greater than 0");
+               exit CANCEL;
+            }
+         }
+      }
+   }
+   computedfield VolumeUtilization {
+      label = "Utilization(%)";
+      value = "#{100 * (OperativeVolume/VolumeCapacity)}";
+      format = ifscurrency;
+      type = Number;
+   }
+   field UomForVolume;
+   field NetWeight;
+   field AdjustedNetWeight;
+   field TareWeight;
+   field ManualGrossWeight;
+   field OperativeGrossWeight;
+   field OperativeAdjustedGrossWeight;
+   field WeightCapacity {
+      validate command {
+         execute {
+            if [WeightCapacity < 0] {
+               error("Weight Capacity must be greater than 0");
+               exit CANCEL;
+            }
+         }
+      }
+   }
+   computedfield WeightUtilization {
+      label = "Utilization(%)";
+      value = "#{100 * (OperativeGrossWeight/WeightCapacity)}";
+      format = ifscurrency;
+      type = Number;
+   }
+   field UomForWeight;
+
+   commandgroup StatusMainCmdGroup {
+      commandgroup StatusGroup {
+         label = "Status";
+         command PreliminaryCommand;
+         command CompleteCommand;
+         command CloseCommand;
+         command CancelCommand;
+      }
+   }
+
+   commandgroup OperationsMainCmdGroup {
+      commandgroup OperationsGroup {
+         label = "Operations";
+         command ReserveCommand;
+         command CreatePickListCommand;
+         command DeliverCommand;
+      }
+   }
+
+   commandgroup PackingDetailsMainCmdGroup {
+      commandgroup PackingGroup {
+         label = "Pack";
+         command PackaccordingHUCapacityCommand;
+         command PackaccordingPackingInstructionCommand;
+         command PackaccordingPackingProposalCommand;
+      }
+   }
+
+   commandgroup PrintDetailsMainCmdGroup {
+      commandgroup PrintGroup {
+         label = "Share";
+         command SendDispatchAdviceCommand;
+         command PrintPickListCommand;
+         command PrintPackingListCommand;
+         command PrintAddressLabelCommand;
+         command PrintConsignmentNoteCommand;
+         command PrintBillofLadingCommand;
+         command PrintShipmentDeliveryNoteCommand;
+         command PrintShipmentProFormaInvoicCommand;
+      }
+   }
+
+   commandgroup NavigateDetailsMainCmdGroup {
+      commandgroup ReferencesGroup {
+         label = "Related Pages";
+         command ShipmentLinesCommand;
+         command DeliveryNoteAnalysisCommand;
+      }
+   }
+}
+
+----------------------------------- CARDS -----------------------------------
+
+---------------------------------- DIALOGS ----------------------------------
+
+---------------------------------- CHARTS -----------------------------------
+
+--------------------------------- CALENDARS ---------------------------------
+
+---------------------------------- SHEETS -----------------------------------
+
+----------------------------- STATE INDICATORS ------------------------------
+
+----------------------------------- TREES -----------------------------------
+
+---------------------------------- PLUGINS ----------------------------------
+
+------------------------------- IMAGE VIEWERS -------------------------------
+

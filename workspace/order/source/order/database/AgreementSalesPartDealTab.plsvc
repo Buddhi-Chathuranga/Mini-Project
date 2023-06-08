@@ -1,0 +1,295 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     AgreementSalesPartDealTab
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+-- Date        Sign    History
+-- ----------  ------  ---------------------------------------------------------------
+-- 2020-02-25  RaVdlk  SCXTEND-2232, Overridden the CRUD_Default_Copy methods
+-- 2018-10-24  IzShlk  SCUXXW4-9622, Converted from tbwAgreementSalesPartDeal using MTG Version: 1.32
+--------------------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Catalog_Info___(
+   base_price_site_ IN VARCHAR2,
+   catalog_no_      IN VARCHAR2 )  RETURN Catalog_Info_Struct_Rec
+IS
+   catalog_info_struct_rec_ Catalog_Info_Struct_Rec;
+BEGIN
+   catalog_info_struct_rec_.catalog_desc  := Sales_Part_API.Get_Catalog_Desc(base_price_site_, catalog_no_);
+   catalog_info_struct_rec_.catalog_group := Sales_Part_API.Get_Catalog_Group(base_price_site_, catalog_no_);
+   catalog_info_struct_rec_.unit_meas     := Sales_Part_API.Get_Price_Unit_Meas(base_price_site_, catalog_no_);
+   RETURN catalog_info_struct_rec_;
+END Catalog_Info___;
+
+FUNCTION Tax_Info___(
+   base_price_site_ IN VARCHAR2,
+   catalog_no_      IN VARCHAR2 ) RETURN Tax_Info_Structure_Rec
+IS
+   tax_struct_rec_ Tax_Info_Structure_Rec;
+BEGIN
+   tax_struct_rec_.tax_code := Sales_Part_API.Get_Tax_Code(base_price_site_, catalog_no_);
+   tax_struct_rec_.taxable  := (Sales_Part_API.Get_Taxable_Db(base_price_site_, catalog_no_)= 'TRUE');
+   RETURN tax_struct_rec_;
+END Tax_Info___;
+
+FUNCTION Validate_Offsets___(
+   agreement_id_        IN VARCHAR2,
+   base_price_incl_tax_ IN NUMBER,
+   base_price_          IN NUMBER,
+   amount_offset_       IN NUMBER,
+   percentage_offset_   IN NUMBER,
+   rounding_            IN NUMBER ) RETURN Deal_Price_Structure_Rec
+IS
+   sales_price_        NUMBER := 0;
+   round_              NUMBER := 0;
+   use_price_incl_tax_ BOOLEAN := FALSE;
+   deal_price_rec_ Deal_Price_Structure_Rec;
+BEGIN
+   use_price_incl_tax_   := (Customer_Agreement_API.Get_Use_Price_Incl_Tax_Db(agreement_id_) = 'TRUE');
+   IF use_price_incl_tax_ THEN
+      sales_price_ := base_price_incl_tax_ + amount_offset_ + (base_price_incl_tax_ * percentage_offset_/100);
+   ELSE
+      sales_price_ := base_price_ + amount_offset_ + (base_price_ * percentage_offset_/100);
+   END IF;
+
+   IF sales_price_ < 0 THEN
+      deal_price_rec_.invalid_flag := 'INVALID';
+   ELSE
+      IF rounding_ IS NOT NULL AND rounding_ < 0 THEN
+         round_ := ROUND(-rounding_, 0);
+         sales_price_ := sales_price_ * POWER(10, -round_); 
+         sales_price_ := ROUND(sales_price_, 0) * POWER(10, round_);
+         deal_price_rec_.deal_price := ROUND(sales_price_, 0);
+      ELSE 
+         IF MOD(sales_price_, 1) = 0 THEN
+            deal_price_rec_.deal_price := ROUND(sales_price_, 0);
+         ELSE
+            IF rounding_ IS NOT NULL THEN
+               deal_price_rec_.deal_price := ROUND(sales_price_, rounding_);
+            ELSE
+               -- TODO : Use IFS currency to round using user perfile
+               deal_price_rec_.deal_price := sales_price_;
+            END IF;
+         END IF;
+      END IF;
+   END IF;
+   
+   deal_price_rec_.use_price_incl_tax := use_price_incl_tax_;
+   RETURN deal_price_rec_;  
+END Validate_Offsets___;
+
+FUNCTION Calculate_Prices___(
+   agreement_id_        IN VARCHAR2,
+   direction_           IN VARCHAR2,
+   base_price_incl_tax_ IN NUMBER,
+   base_price_          IN NUMBER,
+   deal_price_incl_tax_ IN NUMBER,
+   deal_price_          IN NUMBER,
+   taxable_             IN BOOLEAN,
+   tax_code_            IN VARCHAR2,
+   rounding_            IN NUMBER,
+   amount_offset_       IN NUMBER,
+   percentage_offset_   IN NUMBER,
+   base_price_site_     IN VARCHAR2,
+   catalog_no_          IN VARCHAR2 ) RETURN Calculate_Price_Structure_Rec
+IS
+   base_price_temp_ NUMBER;
+   deal_price_temp_ NUMBER;
+   base_price_incl_tax_temp_ NUMBER;
+   deal_price_incl_tax_temp_ NUMBER;
+   calculate_price_  BOOLEAN := TRUE;
+   tax_calc_base_    VARCHAR2(100);
+   offset_direction_ VARCHAR2(100);
+    use_price_incl_tax_ BOOLEAN := FALSE;
+   calculate_price_rec_ Calculate_Price_Structure_Rec;
+   -- TODO: Fetch the ifs curr rounding from profile
+   ifs_curr_rounding_ NUMBER := 16;
+BEGIN
+   use_price_incl_tax_   := (Customer_Agreement_API.Get_Use_Price_Incl_Tax_Db(agreement_id_) = 'TRUE');
+   IF use_price_incl_tax_ THEN
+      tax_calc_base_ := 'GROSS_BASE';
+      IF ((base_price_incl_tax_ IS NULL AND deal_price_incl_tax_ IS NULL) OR taxable_ = FALSE OR tax_code_ IS NULL) THEN
+         calculate_price_rec_.base_price := base_price_incl_tax_;
+         calculate_price_rec_.deal_price := deal_price_incl_tax_;
+         calculate_price_ := FALSE;       
+         calculate_price_rec_.base_price_incl_tax := base_price_incl_tax_;
+         calculate_price_rec_.deal_price_incl_tax := deal_price_incl_tax_;
+      END IF;
+   ELSE
+      tax_calc_base_ := 'NET_BASE';
+      IF ((base_price_ IS NULL AND deal_price_ IS NULL) OR taxable_ = FALSE OR tax_code_ IS NULL) THEN
+         calculate_price_rec_.base_price_incl_tax := base_price_;
+         calculate_price_rec_.deal_price_incl_tax := deal_price_;
+         calculate_price_ := FALSE;
+         calculate_price_rec_.base_price := base_price_;
+         calculate_price_rec_.deal_price := deal_price_;
+      END IF;
+   END IF;
+   
+   IF calculate_price_ THEN
+      offset_direction_ := direction_;
+      base_price_temp_ := base_price_;
+      deal_price_temp_ := deal_price_;
+      base_price_incl_tax_temp_ := base_price_incl_tax_;
+      deal_price_incl_tax_temp_ := deal_price_incl_tax_;
+      
+      -- If the rounding value is specified, DealPrice/DealPriceInclTax calculated at ValidateOffsets should remain.
+      IF rounding_ IS NOT NULL AND rounding_ != 0 AND offset_direction_ != 'NO_CALC' THEN
+         offset_direction_ := 'NO_CALC';
+      END IF;
+      
+      Sales_Part_Base_Price_API.Calculate_Part_Prices(base_price_temp_,
+                                                      base_price_incl_tax_temp_,
+                                                      deal_price_temp_,
+                                                      deal_price_incl_tax_temp_,
+                                                      percentage_offset_,
+                                                      amount_offset_,
+                                                      base_price_site_,
+                                                      catalog_no_,
+                                                      tax_calc_base_,
+                                                      offset_direction_,
+                                                      rounding_,
+                                                      ifs_curr_rounding_);
+                                                      
+      calculate_price_rec_.base_price := base_price_temp_;
+      calculate_price_rec_.base_price_incl_tax := base_price_incl_tax_temp_;
+      calculate_price_rec_.deal_price := deal_price_temp_; 
+      calculate_price_rec_.deal_price_incl_tax := deal_price_incl_tax_temp_;
+   END IF;
+   
+   RETURN calculate_price_rec_;
+END Calculate_Prices___;
+
+FUNCTION Fetch_Base_Price___(
+   agreement_id_     IN VARCHAR2,
+   base_price_site_  IN VARCHAR2,
+   catalog_no_       IN VARCHAR2,
+   sales_price_type_ IN VARCHAR2,
+   min_quantity_     IN NUMBER )  RETURN Price_Structure_Rec
+IS
+   price_                   NUMBER;
+   out_price_               NUMBER;
+   price_break_template_id_ VARCHAR2(100);
+   use_price_break_temp_    VARCHAR2(10) := 'FALSE';
+   currency_rate_           NUMBER := 0;
+   currency_code_           VARCHAR2(5);
+   customer_no_             VARCHAR2(20);
+   use_price_incl_tax_      BOOLEAN := FALSE;
+   price_structure_rec_     Price_Structure_Rec;
+BEGIN
+   use_price_incl_tax_   := (Customer_Agreement_API.Get_Use_Price_Incl_Tax_Db(agreement_id_) = 'TRUE');
+   use_price_break_temp_ := Customer_Agreement_API.Get_Use_Price_Break_Templat_Db(agreement_id_);
+   currency_code_        := Customer_Agreement_API.Get_Currency_Code(agreement_id_);
+   customer_no_          := Customer_Agreement_API.Get_Customer_No(agreement_id_);
+   
+   IF use_price_incl_tax_ THEN
+      Sales_Part_Base_Price_API.Calculate_Base_Price_Incl_Tax( price_break_template_id_,
+                                                               price_,
+                                                               base_price_site_,
+                                                               catalog_no_,
+                                                               sales_price_type_,
+                                                               min_quantity_,
+                                                               use_price_break_temp_);
+   ELSE
+      Sales_Part_Base_Price_API.Calculate_Base_Price( price_break_template_id_,
+                                                      price_,
+                                                      base_price_site_,
+                                                      catalog_no_,
+                                                      sales_price_type_,
+                                                      min_quantity_,
+                                                      use_price_break_temp_);
+   END IF;
+   
+   Customer_Order_Pricing_API.Get_Sales_Price_In_Currency( out_price_,
+                                                           currency_rate_,
+                                                           customer_no_,
+                                                           base_price_site_,
+                                                           currency_code_,
+                                                           price_);
+                                                           
+   price_structure_rec_.price_break_template_id := price_break_template_id_;                                                       
+   price_structure_rec_.price := out_price_;
+   price_structure_rec_.use_price_incl_tax := use_price_incl_tax_;
+   RETURN price_structure_rec_;
+END Fetch_Base_Price___;
+
+FUNCTION Get_Discount_Info___(
+   agreement_id_ IN VARCHAR2,
+   min_quantity_ IN NUMBER,
+   valid_from_   IN DATE,
+   catalog_no_   IN VARCHAR2 )  RETURN Discount_Structure_Rec
+IS
+   rec_                    Agreement_Sales_Part_Deal_API.Public_Rec;
+   discount_structure_rec_ Discount_Structure_Rec;
+BEGIN
+   rec_ := Agreement_Sales_Part_Deal_API.Get(agreement_id_, min_quantity_, valid_from_, catalog_no_);
+   discount_structure_rec_.discount_type := rec_.discount_type;
+   discount_structure_rec_.discount := rec_.discount;
+   
+   RETURN discount_structure_rec_;
+END Get_Discount_Info___;
+
+@Override
+PROCEDURE CRUD_Default_Copy___ (
+   objid_  IN     VARCHAR2,
+   key_    IN     Agreement_Sales_Part_Deal_Key,
+   values_ IN     Copy_Values_Rec,
+   attr_   OUT VARCHAR2,
+   info_   OUT VARCHAR2 )
+IS
+   min_quantity_         NUMBER;
+   base_price_site_      VARCHAR2(20);
+   sales_price_type_     VARCHAR2(20);
+   price_structure_rec_  Price_Structure_Rec;
+   use_price_incl_tax_   VARCHAR2(5);
+
+BEGIN
+   IF objid_ IS NOT NULL  THEN
+      min_quantity_ := key_.min_quantity;
+   ELSE
+      min_quantity_ := Client_SYS.Get_Item_Value('MIN_QUANTITY', values_.modified_source);  
+   END IF;
+   
+   super(objid_,key_,values_,attr_,info_);
+   base_price_site_  := Client_SYS.Get_Item_Value('BASE_PRICE_SITE', attr_);
+   sales_price_type_ := Client_SYS.Get_Item_Value('SALES_PRICE_TYPE_DB', attr_);
+   IF objid_ IS NOT NULL  THEN
+      Client_SYS.Set_Item_Value('SALES_PART_DESCRIPTION', Sales_Part_API.Get_Catalog_Desc(base_price_site_,key_.catalog_no), attr_);   
+      Client_SYS.Set_Item_Value('CATALOG_GROUP_ID', Sales_Part_API.Get_Catalog_Group(base_price_site_,key_.catalog_no), attr_);   
+      use_price_incl_tax_   := Customer_Agreement_API.Get_Use_Price_Incl_Tax_Db(key_.agreement_id);   
+      price_structure_rec_ := Fetch_Base_Price___(
+                                                key_.agreement_id, 
+                                                base_price_site_, 
+                                                key_.catalog_no, 
+                                                sales_price_type_, 
+                                                key_.min_quantity );
+   ELSE
+      Client_SYS.Set_Item_Value('SALES_PART_DESCRIPTION', Sales_Part_API.Get_Catalog_Desc(base_price_site_, Client_SYS.Get_Item_Value('CATALOG_NO', values_.modified_source)), attr_);   
+      Client_SYS.Set_Item_Value('CATALOG_GROUP_ID', Sales_Part_API.Get_Catalog_Group(base_price_site_,Client_SYS.Get_Item_Value('CATALOG_NO', values_.modified_source)), attr_);   
+      use_price_incl_tax_   := Customer_Agreement_API.Get_Use_Price_Incl_Tax_Db(Client_SYS.Get_Item_Value('AGREEMENT_ID', values_.modified_source));   
+      price_structure_rec_ := Fetch_Base_Price___(
+                                                Client_SYS.Get_Item_Value('AGREEMENT_ID', values_.modified_source), 
+                                                base_price_site_, 
+                                                Client_SYS.Get_Item_Value('CATALOG_NO', values_.modified_source), 
+                                                sales_price_type_, 
+                                                Client_SYS.Get_Item_Value('MIN_QUANTITY', values_.modified_source));
+   END IF;
+
+   Client_SYS.Set_Item_Value('MIN_QUANTITY', min_quantity_, attr_);
+   Client_SYS.Set_Item_Value('VALID_FROM_DATE', SYSDATE, attr_);        
+   Client_SYS.Set_Item_Value('PRICE_BREAK_TEMPLATE_ID', price_structure_rec_.price_break_template_id, attr_); 
+   Client_SYS.Set_Item_Value ('USE_PRICE_INCL_TAX_DB', use_price_incl_tax_, attr_);  
+
+   IF use_price_incl_tax_ = 'TRUE' THEN
+      Client_SYS.Set_Item_Value('BASE_PRICE_INCL_TAX', price_structure_rec_.price, attr_); 
+   ELSE
+      Client_SYS.Set_Item_Value('BASE_PRICE', price_structure_rec_.price, attr_); 
+   END IF;   
+   IF (Client_SYS.Get_Item_Value('DISCOUNT_TYPE', attr_)IS NULL) THEN
+      Client_SYS.Set_Item_Value('DISCOUNT', '', attr_); 
+   END IF;
+END CRUD_Default_Copy___;

@@ -1,0 +1,246 @@
+--------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  ---------------------------------------------------------------
+-- 2018-05-04  RoJalk  SCUXXW4-9770, Created
+--------------------------------------------------------------------------------------
+
+layer Core;
+
+PROCEDURE Create_Credit_Invoices___ (
+   selection_   IN VARCHAR2 ) 
+IS
+   selection_in_        VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_   VARCHAR2(32000);
+   invoice_id_          NUMBER;
+   attr_                VARCHAR2(32000);
+BEGIN
+   WHILE (INSTR(selection_in_, ';') > 0) LOOP
+      current_selection_     := substr(selection_in_, 0, INSTR(selection_in_, ';'));
+      invoice_id_            := Client_SYS.Get_Key_Reference_Value(current_selection_, 'INVOICE_ID');
+      Client_SYS.Add_To_Attr('INVOICEID', invoice_id_, attr_);
+      selection_in_          := substr(selection_in_, INSTR(selection_in_, ';')+1);
+   END LOOP;
+   Invoice_Customer_Order_API.Create_Credit_Invoices(attr_, 1, 'CREDIT', 'FALSE');
+END Create_Credit_Invoices___;
+
+PROCEDURE Check_Create_Customer_Credit_Invoice___ (
+   objkey_      IN VARCHAR2,  
+   selection_   IN VARCHAR2 ) 
+IS
+   selection_in_        VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_   VARCHAR2(32000);
+   invoice_id_          NUMBER;
+   company_             VARCHAR2(20);
+BEGIN
+   WHILE (INSTR(selection_in_, ';') > 0) LOOP
+      current_selection_     := substr(selection_in_, 0, INSTR(selection_in_, ';'));
+      
+      company_               := Client_SYS.Get_Key_Reference_Value(current_selection_, 'COMPANY');
+      invoice_id_            := Client_SYS.Get_Key_Reference_Value(current_selection_, 'INVOICE_ID');
+      
+      Check_Create_Warning___(company_, invoice_id_, objkey_);
+      selection_in_          := substr(selection_in_, INSTR(selection_in_, ';')+1);
+      
+   END LOOP;
+END Check_Create_Customer_Credit_Invoice___;
+
+PROCEDURE Create_Warning___ (
+   company_       IN VARCHAR2,  
+   invoice_id_    IN NUMBER,
+   invoice_no_    IN VARCHAR2,
+   parent_objkey_ IN VARCHAR2,
+   warning_       IN VARCHAR2 ) 
+IS
+   new_rec_      Create_Customer_Credit_Invoice_Warning_Virtual_Rec;
+   
+BEGIN
+   new_rec_.company       := company_;
+   new_rec_.invoice_id    := invoice_id_;
+   new_rec_.invoice_no    := invoice_no_; 
+   new_rec_.Warning       := warning_;
+   new_rec_.Answer        := Gen_Yes_No_API.DB_NO;
+   new_rec_.objkey        := sys_guid();
+   new_rec_.parent_objkey := parent_objkey_;
+      
+   CRUD_Create___(new_rec_); 
+     
+END Create_Warning___;
+
+PROCEDURE Check_Create_Warning___ (
+   company_       IN VARCHAR2,  
+   invoice_id_    IN NUMBER,
+   parent_objkey_ IN VARCHAR2 ) 
+IS
+   invoice_rec_                    Invoice_API.Public_Rec;
+   credited_amt_per_order_         NUMBER:= 0;
+   credited_amt_per_debit_invoice_ NUMBER:= 0;
+   currency_rounding_              NUMBER:= 0;
+   warning_                        VARCHAR2(4000);
+   warning_text_1_                 VARCHAR2(2000);
+   warning_text_2_                 VARCHAR2(2000);
+   invoice_no_                     VARCHAR2(50); 
+   debit_invoice_amount_           VARCHAR2(2000);
+   per_order_amount_               VARCHAR2(2000);
+BEGIN
+   invoice_rec_ := Invoice_API.Get(company_, invoice_id_);
+   IF (invoice_rec_.creators_reference IS NOT NULL) THEN       
+      credited_amt_per_order_      :=  Invoice_Customer_Order_API.Get_Credited_Amt_Per_Order(invoice_rec_.creators_reference);
+   END IF;
+   credited_amt_per_debit_invoice_ := Invoice_Customer_Order_API.Get_Cred_Amt_Per_Db_Ivc__(company_, invoice_rec_.invoice_no, invoice_rec_.series_id); 
+   currency_rounding_              := Invoice_Customer_Order_API.Get_Invoice_Currency_Rounding(company_, invoice_id_);
+   invoice_no_                     := Customer_Order_Inv_Head_API.Get_Invoice_No_By_Id(invoice_id_);
+   debit_invoice_amount_           := Check_decimal___(credited_amt_per_debit_invoice_,currency_rounding_);
+   per_order_amount_               := Check_decimal___(credited_amt_per_order_,currency_rounding_);
+   
+   IF (credited_amt_per_order_ != 0) THEN
+      IF (credited_amt_per_debit_invoice_ != 0) THEN 
+         warning_text_1_ := Language_SYS.Translate_Constant (lu_name_,
+                                                            'CREDINVEXIST1: Credit invoice(s) for invoice :P1 already exist with credit amount :P2.',
+                                                            NULL,
+                                                            invoice_rec_.series_id||invoice_rec_.invoice_no, debit_invoice_amount_ );
+                                                         
+         warning_text_2_ := Language_SYS.Translate_Constant (lu_name_,
+                                                             'CREDINVEXIST2: Total credit amount for order :P1 is :P2',
+                                                             NULL,
+                                                             invoice_rec_.creators_reference, per_order_amount_);                                                        
+         Create_Warning___(company_, invoice_id_, invoice_no_, parent_objkey_, warning_text_1_ || warning_text_2_);
+      ELSE
+         warning_ := Language_SYS.Translate_Constant(lu_name_, 'CREDINVEXISTORD: Credit Invoice(s) already exists for order :P1 and the credited amount is :P2.', NULL, invoice_rec_.creators_reference, per_order_amount_);
+         Create_Warning___(company_, invoice_id_, invoice_no_, parent_objkey_, warning_);
+      END IF; 
+   ELSIF (credited_amt_per_debit_invoice_ != 0) THEN
+      warning_ := Language_SYS.Translate_Constant(lu_name_, 'CREDIVDEBINV: Credit Invoice(s) already exists for the debit invoice :P1 and the credited amount is :P2.', NULL, invoice_rec_.invoice_no, debit_invoice_amount_);
+      Create_Warning___(company_, invoice_id_, invoice_no_, parent_objkey_, warning_);
+   END IF;
+   IF (invoice_rec_.correction_invoice_id != 0) THEN  
+      warning_ := Language_SYS.Translate_Constant(lu_name_, 'CORRINVEXISTREF: Correction invoice exist for the reference invoice :P1.', NULL, invoice_rec_.invoice_no);
+      Create_Warning___(company_, invoice_id_, invoice_no_, parent_objkey_, warning_);
+   END IF;   
+   
+END Check_Create_Warning___;
+
+-- Generic method to add zeros after decimal point --
+FUNCTION Check_decimal___ (
+   amount_             IN NUMBER, 
+   currency_rounding_  IN NUMBER) RETURN VARCHAR2
+IS
+   amt_                 NUMBER;
+   decimal_values_      NUMBER;
+   padded_value_        VARCHAR2(4000);
+   currency_rounding2_  NUMBER;
+   rounded_amount_      NUMBER;
+BEGIN
+   amt_              := trunc(amount_);
+   rounded_amount_   := ROUND(amount_,currency_rounding_);
+   decimal_values_   := rounded_amount_ - amt_;
+  
+   IF ( rounded_amount_ = amt_ OR rounded_amount_ = amt_ + 1 ) THEN
+      RETURN rounded_amount_ || '.00';
+   ELSE
+      currency_rounding2_  := currency_rounding_ + 1;
+      padded_value_        := RPAD(decimal_values_,currency_rounding2_,0);
+      RETURN amt_ || padded_value_;
+   END IF;      
+END Check_decimal___;
+
+FUNCTION Finish___ (
+   key_ IN Create_Customer_Credit_Invoice_Virtual_Key ) RETURN VARCHAR2
+IS
+   rec_                   Create_Customer_Credit_Invoice_Virtual_Rec;
+   parent_selection_      VARCHAR2(2000) := '';
+   
+   CURSOR get_exclude_invoice_info IS
+      SELECT DISTINCT company, invoice_id
+        FROM CREATE_CUSTOMER_CREDIT_INVOICES_CREATE_CUSTOMER_CREDIT_INVOICE_WARNING_VIRTUAL_VRT 
+       WHERE parent_objkey = key_.objkey
+         AND answer = Gen_Yes_No_API.DB_NO;    
+BEGIN
+   rec_              := Get_Record___(key_);
+   parent_selection_ := rec_.selection;
+   
+   FOR exclude_invoice_info_rec_ IN get_exclude_invoice_info LOOP
+      
+      parent_selection_ := REPLACE(parent_selection_, 'COMPANY=' || exclude_invoice_info_rec_.company || '^;', '');
+      parent_selection_ := REPLACE(parent_selection_, 'COMPANY=' || exclude_invoice_info_rec_.company|| '^', '');
+         
+      parent_selection_ := REPLACE(parent_selection_, 'INVOICE_ID=' || exclude_invoice_info_rec_.invoice_id || '^;', '');
+      parent_selection_ := REPLACE(parent_selection_, 'INVOICE_ID=' || exclude_invoice_info_rec_.invoice_id|| '^', '');
+      
+   END LOOP;
+   
+   IF SUBSTR(parent_selection_, -1) = ';' THEN
+      parent_selection_ := SUBSTR(parent_selection_, 1, LENGTH(parent_selection_)-1); 
+   END IF;
+   
+   RETURN parent_selection_;
+END Finish___;
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Create_Customer_Credit_Invoice_Virtual_Rec )
+IS
+BEGIN
+   super(rec_);
+   Check_Create_Customer_Credit_Invoice___(rec_.objkey, rec_.Selection);
+END CRUD_Create___;
+
+FUNCTION Get_Validate_Info___ (
+   selection_   IN VARCHAR2 ) RETURN Validate_Info_Struct_Rec 
+IS
+   selection_in_               VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_          VARCHAR2(32000);
+   invoice_id_                 NUMBER;
+   company_                    VARCHAR2(20);
+   invoice_fee_amount_         NUMBER;
+   base_currency_code_         VARCHAR2(3);  
+   currency_code_              VARCHAR2(3);   
+   validate_info_struct_rec_   Validate_Info_Struct_Rec;
+BEGIN
+   WHILE (INSTR(selection_in_, ';') > 0) LOOP
+      
+      current_selection_  := substr(selection_in_, 0, INSTR(selection_in_, ';'));
+      invoice_id_         := Client_SYS.Get_Key_Reference_Value(current_selection_, 'INVOICE_ID');
+      company_            := Client_SYS.Get_Key_Reference_Value(current_selection_, 'COMPANY');
+      invoice_fee_amount_ := Invoice_Item_API.Get_Invoice_Fee_Amount(company_, invoice_id_);
+      
+      base_currency_code_ := Company_Finance_API.Get_Currency_Code(company_);
+      currency_code_      := Customer_Order_Inv_Head_API.Get_Currency(company_, invoice_id_);
+      
+      IF (base_currency_code_ != currency_code_) THEN
+         validate_info_struct_rec_.not_base_currency := TRUE;
+      END IF;   
+      
+      IF (invoice_fee_amount_ IS NOT NULL ) THEN
+         validate_info_struct_rec_.debit_inv_has_inv_fee := TRUE;
+      END IF; 
+      
+      selection_in_       := substr(selection_in_, INSTR(selection_in_, ';') + 1);
+      
+   END LOOP;
+   
+   RETURN validate_info_struct_rec_;
+END Get_Validate_Info___;
+
+PROCEDURE Create_Credit_Invoices___ (
+   selection_             IN VARCHAR2,
+   use_ref_inv_curr_rate_ IN NUMBER,
+   allow_credit_inv_fee_  IN VARCHAR2 ) 
+IS
+   attr_                VARCHAR2(32000);
+   invoice_id_          NUMBER;
+   company_             VARCHAR2(20);
+   selection_in_        VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_   VARCHAR2(32000);
+BEGIN
+    WHILE (INSTR(selection_in_, ';') > 0) LOOP
+      current_selection_  := substr(selection_in_, 0, INSTR(selection_in_, ';'));
+
+      invoice_id_         := Client_SYS.Get_Key_Reference_Value(current_selection_, 'INVOICE_ID');
+      company_            := Client_SYS.Get_Key_Reference_Value(current_selection_, 'COMPANY');
+      Customer_Order_Inv_Head_Uiv_Initial_Check___(company_, invoice_id_);
+      
+      Client_SYS.Add_To_Attr('INVOICEID', invoice_id_, attr_);
+      selection_in_       := substr(selection_in_, INSTR(selection_in_, ';') + 1);
+   END LOOP;
+   Invoice_Customer_Order_API.Create_Credit_Invoices(attr_, use_ref_inv_curr_rate_, 'CREDIT', allow_credit_inv_fee_);
+END Create_Credit_Invoices___;

@@ -1,0 +1,123 @@
+------------------------------------------------------------------------------
+--  Module     : INVENT
+---
+--  Filename   : Mvb_InventFactInventoryTurnover.api
+--  
+--  ---
+--  Purpose    : Installs Business Intelligence specific view for 
+--               Refreshing Data for Datamart version of FactInventoryTurnover in component INVENT
+--
+------------------------------------------------------------------------------
+--  Date    Sign    History
+--  ------  ------  ----------------------------------------------------------
+--  150703  AyAmlk  BOULDER-1950, Replicate the changes correspond to the IdColumnName
+--  150703          property in the model.
+--  150619  AyAmlk  BOULDER-1931, Modified the view by removing the method calls 
+--  150619          and joining with the SITE_PUBLIC to improve performance.
+--  150409  AyAmlk  BOULDER-1032, Created.
+------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------
+-- Create Basic MV source view, i.e. the old MV select statement
+-- Related to entity FACT_INVENTORY_TURNOVER
+------------------------------------------------------------------------------
+DEFINE MODULE      = INVENT
+DEFINE MVB_VIEW    = INVENTORY_TURNOVER_MVB
+DEFINE LU          = BiFactInventoryTurnover
+
+-- Create Basic view that selects source info for the entity
+PROMPT Creating snapshot MVB view &MVB_VIEW
+CREATE OR REPLACE VIEW &MVB_VIEW
+AS
+SELECT
+   -- original key columns
+   i.part_no                                         part_no_key,
+   i.contract                                        contract_key,
+   i.configuration_id                                configuration_id_key,
+   i.stat_year_no                                    stat_year_no_key,
+   i.stat_period_no                                  stat_period_no_key,
+   -- measure items
+   i.beg_balance                                      beg_balance,
+   i.count_adjust                                     count_adjust,
+   i.count_issues                                     count_issues,
+   i.count_abnormal_issues                            count_abnormal_issues,
+   i.count_issues + i.count_abnormal_issues           count_issues_with_abnormal,
+   i.count_receipts                                   count_receipts,
+   i.mtd_adjust                                       adjusted_qty,
+   i.mtd_issues                                       issued_qty,
+   i.mtd_abnormal_issues                              issued_abnormal_qty,
+   i.mtd_issues + i.mtd_abnormal_issues               issued_with_abnormal_qty,
+   i.mtd_receipts                                     received_qty,
+   i.qty_onhand                                       qty_onhand,
+   i.qty_onhand * Inventory_Value_Part_Api.Get_Unit_Cost__(i.contract, 
+                                                           i.stat_year_no, 
+                                                           i.stat_period_no, 
+                                                           i.part_no, 
+                                                           i.configuration_id, 
+                                                           '*', '*', '*')
+                                                      inventory_value,
+   (i.mtd_issues) * Inventory_Value_Part_Api.Get_Unit_Cost__(i.contract, 
+                                                             i.stat_year_no,
+                                                             i.stat_period_no,
+                                                             i.part_no,
+                                                             i.configuration_id,
+                                                             '*', '*', '*')
+                                                      issued_value,
+   (i.mtd_abnormal_issues) * Inventory_Value_Part_Api.Get_Unit_Cost__(i.contract,
+                                                                      i.stat_year_no,
+                                                                      i.stat_period_no,
+                                                                      i.part_no,
+                                                                      i.configuration_id,
+                                                                      '*', '*', '*')
+                                                      issued_abnormal_value,
+   i.mtd_issues/DECODE(i.qty_onhand,0,1,i.qty_onhand) turnover_rate,
+   (i.mtd_issues + i.mtd_abnormal_issues)/DECODE(i.qty_onhand,0,1,i.qty_onhand)
+                                                      turnover_rate_with_abnormal,
+   -- light items
+   i.configuration_id                                 configuration_id,
+   -- dimension identifiers
+   s.company                                          dim_company_id,
+   i.contract                                         dim_site_id,
+   i.contract||'^'||i.part_no                         dim_inventory_part_id,
+   TRUNC(i.create_date)                               dim_it_date_created_id,
+   NVL(i.second_commodity, '#')                       dim_second_commodity_id,
+   i.stat_year_no||'^'||i.stat_period_no              dim_stat_period_id,
+   s.company ||'^'||TO_CHAR(TRUNC(i.create_date),'YYYY-MM-DD')
+                                                      dim_rpd_company_period_id,
+   TRUNC(i.create_date)                               dim_rpd_period_id,
+   -- joiners
+   s.company                                          company,
+   i.contract                                         site,
+   i.part_no                                          inventory_part,
+   i.second_commodity                                 second_commodity,
+   i.stat_year_no                                     stat_year_no,
+   i.stat_period_no                                   stat_period_no,
+   TRUNC(i.create_date)                               it_date_created,
+   TRUNC(i.create_date)                               reporting_date,
+   -- unique key
+   i.part_no || '^' || i.contract || '^' || i.configuration_id || '^' || TO_CHAR(i.stat_year_no) || '^' || TO_CHAR(i.stat_period_no)                                         
+                                                      id
+FROM INVENTORY_PART_PERIOD_HIST_TAB i, SITE_PUBLIC s
+WHERE i.contract = s.contract   
+WITH read only;
+
+COMMENT ON TABLE &MVB_VIEW
+   IS 'LU=&LU^PROMPT=Bi Fact Inventory Turnover^MODULE=&MODULE^';
+
+------------------------------------------------------------------------------
+-- Make sure to create the source view (MVS) at this point but only if there
+-- are any entities that have been registered to use the MVB view.
+-- The reason is to be able to handle upgrades that affects the source view but
+-- not the incremental metadata. 
+------------------------------------------------------------------------------
+BEGIN
+   Is_Mv_Util_API.Create_Mvs_View('&MVB_VIEW');
+   COMMIT;
+END;
+/
+   
+------------------------------------------------------------------------------
+
+UNDEFINE MODULE
+UNDEFINE MVB_VIEW    
+UNDEFINE LU          

@@ -1,0 +1,583 @@
+--------------------------------------------------------------------------------------
+-- Date    Sign    History
+-- ------  ------  ---------------------------------------------------------------
+-- 200908  deeklk  AM2020R1-5850, Created.
+-- 200925  deeklk  AM2020R1-6029, Corrected confusing validation error texts when measurements are uploaded into virtual.
+-- 201015  deeklk  AM2020R1-6029, Changed meter setup conditions in Get_Validate_Status().
+-- 201015  deeklk  AM2020R1-6029, Added Check_Vrt_Accu_Values___() & Modified Validate_Measurements___().
+-- 201019  deeklk  AM2020R1-6029, Added Check_Prev_Preliminary_Reading___().
+-------------------------------------------------------------------------------------
+layer Core;
+
+FUNCTION Download_Template___ RETURN VARCHAR2
+IS
+   new_rec_                 c_s_v_virtual_rec;
+   objkey_                  VARCHAR2(10000);
+   csv_template_blob_       BLOB;
+   csv_raw_                 RAW (32000);
+BEGIN
+   DBMS_LOB.CreateTemporary(csv_template_blob_, TRUE);
+   csv_raw_ := UTL_RAW.CAST_TO_RAW('Object ID*, Object Site*, Test Point ID*, Parameter ID*, Registration Date*(mm/dd/yyyy hh:mm:ss), Meter ID, Remark, Measurement Note, Recorded Value*');
+   DBMS_LOB.Writeappend(csv_template_blob_, UTL_RAW.LENGTH(csv_raw_), csv_raw_);
+   objkey_ := sys_guid();
+   new_rec_.objkey := objkey_;
+   new_rec_.file_name := 'UploadMeasurementsTemplate.csv';
+   new_rec_.file_data := csv_template_blob_;
+   CRUD_Create___(new_rec_);
+   RETURN objkey_;
+END Download_Template___;
+
+
+PROCEDURE Import_Measurements_Action___ (
+   objkey_ IN VARCHAR2 ) 
+IS
+   key_                    Equipment_Object_Measurement_Virtual_Key;
+   rec_                    Equipment_Object_Measurement_Virtual_Rec;
+   clob_file_              CLOB;
+BEGIN
+   DELETE FROM ${PROJECTION}_error_list_virtual_vrt
+   WHERE parent_objkey = objkey_;
+   key_.Objkey := objkey_;
+   rec_ := Get_Record___(key_);
+   clob_file_ := Utility_SYS.Blob_To_Clob(rec_.file_data);
+   Parse_Csv(objkey_, clob_file_);  
+END Import_Measurements_Action___;
+
+PROCEDURE Parse_Csv (
+   objkey_                 VARCHAR2,
+   p_clob_                 CLOB ,
+   p_delim_                VARCHAR2  DEFAULT  ',',
+   p_optionally_enclosed_  VARCHAR2  DEFAULT  '"' ) 
+IS
+   CARRIAGE_RETURN    CONSTANT CHAR(1) := chr(13);
+   LINE_FEED          CONSTANT CHAR(1) := chr(10);
+   l_char_                     CHAR (1);
+   l_lookahead_                CHAR(1);
+   l_pos_                      NUMBER := 0;
+   l_token_                    VARCHAR2(32000) := NULL;
+   l_token_complete_           BOOLEAN := FALSE;
+   l_line_complete_            BOOLEAN := FALSE;
+   l_new_token_                BOOLEAN := TRUE;
+   l_enclosed_                 BOOLEAN := FALSE;
+   l_lineno_                   NUMBER  := 1;
+   l_columnno_                 NUMBER  := 1;
+   
+   contract_                   VARCHAR2(5)    := NULL;
+   mch_code_                   VARCHAR2(100)  := NULL;
+   test_point_id_              VARCHAR2(30)   := NULL;
+   parameter_code_             VARCHAR2(5)    := NULL;
+   reg_date_                   DATE           := NULL;
+   remark_                     VARCHAR2(200)  := NULL;
+   measurement_note_           VARCHAR2(2000) := NULL;
+   meter_id_                   VARCHAR2(30)   := NULL;
+   recorded_value_             NUMBER         := NULL;
+   
+   col1_header_                VARCHAR2(50) := NULL;
+   col2_header_                VARCHAR2(50) := NULL;
+   col3_header_                VARCHAR2(50) := NULL;
+   col4_header_                VARCHAR2(50) := NULL;
+   col5_header_                VARCHAR2(50) := NULL;
+   col6_header_                VARCHAR2(50) := NULL;
+   col7_header_                VARCHAR2(50) := NULL;
+   col8_header_                VARCHAR2(50) := NULL;
+   col9_header_                VARCHAR2(50) := NULL;
+   col_header_                 VARCHAR2(50) := NULL;
+BEGIN
+LOOP
+   -- increment position index
+   l_pos_ := l_pos_ + 1;
+   
+   -- get next character from clob
+   l_char_ := dbms_lob.substr( p_clob_, 1, l_pos_);
+   
+   -- exit when no more characters to process
+   EXIT WHEN l_char_ IS NULL OR  l_pos_ > dbms_lob.getLength(p_clob_);
+   
+   -- if first character of new token is optionally enclosed character
+   -- note that and skip it and get next character
+   IF l_new_token_ AND l_char_ = p_optionally_enclosed_ THEN 
+      l_enclosed_ := TRUE;
+      l_pos_ := l_pos_ + 1;
+      l_char_ := dbms_lob.substr( p_clob_, 1, l_pos_);
+   END IF;
+   l_new_token_ := FALSE;
+   
+   -- get look ahead character
+   l_lookahead_ := dbms_lob.substr( p_clob_, 1, l_pos_+1 );
+   
+   -- inspect character (and lookahead) to determine what to do
+   IF l_char_ = p_optionally_enclosed_ AND l_enclosed_ THEN
+      IF l_lookahead_ = p_optionally_enclosed_ THEN
+         l_pos_ := l_pos_ + 1;
+         l_token_ := l_token_ || l_lookahead_;
+      ELSIF l_lookahead_ = p_delim_ THEN
+         l_pos_ := l_pos_ + 1;
+         l_token_complete_ := TRUE;
+      ELSE
+         l_enclosed_ := FALSE;
+      END IF;
+   ELSIF l_char_ IN ( CARRIAGE_RETURN, LINE_FEED ) AND NOT l_enclosed_ THEN
+      l_token_complete_ := TRUE;
+      l_line_complete_ := TRUE;
+      IF l_lookahead_ IN ( CARRIAGE_RETURN, LINE_FEED ) THEN
+         l_pos_ := l_pos_ + 1;
+      END IF;
+      
+   ELSIF l_char_ = p_delim_ AND NOT l_enclosed_ THEN
+      l_token_complete_ := TRUE;
+      
+   ELSIF l_pos_ = dbms_lob.getLength( p_clob_ ) THEN
+      l_token_ := l_token_ || l_char_;
+      l_token_complete_ := TRUE;
+      l_line_complete_ := TRUE;
+   ELSE 
+      l_token_ := l_token_ || l_char_;
+   END IF;
+   
+   -- process a new token
+   IF l_token_complete_ THEN
+      IF l_lineno_ = 1 THEN
+         CASE l_columnno_ 
+            WHEN 1 THEN col1_header_ := trim(l_token_);
+            WHEN 2 THEN col2_header_ := trim(l_token_);
+            WHEN 3 THEN col3_header_ := trim(l_token_);
+            WHEN 4 THEN col4_header_ := trim(l_token_);
+            WHEN 5 THEN col5_header_ := trim(l_token_);
+            WHEN 6 THEN col6_header_ := trim(l_token_); 
+            WHEN 7 THEN col7_header_ := trim(l_token_);
+            WHEN 8 THEN col8_header_ := trim(l_token_);
+            WHEN 9 THEN col9_header_ := trim(l_token_);
+         END CASE;
+      END IF;
+      
+      IF l_lineno_ != 1 THEN
+         CASE l_columnno_  
+            WHEN 1 THEN col_header_ := col1_header_;
+            WHEN 2 THEN col_header_ := col2_header_;
+            WHEN 3 THEN col_header_ := col3_header_;
+            WHEN 4 THEN col_header_ := col4_header_;
+            WHEN 5 THEN col_header_ := col5_header_;
+            WHEN 6 THEN col_header_ := col6_header_;
+            WHEN 7 THEN col_header_ := col7_header_;
+            WHEN 8 THEN col_header_ := col8_header_;
+            WHEN 9 THEN col_header_ := col9_header_;
+         END CASE;
+         CASE col_header_
+            WHEN 'Object ID*'         THEN mch_code_          := l_token_;
+            WHEN 'Object Site*'       THEN contract_          := l_token_;
+            WHEN 'Test Point ID*'     THEN test_point_id_     := l_token_;
+            WHEN 'Parameter ID*'      THEN parameter_code_    := l_token_;
+            WHEN 'Registration Date*(mm/dd/yyyy hh:mm:ss)' THEN reg_date_          := TO_DATE(l_token_,'MM/DD/YYYY HH24:MI:SS');
+            WHEN 'Meter ID'           THEN meter_id_          := l_token_;
+            WHEN 'Remark'             THEN remark_            := l_token_;
+            WHEN 'Measurement Note'   THEN measurement_note_  := l_token_;
+            WHEN 'Recorded Value*'    THEN recorded_value_    := l_token_;
+         END CASE;
+      END IF;     
+      l_columnno_       := l_columnno_ + 1;
+      l_token_          := NULL;
+      l_enclosed_       := FALSE;
+      l_new_token_      := TRUE;
+      l_token_complete_ := FALSE;
+   END IF;
+   
+   --process end-of-line here
+   IF l_line_complete_ THEN
+      IF l_lineno_ != 1 THEN
+         Validate_Measurements___(mch_code_, contract_, test_point_id_, parameter_code_, reg_date_, remark_, measurement_note_, meter_id_, recorded_value_, objkey_);
+         contract_           := NULL;
+         mch_code_           := NULL;
+         test_point_id_      := NULL;
+         parameter_code_     := NULL;
+         reg_date_           := NULL;
+         remark_             := NULL;
+         measurement_note_   := NULL;
+         meter_id_           := NULL;
+         recorded_value_     := NULL;
+      END IF;
+      l_lineno_ := l_lineno_ + 1;
+      l_columnno_ := 1;
+      l_line_complete_ := FALSE;
+   END IF;
+END  LOOP ;
+  EXCEPTION
+   WHEN OTHERS THEN
+      Error_SYS.Record_General(lu_name_, 'CSVPARSEERROR: Invalid Template Format');
+END Parse_Csv;
+
+PROCEDURE Validate_Measurements___ (
+   mch_code_         IN VARCHAR2,
+   contract_         IN VARCHAR2,
+   test_point_id_    IN VARCHAR2,
+   parameter_code_   IN VARCHAR2,
+   reg_date_         IN TIMESTAMP,
+   remark_           IN VARCHAR2,
+   measurement_note_ IN VARCHAR2,
+   meter_id_         IN VARCHAR2,
+   recorded_value_   IN NUMBER,
+   objkey_           IN VARCHAR2) 
+IS
+   error_message_    VARCHAR2(32000):= NULL;
+   rec_              error_list_virtual_rec;
+   measured_value_   NUMBER;
+   measurement_type_ VARCHAR2(50);
+   test_pnt_seq_    NUMBER;
+BEGIN
+   test_pnt_seq_ := Equipment_Object_Test_Pnt_API.Get_Testpnt_Seq(contract_, mch_code_, test_point_id_);
+   IF (Measurement_Parameter_API.Get_Measurement_Param_Type_Db(parameter_code_) = Measurement_Param_Type_API.DB_ACCUMULATED) THEN
+      IF (Check_Prev_Preliminary_Reading___(contract_, mch_code_, test_point_id_, parameter_code_, reg_date_) = 'PreliminaryReading') THEN
+         measurement_type_ := 'PreliminaryReading';
+         error_message_    := Language_SYS.Translate_Constant(lu_name_,'PRERECEXISTR: Previous Reading is a Preliminary Reading.');
+      ELSE
+         Equipment_Object_Meas_API.Calc_Accumulated_Value(measured_value_, measurement_type_, contract_, mch_code_, parameter_code_, test_point_id_, recorded_value_, reg_date_, test_pnt_seq_);
+         IF (measurement_type_ IS NULL OR measurement_type_ != 'PreliminaryReading') THEN
+            measurement_type_ := Check_Vrt_Accu_Values___(contract_, mch_code_, test_point_id_, parameter_code_, reg_date_, recorded_value_);
+         END IF;
+      END IF;
+   END IF;
+   error_message_ := NVL(Get_Validate_Status(mch_code_, contract_, test_point_id_, parameter_code_, reg_date_, remark_, measurement_note_, meter_id_, recorded_value_, measurement_type_, test_pnt_seq_), error_message_);
+   IF error_message_ IS  NULL THEN
+      IF  (measurement_type_ =  'PreliminaryReading')THEN 
+         error_message_ := Language_SYS.Translate_Constant(lu_name_, 'PRERECEXIST: This will be recorded as a Preliminary Reading.', NULL);
+         rec_.status    := 'Warning';
+      ELSE 
+         rec_.status    := 'Valid';
+         error_message_ := Language_SYS.Translate_Constant(lu_name_, 'VALIDREC: Valid Record.', NULL);
+      END IF;
+   ELSE
+      rec_.status := 'Error';
+   END IF;
+   rec_.error_message    := error_message_;
+   rec_.mch_code         := mch_code_;
+   rec_.contract         := contract_;
+   rec_.mch_code_desc    := Equipment_Object_API.Get_Mch_Name(contract_, mch_code_);
+   rec_.test_point_id    := test_point_id_;
+   rec_.test_point_desc  := Equipment_Object_Test_Pnt_API.Get_Description(contract_, mch_code_, test_point_id_);
+   rec_.parameter_code   := parameter_code_;
+   rec_.parameter_desc   := Measurement_Parameter_API.Get_Description(parameter_code_);
+   rec_.reg_date         := reg_date_;
+   rec_.remark           := remark_;
+   rec_.measurement_note := measurement_note_;
+   rec_.meter_id         := meter_id_;
+   rec_.recorded_value   := recorded_value_;
+   rec_.measurement_type := measurement_type_;
+   rec_.parent_objkey    := objkey_;
+   rec_.objkey           := sys_guid();
+   CRUD_Create___(rec_);
+END Validate_Measurements___;  
+
+
+FUNCTION Import_To_Measurements___ (
+   parent_objkey_ IN VARCHAR2) RETURN Imported_Result_Str_Rec
+IS
+   
+   key_                 Equipment_Object_Measurement_Virtual_Key;
+   return_rec_          Imported_Result_Str_Rec;
+   error_               NUMBER;
+   import_log_          NUMBER;
+   row_count_           NUMBER;
+   error_message_       VARCHAR2(300);
+   import_log_id_       NUMBER;
+   new_rec_             actual_error_list_virtual_rec;
+   info_                VARCHAR2(200);
+   objid_               VARCHAR2(200);
+   objversion_          VARCHAR2(200);
+   attr_                VARCHAR2(32000);
+   test_sequence_id_    VARCHAR2(6);
+   mch_code_            VARCHAR2(100);
+   contract_            VARCHAR2(5);
+   test_point_id_       VARCHAR2(30);
+   test_point_seq_      NUMBER;
+   
+BEGIN
+   key_.Objkey          := parent_objkey_;
+   error_               := 0;
+   row_count_           := 0;
+   import_log_          := 0;
+   error_message_       := NULL;
+   test_sequence_id_    := Def_Key_Value_API.DB_ANY;
+   FOR rec_ IN Get_Uploaded_Data_Set___(key_) LOOP
+      BEGIN
+         @ApproveTransactionStatement(2020-09-06,deeklk)
+         SAVEPOINT NEWDATA;
+         IF rec_.status IN ('Valid', 'Warning')  THEN
+            --IF Validate_SYS.Is_Changed(mch_code_, rec_.mch_code) OR
+            -- Validate_SYS.Is_Changed(contract_, rec_.contract) OR
+            -- Validate_SYS.Is_Changed(test_point_id_, rec_.test_point_id) THEN
+            test_point_seq_:= Equipment_Object_Test_Pnt_API.Get_Testpnt_Seq(rec_.contract, rec_.mch_code, rec_.test_point_id);
+            -- END IF;
+            --            
+            mch_code_      := rec_.mch_code;
+            contract_      := rec_.contract;
+            test_point_id_ := rec_.test_point_id;
+            Client_SYS.Clear_Attr(attr_);
+            Client_SYS.Add_To_Attr('TEST_PNT_SEQ',     test_point_seq_,                   attr_);
+            Client_SYS.Add_To_Attr('PARAMETER_CODE',   rec_.parameter_code,               attr_); 
+            Client_SYS.Add_To_Attr('TEST_SEQUENCE_ID', test_sequence_id_,                 attr_);
+            Client_SYS.Add_To_Attr('REG_DATE',         rec_.reg_date,                     attr_);
+            Client_SYS.Add_To_Attr('REMARK',           rec_.remark,                       attr_);
+            Client_SYS.Add_To_Attr('MEASUREMENT_NOTE', rec_.measurement_note,             attr_);
+            Client_SYS.Add_To_Attr('RECORDED_VALUE',   rec_.recorded_value,               attr_);
+            Client_SYS.Add_To_Attr('METER_ID',         rec_.meter_id,                     attr_);
+            Equipment_Object_Meas_API.New__(info_, objid_, objversion_, attr_, 'DO');
+            row_count_  := row_count_ + 1;
+         ELSE 
+            error_ := error_ + 1;  
+            new_rec_.status           := 'Error';
+            new_rec_.error_message    := rec_.error_message;
+            new_rec_.mch_code         := rec_.mch_code;
+            new_rec_.contract         := rec_.contract;
+            new_rec_.mch_code_desc    := rec_.mch_code_desc;
+            new_rec_.test_point_id    := rec_.test_point_id;
+            new_rec_.test_point_desc  := rec_.test_point_desc;
+            new_rec_.parameter_code   := rec_.parameter_code;
+            new_rec_.parameter_desc   := rec_.parameter_desc;
+            new_rec_.reg_date         := rec_.reg_date;
+            new_rec_.remark           := rec_.remark;
+            new_rec_.measurement_note := rec_.measurement_note;
+            new_rec_.meter_id         := rec_.meter_id;
+            new_rec_.recorded_value   := rec_.recorded_value;
+            new_rec_.measurement_type := rec_.measurement_type;
+            new_rec_.parent_objkey    := parent_objkey_;
+            new_rec_.objkey           := sys_guid();
+            CRUD_Create___(new_rec_);
+         END IF;
+      EXCEPTION
+         WHEN OTHERS THEN 
+            @ApproveTransactionStatement(2020-09-06,deeklk)
+            ROLLBACK TO NEWDATA;
+            error_message_   := SQLERRM;
+            IF (error_message_ IS NOT NULL) THEN  
+               error_ := error_ + 1;  
+               new_rec_.status := 'Error';
+               new_rec_.error_message    := Regexp_Substr(SQLERRM,'[^:]+',1,2);
+               new_rec_.mch_code         := rec_.mch_code;
+               new_rec_.contract         := rec_.contract;
+               new_rec_.mch_code_desc    := rec_.mch_code_desc;
+               new_rec_.test_point_id    := rec_.test_point_id;
+               new_rec_.test_point_desc  := rec_.test_point_desc;
+               new_rec_.parameter_code   := rec_.parameter_code;
+               new_rec_.parameter_desc   := rec_.parameter_desc;
+               new_rec_.reg_date         := rec_.reg_date;
+               new_rec_.remark           := rec_.remark;
+               new_rec_.measurement_note := rec_.measurement_note;
+               new_rec_.meter_id         := rec_.meter_id;
+               new_rec_.recorded_value   := rec_.recorded_value;
+               new_rec_.measurement_type := rec_.measurement_type;
+               new_rec_.parent_objkey    := parent_objkey_;
+               new_rec_.objkey           := sys_guid();
+               CRUD_Create___(new_rec_);
+               IF (import_log_id_ IS NOT NULL) THEN
+                  import_log_ := import_log_ +1;
+               END IF;
+            END IF;
+      END;
+   END LOOP;
+   return_rec_.row_count   := row_count_;
+   return_rec_.error_count := error_;
+   return_rec_.import_log := import_log_;
+   
+   DELETE FROM ${PROJECTION}_error_list_virtual_vrt
+   WHERE parent_objkey = parent_objkey_;
+-- DELETE FROM  ${PROJECTION}_Equipment_Object_Measurement_Virtual_vrt
+-- WHERE objkey = parent_objkey_
+   
+   RETURN return_rec_;
+END Import_To_Measurements___;
+
+PROCEDURE Delete_Virtual_Records___ (
+   parent_objkey_ IN VARCHAR2 ) 
+IS 
+BEGIN
+   DELETE FROM  ${PROJECTION}_Equipment_Object_Measurement_Virtual_vrt
+   WHERE objkey = parent_objkey_;
+   DELETE FROM  ${PROJECTION}_error_list_virtual_vrt
+   WHERE parent_objkey = parent_objkey_;
+   DELETE FROM  ${PROJECTION}_actual_error_list_virtual_vrt
+   WHERE parent_objkey = parent_objkey_;
+END Delete_Virtual_Records___;
+
+FUNCTION Get_Validate_Status (
+   mch_code_         IN VARCHAR2,
+   contract_         IN VARCHAR2,
+   test_point_id_    IN VARCHAR2,
+   parameter_code_   IN VARCHAR2,
+   reg_date_         IN DATE,
+   remark_           IN VARCHAR2,
+   measurement_note_ IN VARCHAR2,
+   meter_id_         IN VARCHAR2,
+   recorded_value_   IN NUMBER,
+   measurement_type_ IN VARCHAR2,
+   test_pnt_seq_     IN NUMBER)  RETURN VARCHAR2
+IS
+   error_message_   VARCHAR2(32000);
+   last_meter_id_   VARCHAR2(30);
+BEGIN
+   --Check all the mandatory values exist or not
+   IF (mch_code_ IS NULL) THEN 
+      error_message_ := Language_SYS.Translate_Constant(lu_name_, 'MCHCODEMANDATORY: Object ID is mandatory.', NULL);
+   END IF;
+   IF (contract_ IS NULL) THEN 
+      error_message_ := error_message_ ||  chr(13)  || Language_SYS.Translate_Constant(lu_name_, 'CONTRACTMANDATORY: Object Site is mandatory.', NULL);
+   END IF;
+   IF (test_point_id_ IS NULL) THEN 
+      error_message_ := error_message_ ||  chr(13)  || Language_SYS.Translate_Constant(lu_name_, 'TSTPNTIDMANDATORY: Test Point ID is mandatory.', NULL);
+   END IF;
+   IF (parameter_code_ IS NULL) THEN 
+      error_message_ := error_message_ ||  chr(13)  || Language_SYS.Translate_Constant(lu_name_, 'PARAMIDMANDATORY: Parameter ID is mandatory.', NULL);
+   END IF;
+   IF (recorded_value_ IS NULL) THEN 
+      error_message_ := error_message_ ||  chr(13)  || Language_SYS.Translate_Constant(lu_name_, 'RECVALMANDATORY: Recorded Value is mandatory.', NULL);
+   END IF;
+   IF (reg_date_ IS NULL) THEN 
+      error_message_ := error_message_ ||  chr(13)  || Language_SYS.Translate_Constant(lu_name_, 'REGDATEMANDATORY: Registration date and time is mandatory.', NULL);
+   END IF;
+   
+   
+   --Validate Site, Object ID, Test Point and Parameter ID
+   IF ((mch_code_ IS NOT NULL) AND (contract_ IS NOT NULL)) THEN
+      IF (Equipment_Object_API.Do_Exist(contract_, mch_code_) = 'FALSE') THEN
+         error_message_ := error_message_ ||  chr(13)  || Language_SYS.Translate_Constant(lu_name_, 'INVLDOBJECTSITE: Object does not exist for site.', NULL, test_point_id_);
+      ELSIF (test_point_id_ IS NOT NULL) THEN
+         IF (test_pnt_seq_ IS NULL) THEN 
+            error_message_ := error_message_ ||  chr(13)  || Language_SYS.Translate_Constant(lu_name_, 'TESTPNTNOTEXIST: Test Point does not exist for Object ID (:P1) of Object Site (:P2).', NULL, mch_code_, contract_);
+         ELSIF (parameter_code_ IS NOT NULL) THEN
+            IF (Equipment_Object_Param_API.Exists(test_pnt_seq_,parameter_code_ ) != TRUE ) THEN
+               error_message_:=  error_message_ ||  chr(13)  ||Language_SYS.Translate_Constant(lu_name_, 'PARAMNOTEXIST: Parameter does not exist for Test Point (:P1) of Object (:P2).', NULL, test_point_id_, mch_code_);
+            ELSE   
+               --Check if measurement is on the same time as previous
+               IF (Equipment_Object_Meas_API.Is_Reg_Date_Exists(test_pnt_seq_, parameter_code_, reg_date_) = 1 AND measurement_type_ != Measurement_Type_API.DB_METER_ROLL_OVER ) THEN
+                  error_message_ := error_message_ ||  chr(13)  || Language_SYS.Translate_Constant(lu_name_, 'EQUIPDUPLIDATE: A Measurement already exists on (:P1) for parameter (:P2) and test point (:P3) combination.', NULL, TO_CHAR(reg_date_, 'MM/DD/YYYY HH12:MI:SS AM'), parameter_code_, test_point_id_);
+               END IF;
+               --get the last recorded meter id
+               last_meter_id_ := Equipment_Object_Meas_API.Get_Meter_Id_For_Latest_Value(test_pnt_seq_, parameter_code_);
+               IF (last_meter_id_ IS NOT NULL) THEN
+                  IF (meter_id_ IS NULL) THEN
+                     error_message_:=  error_message_ ||  chr(13)  ||Language_SYS.Translate_Constant(lu_name_, 'METERIDREQUIREDS: This parameter requires a Meter ID', NULL);
+                  ELSIF (meter_id_ != last_meter_id_) THEN 
+                     error_message_:=  error_message_ ||  chr(13)  ||Language_SYS.Translate_Constant(lu_name_, 'METERSETRQUIRED: Meter setup (:P1) is required for parameter (:P2).', NULL, meter_id_, parameter_code_);
+                  END IF;
+               ELSE 
+                  IF (meter_id_ IS NOT NULL) THEN 
+                     error_message_:=  error_message_ ||  chr(13)  ||Language_SYS.Translate_Constant(lu_name_, 'MTRSTPREQRD: Meter setup (:P1) is required for parameter (:P2)', NULL, meter_id_, parameter_code_);                
+                  ELSIF (Meter_Id_Required_API.Encode(Measurement_Parameter_API.Get_Meter_Id_Required(parameter_code_)) ='M') THEN
+                     error_message_:=  error_message_ ||  chr(13)  ||Language_SYS.Translate_Constant(lu_name_, 'NEWMTRSTPREQ: Meter setup is required for parameter (:P1)', NULL, parameter_code_);                
+                  END IF;   
+                  
+               END IF;
+            END IF;
+         END IF;
+      END IF;
+   END IF;
+   
+   --Check registration date later than todays date or not
+   IF (reg_date_ > Maintenance_Site_Utility_API.Get_Site_Date(contract_)) THEN
+      error_message_:=  error_message_ ||  chr(13)  ||Language_SYS.Translate_Constant(lu_name_, 'WRONGDATE: Registration Date can not be later than the date of today.', NULL);
+   END IF;
+   
+   RETURN error_message_;
+END Get_Validate_Status;
+
+
+@Override
+PROCEDURE CRUD_Update___(
+   old_ IN Error_List_Virtual_Rec,
+   new_ IN Error_List_Virtual_Rec )
+IS
+   new_rec_          Error_List_Virtual_Rec;
+   error_message_    VARCHAR2(32000) := NULL;
+   measured_value_   NUMBER;
+   test_pnt_seq_    NUMBER;
+BEGIN
+   new_rec_             := new_;
+   new_rec_.measurement_type := NULL;
+   test_pnt_seq_ := Equipment_Object_Test_Pnt_API.Get_Testpnt_Seq(new_rec_.contract, new_rec_.mch_code, new_rec_.test_point_id);
+   IF (Measurement_Parameter_API.Get_Measurement_Param_Type_Db(new_rec_.parameter_code) = Measurement_Param_Type_API.DB_ACCUMULATED) THEN
+      IF (Check_Prev_Preliminary_Reading___(new_rec_.contract, new_rec_.mch_code, new_rec_.test_point_id, new_rec_.parameter_code, new_rec_.reg_date) = 'PreliminaryReading') THEN
+         new_rec_.measurement_type := 'PreliminaryReading';
+         error_message_    := Language_SYS.Translate_Constant(lu_name_, 'PRERECEXISTD: Previous Reading is a Preliminary Reading. ');
+      ELSE
+         Equipment_Object_Meas_API.Calc_Accumulated_Value(measured_value_, new_rec_.measurement_type, new_rec_.contract, new_rec_.mch_code, new_rec_.parameter_code, new_rec_.test_point_id, new_rec_.recorded_value, new_rec_.reg_date, test_pnt_seq_);
+         IF (new_rec_.measurement_type IS NULL OR new_rec_.measurement_type != 'PreliminaryReading') THEN
+            new_rec_.measurement_type := Check_Vrt_Accu_Values___(new_rec_.contract, new_rec_.mch_code, new_rec_.test_point_id, new_rec_.parameter_code, new_rec_.reg_date, new_rec_.recorded_value);
+         END IF;
+      END IF;
+   END IF;
+   error_message_ := NVL(Get_Validate_Status(new_rec_.mch_code, new_rec_.contract, new_rec_.test_point_id, new_rec_.parameter_code, new_rec_.reg_date, new_rec_.remark, new_rec_.measurement_note, new_rec_.meter_id, new_rec_.recorded_value, new_rec_.measurement_type, test_pnt_seq_),error_message_);
+   
+   IF error_message_ IS  NULL THEN
+      IF  (new_rec_.measurement_type =  'PreliminaryReading') THEN 
+         new_rec_.error_message  := Language_SYS.Translate_Constant(lu_name_, 'PRERECEXIST: This will be recorded as a Preliminary Reading.', NULL);
+         new_rec_.status         := 'Warning';
+      ELSE 
+         new_rec_.status         := 'Valid';
+         new_rec_.error_message  := Language_SYS.Translate_Constant(lu_name_, 'VALIDREC: Valid Record.', NULL);
+      END IF;
+   ELSE
+      new_rec_.error_message    := error_message_;
+      new_rec_.status := 'Error';
+   END IF;
+   super(old_, new_rec_);
+END CRUD_Update___;
+
+
+FUNCTION Get_Obj_Key___ (
+   key_ IN Equipment_Object_Measurement_Virtual_Key) RETURN VARCHAR2
+IS
+BEGIN
+   RETURN key_.objkey;
+END Get_Obj_Key___;
+
+
+FUNCTION Check_Vrt_Accu_Values___(contract_ IN VARCHAR2,
+                                  mch_code_       IN VARCHAR2,
+                                  test_point_id_  IN VARCHAR2,
+                                  parameter_code_ IN VARCHAR2,
+                                  reg_date_       IN TIMESTAMP,
+                                  recorded_value_ IN NUMBER) RETURN VARCHAR2
+IS
+   CURSOR check_accumulated IS
+   SELECT Count(*) FROM ${PROJECTION}_ERROR_LIST_VIRTUAL_VRT t
+   WHERE t.contract = contract_
+   AND t.mch_code = mch_code_
+   AND t.test_point_id = test_point_id_
+   AND t.parameter_code = parameter_code_
+   AND ((t.reg_date > reg_date_ AND t.recorded_value < recorded_value_) OR (t.reg_date < reg_date_ AND t.recorded_value > recorded_value_));
+   
+   count_ NUMBER := 0;
+BEGIN
+   OPEN check_accumulated;
+   FETCH check_accumulated INTO count_;
+   CLOSE check_accumulated;
+   IF (count_ > 0)  THEN
+      RETURN 'PreliminaryReading';
+   END IF;
+   RETURN 'Recorded';
+END Check_Vrt_Accu_Values___;
+
+
+FUNCTION Check_Prev_Preliminary_Reading___(contract_ IN VARCHAR2,
+                                           mch_code_       IN VARCHAR2,
+                                           test_point_id_  IN VARCHAR2,
+                                           parameter_code_ IN VARCHAR2,
+                                           reg_date_       IN TIMESTAMP) RETURN VARCHAR2
+IS
+   CURSOR check_previous_preliminary IS
+   SELECT Count(*) FROM ${PROJECTION}_ERROR_LIST_VIRTUAL_VRT t
+   WHERE t.contract = contract_
+   AND t.mch_code = mch_code_
+   AND t.test_point_id = test_point_id_
+   AND t.parameter_code = parameter_code_
+   AND t.reg_date < reg_date_ 
+   AND t.measurement_type = 'PreliminaryReading';
+   
+   count_ NUMBER := 0;
+BEGIN
+   OPEN check_previous_preliminary;
+   FETCH check_previous_preliminary INTO count_;
+   CLOSE check_previous_preliminary;
+   IF (count_ > 0)  THEN
+      RETURN 'PreliminaryReading';
+   END IF;
+   RETURN 'Recorded';
+END Check_Prev_Preliminary_Reading___;

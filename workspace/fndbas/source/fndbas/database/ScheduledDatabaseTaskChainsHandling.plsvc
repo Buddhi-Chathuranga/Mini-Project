@@ -1,0 +1,333 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: ScheduleDatabaseTaskChain
+--  Component:    FNDBAS
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+-----------------------------------------------------------------------------
+
+layer Core;
+
+PROCEDURE Run_Schedule___ (
+	key_ IN Scheduled_Database_Task_Key)
+IS
+BEGIN
+	Batch_Schedule_API.Run_Batch_Schedule__(key_.schedule_id, 'FALSE');
+END Run_Schedule___;
+
+FUNCTION Create_Task_Chain_Schedule___ (
+   key_ IN New_Scheduled_Task_Chain_Virtual_Key ) RETURN VARCHAR2
+IS
+   virt_rec_      New_Scheduled_Task_Chain_Virtual_Rec;
+   param_rec_     batch_schedule_chain_par_tab%ROWTYPE;
+   attr_          VARCHAR2(32000);
+   ret_           Entity_Dec;
+   seq_no_        NUMBER;
+   schedule_id_   NUMBER;
+   
+   CURSOR schedule_param IS
+      SELECT *
+      FROM ${PROJECTION}_NEW_SCHEDULED_TASK_CHAIN_METHOD_PAR_VIRTUAL_VRT
+      WHERE chain_key = key_.objkey;
+   
+BEGIN
+   virt_rec_ := Get_Record___(key_);   
+   Add_To_Attr_From_Rec___(virt_rec_,attr_);
+   attr_ := Client_SYS.Remove_Attr('ACTIVE', attr_);
+   Client_SYS.Set_Item_Value('ACTIVE_DB', CASE WHEN virt_rec_.active THEN 'TRUE' else 'FALSE' end, attr_);
+   attr_ := Client_SYS.Remove_Attr('CHECK_EXECUTING', attr_);
+   Client_SYS.Set_Item_Value('CHECK_EXECUTING_DB', CASE WHEN virt_rec_.check_executing THEN 'TRUE' else 'FALSE' end, attr_);
+   attr_ := Client_SYS.Remove_Attr('STREAM_MSG_ON_COMPLETION', attr_);
+   Client_SYS.Set_Item_Value('STREAM_MSG_ON_COMPLETION_DB', CASE WHEN virt_rec_.stream_msg_on_completion THEN 'TRUE' else 'FALSE' end, attr_);
+   ret_ := CRUD_Create(attr_,'DO', scheduled_database_task## => '');
+   schedule_id_ := Client_SYS.Get_Item_Value('SCHEDULE_ID', ret_.attr);
+   Batch_SYS.New_Batch_Schedule_Param(seq_no_, schedule_id_, 'SCHEDULE_ID_', schedule_id_); 
+    
+   FOR virt_par_rec_ in schedule_param
+   LOOP
+         param_rec_.schedule_id := schedule_id_;
+         param_rec_.name        := virt_par_rec_.name;
+         param_rec_.value       := virt_par_rec_.user_value;
+         param_rec_.schedule_method_id := virt_par_rec_.schedule_method_id;
+         param_rec_.step_no := virt_par_rec_.step_no;
+         Batch_Schedule_Chain_Par_API.New__(param_rec_);
+         param_rec_ := NULL;
+      END LOOP;
+   RETURN Client_SYS.Get_Item_Value('SCHEDULE_ID', ret_.attr);
+END Create_Task_Chain_Schedule___;
+
+PROCEDURE Add_Param_To_Schedule___ (
+   key_                IN New_Scheduled_Task_Chain_Virtual_Key,
+   schedule_method_id_ IN NUMBER ) 
+IS
+   default_values_msg_  VARCHAR2(32000) := NULL;
+   
+   parameter_rec_ New_Scheduled_Task_Chain_Method_Par_Virtual_Rec;
+   step_rec_ New_Scheduled_Task_Chain_Step_Virtual_Rec;
+   count_ NUMBER;
+   method_id_ NUMBER;
+   records_count_ NUMBER;
+      
+   CURSOR steps IS
+   SELECT b.step_no, b.chain_schedule_method_id, b.schedule_method_id, m.description
+      FROM BATCH_SCHEDULE_CHAIN_STEP B, BATCH_SCHEDULE_METHOD M
+      WHERE B.schedule_method_id = schedule_method_id_ AND
+            B.chain_schedule_method_id = M.schedule_method_id;
+      
+   CURSOR method_param(method_id_ IN VARCHAR2) IS
+     SELECT seq_no,name,value, mandatory
+     FROM BATCH_SCHEDULE_METHOD_PAR_TAB
+     WHERE schedule_method_id = method_id_;
+BEGIN
+   BEGIN
+      SELECT schedule_method_id INTO method_id_
+      FROM ${PROJECTION}_NEW_SCHEDULED_TASK_CHAIN_STEP_VIRTUAL_VRT
+      WHERE parent_objkey = key_.objkey AND rownum = 1;
+   EXCEPTION
+      WHEN no_data_found THEN
+         method_id_ := NULL;
+   END;
+   
+   IF method_id_ != schedule_method_id_ THEN
+      DELETE FROM ${PROJECTION}_NEW_SCHEDULED_TASK_CHAIN_METHOD_PAR_VIRTUAL_VRT WHERE chain_key = key_.objkey;
+      DELETE FROM ${PROJECTION}_NEW_SCHEDULED_TASK_CHAIN_STEP_VIRTUAL_VRT WHERE parent_objkey = key_.objkey;
+      
+      FOR step_ in steps LOOP
+      Batch_Schedule_Method_Par_API.Get_Default_Values__(default_values_msg_,step_.chain_schedule_method_id);
+      step_rec_.step_no := step_.step_no;
+      step_rec_.description := step_.description;
+      step_rec_.schedule_method_id := step_.schedule_method_id;
+      New_Detail2___(key_, step_rec_);
+      FOR method_param_ IN method_param(step_.chain_schedule_method_id) LOOP
+         -- Log_SYS.Fnd_Trace_(Log_SYS.debug_, 'Adding ' || method_param_.name);
+         parameter_rec_.name := method_param_.name;
+         parameter_rec_.seq_no := method_param_.seq_no;  
+         parameter_rec_.user_value := Message_SYS.Find_Attribute(default_values_msg_, method_param_.name, '');  
+         parameter_rec_.schedule_method_id := step_.chain_schedule_method_id;
+         parameter_rec_.chain_key := key_.objkey;
+         parameter_rec_.step_no := step_rec_.step_no;
+         parameter_rec_.mandatory := (method_param_.mandatory = 'TRUE');
+         New_Detail___(Get_Key___(step_rec_), parameter_rec_);
+      END LOOP;
+   END LOOP;
+   ELSE
+      SELECT COUNT(objkey) INTO records_count_
+      FROM ${PROJECTION}_NEW_SCHEDULED_TASK_CHAIN_STEP_VIRTUAL_VRT
+      WHERE parent_objkey = key_.objkey;
+      
+      IF records_count_ = 0 THEN
+         FOR step_ in steps LOOP
+            Batch_Schedule_Method_Par_API.Get_Default_Values__(default_values_msg_,step_.chain_schedule_method_id);
+            step_rec_.step_no := step_.step_no;
+            step_rec_.description := step_.description;
+            step_rec_.schedule_method_id := step_.schedule_method_id;
+            New_Detail2___(key_, step_rec_);
+         FOR method_param_ IN method_param(step_.chain_schedule_method_id) LOOP
+            -- Log_SYS.Fnd_Trace_(Log_SYS.debug_, 'Adding ' || method_param_.name);
+            parameter_rec_.name := method_param_.name;
+            parameter_rec_.seq_no := method_param_.seq_no;  
+            parameter_rec_.user_value := Message_SYS.Find_Attribute(default_values_msg_, method_param_.name, '');  
+            parameter_rec_.schedule_method_id := step_.chain_schedule_method_id;
+            parameter_rec_.chain_key := key_.objkey;
+            parameter_rec_.step_no := step_rec_.step_no;
+            parameter_rec_.mandatory := (method_param_.mandatory = 'TRUE');
+            New_Detail___(Get_Key___(step_rec_), parameter_rec_);
+         END LOOP;
+         END LOOP;
+      END IF;
+   END IF;
+   
+   SELECT count(*) INTO count_
+     FROM ${PROJECTION}_NEW_SCHEDULED_TASK_CHAIN_METHOD_PAR_VIRTUAL_VRT v
+    WHERE v.mandatory = 'TRUE' AND v.user_value IS NULL AND v.chain_key = key_.objkey;
+
+   IF count_ >= 1  THEN
+      UPDATE ${PROJECTION}_NEW_SCHEDULED_TASK_CHAIN_VIRTUAL_VRT s
+         SET s.enable_param_next = 'FALSE'
+       WHERE s.objkey = key_.objkey;
+   ELSE
+      UPDATE ${PROJECTION}_NEW_SCHEDULED_TASK_CHAIN_VIRTUAL_VRT m
+         SET m.enable_param_next = 'TRUE'
+       WHERE m.objkey = key_.objkey;
+   END IF;
+END Add_Param_To_Schedule___;
+
+PROCEDURE New_Detail2___ (
+   master_ IN New_Scheduled_Task_Chain_Virtual_Key,
+   detail_ IN OUT New_Scheduled_Task_Chain_Step_Virtual_Rec )
+IS
+   rec_ New_Scheduled_Task_Chain_Step_Virtual_Rec := detail_;
+   tab_ SCHEDULED_DATABASE_TASK_CHAINS_HANDLING_NEW_SCHEDULED_TASK_CHAIN_STEP_VIRTUAL_VRT%ROWTYPE;
+BEGIN
+   rec_.objkey := sys_guid();
+   detail_.objkey := rec_.objkey;
+   rec_.parent_objkey := master_.objkey;
+   tab_.objkey                         := rec_.objkey;
+   tab_.parent_objkey                  := rec_.parent_objkey;
+   tab_.step_no                        := rec_.step_no;
+   tab_.description                    := rec_.description;
+   tab_.schedule_method_id             := rec_.schedule_method_id;
+   tab_.obj_created_by                 := fnd_session_API.Get_Fnd_User();
+   INSERT INTO ${PROJECTION}_NEW_SCHEDULED_TASK_CHAIN_STEP_VIRTUAL_VRT VALUES tab_;
+END New_Detail2___;
+
+@Override
+PROCEDURE CRUD_Create___ (
+   etag_   IN OUT VARCHAR2,
+   key_    IN OUT Scheduled_Database_Task_Key,
+   attr_   IN OUT VARCHAR2,
+   info_   OUT VARCHAR2,
+   action_ IN  VARCHAR2 )
+IS
+   next_execution_date_ DATE;
+BEGIN
+   Client_SYS.Add_To_Attr('BATCH_SCHEDULE_TYPE_DB', 'CHAIN', attr_);
+   Batch_Schedule_API.Parse_Execution_Plan__(key_.schedule_id, attr_);
+   super(etag_, key_, attr_, info_, action_);
+   Batch_Schedule_API.Update_Get_Next_Exec_Date_(key_.schedule_id, next_execution_date_);
+   Client_SYS.Add_To_Attr('NEXT_EXECUTION_DATE', next_execution_date_, attr_);
+END CRUD_Create___;
+
+@Override
+PROCEDURE CRUD_Default___ (
+   rec_  IN OUT New_Scheduled_Task_Chain_Virtual_Rec )
+IS
+   attr_ VARCHAR2(2000);
+   info_ VARCHAR2(2000);
+   objid_ Batch_Schedule.OBJID%TYPE;
+   objversion_ Batch_Schedule.OBJVERSION%TYPE;
+BEGIN
+    super(rec_);
+    Batch_Schedule_API.New__(info_, objid_, objversion_, attr_, 'PREPARE');
+    Log_SYS.Fnd_Trace_(Log_SYS.debug_, 'ATTR: ' || attr_);
+    Add_To_Rec_From_Attr___(attr_, rec_);
+    -- needed to add this, the generated Add_To_Rec_From_Attr doesn't seem to work with enumerations
+    IF (Client_SYS.Item_Exist('ACTIVE_DB', attr_)) THEN
+      rec_.active := CASE Client_SYS.Get_Item_Value('ACTIVE_DB', attr_) WHEN 'TRUE' THEN TRUE WHEN 'FALSE' THEN FALSE ELSE NULL END;
+    END IF;
+    rec_.schedule_option :='DAILY';
+    rec_.schedule_time := TO_DATE(SYSDATE);  
+    Log_SYS.Fnd_Trace_(Log_SYS.debug_, 'start_date: ' || TO_CHAR(rec_.start_date, 'YYYY-MM-DD'));
+ END CRUD_Default___;
+ 
+@Override
+PROCEDURE CRUD_Update___ (
+   etag_   IN OUT VARCHAR2,
+   key_    IN OUT Batch_Schedule_Chain_Par_Key,
+   attr_   IN OUT VARCHAR2,
+   info_   OUT VARCHAR2,
+   action_ IN  VARCHAR2 )
+IS
+   mandatory_ VARCHAR2(5);
+   name_ VARCHAR2(30);
+   value_ VARCHAR2(4000);
+   validaton_ VARCHAR2(200);
+   validate_method_string_ VARCHAR2(500);
+   msg_ VARCHAR2(32000);
+BEGIN
+   SELECT b.name INTO name_
+     FROM BATCH_SCHEDULE_CHAIN_PAR_TAB b
+    WHERE b.schedule_id = key_.SCHEDULE_ID AND b.schedule_method_id = key_.SCHEDULE_METHOD_ID AND b.seq_no = key_.SEQ_NO;
+   validaton_   := Batch_Schedule_Method_API.Get_Validation_Method__(key_.SCHEDULE_METHOD_ID);
+   mandatory_   := Batch_Schedule_Method_Par_API.Get_Mandatory_Db(key_.SCHEDULE_METHOD_ID, name_);
+   value_       := Client_SYS.Get_Item_Value('VALUE', attr_);
+   
+   IF Batch_Schedule_Method_Par_API.Get_Data_Type(key_.SCHEDULE_METHOD_ID,key_.SEQ_NO) = 'DATE' THEN 
+      IF NOT  Validate_Date___(value_)THEN 
+         Error_SYS.Record_General(lu_name_,'DATE_INVL: Please enter a valid date in the format YYYY-MM-DD-HH24-MI-SS');
+      END IF;
+   END IF;
+   IF mandatory_ = 'TRUE' AND value_ IS NULL THEN
+      Error_SYS.Appl_General(lu_name_,'CHAINVALNOTEXT: Enter a value for mandatory task parameter :P1',name_);
+   ELSIF validaton_ IS NOT NULL THEN 
+      msg_ := Message_SYS.Construct('');
+      Message_SYS.Add_Attribute(msg_ , name_, value_); 
+      validate_method_string_ := 'BEGIN '|| validaton_ || '(:p1); END;';
+      @ApproveDynamicStatement(2020-08-11,gisslk)
+      execute immediate (validate_method_string_) USING msg_;
+      super(etag_, key_, attr_, info_, action_);
+   ELSE 
+      super(etag_, key_, attr_, info_, action_);
+   END IF;
+END CRUD_Update___;
+
+@Override
+PROCEDURE CRUD_Update___(
+   old_ IN New_Scheduled_Task_Chain_Method_Par_Virtual_Rec,
+   new_ IN New_Scheduled_Task_Chain_Method_Par_Virtual_Rec )
+IS
+   count_ NUMBER;
+   total_ NUMBER := 0;
+   CURSOR objkey IS
+     SELECT objkey
+       FROM ${PROJECTION}_NEW_SCHEDULED_TASK_CHAIN_STEP_VIRTUAL_VRT
+      WHERE parent_objkey = (SELECT p.parent_objkey
+                               FROM ${PROJECTION}_NEW_SCHEDULED_TASK_CHAIN_STEP_VIRTUAL_VRT p
+                              WHERE p.objkey = old_.parent_objkey);
+   validaton_ VARCHAR2(200);
+   validate_method_string_ VARCHAR2(500);
+   msg_ VARCHAR2(32000);
+BEGIN
+   validaton_   := Batch_Schedule_Method_API.Get_Validation_Method__(old_.schedule_method_id);
+   IF Batch_Schedule_Method_Par_API.Get_Data_Type(old_.schedule_method_id,new_.SEQ_NO) = 'DATE' THEN 
+      IF NOT  Validate_Date___(new_.user_value)THEN 
+         Error_SYS.Record_General(lu_name_,'DATE_INVL: Please enter a valid date in the format YYYY-MM-DD-HH24-MI-SS');
+      END IF;
+   END IF;
+   IF validaton_ IS NOT NULL THEN 
+      msg_ := Message_SYS.Construct('');
+      Message_SYS.Add_Attribute(msg_ , new_.name, new_.user_value);
+      validate_method_string_ := 'BEGIN '|| validaton_ || '(:p1); END;';
+      @ApproveDynamicStatement(2020-08-11,gisslk)
+      execute immediate (validate_method_string_) USING msg_;
+   END IF;
+   super(old_, new_);
+   FOR objkeys in objkey
+   LOOP
+      SELECT count(*) INTO count_
+        FROM ${PROJECTION}_NEW_SCHEDULED_TASK_CHAIN_METHOD_PAR_VIRTUAL_VRT v
+       WHERE v.mandatory = 'TRUE' AND v.user_value IS NULL AND v.parent_objkey = objkeys.objkey;
+       total_ := total_ + count_;
+       count_ := 0;
+   END LOOP;
+   IF total_ >= 1  THEN
+      UPDATE ${PROJECTION}_NEW_SCHEDULED_TASK_CHAIN_VIRTUAL_VRT s
+         SET s.enable_param_next = 'FALSE'
+       WHERE s.objkey = (SELECT p.parent_objkey
+                           FROM ${PROJECTION}_NEW_SCHEDULED_TASK_CHAIN_STEP_VIRTUAL_VRT p
+                          WHERE p.objkey = old_.parent_objkey);
+   ELSE
+      UPDATE ${PROJECTION}_NEW_SCHEDULED_TASK_CHAIN_VIRTUAL_VRT m
+         SET m.enable_param_next = 'TRUE'
+       WHERE m.objkey = (SELECT p.parent_objkey
+                           FROM ${PROJECTION}_NEW_SCHEDULED_TASK_CHAIN_STEP_VIRTUAL_VRT p
+                          WHERE p.objkey = old_.parent_objkey);
+   END IF;
+END CRUD_Update___;
+
+@Override
+PROCEDURE CRUD_Update___ (
+   etag_   IN OUT VARCHAR2,
+   key_    IN OUT Scheduled_Database_Task_Key,
+   attr_   IN OUT VARCHAR2,
+   info_   OUT VARCHAR2,
+   action_ IN  VARCHAR2 )
+IS
+BEGIN
+   Batch_Schedule_API.Parse_Execution_Plan__(key_.schedule_id, attr_);
+   super(etag_, key_, attr_, info_, action_);
+END CRUD_Update___;
+
+FUNCTION Validate_Date___(date_ VARCHAR2 ) RETURN BOOLEAN   
+IS
+dte_ VARCHAR2 (100);
+BEGIN
+   dte_ := to_date(date_,'YYYY-MM-DD-HH24-MI-SS');
+   return TRUE;
+exception 
+   when others then 
+      return FALSE;
+END Validate_Date___;

@@ -1,0 +1,265 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     InputUomParametersAssistant
+--  Component:    PARTCA
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign    History
+--  ---------  ------  ---------------------------------------------------------
+-- 2019-07-01  SucPlk  SCUXXW4-20576, Modified Calculate_Value___() to merge corrections from support bug SCZ-3466.
+-- 2019-04-17  ChFolk  SCUXXW4-18540, Removed method Filter_Unit_Code___ as it could be handled in the projection.
+-- 2019-01-24  SaGelk  SCUXXW4-1689, Created
+--------------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Get_Default_Uom___ (
+   input_unit_meas_group_id_ IN VARCHAR2) RETURN VARCHAR2
+IS
+BEGIN
+	RETURN Input_Unit_Meas_API.Get_Default_Input_Uom(input_unit_meas_group_id_);
+END Get_Default_Uom___;
+
+--Create Child List on creating the header
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Input_Unit_Meas_Virtual_Rec )
+IS
+   copy_rec_ Input_Unit_Meas_Virtual_Rec;
+   
+   stmt_                        VARCHAR2(32000);
+   TYPE dynamic_cursor_type     IS REF CURSOR;
+   dynamic_cursor_              dynamic_cursor_type;
+   rec_row_                         Input_Unit_Meas%ROWTYPE;
+   
+BEGIN
+   copy_rec_ := rec_;
+   
+   copy_rec_.description := Input_Unit_Meas_Group_API.Get_Description(rec_.input_unit_meas_group_id);
+   copy_rec_.formula_id := Input_Unit_Meas_API.Get_Formula_Id(rec_.input_unit_meas_group_id, rec_.unit_code);
+   copy_rec_.rounding_decimals := Input_Unit_Meas_API.Get_Rounding_Decimals(rec_.input_unit_meas_group_id, rec_.unit_code);
+   copy_rec_.output_uom := Input_Unit_Meas_Group_API.Get_Unit_Code(rec_.input_unit_meas_group_id);
+   
+   stmt_ := 'SELECT * FROM INPUT_UNIT_MEAS WHERE INPUT_UNIT_MEAS_GROUP_ID =  :input_unit_meas_group_id_';
+   
+   IF copy_rec_.component_type = 'MANUF' THEN
+      stmt_ := stmt_ || ' AND MANUF_USAGE_ALLOWED = 1';
+   ELSIF copy_rec_.component_type = 'PURCH' THEN
+      stmt_ := stmt_ || ' AND PURCH_USAGE_ALLOWED = 1';
+   ELSIF  copy_rec_.component_type = 'ORDER' THEN
+      stmt_ := stmt_ || ' AND CUST_USAGE_ALLOWED = 1';
+   END IF;
+   
+   @ApproveDynamicStatement(2019-01-25, SaGeLK)
+   OPEN dynamic_cursor_ FOR stmt_ USING copy_rec_.input_unit_meas_group_id;
+      FETCH dynamic_cursor_ INTO rec_row_;
+   CLOSE dynamic_cursor_;
+
+   IF rec_.unit_code IS NULL THEN
+      copy_rec_.unit_code := rec_row_.unit_code;
+   END IF;
+   IF rec_.conversion_factor IS NULL THEN
+      copy_rec_.conversion_factor := rec_row_.conversion_factor;
+   END IF;
+
+   super(copy_rec_);
+   Create_Child_List___(copy_rec_);
+END CRUD_Create___;
+
+--Update header with the new values
+@Override
+PROCEDURE CRUD_Update___(
+   old_ IN Input_Unit_Meas_Virtual_Rec,
+   new_ IN Input_Unit_Meas_Virtual_Rec )
+IS
+   copy_new_ input_unit_meas_virtual_rec;
+   del_rec_ input_unit_meas_variable_virtual_rec;
+   
+   CURSOR get_meas_variable_list IS
+      SELECT *
+      FROM ${PROJECTION}_INPUT_UNIT_MEAS_VARIABLE_VIRTUAL_VRT;
+   
+BEGIN
+   copy_new_ := new_;
+   copy_new_.conversion_factor := Input_Unit_Meas_API.Get_Conversion_Factor(new_.input_unit_meas_group_id, new_.unit_code);
+   copy_new_.formula_id := Input_Unit_Meas_API.Get_Formula_Id(new_.input_unit_meas_group_id, new_.unit_code);
+   copy_new_.rounding_decimals := Input_Unit_Meas_API.Get_Rounding_Decimals(new_.input_unit_meas_group_id, new_.unit_code);
+   copy_new_.output_uom := Input_Unit_Meas_Group_API.Get_Unit_Code(new_.input_unit_meas_group_id);
+   
+   IF old_.unit_code != new_.unit_code THEN
+      FOR meas_var_rec_ IN get_meas_variable_list LOOP
+         del_rec_.objkey := meas_var_rec_.objkey;
+         CRUD_DELETE___(del_rec_);
+      END LOOP;
+   END IF;
+   
+   IF old_.unit_code != new_.unit_code THEN
+      Create_Child_List___(copy_new_);
+      copy_new_.all_values_exist := FALSE;
+   END IF;
+   
+   super(old_, copy_new_);
+END CRUD_Update___;
+
+--Create Child List
+PROCEDURE Create_Child_List___(
+   parent_rec_ IN Input_Unit_Meas_Virtual_Rec)
+IS
+   child_rec_ input_unit_meas_variable_virtual_rec;
+   
+   CURSOR get_meas_variable_list IS
+   SELECT * 
+   FROM input_unit_meas_variable
+   WHERE input_unit_meas_group_id = parent_rec_.input_unit_meas_group_id AND unit_code = parent_rec_.unit_code;
+   
+   fetched_rec_ input_unit_meas_variable%ROWTYPE;
+   
+BEGIN
+   OPEN get_meas_variable_list;
+   FETCH get_meas_variable_list INTO fetched_rec_;
+   
+   IF get_meas_variable_list%NOTFOUND THEN
+      child_rec_.input_variable := 'Input Quantity';
+      child_rec_.formula_unit_code := parent_rec_.unit_code;
+      child_rec_.value_source_db := 'USER';
+      
+      child_rec_.objkey := sys_guid();
+      child_rec_.parent_objkey := parent_rec_.objkey;
+      CRUD_Create___(child_rec_);
+   END IF;
+   
+   CLOSE get_meas_variable_list;
+   
+   FOR rec_ IN get_meas_variable_list LOOP
+      child_rec_.formula_id := rec_.formula_id;
+      child_rec_.formula_item_id := rec_.formula_item_id;
+      child_rec_.variable_value := rec_.variable_value;
+      child_rec_.variable_id := rec_.variable_id;
+      child_rec_.input_variable := Formula_Variable_API.Get_Description(rec_.variable_id);
+      child_rec_.formula_unit_code := Formula_Variable_API.Get_Unit_Code(rec_.variable_id);
+      child_rec_.value_source_db := rec_.value_source_db;
+      child_rec_.variable_id := rec_.variable_id;
+      child_rec_.input_unit_meas_group_id := rec_.input_unit_meas_group_id;
+      child_rec_.unit_code := rec_.unit_code;
+      
+      child_rec_.objkey := sys_guid();
+      child_rec_.parent_objkey := parent_rec_.objkey;
+      CRUD_Create___(child_rec_);
+   END LOOP;
+END Create_Child_List___;
+
+--Child CRUD UPDATE to check all values exist
+@Override
+PROCEDURE CRUD_Update___(
+   old_ IN Input_Unit_Meas_Variable_Virtual_Rec,
+   new_ IN Input_Unit_Meas_Variable_Virtual_Rec )
+IS
+   parent_key_        input_unit_meas_virtual_key;
+   old_parent_rec_    input_unit_meas_virtual_rec;
+   parent_rec_        input_unit_meas_virtual_rec;
+   
+   CURSOR get_meas_variable_list IS
+      SELECT *
+      FROM ${PROJECTION}_INPUT_UNIT_MEAS_VARIABLE_VIRTUAL_VRT
+      WHERE parent_objkey = old_.parent_objkey;
+BEGIN
+   super(old_, new_);
+   parent_key_.objkey := new_.parent_objkey;
+   parent_rec_ := Get_Record___(parent_key_);
+   old_parent_rec_ := parent_rec_;
+   parent_rec_.all_values_exist := TRUE;
+   
+   FOR cursor_rec_ IN get_meas_variable_list LOOP
+      IF cursor_rec_.variable_value IS NULL THEN
+         parent_rec_.all_values_exist := FALSE;
+         EXIT;
+      END IF;
+   END LOOP;
+   
+   CRUD_Update___(old_parent_rec_, parent_rec_);
+END CRUD_Update___;
+
+--Calculate Functions
+PROCEDURE Calculate_Value___ (
+   key_ IN Input_Unit_Meas_Virtual_Key)
+IS
+   parent_rec_        input_unit_meas_virtual_rec;
+   old_parent_rec_    input_unit_meas_virtual_rec;
+   child_rec_         ${PROJECTION}_INPUT_UNIT_MEAS_VARIABLE_VIRTUAL_VRT%ROWTYPE;
+   attr_              VARCHAR2(32000);
+   calculated_value_  NUMBER;
+   multiplier_        NUMBER;
+   
+   CURSOR get_meas_variable_list IS
+      SELECT *
+      FROM ${PROJECTION}_INPUT_UNIT_MEAS_VARIABLE_VIRTUAL_VRT
+      WHERE parent_objkey = key_.objkey;
+   
+BEGIN
+   parent_rec_ := Get_Record___(key_);
+   --  Copy Parent Record to send old record in CRUD UPDATE
+   old_parent_rec_ := parent_rec_;
+   
+   --   Build Attribute String
+   attr_ := Create_Attr_String___(parent_rec_.formula_id, parent_rec_.unit_code, key_);
+   
+   --Get Calculated Value when formula id not null
+   IF parent_rec_.formula_id IS NOT NULL THEN
+      calculated_value_ := to_number(Formula_API.Get_Formula_Result(parent_rec_.formula_id, attr_));
+   ELSE
+      OPEN get_meas_variable_list;
+      FETCH get_meas_variable_list INTO child_rec_;
+      calculated_value_ := child_rec_.variable_value;
+      CLOSE get_meas_variable_list;
+   END IF;
+   
+   parent_rec_.calculated_value := calculated_value_;
+   
+   --   Get Previous Record
+   Formula_Item_API.Get_Previous_Values(attr_, parent_rec_.formula_id);
+   parent_rec_.previous_values := attr_;
+   
+   --Get Output
+   IF parent_rec_.rounding_decimals IS NULL THEN
+      parent_rec_.output_quantity := parent_rec_.calculated_value * parent_rec_.conversion_factor;
+   ELSE
+      multiplier_ := POWER(10, TRUNC(parent_rec_.rounding_decimals));
+      parent_rec_.presicion_output := parent_rec_.calculated_value * parent_rec_.conversion_factor;
+      
+      parent_rec_.output_quantity := ROUND(parent_rec_.presicion_output, TRUNC(parent_rec_.rounding_decimals) + 2);
+      IF (parent_rec_.output_quantity != TRUNC(parent_rec_.output_quantity * multiplier_)/ multiplier_) THEN
+         parent_rec_.output_quantity := (TRUNC(parent_rec_.output_quantity * multiplier_) / multiplier_) + POWER(10, TRUNC(parent_rec_.rounding_decimals) * -1);
+      END IF;   
+   END IF;
+   
+   CRUD_Update___(old_parent_rec_, parent_rec_);
+END Calculate_Value___;
+
+
+--Method to create ATTR
+FUNCTION Create_Attr_String___(
+   parent_formula_id_ IN VARCHAR2,
+   parent_unit_code_  IN VARCHAR2,
+   parent_key_        IN input_unit_meas_virtual_key) RETURN VARCHAR2
+IS
+   attr_              VARCHAR2(32000);
+   --   Cursor to get all the records in the child list
+   CURSOR get_meas_variable_list IS
+      SELECT *
+      FROM ${PROJECTION}_INPUT_UNIT_MEAS_VARIABLE_VIRTUAL_VRT
+      WHERE parent_objkey = parent_key_.objkey;
+BEGIN
+   --   Build Attribute String
+   FOR cursor_rec_ IN get_meas_variable_list LOOP
+      IF parent_formula_id_ IS NOT NULL THEN
+         Client_SYS.Add_To_Attr(cursor_rec_.variable_id, cursor_rec_.variable_value, attr_);
+      ELSE
+         Client_SYS.Add_To_Attr('INPUT_VALUE', cursor_rec_.variable_value, attr_);
+         Client_SYS.Add_To_Attr('INPUT_UOM', parent_unit_code_, attr_);
+      END IF;
+      
+   END LOOP;
+   RETURN attr_;
+END Create_Attr_String___;
+

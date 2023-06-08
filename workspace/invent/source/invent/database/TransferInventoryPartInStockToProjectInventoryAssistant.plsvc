@@ -1,0 +1,195 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     TransferInventoryPartInStockToProjectInventoryAssistant
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date         Sign    History
+--  ----------  ------  ---------------------------------------------------------
+--  2019-05-27  ChFolk  SCUXXW4-21762, Modified CRUD_Create___ to use normal cursor instead of dynamic cursor. The prevous parameter value is now changed.
+--  2019-03-14  ChFolk  SCUXXW4-17204, Added dynamic dependency where necessary and removed some functions which could be handled
+--  019-03-14           from the method declaration in Projection in where clause.
+--  2018-10-17  ChFolk  SCUXXW4-5876, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Trans_To_Proj_Inv_Virtual_Rec )
+IS
+   line_rec_                  Stocks_To_Proj_Virtual_Rec;
+ 
+   CURSOR get_part_stock_info IS
+      SELECT contract, part_no, configuration_id, location_no, lot_batch_no, serial_no, eng_chg_level, waiv_dev_rej_no, 
+             activity_seq, handling_unit_id, qty_onhand, (qty_onhand - qty_reserved) qty_to_transfer, qty_reserved, qty_in_transit,
+             warehouse, bay_no, row_no, tier_no, bin_no, location_type_db, availability_control_id, freeze_flag_db, project_id,
+             expiration_date, last_activity_date, last_count_date, receipt_date, owning_customer_no
+      FROM   INVENTORY_PART_IN_STOCK
+      WHERE  objid IN (SELECT REGEXP_SUBSTR(rec_.objid_list_arr,'[^,]+', 1, LEVEL) 
+                       FROM dual
+                       CONNECT BY REGEXP_SUBSTR(rec_.objid_list_arr, '[^,]+', 1, LEVEL) IS NOT NULL)
+      AND    (QTY_ONHAND - QTY_RESERVED) >0
+      AND    LOCATION_TYPE_DB NOT IN ('ARRIVAL' ,'QA');
+      
+BEGIN
+   super(rec_);  
+   FOR part_stock_rec_ IN get_part_stock_info LOOP
+      line_rec_.objkey        := sys_guid();
+      line_rec_.parent_objkey := rec_.objkey;
+      line_rec_.contract := part_stock_rec_.contract;
+      line_rec_.part_no := part_stock_rec_.part_no;
+      line_rec_.configuration_id := part_stock_rec_.configuration_id;
+      line_rec_.location_no := part_stock_rec_.location_no;
+      line_rec_.lot_batch_no := part_stock_rec_.lot_batch_no;
+      line_rec_.serial_no := part_stock_rec_.serial_no;
+      line_rec_.eng_chg_level := part_stock_rec_.eng_chg_level;
+      line_rec_.waiv_dev_rej_no := part_stock_rec_.waiv_dev_rej_no;
+      line_rec_.activity_seq := part_stock_rec_.activity_seq;
+      line_rec_.handling_unit_id := part_stock_rec_.handling_unit_id;
+      line_rec_.qty_onhand := part_stock_rec_.qty_onhand;
+      line_rec_.qty_to_transfer := part_stock_rec_.qty_to_transfer;
+      line_rec_.qty_reserved := part_stock_rec_.qty_reserved;
+      line_rec_.qty_in_transit := part_stock_rec_.qty_in_transit;
+      line_rec_.warehouse := part_stock_rec_.warehouse;
+      line_rec_.bay_no := part_stock_rec_.bay_no;
+      line_rec_.row_no := part_stock_rec_.row_no;
+      line_rec_.tier_no := part_stock_rec_.tier_no;
+      line_rec_.bin_no := part_stock_rec_.bin_no;
+      line_rec_.location_type := part_stock_rec_.location_type_db;
+      line_rec_.availability_control_id := part_stock_rec_.availability_control_id;
+      line_rec_.freeze_flag_db := part_stock_rec_.freeze_flag_db;
+      line_rec_.project_id := part_stock_rec_.project_id;
+      line_rec_.expiration_date := part_stock_rec_.expiration_date;
+      line_rec_.last_activity_date := part_stock_rec_.last_activity_date;
+      line_rec_.last_count_date := part_stock_rec_.last_count_date;
+      line_rec_.receipt_date := part_stock_rec_.receipt_date;
+      line_rec_.owning_customer_no := part_stock_rec_.owning_customer_no;
+
+      $IF (Component_Proj_SYS.INSTALLED) $THEN
+         line_rec_.sub_project_id := Activity_API.Get_Sub_Project_Id(line_rec_.activity_seq);
+         line_rec_.activity_no := Activity_API.Get_Activity_No(line_rec_.activity_seq);
+         line_rec_.program_id := Project_API.Get_Program_Id(line_rec_.project_id);
+      $END
+      CRUD_Create___(line_rec_);
+   END LOOP;
+
+END CRUD_Create___;
+
+@DynamicComponentDependency PROJ
+FUNCTION Get_Program_Id___ (
+   project_id_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   program_id_   VARCHAR2(10);
+BEGIN
+   program_id_ := Project_API.Get_Program_Id(project_id_);  
+   RETURN program_id_; 
+END  Get_Program_Id___;
+
+FUNCTION Check_Sys_Parameters___ RETURN VARCHAR2
+IS
+   
+BEGIN
+   RETURN Mpccom_System_Parameter_API.Get_Parameter_Value1('TRANSACTIONS_PROJECT_TRANSFERS');
+END Check_Sys_Parameters___;
+
+FUNCTION Check_Activity_Days___(
+   contract_list_   IN VARCHAR2,
+   activity_seq_    IN NUMBER ) RETURN BOOLEAN
+IS
+   current_contract_     VARCHAR2(5);
+   local_contract_list_  VARCHAR2(32000);
+   date_entered_         DATE;
+   activity_start_date_  DATE;
+   activity_finish_date_ DATE;
+   date_within_activity_ BOOLEAN := TRUE;
+BEGIN
+   $IF (Component_Proj_SYS.INSTALLED) $THEN
+      activity_start_date_ := Activity_API.Get_Early_Start(activity_seq_);
+      activity_finish_date_ := Activity_API.Get_Early_Finish(activity_seq_);
+   $END   
+   local_contract_list_ := contract_list_;
+   WHILE (INSTR(local_contract_list_, Client_Sys.record_separator_) > 0) LOOP
+      current_contract_ := substr(local_contract_list_, 0, INSTR(local_contract_list_, Client_Sys.record_separator_ ) -1);
+      date_entered_ := Site_API.Get_Site_Date(current_contract_);
+      IF (activity_start_date_ > date_entered_ OR date_entered_ > activity_finish_date_) THEN
+         date_within_activity_ := FALSE;
+         EXIT;
+      END IF;
+      local_contract_list_ := SUBSTR(local_contract_list_, (INSTR(local_contract_list_, Client_Sys.record_separator_) + 1));
+   END LOOP;
+   RETURN date_within_activity_;   
+END Check_Activity_Days___;
+
+@DynamicComponentDependency PROJ
+-- Dynamic dependency added because project_customer exits only if PROJ is available.
+FUNCTION Check_Owning_Customer___(
+   owning_customer_info_ IN VARCHAR2,
+   project_customer_     IN VARCHAR2 ) RETURN Owning_Customer_Detail_Structure_Rec
+IS
+   owning_cust_detail_           Owning_Customer_Detail_Structure_Rec;
+   local_owning_customer_info_   VARCHAR2(32000);
+   current_owning_customer_      VARCHAR2(20);
+   current_part_no_              VARCHAR2(25);
+   current_location_no_          VARCHAR2(35);
+   cust_separater_position_      NUMBER;
+   part_separater_position_      NUMBER;
+   location_separater_position_  NUMBER;
+BEGIN     
+   local_owning_customer_info_ := owning_customer_info_;   
+
+   WHILE (INSTR(local_owning_customer_info_, Client_Sys.record_separator_) > 0) LOOP
+      cust_separater_position_ := INSTR(local_owning_customer_info_, ';' );      
+      current_owning_customer_ := substr(local_owning_customer_info_, 0, cust_separater_position_ -1);     
+      part_separater_position_ := INSTR(local_owning_customer_info_, ';', cust_separater_position_ +1);      
+      current_part_no_ := substr(local_owning_customer_info_, cust_separater_position_ +1, part_separater_position_ - (cust_separater_position_ + 1));      
+      location_separater_position_ := INSTR(local_owning_customer_info_, Client_Sys.record_separator_);      
+      current_location_no_ := substr(local_owning_customer_info_, part_separater_position_ + 1, location_separater_position_ - (part_separater_position_ + 1));     
+      IF (current_owning_customer_ IS NOT NULL AND (project_customer_ IS NOT NULL AND project_customer_ != current_owning_customer_)) THEN
+         owning_cust_detail_.owning_customer := current_owning_customer_;
+         owning_cust_detail_.part_no := current_part_no_;
+         owning_cust_detail_.location_no := current_location_no_;
+      END IF;   
+      local_owning_customer_info_ := SUBSTR(local_owning_customer_info_, (INSTR(local_owning_customer_info_, Client_Sys.record_separator_) + 1));
+   END LOOP; 
+   RETURN owning_cust_detail_;
+END Check_Owning_Customer___;
+
+PROCEDURE Execute_Moving_Stocks_To_Project_Inventory___ (
+   parent_objkey_        IN VARCHAR2 )  
+IS
+   parent_key_       Trans_To_Proj_Inv_Virtual_Key;
+   parent_rec_       Trans_To_Proj_Inv_Virtual_Rec;
+   child_key_        Stocks_To_Proj_Virtual_Key;
+   child_rec_        Stocks_To_Proj_Virtual_Rec;
+ 
+BEGIN
+   parent_key_.objkey := parent_objkey_;
+   parent_rec_ := Get_Record___(parent_key_);
+   FOR line_rec_ IN Get_Part_In_Stock_To_Transfer_Array___(parent_key_) LOOP
+      child_key_.objkey := line_rec_.objkey;
+      child_rec_ := Get_Record___(child_key_);
+      -- Security
+      User_Allowed_Site_API.Is_Authorized(child_rec_.contract); 
+      
+      Inventory_Part_In_Stock_API.Move_Part_Project(child_rec_.contract,
+                                                    child_rec_.part_no,
+                                                    child_rec_.configuration_id,
+                                                    child_rec_.location_no,
+                                                    child_rec_.lot_batch_no,
+                                                    child_rec_.serial_no,
+                                                    child_rec_.eng_chg_level,
+                                                    child_rec_.waiv_dev_rej_no,
+                                                    child_rec_.activity_seq,
+                                                    child_rec_.handling_unit_id,
+                                                    child_rec_.expiration_date,
+                                                    parent_rec_.activity_seq,
+                                                    child_rec_.qty_to_transfer,
+                                                    0,
+                                                    parent_rec_.notes,
+                                                    CASE parent_rec_.report_earned_values WHEN true THEN 'TRUE' WHEN false THEN 'FALSE' ELSE NULL END,
+                                                    parent_rec_.ownership_transfer_reason_id,
+                                                    child_rec_.catch_qty);
+   END LOOP;                                                 
+END Execute_Moving_Stocks_To_Project_Inventory___;

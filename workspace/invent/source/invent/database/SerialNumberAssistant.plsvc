@@ -1,0 +1,164 @@
+----------------------------------------------------------------------------------------------
+--
+--  Fragment:     SerialNumberAssistant
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------------------------
+--  190408  JaThlk  SCUXXW4-18859, Used Client_Sys.record_separator_, to build serial_no_list_.
+--  181231  JaThlk  SCUXXW4-5816, Created.
+-----------------------------------------------------------------------------------------------
+
+layer Core;
+
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Serial_Number_Virtual_Rec )
+IS
+   line_rec_             Serial_Number_List_Virtual_Rec; 
+   serial_rule_          VARCHAR2(20);
+   serials_to_receive_   NUMBER;
+   count_                NUMBER := 0;
+   max_serial_no_        NUMBER;
+   last_serial_no_       NUMBER;
+BEGIN
+   super(rec_);
+   IF (rec_.parts_to_receive < 0) OR (TO_CHAR(rec_.parts_to_receive) IS NULL) THEN
+      serials_to_receive_ := 0;
+   ELSE
+      serials_to_receive_ := rec_.parts_to_receive;
+   END IF;
+   serial_rule_ := Part_Serial_Rule_API.Encode(Part_Catalog_API.Get_Serial_Rule(rec_.part_no));
+   IF serial_rule_ = 'AUTOMATIC' THEN
+      max_serial_no_ := Serial_No_Reservation_API.Get_Max_Serial_No(rec_.part_no);
+      IF (Is_Number___(max_serial_no_) = 'TRUE') OR (TO_CHAR(max_serial_no_) IS NULL) THEN
+         IF rec_.parts_to_receive > 0  THEN
+            last_serial_no_ := max_serial_no_;
+            WHILE count_ < serials_to_receive_ LOOP
+               last_serial_no_                            := last_serial_no_ + 1;
+               line_rec_.serial_no                        := last_serial_no_;
+               count_                                     := count_ + 1;
+               line_rec_.objkey                           := sys_guid();
+               line_rec_.parent_objkey                    := rec_.objkey;
+               line_rec_.contract                         := rec_.contract;
+               line_rec_.part_no                          := rec_.part_no;
+               line_rec_.location_no                      := rec_.location_no;
+               CRUD_Create___(line_rec_);                  
+            END LOOP;
+          END IF;
+      END IF;
+   END IF;
+END CRUD_Create___;
+
+
+FUNCTION Is_Number___(
+   serial_no_ IN  VARCHAR2) RETURN VARCHAR2
+IS
+   number_type_   NUMBER;   
+BEGIN
+   number_type_ := TO_NUMBER(serial_no_);
+   RETURN 'TRUE';
+   EXCEPTION
+      WHEN VALUE_ERROR THEN
+      RETURN 'FALSE';
+END Is_Number___;
+   
+   
+PROCEDURE Create_Lines___ (
+   parent_objkey_   IN VARCHAR2,
+   serial_list_     IN CLOB,
+   contract_        IN VARCHAR2,
+   part_no_         IN VARCHAR2,
+   location_no_     IN VARCHAR2 ) 
+IS
+   serial_no_list_      CLOB := CONCAT(serial_list_, Client_Sys.record_separator_);
+   line_rec_            Serial_Number_List_Virtual_Rec;
+
+BEGIN
+   WHILE (INSTR(serial_no_list_, Client_SYS.record_separator_) > 0) LOOP
+      line_rec_.objkey                       := sys_guid();
+      line_rec_.parent_objkey                := parent_objkey_;
+      line_rec_.serial_no                    := substr(serial_no_list_, 0, INSTR(serial_no_list_, Client_SYS.record_separator_) - 1);
+      line_rec_.contract                     := contract_;  
+      line_rec_.part_no                      := part_no_;  
+      line_rec_.location_no                  := location_no_; 
+      CRUD_Create___(line_rec_);
+      
+      serial_no_list_ := SUBSTR(serial_no_list_, (INSTR(serial_no_list_, Client_SYS.record_separator_) + 1)); 
+   END LOOP;
+END Create_Lines___;
+
+
+PROCEDURE Validate_Serial_Numbers___ (
+   parent_objkey_      IN VARCHAR2,
+   part_no_            IN VARCHAR2,
+   contract_           IN VARCHAR2,
+   parts_to_receive_   IN NUMBER )
+IS
+   struct_effectivity_db_   VARCHAR2(6);
+   parent_key_              Serial_Number_Virtual_Key;
+   child_key_               Serial_Number_List_Virtual_Key; 
+   child_rec_               Serial_Number_List_Virtual_Rec;
+   serial_count_            NUMBER := 0;
+   
+BEGIN
+   $IF Component_Mfgstd_SYS.INSTALLED $THEN
+      struct_effectivity_db_ := Effectivity_Control_API.Encode(Manuf_Part_Attribute_API.Get_Structure_Effectivity(contract_, part_no_)); 
+   $END
+   
+   parent_key_.objkey := parent_objkey_;
+   FOR line_rec_ IN Get_Serial_No_Array___(parent_key_) LOOP
+      child_key_.objkey := line_rec_.objkey;
+      child_rec_ := Get_Record___(child_key_);
+      $IF Component_Mfgstd_SYS.INSTALLED $THEN
+         IF struct_effectivity_db_ = 'SERIAL' THEN
+            IF (Is_Number___(child_rec_.serial_no) = 'FALSE') THEN
+               Error_SYS.Record_General(lu_name_, 'ALPHANUMERICNOTALLOWED: Alphanumeric serials :P1 are not allowed when structure effectivity for the part is :P2.', child_rec_.serial_no, Effectivity_Control_API.Decode(struct_effectivity_db_));
+            END IF;
+         END IF; 
+      $END  
+      serial_count_ := serial_count_ + 1;
+   END LOOP;
+   
+   IF serial_count_ != parts_to_receive_ THEN
+      Error_SYS.Record_General(lu_name_, 'SERIALNONOTALLPARTS: Serial numbers entered :P1 does not match no of parts to receive :P2.', serial_count_, parts_to_receive_);
+   END IF;
+END Validate_Serial_Numbers___;
+
+FUNCTION Get_Part_Serial_State___ (
+   part_no_   IN VARCHAR2,
+   serial_no_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   
+BEGIN
+  RETURN Part_Serial_Catalog_API.Get_Objstate(part_no_, serial_no_);
+END Get_Part_Serial_State___;
+
+
+PROCEDURE Remove_Record___ (
+   objkey_ IN VARCHAR2 ) 
+IS
+   rec_   Serial_Number_List_Virtual_Rec; 
+BEGIN
+   rec_.objkey := objkey_;
+   CRUD_Delete___(rec_);
+END Remove_Record___;
+
+
+PROCEDURE Remove_Serial_Numbers___ (
+   parent_objkey_ IN VARCHAR2 ) 
+IS
+   parent_key_   Serial_Number_Virtual_Key;
+   child_key_    Serial_Number_List_Virtual_Key; 
+   child_rec_    Serial_Number_List_Virtual_Rec;
+BEGIN
+   parent_key_.objkey := parent_objkey_;
+   FOR line_rec_ IN Get_Serial_No_Array___(parent_key_) LOOP
+      child_key_.objkey := line_rec_.objkey;
+      child_rec_ := Get_Record___(child_key_);
+      CRUD_Delete___(child_rec_);
+   END LOOP;
+END Remove_Serial_Numbers___;

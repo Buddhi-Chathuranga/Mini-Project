@@ -1,0 +1,126 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: PrintAgent
+--  Component:    FNDBAS
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+-----------------------------------------------------------------------------
+
+layer Core;
+
+PROCEDURE Remove_Printing_Node___ (
+   node_name_ IN VARCHAR2 ) 
+IS
+   
+BEGIN
+   Remote_Printing_Node_API.Touch(node_name_); -- to release it
+   REMOTE_PRINTER_MAPPING_API.REMOVE_PRINTING_NODE (node_name_);
+   DELETE FROM REMOTE_PRINTING_NODE_TAB WHERE  NAME = node_name_;
+   DBMS_Alert.Signal('PRINT_AGENT_ALERT','RENEW');
+END Remove_Printing_Node___;
+
+PROCEDURE Create_Printing_Node___ (
+   node_name_ IN VARCHAR2,
+   poll_time_  IN NUMBER ) 
+IS
+   
+BEGIN
+   REMOTE_PRINTING_NODE_API.CREATE_NODE (node_name_, poll_time_);
+   DBMS_Alert.Signal('PRINT_AGENT_ALERT','RENEW');
+END Create_Printing_Node___;
+
+PROCEDURE Add_Mapping___ (
+   logical_   IN VARCHAR2,
+   node_name_ IN VARCHAR2 ) 
+IS
+   
+BEGIN
+      REMOTE_PRINTER_MAPPING_API.ADD_MAPPING (logical_, node_name_);
+      DBMS_Alert.Signal('PRINT_AGENT_ALERT','RENEW');
+END Add_Mapping___;
+
+PROCEDURE Abort_Job___ (
+   print_job_id_  IN NUMBER,
+   error_message_ IN VARCHAR2 ) 
+IS
+   
+BEGIN
+   PRINT_QUEUE_API.ABORT_JOB (
+            print_job_id_,
+            error_message_);
+
+END Abort_Job___;
+
+
+PROCEDURE Complete_Job___ (
+   print_job_id_ IN NUMBER ) 
+IS
+   
+BEGIN
+   PRINT_QUEUE_API.COMPLETE_JOB (
+            print_job_id_);
+END Complete_Job___;
+
+FUNCTION Get_Remote_Job___(
+   node_name_ IN VARCHAR2 ) RETURN Remote_Job_Rec
+IS
+   
+     return_rec_ Remote_Job_Rec; 
+   PROCEDURE Auto___(
+      node_name_ IN VARCHAR2 ,
+      return_rec_ OUT Remote_Job_Rec ) 
+   IS
+      elapsed_time_ NUMBER;
+      start_time_ DATE;
+      timeout_ NUMBER;
+      current_rowversion_ TIMESTAMP;
+      alert_message_       VARCHAR2(10);
+      alert_status_        INTEGER;
+      PRAGMA autonomous_transaction;
+
+   BEGIN
+
+      SELECT t.poll_time, t.rowversion
+      INTO timeout_, current_rowversion_
+      FROM   remote_printing_node_tab t
+      WHERE  t.name = node_name_;
+      start_time_ := SYSDATE;
+      elapsed_time_ := 0;
+      alert_message_ := 'NEW';
+      DBMS_ALERT.Register('PRINT_AGENT_ALERT');            
+      WHILE (elapsed_time_ < timeout_/(24*3600) AND alert_message_!='RENEW') LOOP
+         Remote_Printing_Node_API.Touch(node_name_);
+         Print_Queue_API.Get_Remote_Job(return_rec_.print_job_id, return_rec_.printer_id, return_rec_.copies, return_rec_.print_from_page, return_rec_.print_to_page, node_name_);
+         IF(return_rec_.print_job_id IS NULL) THEN
+            current_rowversion_ := Remote_Printing_Node_API.Get_Rowversion(node_name_);
+            @ApproveTransactionStatement(2017-12-08,dasvse)
+            COMMIT;
+            DBMS_ALERT.Waitone('PRINT_AGENT_ALERT',alert_message_,alert_status_,timeout_- elapsed_time_*(24*3600));
+            --IF(alert_status_=0) THEN
+            --    DBMS_Lock.Sleep(10);-- sleep for a sec while waiting for response
+            --END IF;
+
+         ELSE
+            @ApproveTransactionStatement(2017-12-08,dasvse)
+            COMMIT;
+            EXIT;
+         END IF;
+         elapsed_time_ := SYSDATE - start_time_;
+      END LOOP;
+      DBMS_ALERT.Remove('PRINT_AGENT_ALERT');            
+   END Auto___;     
+BEGIN
+   --Print_Queue_API.Get_Remote_Job(return_rec_.print_job_id, return_rec_.printer_id, return_rec_.copies, return_rec_.print_from_page, return_rec_.print_to_page, node_name_);
+   Auto___(node_name_, return_rec_);
+   RETURN return_rec_;
+END Get_Remote_Job___;
+
+FUNCTION Get_Routing_Info___ (
+   print_job_id_ IN NUMBER ) RETURN VARCHAR2
+IS   
+BEGIN   
+   RETURN Print_Job_API.Get_Routing_Info(print_job_id_);
+END Get_Routing_Info___;

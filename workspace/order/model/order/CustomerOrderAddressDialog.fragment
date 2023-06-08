@@ -1,0 +1,339 @@
+----------------------------------------------------------------------------------------------------------------------------------------------------
+-- Date        Sign     History
+-- ----------  ------   ----------------------------------------------------------------------------------------------------------------------------
+-- 2021-01-29  Skanlk   SCZ-13274, Modified SaveAddressCommand and ValidateInfoStructure to prevent an unnecessary information message
+-- 2021-01-29           being raised when the tax liability is exempt.
+-- 2020-07-23  MaRalk   SCXTEND-4307, Modified action SetOrderAddress to handle warnings.
+-- 2020-06-10  KiSalk   Bug 154335(SCZ-10322), Added maxlength to address attributes in OrderAddressStructure
+-- 2019-01-30  SeJalk   SCUXXW4-9077, Converted from frmCustomerOrderAddress using MTG Version: 1.34
+----------------------------------------------------------------------------------------------------------------------------------------------------
+fragment CustomerOrderAddressDialog;
+component ORDER;
+layer Core;
+description "Use this fragment to view the delivery address customer order";
+include fragment CustAddressShipLovSelector;
+include fragment CountyCode1LovSelector;
+include fragment StateCodeLovSelector;
+include fragment CityCode1LovSelector;
+include fragment TaxCodeExemptRestrictedSelector;
+include fragment CustomerOrderInitialCheck;
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+
+
+singleton CustomerOrderCustomerSingleton for CustomerOrderAddress;
+
+--------------------------------- COMMANDS ----------------------------------
+command SaveAddressCommand for OrderAddressStructure {
+   label = "OK";
+   variable ValidateInfoVar           Structure(ValidateInfoStructure);
+   variable CopyAddrToLineVar         Text;
+   variable PeggedLinesExistVar       Text;
+   variable AllowSendChangeRequestVar Boolean;
+   variable SendChangeRequestVar      Text;
+   variable ReplicateVar              Text;
+   enabled = [AddressChanged];
+
+   execute {
+      set CopyAddrToLineVar = "TRUE";
+
+      call GetValidateInfo(Company, OrderNo) into ValidateInfoVar;
+      if [ValidateInfoVar.TaxMethod = "NOT_USED" and(ValidateInfoVar.OrderLinesExist > 0  or ValidateInfoVar.ChargeLinesExist > 0) and ValidateInfoVar.TaxLiabilityTypeDb != "EXM"] {
+         alert("Tax lines have not been changed for the single occurrence address line(s). You may want to check the tax information.");
+      }
+      if [NonDefLinesExist > 0 and AddressChanged] {
+         inquire("Do you want to update all lines with the same delivery address as the header regardless of the Default Info check box?") {
+            when YES {
+               set CopyAddrToLineVar = "TRUE";
+            }
+            when NO {
+               set CopyAddrToLineVar = "FALSE";
+            }
+            when CANCEL {
+               exit;
+            }
+         }
+      }
+
+      if [((ValidateInfoVar.IpdAndDefaultInfo = "TRUE") and(CopyAddrToLineVar = "TRUE")) or
+      ((ValidateInfoVar.IpdExist = "TRUE") and(CopyAddrToLineVar = "TRUE"))] {
+
+         if [not RowState in("Planned", "Invoiced", "Cancelled")] {
+            if [ValidateInfoVar.PeggedLinesExist = "TRUE"] {
+               if [ValidateInfoVar.SendChangeRequest = "TRUE"] {
+                  set AllowSendChangeRequestVar = true;
+               }
+               else {
+                  set AllowSendChangeRequestVar = false;
+               }
+               dialog ReplicateOrderChangesDialog(AllowSendChangeRequestVar, AllowSendChangeRequestVar) into(SendChangeRequestVar, ReplicateVar) {
+                  when CANCEL {
+                     exit CANCEL;
+                  }
+               }
+            }
+         }
+      }
+      call SetOrderAddress(OrderNo, SingleOccur, InCity, AddressName, Address1, Address2, Address3, Address4, Address5, Address6,
+      ZipCode, City, County, State, CountryCode, VatFreeVatCode, CopyAddrToLineVar, ReplicateVar);
+   }
+}
+
+command InitOrderAddressCommand for OrderAddressStructure {
+   variable AddressVar {
+      type = Structure(OrderAddressStructure);
+   }
+   execute {
+      call GetAddrInfo(OrderNo, Company, CustomerNo, ShipAddrNo) into AddressVar;
+      copy AddressVar into this;
+      set AddressNameTemp = AddressName;
+      set VatFreeVatCodeTemp = VatFreeVatCode;
+      set AddressChanged = false;
+   }
+}
+
+command SetAddressChangedCommand for OrderAddressStructure {
+   execute {
+      set AddressChanged = true;
+   }
+}
+
+---------------------------------- DIALOGS ----------------------------------
+dialog SingleOccuranceAddressDialog for OrderAddressStructure {
+   label = "Order Address";
+   input(OrderNo, Company, CustomerNo, ShipAddrNo, SingleOccur) {
+      command InitOrderAddressCommand;
+   }
+   group OrderAddressGroup;
+   command SaveAddressCommand;
+   command Cancel;
+}
+---------------------------------- GROUPS -----------------------------------
+group OrderAddressSingleOccurenceGroup for CustomerOrderAddress {
+
+   label = "Delivery Address";
+   visible = [parent.AddrFlagDb];
+
+   field Addr1;
+   field DummySingleOccur;
+   field InCity;
+   addressfield {
+      address1 Address1;
+      address2 Address2;
+      address3 Address3;
+      address4 Address4;
+      address5 Address5;
+      address6 Address6;
+      city City;
+      country Country;
+      county County;
+      state State;
+      zipcode ZipCode;
+      countrycode CountryCode;
+      label = "Delivery Address";
+      size = Medium;
+   }
+
+   lov VatFreeVatCodeRef with ReferenceTaxCodeExemptRestrictedSelector {
+      description = VatFreeVatCodeRef.Description;
+   }
+}
+
+group OrderAddressGroup for OrderAddressStructure {
+   label = "Delivery Address";
+   field AddressName {
+      editable = [SingleOccur];
+      validate command {
+         execute {
+            if [AddressNameTemp != AddressName] {
+               set AddressChanged = true;
+            }
+         }
+      }
+   }
+   field SingleOccur {
+      validate command SetAddressChangedCommand;
+   }
+   field InCity {
+      editable = [SingleOccur];
+      validate command SetAddressChangedCommand;
+   }
+   addressfield {
+      address1 Address1;
+      address2 Address2;
+      address3 Address3;
+      address4 Address4;
+      address5 Address5;
+      address6 Address6;
+      city City;
+      country CountryDesc;
+      county County;
+      state State;
+      zipcode ZipCode;
+      countrycode CountryCode;
+      label = "Delivery Address";
+      size = Medium;
+      editable = [SingleOccur];
+      validate command SetAddressChangedCommand;
+   }
+
+   lov VatFreeVatCodeRef with ReferenceTaxCodeExemptRestrictedSelector {
+      description = VatFreeVatCodeRef.Description;
+      editable = [SingleOccur];
+      validate command {
+         execute {
+            if [VatFreeVatCodeTemp != VatFreeVatCode] {
+               set AddressChanged = true;
+            }
+         }
+      }
+   }
+}
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+entityset CustomerOrderAddresses for CustomerOrderAddress;
+
+@Override
+entity CustomerOrderAddress {
+   crud = Read;
+
+   use attributes = Addr1, InCity, Address1, Address2, Address3, Address4, Company,
+   Address5, Address6, City, Country, County, State, ZipCode, CountryCode, VatFreeVatCode;
+
+   attribute DummySingleOccur Boolean {
+      label = "Single Occurence";
+      fetch = "'TRUE'";
+      editable = [false];
+   }
+   attribute Country Text {
+      fetch = "Iso_Country_API.Get_Description(country_code)";
+      label = "Country";
+   }
+   attribute Addr1 Text {
+      fetch = "addr_1";
+      label = "Name";
+      maxlength = 32767;
+      editable = [ETag != null];
+   }
+   attribute InCity Boolean("TRUE", "FALSE") {
+      fetch = "in_city";
+      label = "Within City Limit";
+      editable = [ETag != null];
+   }
+   reference VatFreeVatCodeRef(Company, VatFreeVatCode) to TaxCodeExemptRestricted(Company, FeeCode) {
+      label = "Tax Free Tax Code";
+   }
+}
+
+--------------------------------- FUNCTIONS ---------------------------------
+function GetValidateInfo Structure(ValidateInfoStructure) {
+   parameter Company Text;
+   parameter OrderNo Text;
+}
+
+function GetAddrInfo Structure(OrderAddressStructure) {
+   parameter OrderNo Text;
+   parameter Company Text;
+   parameter CustomerNo Text;
+   parameter ShipAddrNo Text;
+}
+
+---------------------------------- ACTIONS ----------------------------------
+action SetOrderAddress {
+   initialcheck CustomerOrderInitialCheck(OrderNo);
+   parameter OrderNo Text;
+   parameter SingleOccur Boolean;
+   parameter InCity Boolean;
+   parameter AddressName Text;
+   parameter Address1 Text;
+   parameter Address2 Text;
+   parameter Address3 Text;
+   parameter Address4 Text;
+   parameter Address5 Text;
+   parameter Address6 Text;
+   parameter ZipCode Text;
+   parameter City Text;
+   parameter County Text;
+   parameter State Text;
+   parameter CountryCode Text;
+   parameter VatFreeVatCode Text;
+   parameter CopyAddrToLine Text;
+   parameter Replicate Text;
+   supportwarnings = [true];
+   ludependencies = CustomerOrderAddress, CustomerOrderLine;
+}
+-------------------------------- STURCTURES ---------------------------------
+
+structure ValidateInfoStructure {
+   attribute TaxMethod         Text;
+   attribute OrderLinesExist   Number;
+   attribute ChargeLinesExist  Number;
+   attribute PeggedLinesExist  Text;
+   attribute SendChangeRequest Text;
+   attribute IpdAndDefaultInfo Text;
+   attribute IpdExist          Text;
+   attribute IptExist          Text;
+   attribute OnlyIptExist      Text;
+   attribute TaxLiabilityTypeDb Text;
+}
+structure OrderAddressStructure {
+   attribute OrderNo Text;
+   attribute Company Text;
+   attribute CustomerNo Text;
+   attribute SingleOccur Boolean {
+      label = "Single Occurence";
+      required = [true];
+   }
+   attribute ShipAddrNo Text;
+   attribute InCity Boolean {
+      label = "Within City Limit";
+      required = [true];
+   }
+   attribute AddressName Text {
+      label = "Name";
+   }
+   attribute Address1 Text {
+      maxlength = 35;
+   }
+   attribute Address2 Text {
+      maxlength = 35;
+   }
+   attribute Address3 Text {
+      maxlength = 100;
+   }
+   attribute Address4 Text {
+      maxlength = 100;
+   }
+   attribute Address5 Text {
+      maxlength = 100;
+   }
+   attribute Address6 Text {
+      maxlength = 100;
+   }
+   attribute ZipCode Text {
+      maxlength = 35;
+   }
+   attribute City Text {
+      maxlength = 35;
+   }
+   attribute County Text {
+      maxlength = 35;
+   }
+   attribute State Text {
+      maxlength = 35;
+   }
+   attribute CountryCode Text;
+   attribute CountryName Text;
+   attribute CountryDesc Text;
+   attribute VatFreeVatCode Text;
+   attribute NonDefLinesExist Number;
+   attribute RowState Text;
+   attribute AddressChanged Boolean {
+      required = [true];
+   }
+   attribute AddressNameTemp Text;
+   attribute VatFreeVatCodeTemp Text;
+   reference VatFreeVatCodeRef(Company, VatFreeVatCode) to TaxCodeExemptRestricted(Company, FeeCode) {
+      label = "Tax Free Tax Code";
+   }
+}
+

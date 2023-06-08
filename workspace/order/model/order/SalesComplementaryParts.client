@@ -1,0 +1,190 @@
+------------------------------------------------------------------------------------------------------------
+-- Date        Sign       History
+-- ----------  ------   -------------------------------------------------------------------------------
+-- 2021-07-26  ChFolk   SCZ-15615(Bug-160007, Included fragment ConnectObjectToActivityDialog. Added new input parameters ParentSourceNo and ProjectConnectAtCreation into ComplementaryPartsAssistant.
+-- 2021-07-26           Added before command AddProjectInfo to pop up project conenction dialog to get the project information for teh complementory part when the it needs project connection at creation.
+-- 2019-09-16  Rulilk   SCFALL19-391, Modified command PrePostingCommand to send LineNo and ReleaseNo to method CreateRecords.
+-- 2019-08-20  MalLlk   SCUXXW4-22978, Renamed the client ManageComplementaryPartsAssistant to SalesComplementaryParts.
+-- 2019-07-09  RuLiLk   SCUXXW4-23041, Modified method PrePostingCommand. Values for LineNo and ReleaseNo is not set after CreateRecord methods as it will show inline editing icon for save multiple times.
+-- 2019-07-04  MiKulk   SCUXXW4-22978, Supporting to move assistant ComplementaryPartsAssistant to a seperate projection.
+-- 2019-04-30  Chbnlk   SCUXXW4-8515,  Included the fragment PrePostingWithSourceAssistant.
+-- 2019-03-31  ChBnlk   SCUXXW4-18291, Fixed the refresh issue reported through this bug.
+-- 2019-03-31  ChBnlk   SCUXXW4-18215, Implemented the Cancel command.
+-- 2019-03-20  ChBnlk   SCUXXW4-8517, Modified file to support Sales Quotation Template.
+-- 2018-11-20  RuLiLk   SCUXXW4-8810, Converted from dlgSuggestedSalesPart using MTG Version: 1.33
+-----------------------------------------------------------------------------------------------------------
+client SalesComplementaryParts;
+component ORDER;
+layer Core;
+
+projection SalesComplementaryPartsHandling;
+
+--------------------------------- FRAGMENTS ---------------------------------
+
+include fragment SalesPartActiveLovSelector;
+@DynamicComponentDependency PROJ
+include fragment ConnectObjectToActivityDialog;
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+
+-------------------------------- MAIN PAGES ---------------------------------
+
+-------------------------------- ASSISTANTS ---------------------------------
+assistant ComplementaryPartsAssistant using SuggestedSalesPartSet {
+   label = "Complementary Parts";
+   savemode = OnLostFocus;
+   input(Record, Source, ObjRecord, ParentSourceNo, ProjectConnectAtCreation);
+
+   singlestep {
+      list RelatedPartsList(RelatedPartsArray);
+   }
+   command Close;
+}
+command Close for SuggestedSalesPartVirtual {
+   execute {
+      exit OK;
+   }
+}
+
+--------------------------------- COMMANDS ----------------------------------
+command AddProjectInfo for SuggestedSalesPartListVirtual {
+   variable ActivitySeqVar Number;
+   variable ProjectInfoStructureVar Structure(ProjectInfoStructure);
+
+   execute {
+      if [parent.ProjectConnectAtCreation] {
+         call GetProjectInfo(parent.ParentSourceNo, parent.Source) into ProjectInfoStructureVar;
+         @DynamicComponentDependency PROJ
+         if [ProjectInfoStructureVar.ProjectId != null] {
+            dialog ConnectActivityDialog(ProjectInfoStructureVar.Company, ProjectInfoStructureVar.ProjectId, ProjectInfoStructureVar.Contract, "COLINE") into(ActivitySeqVar) {
+               when OK {
+                  set ActivitySeq = ActivitySeqVar;
+                  set ProjectId = ProjectInfoStructureVar.ProjectId;
+                  exit OK;
+               }
+               when CANCEL {
+                  exit CANCEL;
+               }
+            }
+         }
+      }
+   }
+}
+
+command PrePostingCommand for SuggestedSalesPartListVirtual {
+   variable IsMandatoryVar Boolean;
+   variable PreAccountingIdVar Number;
+   variable ReturnValuesStructureVar Structure(ReturnValues);
+   execute {
+      call CreateRecords(parent.Source, parent.Objkey, SuggestedPartNo, LineNo, ReleaseNo) into ReturnValuesStructureVar;
+
+      set PreAccountingIdVar = ReturnValuesStructureVar.PreAccountingId;
+
+      if [CrudOperation = "update" and parent.Source = "ORDER"] {
+         call  IsMandatoryPrePosting(SourceNo, Contract) into IsMandatoryVar;
+         if [IsMandatoryVar] {
+            set SourceIdentifierVar = "for Customer Order Line ${SourceNo} - ${ReturnValuesStructureVar.LineNo} - ${ReturnValuesStructureVar.ReleaseNo}" {
+               translatable = true;
+            }
+            assistant PrepostingWithSource.PrePostingWithSourceAssistant("M104", PreAccountingIdVar, Contract, false, SourceIdentifierVar, "CUSTOMER ORDER LINE") {
+               when OK {
+                  exit OK;
+               }
+            }
+         }
+      }
+   }
+}
+
+--------------------------------- SELECTORS ---------------------------------
+
+---------------------------------- GROUPS -----------------------------------
+
+----------------------------------- LISTS -----------------------------------
+list RelatedPartsList for SuggestedSalesPartListVirtual {
+   editmode = SingleRowEdit;
+
+   crudactions {
+      before command AddProjectInfo;
+      after command PrePostingCommand;
+   }
+   measure Quantity(SalesPartRef.SalesUnitMeas) {
+      unitselector IsoUnitSelector;
+      uniteditable = [false];
+
+      validate command {
+         variable SuggestedPricesVar {
+            type = Structure(StructGetPrice);
+         }
+         execute {
+            if [Quantity != 0] {
+               if [Quantity != null and Quantity < 0] {
+                  error("Negative Sales Quantity is not allowed.");
+               }
+               call GetPrice(parent.Source, SourceNo, SuggestedPartNo, SalesPartRef.TaxCode, Quantity, PriceEffectivityDate) into SuggestedPricesVar;
+               set Price = SuggestedPricesVar.Price;
+               set PriceInclTax = SuggestedPricesVar.PriceInclTax;
+               set PriceSource = SuggestedPricesVar.PriceSource;
+               set PriceSourceId = SuggestedPricesVar.PriceSourceId;
+            }
+         }
+      }
+   }
+   lov SuggestedPartNoRef with ReferenceSalesPartActiveLovSelector {
+      description = SuggestedPartNoRef.CatalogDesc;
+      size = Large;
+   }
+   field ParentPartNo;
+   field Description;
+
+   measure BuyQtyDue(SalesPartRef.SalesUnitMeas) {
+      unitselector IsoUnitSelector;
+      uniteditable = [false];
+      editable = [false];
+   }
+   computedfield PriceQty {
+      value = "#{Quantity*SalesPartRef.PriceConvFactor}";
+   }
+   field SalesPartRef.PriceUnitMeas {
+      size = Small;
+      label = "Price UoM";
+   }
+   field Price {
+      searchable = false;
+      editable = [false];
+      preserveprecision = [true];
+   }
+   field PriceInclTax {
+      searchable = false;
+      editable = [false];
+      preserveprecision = [true];
+   }
+   field SuggestedPartNoRef.TaxCode {
+      size = Small;
+      label = "Tax Code";
+   }
+   field SuggestedPartNoRef.Description;
+   field PriceSource;
+   field PriceSourceId;
+   field ActivitySeq;
+
+   fieldranking Quantity, SuggestedPartNoRef, ParentPartNo, BuyQtyDue, Price;
+}
+
+----------------------------------- CARDS -----------------------------------
+
+---------------------------------- DIALOGS ----------------------------------
+
+---------------------------------- CHARTS -----------------------------------
+
+--------------------------------- CALENDARS ---------------------------------
+
+---------------------------------- SHEETS -----------------------------------
+
+----------------------------- STATE INDICATORS ------------------------------
+
+----------------------------------- TREES -----------------------------------
+
+---------------------------------- PLUGINS ----------------------------------
+
+------------------------------- IMAGE VIEWERS -------------------------------

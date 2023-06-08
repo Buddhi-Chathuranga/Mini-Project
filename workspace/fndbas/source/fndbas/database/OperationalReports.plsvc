@@ -1,0 +1,228 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: OperationalReports
+--  Component:    FNDBAS
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+-----------------------------------------------------------------------------
+
+layer Core;
+
+CURSOR get_report_columns(report_id_ IN VARCHAR2) IS
+   SELECT *
+   FROM   report_column_definition
+   WHERE  report_id = report_id_
+   AND  column_query IS NOT null
+   ORDER BY column_id;
+   
+   
+
+FUNCTION Get_Report_Parameters___(
+   report_id_ IN VARCHAR2 ) RETURN Report_Parameter_Arr
+IS
+    arr_ Report_Parameter_Arr := Report_Parameter_Arr();   
+    params_ Report_Parameter_Rec;
+    query_            VARCHAR2(500);
+    status_           VARCHAR2(500);
+    logical_unit_     VARCHAR2(500);    
+    param_count_      NUMBER;
+    
+BEGIN
+   SELECT lu_name INTO logical_unit_
+         FROM  report_definition
+         WHERE report_id = report_id_;
+   param_count_ := 1;
+   FOR column_ IN get_report_columns(report_id_) LOOP
+      arr_.extend;
+      params_.param_name := column_.column_name;
+      query_ := Language_SYS.Translate_Report_Question_(logical_unit_, report_id_, column_.column_name, column_.column_query);
+      params_.translated_name  := NVL(query_,column_.column_query);
+      params_.flags :=  NVL(column_.column_qflags, '-CS--');
+      params_.data_type := NVL(column_.column_dataformat, 'TEXT'); -- TEXT was STRING(50) 
+      status_ := Language_SYS.Translate_Report_Col_Status_(logical_unit_, report_id_, column_.column_name, column_.status);
+      params_.status := SUBSTR(status_,1,200);
+      IF (column_.column_lov IS NOT NULL) THEN
+         params_.reference := column_.lov_view;
+         params_.enumerate := column_.lov_enum;
+      ELSE        
+        IF(column_.enumerate_method IS NOT NULL) THEN
+          params_.enumerate := Get_Enum_Method_Enum___(column_.enumerate_method);
+        ELSE
+           params_.enumerate := column_.enumerate_method;
+        END IF;
+        
+      END IF;
+      params_.valid := column_.validate_method;
+      arr_(param_count_) := params_;
+      param_count_ := param_count_+1;     
+   END LOOP;
+   RETURN arr_;
+END Get_Report_Parameters___;
+
+FUNCTION Get_Report_Layouts___(
+   report_id_ IN VARCHAR2 ) RETURN Text_Arr
+IS
+       arr_layouts_ Text_Arr := Text_Arr();
+       layout_properties_ VARCHAR2(4000);       
+       layout_name_ VARCHAR2(300);       
+       start_pos_  NUMBER;
+       end_pos_ NUMBER;
+       layout_end_pos_ NUMBER;
+       count_        NUMBER;
+BEGIN
+   
+   start_pos_ := 1;
+   count_ := 1;
+      
+      Report_Definition_API.Enumerate_Report_Layout(layout_properties_, report_id_);
+   WHILE( INSTR(layout_properties_,client_sys.record_separator_,start_pos_,1)>1) LOOP
+         arr_layouts_.extend;
+         end_pos_ := INSTR(layout_properties_,client_sys.record_separator_,start_pos_,1);
+         layout_name_ :=SUBSTR(layout_properties_,start_pos_,end_pos_);
+         
+         layout_end_pos_ := INSTR(layout_name_, client_sys.field_separator_,1,1);
+         
+         arr_layouts_(count_) := SUBSTR(layout_name_,1, (layout_end_pos_-1));
+         
+         start_pos_ := end_pos_ + 1;
+         count_ := count_ + 1;
+         
+      END LOOP;     
+      RETURN  arr_layouts_;
+   END Get_Report_Layouts___;
+   
+   
+FUNCTION Get_Report_Language___(
+  report_id_ IN VARCHAR2 ) RETURN Text_Arr
+IS
+   arr_language_codes_ Text_Arr := Text_Arr();
+   ptr_ NUMBER;
+   name_ VARCHAR2(5);
+   value_ VARCHAR2(5);
+   lang_attr_ VARCHAR2(2000);
+   count_ NUMBER;
+BEGIN
+   ptr_ := NULL;
+   count_ := 1;
+   Language_SYS.Enumerate_Report_Languages_(lang_attr_ , report_id_);
+   WHILE Client_SYS.Get_Next_From_Attr(lang_attr_ , ptr_, name_, value_) LOOP
+     arr_language_codes_.extend;
+     arr_language_codes_(count_) := value_;
+     count_ := count_+1;
+     
+   END LOOP;
+   
+   RETURN  arr_language_codes_;
+END Get_Report_Language___;
+
+FUNCTION Enumerate_Logical_Printer___ RETURN Logical_Printer_Arr
+IS
+   tlp_ Logical_Printer_Rec;
+   count_ NUMBER;
+   arr_lp_ Logical_Printer_Arr :=  Logical_Printer_Arr();
+   CURSOR get_logical_printers IS
+      SELECT printer_id, description
+      FROM  LOGICAL_PRINTER_TAB
+      ORDER BY printer_id;
+BEGIN
+   count_ := 1;
+   FOR rec IN get_logical_printers  LOOP
+      arr_lp_.extend;
+      tlp_.printer_id := rec.printer_id;
+      tlp_.description := rec.description;
+      arr_lp_(count_) := tlp_;
+      count_ := count_ +1;
+   END LOOP;
+   
+   RETURN arr_lp_;
+END Enumerate_Logical_Printer___;
+
+FUNCTION Get_Enum_Method_Enum___(enumerate_method_ IN VARCHAR2)RETURN VARCHAR2
+IS
+   vals_ VARCHAR2(500);
+   plsql_block_ VARCHAR2(500);
+   
+BEGIN
+   plsql_block_ := 'BEGIN '|| enumerate_method_ ||'(:vl); END;';
+   vals_ :='abc';
+   Assert_SYS.Assert_Is_Package_Method(enumerate_method_);
+   @ApproveDynamicStatement(2016-10-31,LakRLK)
+   EXECUTE IMMEDIATE plsql_block_
+   USING  OUT vals_;
+   vals_ := replace(vals_,client_sys.field_separator_,',');
+   
+   RETURN vals_;
+END;
+
+FUNCTION Create_New_Report___ (
+   report_attr_     IN VARCHAR2,
+   parameter_values_ IN VARCHAR2,
+   distrib_list_    IN VARCHAR2 ) RETURN NUMBER
+IS
+   dist_list_ VARCHAR2(500);   
+BEGIN
+   dist_list_ := Fnd_Session_API.Get_Fnd_User();
+   IF distrib_list_ IS NOT NULL THEN
+      dist_list_ := dist_list_ || client_sys.field_separator_|| distrib_list_;  
+   END IF;
+   
+   RETURN Report_Format_API.Create_New_Report__(report_attr_, parameter_values_, dist_list_);       
+END Create_New_Report___;
+
+
+FUNCTION Enumerate_Layout___(
+   report_id_ IN VARCHAR2 ) RETURN Report_Layout_Arr
+IS
+   arr_layouts_ Report_Layout_Arr := Report_Layout_Arr();
+   rec_layout_ Report_Layout_Rec;
+   list_ VARCHAR2(32000);
+   start_pos_ NUMBER;
+   end_pos_ NUMBER;
+   desc_pos1_ NUMBER;
+   desc_pos2_ NUMBER;
+   count_ NUMBER;
+   full_layout_ VARCHAR2(2000);
+BEGIN
+   
+   Report_Layout_Definition_API.Enumerate_Layout(list_, report_id_); --droped the result key for the moment 
+   start_pos_ := 1;
+   count_ :=1;
+   IF list_ IS NOT NULL THEN
+      WHILE INSTR(list_,client_sys.record_separator_,start_pos_,1) > 0 LOOP            
+            arr_layouts_.extend;
+            end_pos_ :=  INSTR(list_,client_sys.record_separator_,start_pos_,1);
+            full_layout_  := SUBSTR(list_,start_pos_,end_pos_);
+            rec_layout_.layout_id :=SUBSTR(full_layout_,1,INSTR(full_layout_ ,client_sys.field_separator_,1,1));
+            desc_pos1_ := INSTR(full_layout_ ,client_sys.field_separator_,1,1);
+            desc_pos2_ := INSTR(full_layout_ ,client_sys.field_separator_,1,2);
+            rec_layout_.description :=SUBSTR(full_layout_,desc_pos1_,(desc_pos2_- desc_pos1_));
+            arr_layouts_(count_) := rec_layout_;
+            start_pos_ := end_pos_ +1;
+            count_ := count_ + 1;  
+           
+      END LOOP;
+   END IF;
+   
+   RETURN arr_layouts_;
+END Enumerate_Layout___;
+
+FUNCTION Get_Report_Title___(
+   report_id_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   report_title_ VARCHAR2(400);
+BEGIN
+   Report_Definition_API.Get_Report_Title(report_title_, report_id_);
+   RETURN report_title_;
+END Get_Report_Title___;
+
+FUNCTION Get_Quick_Report_File_Name___(
+   report_id_ IN VARCHAR2 )  RETURN VARCHAR2
+IS
+   quick_report_id_ NUMBER;
+BEGIN
+   quick_report_id_ := to_number(report_id_);
+   RETURN Quick_Report_API.Get_File_Name( quick_report_id_);
+END Get_Quick_Report_File_Name___;

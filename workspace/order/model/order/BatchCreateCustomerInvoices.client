@@ -1,0 +1,211 @@
+----------------------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  -----------------------------------------------------------------------------
+-- 210817      KiSalk  SCZ-15946, In the finish command, the value assigned to Result was made translatable, because it is used as the description in final step.
+-- 200914      ApWilk  Bug 155540(SCZ-11357), Changed the parameter name ExcludeUncntdCharges as InvoiceUncntdCharges and added the validate command
+--                     to the Companyref to set the value for the InvoiceUncntdCharges
+-- 200914              based on the value set in company level
+-- 191028      Satglk  SCXTEND-963, Salesman renamed to Salesperson
+-- 26-08-2019  ChLeLK  SCUXXW4-24031,  Entering values are set to uppercase for fields Order Type, Customer No, Coordinator and Salesman Id
+-- 181108      RAKUSE  SCUXXW4-8600,   Converted dialog 'dlgPsheetBatchCreateCustomerInvoices' using MTG Version: 1.34
+----------------------------------------------------------------------------------------------------
+client BatchCreateCustomerInvoices;
+component ORDER;
+layer Core;
+projection BatchCreateCustomerInvoicesHandling;
+include fragment ScheduledTasksCommon;
+include fragment UserSiteCompanyLovSelector;
+include fragment CustOrdCust1Selector;
+include fragment OrderCoordinatorLovSelector;
+include fragment SalesPartSalesmanLovSelector;
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+
+navigator {
+   entry TaskAssistantNavEntry parent OrderNavigator.SalesInvoicing at index 450 {
+      label = "Batch Create Customer Invoices";
+      assistant TaskAssistant;
+   }
+}
+
+---------------------------------- GROUPS -----------------------------------
+
+group ParameterGroup for TaskVirtual {
+   label = "Parameters";
+
+   lov CompanyRef with ReferenceCompanyFinanceSelector {
+      label = "Company";
+      validate command {
+         variable CompanyParamVar {
+            type = Boolean;
+         }
+         execute {
+            call GetCompanyParam(Company) into CompanyParamVar;
+            if[CompanyParamVar] {
+               set InvoiceUncntdCharges = true;
+            }
+            else {
+               set InvoiceUncntdCharges = false;
+            }
+         }
+      }
+   }
+
+   lov ContractRef with ReferenceUserSiteCompanyLovSelector {
+      freeinput = [true];
+      label = "Site";
+      format = uppercase;
+   }
+
+   lov OrderIdRef with ReferenceCustOrderTypeSelector {
+      freeinput = [true];
+      label = "Order Type";
+      format = uppercase;
+   }
+
+   lov CustomerNoRef with ReferenceCustOrdCust1Selector {
+      freeinput = [true];
+      label = "Customer No";
+      format = uppercase;
+   }
+
+   lov AuthorizeCodeRef with ReferenceOrderCoordinatorLovSelector using AuthorizeCodeLovFilter {
+      freeinput = [true];
+      label = "Coordinator";
+      format = uppercase;
+   }
+
+   lov SalesmanCodeRef with ReferenceSalesPartSalesmanLovSelector using SalesmanCodeLovFilter {
+      freeinput = [true];
+      label = "Salesperson ID";
+      format = uppercase;
+   }
+
+   field Priority;
+
+   field InvoiceUncntdCharges {
+      label = "Invoice Unconnected Charges Seperately";
+   }
+
+}
+
+@Override
+list CustOrderTypeLovList for CustOrderType {
+   label = "";
+   static OrderId;
+   static Description;
+   static PickInventoryType {
+      label = "Use Shipment Inventory";
+   }
+   static OeAllocAssignFlag {
+      label = "Priority Reservations";
+   }
+   static OnlineProcessing {
+      label = "Online Execution";
+   }
+   static AllowPartialPicking;
+}
+
+@Override
+selector ReferenceCustOrderTypeSelector for CustOrderType {
+   label = "";
+   static OrderId;
+   static Description;
+   static PickInventoryType {
+      label = "Use Shipment Inventory";
+   }
+   static OeAllocAssignFlag {
+      label = "Priority Reservations";
+   }
+   static OnlineProcessing {
+      label = "Online Execution";
+   }
+   static AllowPartialPicking;
+}
+
+-------------------------------- ASSISTANTS ---------------------------------
+
+assistant TaskAssistant using TaskVirtuals {
+   label = "Batch Create Customer Invoices";
+
+   init command {
+      execute {
+         call GetParameters() into Params;
+         set ScheduleMethodId = Params.ScheduleMethodId;
+         set ScheduleName = Params.Description;
+         -- Init parameters
+         set Company = Params.Company;
+         set Contract = Params.Contract;
+         set OrderId = Params.OrderId;
+         set CustomerNo = Params.CustomerNo;
+         set AuthorizeCode = Params.AuthorizeCode;
+         set SalesmanCode = Params.SalesmanCode;
+         set Priority = Params.Priority;
+         set InvoiceUncntdCharges = Params.InvoiceUncntdCharges;
+      }
+   }
+
+   steps {
+      step {
+         label = "Task Options";
+         group ExecuteOptionGroup;
+         group ParameterGroup;
+         next command {
+            enabled = [TaskOption = "Schedule"];
+         }
+      }
+      step {
+         label = "Schedule";
+         group SchedulingParametersGroup;
+         group SchedulingStartAndStopDateGroup;
+      }
+      step {
+         label = "Schedule Options";
+         group ScheduledTasksAssistantAdvOpGroup;
+         group ScheduledTasksAssistantStreamsGroup;
+      }
+      final step {
+         description = "${Result}";
+         command NavigateToScheduledTask {
+            visible = [TaskOption = "Schedule"];
+         }
+      }
+      cancelled step {
+         description = "Task was cancelled";
+      }
+   }
+
+   finish command {
+      enabled = [(Company != null and Contract != null and OrderId != null and CustomerNo != null and AuthorizeCode != null and SalesmanCode != null) and(
+      (TaskOption = "Now") or
+      (TaskOption = "Schedule" and ScheduleName != null and
+      (ScheduleOption = "Daily" and ScheduleTime != null) or
+      (ScheduleOption = "Weekly" and ScheduleTime != null and ScheduledDays != null) or
+      (ScheduleOption = "Monthly" and ScheduleTime != null and ScheduledDayNumber > 0 and ScheduledDayNumber < 32) or
+      (ScheduleOption = "Date" and ScheduleDatetime != null) or
+      (ScheduleOption = "Interval" and ScheduleInterval != null) or
+      (ScheduleOption = "Custom" and ExecutionPlan != null)))];
+
+      execute {
+         if [TaskOption = "Now"] {
+            call ExecuteTask();
+            set Result = "Task '${ScheduleName}' has been successfully completed!" {
+               translatable = true;
+            }
+         }
+         else {
+            call ScheduleTask() into ScheduledTask;
+            set ScheduleId = ScheduledTask.ScheduleId;
+            set Result = "Task '${ScheduleName}', assigned with the Id '${ScheduleId}', was successfully scheduled to start ${ScheduledTask.ScheduledDate} at ${ScheduledTask.ScheduledTime}!" {
+               translatable = true;
+            }
+         }
+      }
+   }
+   cancel command {
+      execute {
+         navigate back;
+      }
+   }
+
+}

@@ -1,0 +1,2269 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     ReturnMaterialLineTab
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign    History
+--  ------     ------  ---------------------------------------------------------
+-- 2021-08-25  MalLlk  SC21R2-2372, Modified CRUD_Default_Copy___ to add dynamic dependency to Expctr. 
+-- 2021-07-26  Hahalk  SC21R2-519, Overridden the CRUD_Default_Copy method
+-- 2020-07-27  ChBnlk  SCXTEND-4658, Added new parameters to Get_Info_From_Order_No___ and 
+-- 2020-07-27          and used them in get_info_from_order_no to filter the records properly.
+-- 2020-05-11  MaEelk  SCXTEND-4316, Added Order line Information to Get_Order_Info_From_Catalog_No___
+-- 2020-05-11          and added them to the cursors in it.
+-- 2019-09-12  YasMlk  SCFALL19-225, Added method Get_Qty_To_Return_Inv___.
+-- 2019-07-22  MaEelk  SCUXXW4-20211, Removed some unnnecessary codes in Check_Connected_Promo___ to improve performance.
+-- 2019-03-11  IzShlk  SCUXXW4-17154, Introduced Get_Order_Data___, Validate_Order_Info___ methods for debit invoice no validation
+-- 2019-03-09  IzShlk  SCUXXW4-17154, Added the validation for DebitInvoiceNo.
+-- 2019-03-01  RaVdlk  SCUXXW4-1389, Added the method Get_Order_Info
+-- 2019-02-18  RaVdlk  SCUXXW4-1389, Modified Get_Price_Info___ method
+-- 2019-02-06  RaVdlk  SCUXXW4-1389, Moved the ReturnMaterialLine code to a fragement
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Get_Order_Info_From_Lov___(
+   rma_no_                  IN NUMBER,
+   rma_line_no_             IN NUMBER,
+   shipment_id_             IN NUMBER,
+   company_                 IN VARCHAR2, 
+   objstate_                IN VARCHAR2,
+   info_rec_                IN Order_Info_Rec,
+   qty_to_return_           IN NUMBER,
+   allow_update_            IN BOOLEAN) RETURN Order_Info_Rec
+IS
+   po_no_changed_          VARCHAR2(10);  
+   old_purchase_order_no_  VARCHAR2(20);  
+   out_attr_               VARCHAR2 (32000);  
+   order_info_rec_         Order_Info_Rec := NULL;     
+BEGIN     
+-- series_id and item_id need to be assigned for the info_rec from debit invoice no validation
+   IF info_rec_.debit_invoice_no IS NOT NULL AND info_rec_.debit_invoice_series_id IS NOT NULL AND company_ IS NOT NULL THEN
+      Return_Material_Line_API.Get_Ivc_Line_Data(out_attr_, 
+                                                 info_rec_.order_no, 
+                                                 info_rec_.line_no, 
+                                                 info_rec_.rel_no, 
+                                                 info_rec_.line_item_no, 
+                                                 info_rec_.debit_invoice_no,
+                                                 NULL,
+                                                 info_rec_.debit_invoice_series_id,
+                                                 company_,
+                                                 rma_no_,
+                                                 rma_line_no_);
+      order_info_rec_ := Get_Order_Info_From_Attr___ (rma_no_,rma_line_no_, out_attr_, qty_to_return_, objstate_, allow_update_); 
+      order_info_rec_.debit_inv_validated := TRUE;
+   ELSE
+      Return_Material_Line_API.Get_Co_Line_Data(out_attr_,
+                                                info_rec_.order_no, 
+                                                info_rec_.line_no, 
+                                                info_rec_.rel_no, 
+                                                info_rec_.line_item_no, 
+                                                rma_no_,
+                                                rma_line_no_,
+                                                shipment_id_);
+      order_info_rec_ := Get_Order_Info_From_Attr___ (rma_no_,rma_line_no_, out_attr_, qty_to_return_, objstate_, allow_update_);
+   END IF;     
+       
+   IF (old_purchase_order_no_ != order_info_rec_.customer_po_no)  THEN
+      po_no_changed_ := 'TRUE';
+   END IF;
+   IF po_no_changed_ = 'TRUE' AND  (info_rec_.debit_invoice_series_id IS NULL OR info_rec_.debit_invoice_item_id IS NULL ) THEN
+      order_info_rec_.debit_invoice_item_id := NULL;
+      order_info_rec_.debit_invoice_no := NULL;
+      order_info_rec_.debit_invoice_series_id := NULL;
+   END IF;
+   -- this was added to have the value for delivery country code which is needed for tax liability LOVuserWhere
+   order_info_rec_.delivery_country_code :=  Return_Material_Line_API.Get_Delivery_Country_Code(rma_no_,rma_line_no_ );
+   RETURN order_info_rec_;
+END Get_Order_Info_From_Lov___;
+
+FUNCTION Get_Order_Info_From_Attr___(
+   rma_no_        IN NUMBER,
+   rma_line_no_   IN NUMBER,
+   attr_          IN VARCHAR2,
+   qty_to_return_ IN NUMBER,
+   objstate_      IN VARCHAR2,
+   allow_update_  IN BOOLEAN ) RETURN Order_Info_Rec
+IS
+   local_qty_return_       NUMBER;
+   order_info_rec_         Order_Info_Rec := NULL;
+   line_rec_               Return_Material_Line_API.Public_Rec; 
+
+BEGIN
+   line_rec_ := Return_Material_Line_API.Get(rma_no_, rma_line_no_);
+   order_info_rec_.order_no              := Client_SYS.Get_Item_Value('ORDER_NO',attr_); 
+   order_info_rec_.line_no               := Client_SYS.Get_Item_Value('LINE_NO',attr_); 
+   order_info_rec_.rel_no                := Client_SYS.Get_Item_Value('REL_NO',attr_);
+   order_info_rec_.line_item_no          := Client_SYS.Get_Item_Value_To_Number('LINE_ITEM_NO',attr_, lu_name_);
+   order_info_rec_.catalog_no            := Client_SYS.Get_Item_Value('CATALOG_NO',attr_);
+   order_info_rec_.part_no               := Client_SYS.Get_Item_Value('PART_NO',attr_);
+   order_info_rec_.tax_liability         := Client_SYS.Get_Item_Value('TAX_LIABILITY',attr_);
+   order_info_rec_.currency_rate         := Client_SYS.Get_Item_Value('CURRENCY_RATE',attr_);    
+   order_info_rec_.conv_factor           := Client_SYS.Get_Item_Value_To_Number('CONV_FACTOR',attr_, lu_name_);
+   order_info_rec_.inverted_conv_factor  := Client_SYS.Get_Item_Value_To_Number('INVERTED_CONV_FACTOR',attr_, lu_name_);
+   order_info_rec_.condition_code        := Client_SYS.Get_Item_Value('CONDITION_CODE',attr_);
+   order_info_rec_.catalog_desc          := Client_SYS.Get_Item_Value('CATALOG_DESC',attr_);
+   order_info_rec_.delivery_type         := Client_SYS.Get_Item_Value('DELIVERY_TYPE',attr_);
+   order_info_rec_.qty_to_return_inv_uom := Client_SYS.Get_Item_Value_To_Number('QTY_TO_RETURN_INV_UOM',attr_,lu_name_);
+   order_info_rec_.rental_db             := Client_SYS.Get_Item_Value('RENTAL_DB',attr_);
+   order_info_rec_.price_conv_factor     := Get_Price_Conversion_Factor___(order_info_rec_.order_no ,order_info_rec_.line_no,order_info_rec_.rel_no,order_info_rec_.line_item_no);
+   order_info_rec_.customer_po_no        := Client_SYS.Get_Item_Value('CUSTOMER_PO_NO',attr_);   
+   local_qty_return_                     := Client_SYS.Get_Item_Value_To_Number('POSS_QTY_TO_RETURN', attr_, lu_name_); 
+     
+
+-- TO DO : missed the copy related condition
+IF (((qty_to_return_ IS NULL) OR (rma_line_no_ IS NULL AND NVL(local_qty_return_,0) != NVL(qty_to_return_,0) AND (NVL(line_rec_.qty_to_return,0) != NVL(qty_to_return_,0))) OR (qty_to_return_ = 0 AND (NVL(line_rec_.qty_to_return,0) != NVL(qty_to_return_,0)))) 
+  AND (objstate_ IS NULL OR objstate_ != 'ReturnCompleted') AND ((NVL(line_rec_.qty_to_return,0) = NVL(qty_to_return_,0)) OR allow_update_) OR ((rma_line_no_ IS NOT NULL) AND (NVL(local_qty_return_,0) != NVL(qty_to_return_,0)) AND qty_to_return_ IS NULL)) THEN 
+      order_info_rec_.qty_to_return := Client_SYS.Get_Item_Value_To_Number('POSS_QTY_TO_RETURN', attr_, lu_name_);  
+ELSE
+   order_info_rec_.qty_to_return := qty_to_return_;
+END IF;  
+   order_info_rec_.configuration_id  := nvl(Client_SYS.Get_Item_Value('CONFIGURATION_ID', attr_), '*');
+   order_info_rec_.customer_po_no    := nvl(Client_SYS.Get_Item_Value('INTERNAL_PO_NO', attr_), order_info_rec_.customer_po_no);
+   order_info_rec_.order_validated   := 'TRUE'; 
+   RETURN order_info_rec_;
+END Get_Order_Info_From_Attr___;   
+
+
+FUNCTION Get_Price_Conversion_Factor___(
+   order_no_     IN VARCHAR2,
+   line_no_      IN VARCHAR2,
+   rel_no_       IN VARCHAR2,
+   line_item_no_ IN NUMBER)RETURN NUMBER
+IS
+   price_conv_factor_ NUMBER;   
+BEGIN
+   IF order_no_ IS NOT NULL AND line_no_ IS NOT NULL AND rel_no_ IS NOT NULL AND line_item_no_ IS NOT NULL  THEN
+      price_conv_factor_ := Customer_Order_Line_API.Get_Price_Conv_Factor(order_no_,line_no_, rel_no_,line_item_no_ );
+   END IF;
+   RETURN price_conv_factor_;
+END Get_Price_Conversion_Factor___; 
+   
+FUNCTION Calculate_Price_Conversion_Factor___(
+   catch_qty_      IN NUMBER,
+   qty_to_return_  IN NUMBER)RETURN NUMBER
+IS
+   price_conv_factor_ NUMBER;   
+BEGIN
+   price_conv_factor_ := catch_qty_/qty_to_return_;
+   RETURN price_conv_factor_;
+
+END Calculate_Price_Conversion_Factor___; 
+
+FUNCTION Get_Inspection_Default___(
+   return_reason_code_  IN VARCHAR2)RETURN VARCHAR2
+IS
+   inspection_info_ VARCHAR2(100);   
+BEGIN
+   inspection_info_ := Return_Material_Reason_API.Get_Inspection_Info(return_reason_code_);
+   RETURN inspection_info_;
+   
+END Get_Inspection_Default___;    
+
+FUNCTION Validate_Delivery_Type___(
+   order_no_              IN VARCHAR2,
+   line_no_               IN VARCHAR2,
+   rel_no_                IN VARCHAR2,
+   line_item_no_          IN NUMBER,
+   rma_no_                IN NUMBER,
+   rma_line_no_           IN NUMBER,
+   tax_liability_         IN VARCHAR2,
+   tax_from_defaults_     IN VARCHAR2,
+   net_price_curr_        IN NUMBER,
+   gross_price_curr_      IN NUMBER,  
+   tax_code_              IN VARCHAR2,
+   tax_calc_structure_id_ IN VARCHAR2,
+   tax_class_id_          IN VARCHAR2 ,
+   company_               IN VARCHAR2,
+   contract_              IN VARCHAR2,
+   delivery_type_         IN VARCHAR2,
+   catalog_no_            IN VARCHAR2,
+   tax_liability_type_db_ IN VARCHAR2,
+   debit_invoice_id_      IN NUMBER,
+   debit_invoice_item_id_ IN NUMBER,
+   net_amt_curr_          IN NUMBER,
+   gross_amt_curr_        IN NUMBER,
+   qty_to_return_         IN NUMBER,
+   price_conv_factor_     IN NUMBER)RETURN Price_Details_Rec
+IS
+   tax_liability_type_   VARCHAR2(10);
+   delivery_country_db_  VARCHAR2(40);
+   price_details_rec_    Price_Details_Rec := NULL;   
+   currency_rate_        NUMBER;
+   
+BEGIN
+   tax_liability_type_ := tax_liability_type_db_;
+   IF tax_liability_type_ = '' THEN
+      Get_Tax_Liability_Type___(tax_liability_type_,delivery_country_db_,order_no_,line_no_,rel_no_,line_item_no_,rma_no_,rma_line_no_,tax_liability_);
+   END IF;
+   currency_rate_  := Return_Material_Line_API.Get_Currency_Rate(rma_no_,rma_line_no_);
+   IF tax_liability_type_ = 'EXM' THEN
+      price_details_rec_ :=  Calculate_Line_Prices___(tax_from_defaults_, rma_no_,rma_line_no_, order_no_, line_no_, rel_no_, line_item_no_, 
+                          net_price_curr_, gross_price_curr_, tax_code_,tax_calc_structure_id_, tax_class_id_, company_, contract_, delivery_type_, catalog_no_,
+                          tax_liability_, tax_liability_type_, currency_rate_, debit_invoice_id_,debit_invoice_item_id_,net_amt_curr_, gross_amt_curr_,
+                          qty_to_return_, price_conv_factor_,delivery_country_db_);
+                          
+   END IF;
+   RETURN  price_details_rec_;    
+
+END Validate_Delivery_Type___; 
+
+PROCEDURE Get_Tax_Liability_Type___(
+   tax_liability_type_    OUT VARCHAR2,
+   delivery_country_db_   OUT VARCHAR2,
+   order_no_              IN VARCHAR2,
+   line_no_               IN VARCHAR2,
+   rel_no_                IN VARCHAR2,
+   line_item_no_          IN NUMBER,
+   rma_no_                IN NUMBER,
+   rma_line_no_           IN NUMBER,
+   tax_liability_         IN VARCHAR2)
+IS
+BEGIN
+   IF order_no_ IS NOT NULL THEN
+      delivery_country_db_ := Cust_Order_Line_Address_API.Get_Country_Code(order_no_, line_no_, rel_no_, line_item_no_);
+   ELSE
+      delivery_country_db_ := Return_Material_Line_API.Get_Delivery_Country_Code(rma_no_, rma_line_no_);
+   END IF;
+   tax_liability_type_ := Tax_Liability_API.Get_Tax_Liability_Type_Db(tax_liability_, delivery_country_db_);   
+END Get_Tax_Liability_Type___; 
+
+FUNCTION Validate_Tax_Liability___(
+   order_no_              IN VARCHAR2,
+   line_no_               IN VARCHAR2,
+   rel_no_                IN VARCHAR2,
+   line_item_no_          IN NUMBER,
+   rma_no_                IN NUMBER,
+   rma_line_no_           IN NUMBER,
+   tax_liability_         IN VARCHAR2,
+   net_price_curr_        IN NUMBER,
+   gross_price_curr_      IN NUMBER,  
+   tax_code_              IN VARCHAR2,
+   tax_calc_structure_id_ IN VARCHAR2,
+   tax_class_id_          IN VARCHAR2 ,
+   company_               IN VARCHAR2,
+   contract_              IN VARCHAR2,
+   delivery_type_         IN VARCHAR2,
+   catalog_no_            IN VARCHAR2,
+   debit_invoice_id_      IN NUMBER,
+   debit_invoice_item_id_ IN NUMBER,
+   net_amt_curr_          IN NUMBER,
+   gross_amt_curr_        IN NUMBER,
+   qty_to_return_         IN NUMBER,
+   price_conv_factor_     IN NUMBER)RETURN Price_Details_Rec
+IS
+   tax_liability_type_   VARCHAR2(10);
+   delivery_country_db_  VARCHAR2(40);
+   price_details_rec_    Price_Details_Rec := NULL;   
+   currency_rate_        NUMBER;
+   tax_from_defaults_    VARCHAR2(5) := 'FALSE';
+   saved_tax_liability_  BOOLEAN := FALSE;
+   local_tax_liability_type_db_ VARCHAR2(20);
+   
+BEGIN 
+   Get_Tax_Liability_Type___(tax_liability_type_,delivery_country_db_, order_no_,line_no_,rel_no_,line_item_no_,rma_no_,rma_line_no_,tax_liability_);
+   currency_rate_  := Return_Material_Line_API.Get_Currency_Rate(rma_no_,rma_line_no_);
+   
+   local_tax_liability_type_db_ := Return_Material_Line_API.Get_Tax_Liability_Type_Db(rma_no_,rma_line_no_);
+   IF (rma_line_no_ IS NOT NULL AND Validate_SYS.Is_Different(local_tax_liability_type_db_, tax_liability_type_))  THEN
+      saved_tax_liability_ := TRUE;
+   END IF;
+   
+   IF (rma_line_no_ IS NULL OR saved_tax_liability_) THEN
+      tax_from_defaults_ := 'TRUE';  
+   END IF;   
+   
+   price_details_rec_ :=  Calculate_Line_Prices___( tax_from_defaults_, rma_no_, rma_line_no_, order_no_, line_no_, rel_no_, line_item_no_, 
+                          net_price_curr_, gross_price_curr_, tax_code_,tax_calc_structure_id_, tax_class_id_, company_, contract_, delivery_type_, catalog_no_,
+                          tax_liability_, tax_liability_type_, currency_rate_, debit_invoice_id_,debit_invoice_item_id_,net_amt_curr_, gross_amt_curr_,
+                          qty_to_return_, price_conv_factor_,delivery_country_db_);
+   price_details_rec_.tax_liability_type := tax_liability_type_;                      
+   RETURN  price_details_rec_;    
+
+END Validate_Tax_Liability___; 
+
+FUNCTION  Get_Sales_Part_Defaults___(
+   rma_no_           IN NUMBER,
+   order_no_         IN VARCHAR2,
+   line_no_          IN VARCHAR2,
+   rel_no_           IN VARCHAR2,
+   line_item_no_     IN NUMBER ,
+   company_          IN VARCHAR2,
+   contract_         IN VARCHAR2,
+   catalog_no_       IN VARCHAR2,
+   currency_code_    IN VARCHAR2,
+   date_requested_   IN DATE)  RETURN Sales_Part_Info_Rec
+IS
+   related_to_           VARCHAR2 (20) := 'CUSTOMER';
+   order_catalog_no_     VARCHAR2 (200) := '';
+   identity_             RETURN_MATERIAL.customer_no%TYPE;
+   return_material_rec_  Return_Material_API.Public_Rec;
+   sales_part_info_rec_  Sales_Part_Info_Rec := NULL;
+   attr_                 VARCHAR2 (2000);
+   conv_factor_          NUMBER;
+
+BEGIN
+    
+   IF catalog_no_ IS NOT NULL AND contract_ IS NOT NULL THEN
+      
+      Return_Material_Line_API.Get_Part_Info (attr_, contract_, catalog_no_, rma_no_);
+      sales_part_info_rec_.sales_unit      := Client_SYS.Get_Item_Value('SALES_UNIT', attr_);
+      sales_part_info_rec_.inventory_unit  := Client_SYS.Get_Item_Value('INVENTORY_UNIT', attr_);
+      sales_part_info_rec_.taxable         := Client_SYS.Get_Item_Value('TAXABLE', attr_);
+      sales_part_info_rec_.fee_code        := Client_SYS.Get_Item_Value('FEE_CODE', attr_);
+      sales_part_info_rec_.delivery_type   := Client_SYS.Get_Item_Value('DELIVERY_TYPE', attr_);
+      sales_part_info_rec_.part_no         := Client_SYS.Get_Item_Value('PART_NO', attr_);
+      sales_part_info_rec_.scrap_unit      := sales_part_info_rec_.inventory_unit;  
+      sales_part_info_rec_.receive_unit    := sales_part_info_rec_.sales_unit;
+      
+      -------- Getting Catch Unit information.--------------
+      sales_part_info_rec_.catch_unit_enabled := Part_Catalog_API.Get_Catch_Unit_Enabled_Db(sales_part_info_rec_.part_no);
+      sales_part_info_rec_.catch_unit         := Inventory_Part_API.Get_Enabled_Catch_Unit_Meas(contract_,sales_part_info_rec_.part_no );
+
+      --------- Getting Currency Rate information.---------
+      return_material_rec_ := Return_Material_API.Get(rma_no_);
+      identity_ := NVL(return_material_rec_.customer_no_credit, return_material_rec_.customer_no); 
+      Invoice_Library_API.Get_Currency_Rate_Defaults( sales_part_info_rec_.currency_type, 
+                                                      conv_factor_,
+                                                      sales_part_info_rec_.currency_rate, 
+                                                      company_, 
+                                                      currency_code_,
+                                                      date_requested_, 
+                                                      related_to_,
+                                                      identity_);
+                                                      
+      sales_part_info_rec_.currency_rate := sales_part_info_rec_.currency_rate / conv_factor_;
+      sales_part_info_rec_.gtin_no       := PART_GTIN_API.Get_Default_Gtin_No(catalog_no_);  
+      sales_part_info_rec_.catalog_desc  := Customer_Order_Line_API.Get_Catalog_Desc(order_no_, line_no_,rel_no_, line_item_no_);
+      order_catalog_no_ := Customer_Order_line_API.Get_Catalog_No(order_no_, line_no_,rel_no_, line_item_no_);
+      IF order_no_ IS NOT NULL AND Validate_SYS.Is_Equal(order_catalog_no_ , catalog_no_)THEN 
+         sales_part_info_rec_.catalog_desc  := Customer_Order_Line_API.Get_Catalog_Desc(order_no_, line_no_,rel_no_, line_item_no_);
+      ELSE
+         sales_part_info_rec_.catalog_desc    := Client_SYS.Get_Item_Value('CATALOG_DESC', attr_);
+      END IF;
+      sales_part_info_rec_.price_validated := FALSE;
+   END IF;
+   RETURN sales_part_info_rec_;
+END Get_Sales_Part_Defaults___;
+
+
+FUNCTION  Get_Price_Info___(
+   tax_from_defaults_       IN VARCHAR2,
+   rma_no_                  IN NUMBER,
+   rma_line_no_             IN NUMBER,
+   order_no_                IN VARCHAR2,
+   line_no_                 IN VARCHAR2,
+   rel_no_                  IN VARCHAR2,
+   line_item_no_            IN NUMBER,
+   contract_                IN VARCHAR2,
+   catalog_no_              IN VARCHAR2,
+   price_conv_factor_       IN NUMBER,
+   condition_code_          IN VARCHAR2,
+   fee_code_                IN VARCHAR2, 
+   qty_to_return_           IN NUMBER,
+   debit_invoice_no_        IN VARCHAR2,
+   debit_invoice_item_id_   IN NUMBER,
+   debit_invoice_series_id_ IN VARCHAR2,
+   purchase_order_no_       IN VARCHAR2,
+   company_                 IN VARCHAR2,
+   delivery_type_           IN VARCHAR2,
+   tax_liability_           IN VARCHAR2,
+   tax_liability_type_db_   IN VARCHAR2,
+   tax_calc_structure_id_   IN VARCHAR2,
+   currency_rate_           IN NUMBER,
+   debit_invoice_id_        IN NUMBER) RETURN  Price_Details_Rec
+IS
+   identity_                  RETURN_MATERIAL.customer_no%TYPE;
+   price_info_rec_            Price_Info_Rec := NULL;
+   price_details_rec_         Price_Details_Rec := NULL;   
+   price_conv_factor_local_   NUMBER;
+   condtion_code_local_       VARCHAR2 (200);
+   discount_                  NUMBER;
+   local_vat_code_            VARCHAR2(20);
+   local_tax_code_flag_       BOOLEAN;
+   header_rec_                Return_Material_API.Public_Rec;
+   line_rec_                  Return_Material_Line_API.Public_Rec;
+   
+BEGIN
+   condtion_code_local_     := condition_code_;
+   header_rec_              := Return_Material_API.Get(rma_no_);
+   line_rec_                := Return_Material_Line_API.Get(rma_no_, rma_line_no_);
+   local_vat_code_          := fee_code_;
+   identity_                := NVL(header_rec_.customer_no_credit, header_rec_.customer_no);
+   price_conv_factor_local_ := price_conv_factor_;
+
+   Return_Material_Line_API.Get_Price_Info(price_info_rec_.sales_unit_price,
+                                           price_info_rec_.sale_unit_price_incl_tax,
+                                           price_info_rec_.base_sale_unit_price,
+                                           price_info_rec_.base_sale_unit_price_incl_tax,
+                                           price_info_rec_.line_total,
+                                           price_info_rec_.gross_total_base,
+                                           price_info_rec_.line_total_curr,
+                                           price_info_rec_.gross_total_curr,
+                                           discount_,
+                                           price_info_rec_.vat_code,
+                                           price_info_rec_.tax_class_id,
+                                           price_conv_factor_local_,
+                                           condtion_code_local_,
+                                           qty_to_return_,
+                                           identity_,
+                                           contract_,
+                                           header_rec_.currency_code,
+                                           catalog_no_,
+                                           order_no_,
+                                           line_no_,
+                                           rel_no_,
+                                           line_item_no_,
+                                           debit_invoice_no_,
+                                           debit_invoice_item_id_,
+                                           debit_invoice_series_id_,
+                                           header_rec_.use_price_incl_tax);
+   price_info_rec_.order_catalog_no             := Customer_Order_line_API.Get_Catalog_No( order_no_,line_no_,rel_no_,line_item_no_);
+   price_details_rec_.co_pack_chg_line_seq_no   := Customer_Order_Charge_API.Get_Pack_Size_Chg_Line_Seq_No(order_no_,line_no_,rel_no_,line_item_no_);
+    
+   IF line_rec_.order_no != order_no_ OR line_rec_.line_no != line_no_  OR line_rec_.rel_no != rel_no_ OR 
+   line_rec_.line_item_no != line_item_no_ OR line_rec_.debit_invoice_no != debit_invoice_no_ OR line_rec_.purchase_order_no != purchase_order_no_  THEN
+      local_vat_code_ :=  price_info_rec_.vat_code;
+      IF price_info_rec_.vat_code IS NOT NULL  THEN
+         local_tax_code_flag_ := TRUE;
+      END IF;
+   END IF;
+   IF ((catalog_no_ != price_info_rec_.order_catalog_no) AND (price_info_rec_.order_catalog_no IS NOT NULL)) OR
+      ((price_info_rec_.order_catalog_no IS NULL ) AND ((order_no_ IS NOT NULL) OR (line_no_ IS NOT NULL) OR (rel_no_ IS NOT NULL))) THEN
+      price_details_rec_.info_message := 'The part number for this Customer Order Line is not the same as on the RMA line';
+      RETURN  price_details_rec_;
+   END IF;  
+   price_details_rec_ :=  Calculate_Line_Prices___(tax_from_defaults_, 
+                                                   rma_no_, 
+                                                   rma_line_no_,
+                                                   order_no_, 
+                                                   line_no_, 
+                                                   rel_no_, 
+                                                   line_item_no_,
+                                                   price_info_rec_.sales_unit_price, 
+                                                   price_info_rec_.sale_unit_price_incl_tax, 
+                                                   local_vat_code_,
+                                                   tax_calc_structure_id_, 
+                                                   price_info_rec_.tax_class_id, 
+                                                   company_, 
+                                                   contract_,
+                                                   delivery_type_,
+                                                   catalog_no_,
+                                                   tax_liability_,
+                                                   tax_liability_type_db_,
+                                                   currency_rate_, 
+                                                   debit_invoice_id_,
+                                                   debit_invoice_item_id_, 
+                                                   price_info_rec_.line_total_curr,
+                                                   price_info_rec_.gross_total_curr,
+                                                   qty_to_return_,
+                                                   price_conv_factor_local_,
+                                                   '');                                                   
+                                              
+   price_details_rec_.price_conv_factor  := price_conv_factor_local_;  
+   price_details_rec_.condition_code     := condtion_code_local_;
+   price_details_rec_.order_validated    := 'TRUE';
+   RETURN  price_details_rec_;                                                                 
+END Get_Price_Info___;
+
+FUNCTION Calculate_Line_Prices___(
+   tax_from_defaults_     IN VARCHAR2,
+   rma_no_                IN NUMBER,
+   rma_line_no_           IN NUMBER,
+   order_no_              IN VARCHAR2,
+   line_no_               IN VARCHAR2,
+   rel_no_                IN VARCHAR2,
+   line_item_no_          IN NUMBER,
+   net_price_curr_        IN NUMBER,
+   gross_price_curr_      IN NUMBER,  
+   tax_code_              IN VARCHAR2,
+   tax_calc_structure_id_ IN VARCHAR2,
+   tax_class_id_          IN VARCHAR2 ,
+   company_               IN VARCHAR2,
+   contract_              IN VARCHAR2,
+   delivery_type_         IN VARCHAR2,
+   catalog_no_            IN VARCHAR2,
+   tax_liability_         IN VARCHAR2,
+   tax_liability_type_db_ IN VARCHAR2,
+   currency_rate_         IN NUMBER,
+   debit_invoice_id_      IN NUMBER,
+   debit_invoice_item_id_ IN NUMBER,
+   net_amt_curr_          IN NUMBER,
+   gross_amt_curr_        IN NUMBER,
+   qty_to_return_         IN NUMBER,
+   price_conv_factor_     IN NUMBER,
+   delivery_country_db_   IN VARCHAR2)RETURN Price_Details_Rec
+IS
+   tax_calc_method_           VARCHAR2(200);
+   order_ref1_                VARCHAR2(40);
+   order_ref2_                VARCHAR2(40);
+   order_ref3_                VARCHAR2(40);
+   order_ref4_                VARCHAR2(40);
+   tax_from_diff_source_      VARCHAR2(5):='FALSE';
+   tax_line_source_ref_type_  VARCHAR2(20):='RETURN_MATERIAL_LINE';
+   -- TODO: Fetch the ifs curr rounding from profile
+   curr_rounding_             NUMBER := 16;
+   attr_                      VARCHAR2(200);
+   multiple_tax_lines_        VARCHAR2(5):= 'FALSE';
+   tax_liability_db_          VARCHAR2(20);
+   price_details_rec_         Price_Details_Rec := NULL;   
+   ret_line_totals_rec_       Line_Totals_Rec := NULL;
+   local_tax_from_defaults_   VARCHAR2(5) := tax_from_defaults_;
+   header_rec_                Return_Material_API.Public_Rec;
+   line_rec_                  Return_Material_Line_API.Public_Rec;
+   tax_code_flag_             BOOLEAN := FALSE;
+   tax_edited_                BOOLEAN := FALSE;
+
+BEGIN     
+   line_rec_ := Return_Material_Line_API.Get(rma_no_, rma_line_no_);
+   tax_liability_db_ := tax_liability_type_db_;
+   IF ((rma_line_no_ = '' OR rma_line_no_ IS NULL) OR (Validate_SYS.Is_Different(line_rec_.fee_code, tax_code_)) OR (Validate_SYS.Is_Different(line_rec_.tax_liability, tax_liability_))) THEN
+      tax_code_flag_ := TRUE; 
+   END IF;
+   IF (Validate_SYS.Is_Different(line_rec_.fee_code, tax_code_)) OR (Validate_SYS.Is_Different(tax_calc_structure_id_, line_rec_.tax_calc_structure_id)) THEN
+      tax_edited_ := TRUE;
+   END IF;     
+
+   tax_calc_method_   := Company_Tax_Control_API.Get_External_Tax_Cal_Method_Db(company_);
+   header_rec_        := Return_Material_API.Get(rma_no_);
+   price_details_rec_.gross_price_curr      := gross_price_curr_;
+   price_details_rec_.net_price_curr        := net_price_curr_;
+   price_details_rec_.tax_code              := tax_code_;
+   price_details_rec_.tax_calc_structure_id := tax_calc_structure_id_;
+   price_details_rec_.tax_class_id          := tax_class_id_;   
+    
+   IF tax_code_flag_ AND tax_calc_method_ = 'NOT_USED' THEN    
+      order_ref1_ := NULL;
+      order_ref2_ := NULL;
+      order_ref3_ := NULL;
+      order_ref4_ := NULL;
+   ELSIF debit_invoice_id_ IS NOT NULL THEN
+      order_ref1_ := debit_invoice_id_;
+      order_ref2_ := debit_invoice_item_id_;
+      order_ref3_ := '*';
+      order_ref4_ := '*';
+      tax_line_source_ref_type_ := 'INVOICE';
+      tax_from_diff_source_  := 'TRUE'; 
+   ELSIF order_no_ IS NOT NULL THEN  
+      order_ref1_ := order_no_;
+      order_ref2_ := line_no_;
+      order_ref3_ := rel_no_;
+      order_ref4_ := line_item_no_;
+      tax_line_source_ref_type_ := 'CUSTOMER_ORDER_LINE';
+      tax_from_diff_source_  := 'TRUE'; 
+   ELSE   
+      order_ref1_ := rma_no_;
+      IF rma_line_no_ IS NULL OR rma_line_no_ = '' THEN
+         order_ref2_ := '*';
+      ELSE
+         order_ref2_ := rma_line_no_;
+      END IF;
+      order_ref3_ :='*';
+      order_ref4_ := '*';
+      tax_line_source_ref_type_ := 'RETURN_MATERIAL_LINE';
+      tax_from_diff_source_  := 'FALSE';            
+   END IF;  
+   
+   IF tax_calc_method_ != 'NOT_USED' THEN
+      local_tax_from_defaults_ := 'FALSE';
+   ELSE       
+      IF tax_from_defaults_ = 'FALSE' THEN
+         IF (rma_line_no_ = '' OR rma_line_no_ IS NULL) AND (NOT tax_edited_) THEN 
+            local_tax_from_defaults_ := 'TRUE';
+         END IF;
+      END IF;
+   END IF;   
+   IF (rma_line_no_ IS NULL OR (Validate_SYS.Is_Different(line_rec_.tax_liability, tax_liability_))) THEN
+      tax_liability_db_ := Tax_Liability_API.Get_Tax_Liability_Type_Db(tax_liability_, Cust_Ord_Customer_Address_API.Get_Country_Code(header_rec_.customer_no, header_rec_.ship_addr_no));                    
+   END IF;
+   Tax_Handling_Order_Util_API.Get_Prices(price_details_rec_.net_price_base,
+                                          price_details_rec_.gross_price_base,
+                                          price_details_rec_.net_price_curr,
+                                          price_details_rec_.gross_price_curr,
+                                          multiple_tax_lines_,
+                                          price_details_rec_.tax_code,
+                                          price_details_rec_.tax_calc_structure_id,
+                                          price_details_rec_.tax_class_id,
+                                          order_ref1_,
+                                          order_ref2_,
+                                          order_ref3_,
+                                          order_ref4_,
+                                          '*',
+                                          tax_line_source_ref_type_,
+                                          contract_,
+                                          header_rec_.customer_no,
+                                          header_rec_.ship_addr_no,
+                                          header_rec_.date_requested,
+                                          header_rec_.supply_country,
+                                          delivery_type_,
+                                          catalog_no_,
+                                          header_rec_.use_price_incl_tax,
+                                          header_rec_.currency_code,
+                                          currency_rate_,
+                                          local_tax_from_defaults_,
+                                          tax_liability_,
+                                          tax_liability_db_,
+                                          delivery_country_db_,
+                                          curr_rounding_,
+                                          tax_from_diff_source_,
+                                          attr_);                                       
+   ret_line_totals_rec_ := Calculate_Line_Total___(tax_from_defaults_, net_amt_curr_, gross_amt_curr_, rma_no_,rma_line_no_, order_no_, line_no_, rel_no_, line_item_no_,
+                         price_details_rec_.tax_calc_structure_id, price_details_rec_.tax_code, company_, contract_, delivery_type_,catalog_no_, tax_liability_, tax_liability_type_db_,
+                         currency_rate_, qty_to_return_,price_conv_factor_,price_details_rec_.net_price_curr, price_details_rec_.gross_price_curr, debit_invoice_id_, debit_invoice_item_id_,delivery_country_db_);
+   price_details_rec_.fetch_tax_from_defaults :=  tax_from_defaults_;
+   
+   IF price_details_rec_.fetch_tax_from_defaults = 'FALSE' AND tax_calc_method_ = 'NOT_USED' THEN
+      price_details_rec_.fetch_tax_from_defaults := 'FALSE';
+   END IF;
+   price_details_rec_.line_tax_dom_amount := ret_line_totals_rec_.line_tax_dom_amount;
+   price_details_rec_.line_net_dom_amount := ret_line_totals_rec_.line_net_dom_amount;
+   price_details_rec_.line_gross_dom_amount := ret_line_totals_rec_.line_gross_dom_amount;
+   price_details_rec_.line_tax_curr_amount := ret_line_totals_rec_.line_tax_curr_amount;
+   price_details_rec_.line_net_curr_amount := ret_line_totals_rec_.line_net_curr_amount;
+   price_details_rec_.line_gross_curr_amount := ret_line_totals_rec_.line_gross_curr_amount;
+   price_details_rec_.tax_calc_structure_id := ret_line_totals_rec_.tax_calc_structure_id;
+   RETURN  price_details_rec_ ;
+   
+END Calculate_Line_Prices___;
+
+
+FUNCTION Calculate_Line_Total___(
+   tax_from_defaults_        IN VARCHAR2,
+   net_curr_amount_          IN NUMBER,
+   gross_curr_amount_        IN NUMBER,
+   rma_no_                   IN NUMBER,
+   rma_line_no_              IN NUMBER,
+   order_no_                 IN VARCHAR2,
+   line_no_                  IN VARCHAR2,
+   rel_no_                   IN VARCHAR2,
+   line_item_no_             IN NUMBER,
+   tax_calc_structure_id_    IN VARCHAR2,
+   tax_code_                 IN VARCHAR2,
+   company_                  IN VARCHAR2,
+   contract_                 IN VARCHAR2,
+   delivery_type_            IN VARCHAR2,
+   catalog_no_               IN VARCHAR2,
+   tax_liability_            IN VARCHAR2,
+   tax_liability_type_db_    IN VARCHAR2,
+   currency_rate_            IN NUMBER,
+   qty_to_return_            IN NUMBER,
+   price_conv_factor_        IN NUMBER,
+   sale_unit_price_          IN NUMBER,
+   sale_unit_price_incl_tax_ IN NUMBER,
+   debit_invoice_id_         IN NUMBER,
+   debit_invoice_item_id_    IN NUMBER,
+   delivery_country_db_      IN VARCHAR2) RETURN Line_Totals_Rec
+IS
+   order_ref1_                VARCHAR2(40);
+   order_ref2_                VARCHAR2(40);
+   order_ref3_                VARCHAR2(40);
+   order_ref4_                VARCHAR2(40);
+   line_source_ref_type_      VARCHAR2(20):= 'RETURN_MATERIAL_LINE';
+   tax_from_diff_source_      VARCHAR2(5) := 'FALSE';
+   tax_line_source_ref_type_  VARCHAR2(20):= 'RETURN_MATERIAL_LINE';
+   curr_rounding_             NUMBER;
+   attr_                      VARCHAR2(200);
+   line_totals_rec_           Line_Totals_Rec := NULL;
+   tax_calc_method_           VARCHAR2(200);
+   local_tax_from_defaults_   VARCHAR2(5) := tax_from_defaults_;
+   header_rec_                Return_Material_API.Public_Rec;
+   line_rec_                  Return_Material_Line_API.Public_Rec;
+   tax_code_flag_             BOOLEAN := FALSE;
+   tax_edited_                BOOLEAN := FALSE;
+   
+BEGIN   
+
+   line_rec_ := Return_Material_Line_API.Get(rma_no_, rma_line_no_);
+   IF ((rma_line_no_ = '' OR rma_line_no_ IS NULL) OR (Validate_SYS.Is_Different(line_rec_.fee_code, tax_code_)) OR (Validate_SYS.Is_Different(line_rec_.tax_liability, tax_liability_))) THEN
+      tax_code_flag_ := TRUE;
+   END IF;
+
+   IF (Validate_SYS.Is_Different(line_rec_.fee_code, tax_code_)) OR (Validate_SYS.Is_Different(tax_calc_structure_id_, line_rec_.tax_calc_structure_id)) THEN
+      tax_edited_ := TRUE;
+   END IF;     
+
+   tax_calc_method_       := Company_Tax_Control_API.Get_External_Tax_Cal_Method_Db(company_);
+   header_rec_            := Return_Material_API.Get(rma_no_);
+   curr_rounding_         := Currency_Code_API.Get_Currency_Rounding(company_, header_rec_.currency_code);
+   
+   line_totals_rec_.line_net_curr_amount := net_curr_amount_;
+   line_totals_rec_.line_gross_curr_amount := gross_curr_amount_;
+   line_totals_rec_.tax_calc_structure_id:= tax_calc_structure_id_;
+
+   IF tax_code_flag_ AND tax_calc_method_ = 'NOT_USED' THEN
+      order_ref1_ := NULL;
+      order_ref2_ := NULL;
+      order_ref3_ := NULL;
+      order_ref4_ := NULL;
+   ELSIF debit_invoice_id_ IS NOT NULL THEN
+      order_ref1_                := debit_invoice_id_;
+      order_ref2_                := debit_invoice_item_id_;
+      order_ref3_                := '*';
+      order_ref4_                := '*';
+      tax_line_source_ref_type_  := 'INVOICE';
+      tax_from_diff_source_      := 'TRUE';
+   ELSIF order_no_ IS NOT NULL THEN
+      order_ref1_                := order_no_;
+      order_ref2_                := line_no_;
+      order_ref3_                := rel_no_;
+      order_ref4_                := line_item_no_;
+      tax_line_source_ref_type_  := 'CUSTOMER_ORDER_LINE';
+      tax_from_diff_source_      := 'TRUE'; 
+   ELSE 
+      order_ref1_ := rma_no_;
+      IF rma_line_no_ IS NULL OR rma_line_no_ = '' THEN
+         order_ref2_ := '*';
+      ELSE
+         order_ref2_ := rma_line_no_;
+      END IF;
+      order_ref3_                :='*';
+      order_ref4_                := '*';
+      tax_line_source_ref_type_  := line_source_ref_type_;
+      tax_from_diff_source_      := 'FALSE';            
+   END IF;
+   
+   IF tax_calc_method_ != 'NOT_USED' THEN
+      local_tax_from_defaults_ := 'FALSE';
+   ELSE 
+      IF local_tax_from_defaults_ = 'FALSE' THEN
+         IF (rma_line_no_ = '' OR rma_line_no_ IS NULL)  AND NOT tax_edited_ THEN 
+            local_tax_from_defaults_ := 'TRUE';
+         END IF;
+      END IF;
+   END IF;
+       
+   IF header_rec_.use_price_incl_tax = 'TRUE' THEN
+      line_totals_rec_.line_gross_curr_amount := (nvl(qty_to_return_,0) * price_conv_factor_ * ROUND(sale_unit_price_incl_tax_, curr_rounding_));
+   ELSE   
+      line_totals_rec_.line_net_curr_amount := (nvl(qty_to_return_,0) * price_conv_factor_ * ROUND(sale_unit_price_, curr_rounding_));
+   END IF;
+
+   Tax_Handling_Order_Util_API.Get_Amounts(line_totals_rec_.line_tax_dom_amount,
+                                          line_totals_rec_.line_net_dom_amount,
+                                          line_totals_rec_.line_gross_dom_amount,
+                                          line_totals_rec_.line_tax_curr_amount,
+                                          line_totals_rec_.line_net_curr_amount,
+                                          line_totals_rec_.line_gross_curr_amount,
+                                          line_totals_rec_.tax_calc_structure_id,
+                                          order_ref1_,
+                                          order_ref2_,
+                                          order_ref3_,
+                                          order_ref4_,
+                                          '*',
+                                          tax_line_source_ref_type_,
+                                          NULL,
+                                          contract_,
+                                          header_rec_.customer_no,
+                                          header_rec_.ship_addr_no,
+                                          header_rec_.date_requested,
+                                          header_rec_.supply_country,
+                                          delivery_type_,
+                                          catalog_no_,
+                                          header_rec_.use_price_incl_tax,
+                                          header_rec_.currency_code,
+                                          currency_rate_,
+                                          local_tax_from_defaults_,
+                                          tax_code_,
+                                          tax_liability_,
+                                          tax_liability_type_db_,  
+                                          delivery_country_db_,
+                                          NULL,
+                                          tax_from_diff_source_,
+                                          NULL,
+                                          NULL,
+                                          attr_);                                                                         
+   RETURN line_totals_rec_;   
+END Calculate_Line_Total___;
+
+FUNCTION Get_Sales_Price_In_Currency___(
+   rma_no_               IN  NUMBER,
+   order_no_             IN  VARCHAR2,
+   contract_             IN VARCHAR2,
+   base_sale_unit_price_ IN NUMBER) RETURN Sales_Price_Info_Rec
+IS
+   sales_price_info_rec_  Sales_Price_Info_Rec := NULL;
+   curr_type_             VARCHAR2(10);
+   identity_              RETURN_MATERIAL.customer_no%TYPE;
+   return_material_rec_   Return_Material_API.Public_Rec := Return_Material_API.Get(rma_no_);
+BEGIN
+   curr_type_ := Customer_Order_API.Get_Currency_Rate_Type(order_no_);
+   identity_  := NVL(return_material_rec_.customer_no_credit ,return_material_rec_.customer_no);
+   Customer_Order_Pricing_API.Get_Sales_Price_In_Currency(sales_price_info_rec_.price,
+                                                          sales_price_info_rec_.currency_rate,
+                                                          identity_,
+                                                          contract_,
+                                                          return_material_rec_.currency_code,
+                                                          base_sale_unit_price_,
+                                                          curr_type_);   
+   RETURN sales_price_info_rec_;
+END Get_Sales_Price_In_Currency___;
+
+@Override
+PROCEDURE CRUD_Default___ (
+   key_     IN     Return_Material_Line_Key,
+   attr_    IN OUT VARCHAR2,
+   info_    OUT VARCHAR2 )
+IS
+   rma_no_          NUMBER;
+   contract_        VARCHAR2(5);
+   company_         VARCHAR2(20);
+   tax_liability_   VARCHAR2(20);
+   curr_date_       DATE;
+BEGIN
+   rma_no_ := Client_SYS.Get_Item_Value('RMA_NO', attr_);
+   super(key_, attr_, info_);
+   Client_SYS.Add_To_Attr('RENTAL_DB','FALSE' , attr_);
+   contract_ := Return_Material_API.Get_Contract(rma_no_); 
+   curr_date_ := trunc(Site_API.Get_Site_Date(contract_));
+   Client_SYS.Add_To_Attr('CURR_DATE',curr_date_, attr_);
+   company_ := Site_API.Get_Company(contract_);   
+   Client_SYS.Add_To_Attr('COMPANY',company_ , attr_);
+   Client_SYS.Add_To_Attr('CONTRACT',contract_, attr_);
+   tax_liability_ := Return_Material_API.Get_Tax_Liability(rma_no_);
+   Client_SYS.Add_To_Attr('TAX_LIABILITY',tax_liability_, attr_);
+END CRUD_Default___;
+
+PROCEDURE Check_For_Approve_For_Credit___ (
+   key_ IN Return_Material_Line_Key ) 
+IS
+BEGIN
+   Return_Material_Line_API.Approve_For_Credit__(key_.rma_no,key_.rma_line_no);  
+END Check_For_Approve_For_Credit___;
+
+PROCEDURE Remove_Credit_Approval_In_Lines___ (
+   key_ IN Return_Material_Line_Key ) 
+IS   
+BEGIN
+   Return_Material_Line_API.Remove_Credit_Approval__(key_.rma_no,key_.rma_line_no);
+END Remove_Credit_Approval_In_Lines___;
+
+
+FUNCTION Check_Connected_Promo___ (
+   selection_ IN VARCHAR2) RETURN NUMBER
+IS
+   selected_records_       VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_      VARCHAR2(32000); 
+   rma_no_                 NUMBER;
+   rma_line_no_            NUMBER;
+   connected_promo_exists_ NUMBER := 0;
+   return_material_line_rec_ Return_Material_Line_API.Public_Rec;
+BEGIN
+   WHILE (INSTR(selected_records_, ';') > 0) LOOP      
+      current_selection_   := substr(selected_records_, 0, INSTR(selected_records_, ';'));
+      rma_no_              := Client_SYS.Get_Key_Reference_Value(current_selection_,'RMA_NO');   
+      rma_line_no_         := Client_SYS.Get_Key_Reference_Value(current_selection_,'RMA_LINE_NO'); 
+      return_material_line_rec_ := Return_Material_Line_API.Get(rma_no_,rma_line_no_);
+      connected_promo_exists_ := Sales_Promotion_Util_API.Check_Promo_Exist_Ord_Line_Num(return_material_line_rec_.order_no,return_material_line_rec_.line_no,return_material_line_rec_.rel_no,return_material_line_rec_.line_item_no );     
+      IF connected_promo_exists_ = 1 THEN
+         RETURN connected_promo_exists_;
+      END IF;      
+      selected_records_ := substr(selected_records_, INSTR(selected_records_, ';')+1);   
+   END LOOP;
+   RETURN connected_promo_exists_;
+END Check_Connected_Promo___;
+
+PROCEDURE Cancel_Return_Material_Line___ (
+   selection_     IN VARCHAR2,
+   cancel_reason_ IN VARCHAR2,
+   info$_         OUT VARCHAR2) 
+IS
+   selected_records_   VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_  VARCHAR2(32000); 
+   rma_no_             NUMBER;
+   rma_line_no_        NUMBER;
+   info_               VARCHAR2(2000);
+   
+BEGIN
+   WHILE (INSTR(selected_records_, ';') > 0) LOOP 
+      
+      current_selection_   := substr(selected_records_, 0, INSTR(selected_records_, ';'));
+      rma_no_              := Client_SYS.Get_Key_Reference_Value(current_selection_,'RMA_NO');   
+      rma_line_no_         := Client_SYS.Get_Key_Reference_Value(current_selection_,'RMA_LINE_NO'); 
+      
+      Return_Material_Line_Initial_Check___(rma_no_, rma_line_no_);
+      
+      Return_Material_Line_API.Set_Cancel_Reason(rma_no_, rma_line_no_, cancel_reason_);
+      Return_Material_Line_API.Cancel_line(info_,rma_no_,rma_line_no_);  
+      info$_ := info_;
+      selected_records_ := substr(selected_records_, INSTR(selected_records_, ';')+1);   
+   
+   END LOOP;
+END Cancel_Return_Material_Line___;
+
+FUNCTION Find_And_Conn_Exp_License___ (
+   rma_no_       IN NUMBER,
+   rma_line_no_  IN NUMBER) RETURN NUMBER
+IS
+   exp_license_connect_id_ NUMBER;
+BEGIN
+   $IF Component_Expctr_SYS.INSTALLED $THEN
+   Exp_License_Connect_Util_API.Create_Or_Get_Find_And_Conn(exp_license_connect_id_,'RMA',rma_no_, rma_line_no_, '', '');
+   $ELSE
+      NULL;
+   $END
+   RETURN exp_license_connect_id_;
+END Find_And_Conn_Exp_License___;
+
+FUNCTION Check_Create_Credit_Invoice___ (
+   customer_no_  IN VARCHAR2,
+   contract_     IN VARCHAR2) RETURN VARCHAR2
+IS
+   dummy_ VARCHAR2 (20);
+BEGIN   
+   dummy_ := Invoice_Customer_Order_API.Is_Create_Credit_Invoice_Ok (customer_no_, contract_);
+   RETURN dummy_;
+END Check_Create_Credit_Invoice___;
+
+-- Returns true if a debit invoice is connected to at least one of the selected lines
+FUNCTION Is_Debit_Invoice_Connected___ (
+   selection_     IN VARCHAR2) RETURN BOOLEAN
+IS
+   selected_records_   VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_  VARCHAR2(32000); 
+   rma_no_             NUMBER;
+   rma_line_no_        NUMBER;
+   debit_invoice_no_   VARCHAR2 (40):= NULL; 
+   
+BEGIN
+   WHILE (INSTR(selected_records_, ';') > 0) LOOP 
+      current_selection_   := substr(selected_records_, 0, INSTR(selected_records_, ';'));
+      rma_no_              := Client_SYS.Get_Key_Reference_Value(current_selection_,'RMA_NO');   
+      rma_line_no_         := Client_SYS.Get_Key_Reference_Value(current_selection_,'RMA_LINE_NO'); 
+      debit_invoice_no_    := Return_Material_Line_API.Get_Debit_Invoice_No(rma_no_, rma_line_no_);      
+      IF debit_invoice_no_ IS NOT NULL  THEN
+         RETURN TRUE;
+      END IF;
+      selected_records_ := substr(selected_records_, INSTR(selected_records_, ';')+1);   
+   END LOOP;
+         RETURN FALSE;
+END Is_Debit_Invoice_Connected___;
+
+--Returns TRUE if RMA header currency code is not equal to the base currency code
+FUNCTION Is_Not_Base_Currency___ (
+   company_         IN VARCHAR2,
+   currency_code_   IN VARCHAR2) RETURN BOOLEAN 
+IS
+   base_currency_code_ VARCHAR2 (20);
+BEGIN
+   base_currency_code_ := Company_Finance_API.Get_Currency_Code (company_);
+   IF currency_code_ != base_currency_code_ THEN
+      RETURN TRUE ;
+   END IF;
+   RETURN FALSE;
+END Is_Not_Base_Currency___;
+
+FUNCTION Check_Quantity___ (
+   selection_     IN VARCHAR2) RETURN VARCHAR2
+IS
+   selected_records_   VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_  VARCHAR2(32000); 
+   rma_no_             NUMBER;
+   rma_line_no_        NUMBER;
+   return_val_         VARCHAR2 (40):= NULL; 
+   
+BEGIN
+   WHILE (INSTR(selected_records_, ';') > 0) LOOP 
+      current_selection_   := substr(selected_records_, 0, INSTR(selected_records_, ';'));
+      rma_no_              := Client_SYS.Get_Key_Reference_Value(current_selection_,'RMA_NO');   
+      rma_line_no_         := Client_SYS.Get_Key_Reference_Value(current_selection_,'RMA_LINE_NO'); 
+      return_val_          := Return_Material_Line_API.Inquire_Operation__(rma_no_, rma_line_no_,'CREDIT');      
+      IF return_val_ = 'FALSE' THEN
+         RETURN return_val_;
+      END IF;
+      selected_records_ := substr(selected_records_, INSTR(selected_records_, ';')+1);   
+   END LOOP;
+   RETURN return_val_;
+END Check_Quantity___;
+
+PROCEDURE Create_Invoice_From_Return___ (
+   selection_          IN VARCHAR2,
+   use_debit_inv_rate_ IN NUMBER)
+IS
+   selected_records_   VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_  VARCHAR2(32000); 
+   rma_no_             NUMBER;
+   rma_line_no_        NUMBER;   
+   charge_no_          NUMBER := NULL;
+BEGIN
+   WHILE (INSTR(selected_records_, ';') > 0) LOOP 
+      current_selection_   := substr(selected_records_, 0, INSTR(selected_records_, ';'));
+      rma_no_              := Client_SYS.Get_Key_Reference_Value(current_selection_,'RMA_NO');   
+      rma_line_no_         := Client_SYS.Get_Key_Reference_Value(current_selection_,'RMA_LINE_NO'); 
+
+      Return_Material_Line_Initial_Check___(rma_no_, rma_line_no_);
+
+      INVOICE_CUSTOMER_ORDER_API.Create_Invoice_From_Return__(rma_no_, rma_line_no_, charge_no_, use_debit_inv_rate_);      
+      selected_records_    := substr(selected_records_, INSTR(selected_records_, ';')+1);   
+   END LOOP;
+END Create_Invoice_From_Return___;
+
+FUNCTION Get_Base_Price_In_Currency___(
+   order_no_             IN VARCHAR2,
+   rma_no_               IN NUMBER,
+   contract_             IN VARCHAR2,
+   sale_unit_price_      IN NUMBER) RETURN Sales_Price_Info_Rec
+IS
+   sales_price_info_rec_  Sales_Price_Info_Rec := NULL;
+   curr_type_             VARCHAR2(10);
+   identity_              RETURN_MATERIAL.customer_no%TYPE;
+   header_rec_            Return_Material_API.Public_Rec;
+BEGIN
+   header_rec_       := Return_Material_API.Get(rma_no_);
+   curr_type_        := Customer_Order_API.Get_Currency_Rate_Type(order_no_);
+   identity_         := NVL(header_rec_.customer_no_credit, header_rec_.customer_no);
+   Customer_Order_Pricing_API.Get_Base_Price_In_Currency( sales_price_info_rec_.price,
+                                                          sales_price_info_rec_.currency_rate,
+                                                          identity_,
+                                                          contract_,
+                                                          header_rec_.currency_code,
+                                                          sale_unit_price_,
+                                                          curr_type_);   
+   RETURN sales_price_info_rec_;
+END Get_Base_Price_In_Currency___;
+
+FUNCTION Validate_Base_Sale_Unit_Price___ (
+   input_price_           IN NUMBER,
+   tax_from_defaults_     IN VARCHAR2,
+   rma_no_                IN NUMBER,
+   rma_line_no_           IN NUMBER,
+   order_no_              IN VARCHAR2,
+   line_no_               IN VARCHAR2,
+   rel_no_                IN VARCHAR2,
+   line_item_no_          IN NUMBER,
+   gross_price_curr_      IN NUMBER,  
+   tax_code_              IN VARCHAR2,
+   tax_calc_structure_id_ IN VARCHAR2,
+   tax_class_id_          IN VARCHAR2 ,
+   company_               IN VARCHAR2,
+   contract_              IN VARCHAR2,
+   delivery_type_         IN VARCHAR2,
+   catalog_no_            IN VARCHAR2,
+   tax_liability_         IN VARCHAR2,
+   tax_liability_type_db_ IN VARCHAR2,
+   debit_invoice_id_      IN NUMBER,
+   debit_invoice_item_id_ IN NUMBER,
+   net_amt_curr_          IN NUMBER,
+   gross_amt_curr_        IN NUMBER,
+   qty_to_return_         IN NUMBER,
+   price_conv_factor_     IN NUMBER)RETURN Price_Details_Rec
+IS
+   sales_price_info_rec_   Sales_Price_Info_Rec := NULL;
+   price_details_rec_      Price_Details_Rec := NULL;   
+   local_net_price_curr_   NUMBER;
+   local_currency_rate_    NUMBER;
+BEGIN
+   sales_price_info_rec_ := Get_Sales_Price_In_Currency___(rma_no_, order_no_, contract_, input_price_);
+   local_net_price_curr_ := sales_price_info_rec_.price;
+   local_currency_rate_   := sales_price_info_rec_.currency_rate;
+   
+   price_details_rec_ :=  Calculate_Line_Prices___(tax_from_defaults_, rma_no_, rma_line_no_,  order_no_, line_no_, rel_no_, line_item_no_, 
+                          local_net_price_curr_, gross_price_curr_, tax_code_,tax_calc_structure_id_, tax_class_id_, company_, contract_, 
+                          delivery_type_,catalog_no_,tax_liability_, tax_liability_type_db_,local_currency_rate_, debit_invoice_id_,debit_invoice_item_id_, 
+                          net_amt_curr_,gross_amt_curr_,qty_to_return_,price_conv_factor_, '');     
+   RETURN  price_details_rec_;                      
+END Validate_Base_Sale_Unit_Price___;
+
+FUNCTION Validate_Base_Unit_Price_Incl_Tax___ (
+   input_price_           IN NUMBER,
+   tax_from_defaults_     IN VARCHAR2,
+   rma_no_                IN NUMBER,
+   rma_line_no_           IN NUMBER,
+   order_no_              IN VARCHAR2,
+   line_no_               IN VARCHAR2,
+   rel_no_                IN VARCHAR2,
+   line_item_no_          IN NUMBER,
+   net_price_curr_        IN NUMBER,  
+   tax_code_              IN VARCHAR2,
+   tax_calc_structure_id_ IN VARCHAR2,
+   tax_class_id_          IN VARCHAR2 ,
+   company_               IN VARCHAR2,
+   contract_              IN VARCHAR2,
+   delivery_type_         IN VARCHAR2,
+   catalog_no_            IN VARCHAR2,
+   tax_liability_         IN VARCHAR2,
+   tax_liability_type_db_ IN VARCHAR2,
+   debit_invoice_id_      IN NUMBER,
+   debit_invoice_item_id_ IN NUMBER,
+   net_amt_curr_          IN NUMBER,
+   gross_amt_curr_        IN NUMBER,
+   qty_to_return_         IN NUMBER,
+   price_conv_factor_     IN NUMBER)RETURN Price_Details_Rec
+IS
+   sales_price_info_rec_   Sales_Price_Info_Rec := NULL;
+   price_details_rec_      Price_Details_Rec := NULL;   
+   local_gross_price_curr_ NUMBER;
+   local_currency_rate_    NUMBER;
+BEGIN
+   sales_price_info_rec_   := Get_Sales_Price_In_Currency___(rma_no_, order_no_, contract_, input_price_);
+   local_gross_price_curr_ := sales_price_info_rec_.price;
+   local_currency_rate_    := sales_price_info_rec_.currency_rate; 
+   
+   price_details_rec_ :=  Calculate_Line_Prices___(tax_from_defaults_, rma_no_, rma_line_no_, order_no_, line_no_, rel_no_, line_item_no_, 
+                          net_price_curr_, local_gross_price_curr_, tax_code_,tax_calc_structure_id_, tax_class_id_, company_, contract_, 
+                          delivery_type_,catalog_no_,tax_liability_, tax_liability_type_db_,local_currency_rate_, debit_invoice_id_,debit_invoice_item_id_, 
+                          net_amt_curr_,gross_amt_curr_,qty_to_return_,price_conv_factor_, '');        
+   RETURN  price_details_rec_;                        
+END Validate_Base_Unit_Price_Incl_Tax___;
+
+FUNCTION Construct_Date___(
+   rental_end_date_ IN DATE,
+   rental_end_time_ IN DATE )  RETURN DATE
+IS
+   end_date_time_ DATE;
+BEGIN 
+  end_date_time_ := TO_DATE(TO_CHAR(rental_end_date_, 'DD-MM-YYYY') || ' ' ||TO_CHAR(rental_end_time_, 'HH24:MI:SS'), 'DD-MM-YYYY HH24:MI:SS'); 
+  RETURN end_date_time_;
+END Construct_Date___;
+
+FUNCTION Calculate_Catch_Qty___(
+   qty_to_return_       IN NUMBER,
+   price_conv_factor_   IN NUMBER,
+   catch_unit_enabled_  IN VARCHAR2)RETURN NUMBER
+IS
+   catch_qty_ NUMBER;
+BEGIN 
+   IF catch_unit_enabled_ = 'TRUE' THEN
+      catch_qty_ := qty_to_return_ * price_conv_factor_;
+   END IF;
+   RETURN catch_qty_;
+END Calculate_Catch_Qty___;
+
+--FUNCTION Validate_Gtin_No___(
+--   rma_no_                  IN NUMBER,
+--   order_no_                IN VARCHAR2,
+--   line_no_                 IN VARCHAR2,
+--   rel_no_                  IN VARCHAR2,
+--   line_item_no_            IN NUMBER,
+--   contract_                IN VARCHAR2,
+--   company_                 IN VARCHAR2,
+--   currency_code_           IN VARCHAR2,
+--   date_requested_          IN DATE,
+--   gtin_no_                 IN VARCHAR2)RETURN Sales_Part_Info_Rec
+--IS
+--   sales_part_info_rec_  Sales_Part_Info_Rec := NULL;  
+--   catalog_no_local_     VARCHAR2 (40);
+--BEGIN
+--   catalog_no_local_ := NULL;
+--   Sales_Part_API.Validate_Catalog_No_By_Gtin_No(catalog_no_local_, gtin_no_, contract_);
+--   sales_part_info_rec_ := Get_Sales_Part_Defaults___(rma_no_ ,
+--                                                      order_no_, 
+--                                                      line_no_, 
+--                                                      line_item_no_, 
+--                                                      rel_no_, 
+--                                                      company_, 
+--                                                      contract_, 
+--                                                      catalog_no_local_, 
+--                                                      currency_code_, 
+--                                                      date_requested_); 
+--   sales_part_info_rec_.catalog_no := catalog_no_local_;
+--   RETURN sales_part_info_rec_;
+--END Validate_Gtin_No___;
+
+FUNCTION Get_Order_Info___(
+   type_                    IN VARCHAR2,
+   rma_no_                  IN NUMBER,
+   rma_line_no_             IN NUMBER,
+   purchase_order_no_       IN VARCHAR2,
+   debit_invoice_no_        IN VARCHAR2,
+   debit_invoice_item_id_   IN NUMBER,
+   order_no_                IN VARCHAR2,
+   contract_                IN VARCHAR2,
+   catalog_no_              IN VARCHAR2,
+   qty_to_return_           IN NUMBER,
+   debit_invoice_series_id_ IN VARCHAR2,
+   objstate_                IN VARCHAR2)RETURN Order_Info_Rec
+IS
+   order_info_rec_                 Order_Info_Rec := NULL;   
+   id_no_                          VARCHAR2(20);
+   customer_no_                    VARCHAR2(20);
+   currency_code_                  VARCHAR2(20);
+   local_purchase_order_no_        VARCHAR2(20);
+   local_order_no_                 VARCHAR2(12);
+   local_debit_invoice_no_         VARCHAR2(50);
+   local_debit_invoice_item_id_    NUMBER;
+   local_debit_invoice_series_id_  VARCHAR2(20);
+   attr_                           VARCHAR2(2000);
+  allow_qty_to_return_update_      BOOLEAN := FALSE;
+   
+BEGIN
+   local_debit_invoice_no_        := debit_invoice_no_;
+   local_debit_invoice_item_id_   := debit_invoice_item_id_;
+   local_debit_invoice_series_id_ := debit_invoice_series_id_;
+   order_info_rec_.debit_inv_validated := FALSE;
+   
+   IF type_ = 'CO' THEN
+      id_no_ := order_no_;
+   ELSIF type_ = 'CPO' THEN 
+      id_no_ := purchase_order_no_;
+      local_purchase_order_no_ := Return_Material_Line_API.Get_Po_Order_No(rma_no_, rma_line_no_);
+      IF local_purchase_order_no_ != purchase_order_no_ THEN
+         local_debit_invoice_no_        := NULL;
+         local_debit_invoice_item_id_   := NULL;
+         local_debit_invoice_series_id_ := NULL;
+      END IF;
+   ELSIF type_ = 'INVOICE' THEN
+      id_no_ := debit_invoice_no_;
+      order_info_rec_.debit_inv_validated := TRUE;
+   END IF;
+   customer_no_            := Return_Material_API.Get_Customer_No(rma_no_);
+   currency_code_          := Return_Material_API.Get_Currency_Code(rma_no_);
+   Return_Material_Line_API.Get_Co_Line_Info(attr_, 
+                                             id_no_,
+                                             type_, 
+                                             contract_, 
+                                             catalog_no_, 
+                                             customer_no_, 
+                                             currency_code_, 
+                                             local_debit_invoice_series_id_, 
+                                             order_no_ );  
+   local_order_no_   := Client_SYS.Get_Item_Value('ORDER_NO', attr_);
+   IF local_order_no_ IS NULL THEN
+      order_info_rec_.order_no := local_order_no_;
+      order_info_rec_.error_message := 'This Customer Order does not match the information on the RMA. Customer, Sales Part or Site';
+      RETURN order_info_rec_;
+   END IF;
+   order_info_rec_ := Get_Order_Info_From_Attr___(rma_no_, rma_line_no_, attr_, qty_to_return_, objstate_, allow_qty_to_return_update_);
+   RETURN order_info_rec_;
+   
+END Get_Order_Info___;
+
+FUNCTION Get_Order_Info_From_Catalog_No___(
+   rma_no_                  IN NUMBER,
+   rma_line_no_             IN NUMBER,
+   shipment_id_             IN NUMBER,
+   contract_                IN VARCHAR2,
+   company_                 IN VARCHAR2,
+   order_no_                IN VARCHAR2,
+   line_no_                 IN VARCHAR2,
+   rel_no_                  IN VARCHAR2,
+   line_item_no_            IN NUMBER,
+   customer_no_             IN VARCHAR2,
+   currency_code_           IN VARCHAR2,
+   catalog_no_              IN VARCHAR2,
+   objstate_                IN VARCHAR2,
+   qty_to_return_           IN NUMBER,
+   part_no_                 IN VARCHAR2,
+   configuration_id_        IN VARCHAR2,
+   condition_code_          IN VARCHAR2,
+   delivery_type_           IN VARCHAR2,
+   qty_to_return_inv_uom_   IN NUMBER,
+   rental_db_               IN VARCHAR2,
+   tax_liability_           IN VARCHAR2,
+   currency_rate_           IN NUMBER,
+   conv_factor_             IN NUMBER,
+   inverted_conv_factor_    IN NUMBER,
+   price_conv_factor_       IN NUMBER) RETURN Order_Info_Rec
+IS
+   order_info_rec_        Order_Info_Rec := NULL;
+   catalog_no_info_rec_   Order_Info_Rec := NULL;
+   detail_rec_            Order_Info_Rec := NULL;
+
+   CURSOR get_catalog_nos_with_order_no IS
+      SELECT ORDER_NO, LINE_NO, REL_NO, LINE_ITEM_NO, PO_ORDER_NO, PO_LINE_NO, PO_REL_NO, CUSTOMER_PO_NO
+      FROM DELIVERED_CATALOG_NO_LOV
+      WHERE order_no = order_no_ 
+      AND (line_no = line_no_ OR line_no_ IS NULL)
+      AND (rel_no = rel_no_ OR rel_no_ IS NULL)
+      AND (line_item_no = line_item_no_ OR line_item_no_ IS NULL)
+      AND contract = contract_ 
+      AND customer_no = customer_no_ 
+      AND currency_code = currency_code_ 
+      AND catalog_no = catalog_no_;
+
+   CURSOR get_catalog_nos_with_shipment_id IS
+      SELECT SOURCE_REF1, SOURCE_REF2, SOURCE_REF3, SOURCE_REF4
+      FROM SHIPPED_CATALOG_NOS_LOV
+      WHERE shipment_id = shipment_id_ 
+      AND contract = contract_ 
+      AND receiver_id = customer_no_ 
+      AND catalog_no = catalog_no_ 
+      AND (source_ref1 = order_no_ OR order_no_ IS NULL)
+      AND (source_ref2 = line_no_ OR line_no_ IS NULL)
+      AND (source_ref3 = rel_no_ OR rel_no_ IS NULL)
+      AND (source_ref4 = line_item_no_ OR line_item_no_ IS NULL);
+          
+BEGIN 
+   IF ((shipment_id_ != '' OR shipment_id_ IS NOT NULL)) THEN
+      OPEN get_catalog_nos_with_shipment_id;
+      FETCH get_catalog_nos_with_shipment_id INTO detail_rec_.order_no, detail_rec_.line_no, detail_rec_.rel_no, 
+      detail_rec_.line_item_no;
+      CLOSE get_catalog_nos_with_shipment_id;
+   ELSIF order_no_ IS NOT NULL THEN    
+      OPEN get_catalog_nos_with_order_no;
+      FETCH get_catalog_nos_with_order_no INTO detail_rec_.order_no, detail_rec_.line_no, detail_rec_.rel_no, 
+      detail_rec_.line_item_no, detail_rec_.po_order_no, detail_rec_.po_line_no, detail_rec_.po_rel_no, 
+      detail_rec_.customer_po_no;
+      CLOSE get_catalog_nos_with_order_no; 
+   END IF; 
+
+   order_info_rec_ := Get_Order_Info_From_Lov___(rma_no_,  
+                                                 rma_line_no_, 
+                                                 shipment_id_, 
+                                                 company_, 
+                                                 objstate_,
+                                                 detail_rec_,
+                                                 qty_to_return_ , 
+                                                 FALSE);
+   catalog_no_info_rec_.order_no              := detail_rec_.order_no;                                              
+   catalog_no_info_rec_.line_no               := detail_rec_.line_no;
+   catalog_no_info_rec_.rel_no                := detail_rec_.rel_no;
+   catalog_no_info_rec_.line_item_no          := detail_rec_.line_item_no;
+   catalog_no_info_rec_.catalog_no            := catalog_no_;
+   catalog_no_info_rec_.catalog_desc          := order_info_rec_.catalog_desc;
+   catalog_no_info_rec_.qty_to_return         := nvl(order_info_rec_.qty_to_return, qty_to_return_);
+   catalog_no_info_rec_.part_no               := nvl(order_info_rec_.part_no, part_no_);
+   catalog_no_info_rec_.tax_liability         := nvl(order_info_rec_.tax_liability, tax_liability_);
+   catalog_no_info_rec_.configuration_id      := nvl(order_info_rec_.configuration_id,configuration_id_);
+   catalog_no_info_rec_.conv_factor           := nvl(order_info_rec_.conv_factor, conv_factor_);
+   catalog_no_info_rec_.condition_code        := nvl(order_info_rec_.condition_code, condition_code_);
+   catalog_no_info_rec_.inverted_conv_factor  := nvl(order_info_rec_.inverted_conv_factor,inverted_conv_factor_);
+   catalog_no_info_rec_.delivery_type         := nvl(order_info_rec_.delivery_type, delivery_type_);
+   catalog_no_info_rec_.delivery_country_code := order_info_rec_.delivery_country_code;
+   catalog_no_info_rec_.qty_to_return_inv_uom := nvl(order_info_rec_.qty_to_return_inv_uom, qty_to_return_inv_uom_);
+   catalog_no_info_rec_.rental_db             := nvl(order_info_rec_.rental_db, rental_db_);
+   catalog_no_info_rec_.currency_rate         := nvl(order_info_rec_.currency_rate, currency_rate_); 
+   catalog_no_info_rec_.price_conv_factor     := nvl(order_info_rec_.price_conv_factor, price_conv_factor_);   
+   catalog_no_info_rec_.po_order_no           := detail_rec_.po_order_no;
+   catalog_no_info_rec_.po_line_no            := detail_rec_.po_line_no;
+   catalog_no_info_rec_.po_rel_no             := detail_rec_.po_rel_no;
+   catalog_no_info_rec_.customer_po_no        := detail_rec_.customer_po_no;
+   catalog_no_info_rec_.order_validated       := order_info_rec_.order_validated;
+   RETURN catalog_no_info_rec_;
+END Get_Order_Info_From_Catalog_No___;
+
+
+FUNCTION Get_Order_Info_From_Po_No___(
+   shipment_id_              IN NUMBER,
+   rma_no_                   IN NUMBER,
+   rma_line_no_              IN NUMBER,
+   catalog_no_               IN VARCHAR2,
+   company_                  IN VARCHAR2,
+   contract_                 IN VARCHAR2,
+   order_no_                 IN VARCHAR2,
+   currency_code_            IN VARCHAR2,
+   customer_no_              IN VARCHAR2,
+   objstate_                 IN VARCHAR2,
+   qty_to_return_            IN NUMBER,   
+   tax_from_defaults_        IN VARCHAR2,
+   debit_invoice_no_         IN VARCHAR2,
+   debit_invoice_item_id_    IN VARCHAR2,
+   debit_invoice_series_id_  IN VARCHAR2,
+   debit_invoice_id_         IN NUMBER,
+   tax_code_                 IN VARCHAR2,
+   tax_liability_            IN VARCHAR2,
+   tax_liability_type_db_    IN VARCHAR2,
+   tax_calc_structure_id_    IN VARCHAR2,
+   catalog_desc_             IN VARCHAR2,
+   part_no_                  IN VARCHAR2,
+   configuration_id_         IN VARCHAR2,
+   delivery_type_            IN VARCHAR2,
+   qty_to_return_inv_uom_    IN NUMBER,
+   rental_db_                IN VARCHAR2,
+   currency_rate_            IN NUMBER,
+   conv_factor_              IN NUMBER,
+   inverted_conv_factor_     IN NUMBER,
+   price_conv_factor_        IN NUMBER,
+   base_unit_price_incl_tax_ IN NUMBER,
+   base_sale_unit_price_     IN NUMBER,
+   sale_unit_price_          IN NUMBER,
+   unit_price_incl_tax_      IN NUMBER,
+   tax_class_id_             IN VARCHAR2,
+   tax_amount_base_          IN NUMBER,
+   net_amt_base_             IN NUMBER,
+   gross_amt_base_           IN NUMBER,
+   tax_amt_curr_             IN NUMBER,
+   net_amt_curr_             IN NUMBER,
+   gross_amt_curr_           IN NUMBER) RETURN Purchase_Order_Info_Rec
+IS
+   purchase_order_info_rec_   Purchase_Order_Info_Rec := NULL; 
+   order_info_rec_            Order_Info_Rec := NULL;
+   detail_rec_                Order_Info_Rec := NULL;
+   price_details_rec_         Price_Details_Rec := NULL;  
+   
+   CURSOR get_info_from_po_no IS
+   SELECT ORDER_NO, LINE_NO, REL_NO, LINE_ITEM_NO, PO_ORDER_NO, PO_LINE_NO, PO_REL_NO, CUSTOMER_PO_NO, 
+   CATALOG_NO, RENTAL_NO
+   FROM CUSTOMER_ORDER_LINE_RMA_LOV
+   WHERE order_no = order_no_ AND contract = contract_ AND customer_no = customer_no_ 
+   AND currency_code = currency_code_ AND catalog_no = catalog_no_;   
+   
+BEGIN
+   OPEN get_info_from_po_no;
+   FETCH get_info_from_po_no INTO detail_rec_.order_no, detail_rec_.line_no, detail_rec_.rel_no, 
+   detail_rec_.line_item_no, detail_rec_.po_order_no, detail_rec_.po_line_no, detail_rec_.po_rel_no, 
+   detail_rec_.customer_po_no, detail_rec_.catalog_no, detail_rec_.rental_no;
+   CLOSE get_info_from_po_no;                                                                                                                                          
+   
+   order_info_rec_ := Get_Order_Info_From_Lov___(rma_no_,  
+                                                 rma_line_no_, 
+                                                 shipment_id_,
+                                                 company_, 
+                                                 objstate_,
+                                                 detail_rec_, 
+                                                 qty_to_return_, 
+                                                 TRUE);
+   purchase_order_info_rec_.order_no              := detail_rec_.order_no;                                              
+   purchase_order_info_rec_.line_no               := detail_rec_.line_no;
+   purchase_order_info_rec_.rel_no                := detail_rec_.rel_no;
+   purchase_order_info_rec_.line_item_no          := detail_rec_.line_item_no;
+   purchase_order_info_rec_.catalog_no            := detail_rec_.catalog_no;
+   purchase_order_info_rec_.catalog_desc          := nvl(order_info_rec_.catalog_desc, catalog_desc_);
+   purchase_order_info_rec_.qty_to_return         := nvl(order_info_rec_.qty_to_return, qty_to_return_);
+   purchase_order_info_rec_.part_no               := nvl(order_info_rec_.part_no, part_no_);
+   purchase_order_info_rec_.configuration_id      := nvl(order_info_rec_.configuration_id,configuration_id_);
+   purchase_order_info_rec_.conv_factor           := nvl(order_info_rec_.conv_factor, conv_factor_);
+   purchase_order_info_rec_.condition_code        := detail_rec_.condition_code;
+   purchase_order_info_rec_.inverted_conv_factor  := nvl(order_info_rec_.inverted_conv_factor,inverted_conv_factor_);
+   purchase_order_info_rec_.delivery_type         := nvl(order_info_rec_.delivery_type, delivery_type_);
+   purchase_order_info_rec_.qty_to_return_inv_uom := nvl(order_info_rec_.qty_to_return_inv_uom,qty_to_return_inv_uom_);
+   purchase_order_info_rec_.rental_db             := nvl(order_info_rec_.rental_db,rental_db_);
+   purchase_order_info_rec_.delivery_country_code := order_info_rec_.delivery_country_code; 
+   purchase_order_info_rec_.po_order_no           := detail_rec_.po_order_no;
+   purchase_order_info_rec_.po_line_no            := detail_rec_.po_line_no;
+   purchase_order_info_rec_.po_rel_no             := detail_rec_.po_rel_no;
+   purchase_order_info_rec_.rental_no             := detail_rec_.rental_no;
+   purchase_order_info_rec_.currency_rate         := nvl(order_info_rec_.currency_rate,currency_rate_);
+   purchase_order_info_rec_.tax_liability         := nvl(order_info_rec_.tax_liability,tax_liability_);
+   
+   IF purchase_order_info_rec_.order_no IS NULL THEN
+      purchase_order_info_rec_.error_message := 'This Customer Order does not match the information on the RMA. Customer, Sales Part or Site';
+   END IF;
+   -- GetPriceInfo was avoided as it was done later   
+   -- this code segment was not written
+   -- if ((!(this.bCPOValidated)) && (!(this.bCopyAttrib)))
+--   order_info_rec_ := Get_Order_Info___('CPO', rma_no_, rma_line_no_, info_rec_.customer_po_no, null, null, order_no_, contract_,
+--   purchase_order_info_rec_.catalog_no, qty_to_return_, null, objstate_);
+--   purchase_order_info_rec_.error_message := order_info_rec_.error_message;
+   price_details_rec_ :=  Get_Price_Info___(tax_from_defaults_, 
+                                            rma_no_, 
+                                            rma_line_no_, 
+                                            order_no_, 
+                                            purchase_order_info_rec_.line_no, 
+                                            purchase_order_info_rec_.rel_no, 
+                                            purchase_order_info_rec_.line_item_no, 
+                                            contract_, 
+                                            purchase_order_info_rec_.catalog_no, 
+                                            purchase_order_info_rec_.conv_factor, 
+                                            purchase_order_info_rec_.condition_code, 
+                                            tax_code_, 
+                                            qty_to_return_,
+                                            debit_invoice_no_,
+                                            debit_invoice_item_id_,
+                                            debit_invoice_series_id_,
+                                            detail_rec_.customer_po_no, 
+                                            company_, 
+                                            purchase_order_info_rec_.delivery_type, 
+                                            purchase_order_info_rec_.tax_liability, 
+                                            tax_liability_type_db_, 
+                                            tax_calc_structure_id_, 
+                                            purchase_order_info_rec_.currency_rate, 
+                                            debit_invoice_id_);                                          
+                                            
+   purchase_order_info_rec_.price_conv_factor         := nvl(price_details_rec_.price_conv_factor, price_conv_factor_);
+   purchase_order_info_rec_.base_sale_unit_price      := nvl(price_details_rec_.net_price_base,base_sale_unit_price_);
+   purchase_order_info_rec_.base_unit_price_incl_tax  := nvl(price_details_rec_.gross_price_base, base_unit_price_incl_tax_);
+   purchase_order_info_rec_.sale_unit_price           := nvl(price_details_rec_.net_price_curr,sale_unit_price_) ;
+   purchase_order_info_rec_.unit_price_incl_tax       := nvl(price_details_rec_.gross_price_curr, unit_price_incl_tax_);
+   purchase_order_info_rec_.tax_code                  := nvl(price_details_rec_.tax_code, tax_code_);
+   purchase_order_info_rec_.tax_class_id              := nvl(price_details_rec_.tax_class_id, tax_class_id_);
+   purchase_order_info_rec_.tax_amount_base           := nvl(price_details_rec_.line_tax_dom_amount,tax_amount_base_) ; 
+   purchase_order_info_rec_.net_amt_base              := nvl(price_details_rec_.line_net_dom_amount, net_amt_base_);
+   purchase_order_info_rec_.gross_amt_base            := nvl(price_details_rec_.line_gross_dom_amount,gross_amt_base_);
+   purchase_order_info_rec_.net_amt_curr              := nvl(price_details_rec_.line_net_curr_amount, net_amt_curr_);
+   purchase_order_info_rec_.tax_amt_curr              := nvl(price_details_rec_.line_tax_curr_amount, tax_amt_curr_);
+   purchase_order_info_rec_.gross_amt_curr            := nvl(price_details_rec_.line_gross_curr_amount, gross_amt_curr_);
+   purchase_order_info_rec_.tax_calc_structure_id     := nvl(price_details_rec_.tax_calc_structure_id, tax_calc_structure_id_);   
+   purchase_order_info_rec_.order_validated           := price_details_rec_.order_validated;
+   RETURN purchase_order_info_rec_;
+END Get_Order_Info_From_Po_No___;
+
+FUNCTION Get_Info_From_Order_No___(
+   rma_no_                   IN NUMBER,
+   rma_line_no_              IN NUMBER,
+   shipment_id_              IN NUMBER,
+   order_no_                 IN VARCHAR2,
+   line_no_                  IN VARCHAR2,
+   rel_no_                   IN VARCHAR2,
+   line_item_no_             IN NUMBER,
+   contract_                 IN VARCHAR2,
+   company_                  IN VARCHAR2,
+   customer_no_              IN VARCHAR2,
+   currency_code_            IN VARCHAR2,
+   catalog_no_               IN VARCHAR2,
+   catalog_desc_             IN VARCHAR2,
+   part_no_                  IN VARCHAR2,
+   configuration_id_         IN VARCHAR2,
+   delivery_type_            IN VARCHAR2,
+   qty_to_return_inv_uom_    IN NUMBER,
+   rental_db_                IN VARCHAR2,
+   objstate_                 IN VARCHAR2,
+   debit_invoice_no_         IN VARCHAR2,
+   qty_to_return_            IN NUMBER,
+   debit_invoice_item_id_    IN NUMBER,
+   debit_invoice_series_id_  IN VARCHAR2,
+   tax_code_                 IN VARCHAR2,
+   tax_liability_            IN VARCHAR2,
+   tax_liability_type_db_    IN VARCHAR2,
+   tax_calc_structure_id_    IN VARCHAR2,
+   debit_invoice_id_         IN NUMBER,
+   currency_rate_            IN NUMBER,
+   conv_factor_              IN NUMBER,
+   inverted_conv_factor_     IN NUMBER,
+   price_conv_factor_        IN NUMBER,
+   base_unit_price_incl_tax_ IN NUMBER,
+   unit_price_incl_tax_      IN NUMBER,
+   tax_class_id_             IN VARCHAR2,
+   tax_amount_base_          IN NUMBER,
+   net_amt_base_             IN NUMBER,
+   gross_amt_base_           IN NUMBER,
+   tax_amt_curr_             IN NUMBER,
+   net_amt_curr_             IN NUMBER,
+   gross_amt_curr_           IN NUMBER) RETURN Order_No_Info_Rec
+IS
+   order_info_rec_        Order_Info_Rec := NULL;
+   detail_rec_            Order_Info_Rec := NULL;
+   order_no_info_rec_     Order_No_Info_Rec := NULL; 
+   price_details_rec_     Price_Details_Rec := NULL;  
+   header_rec_            Return_Material_API.Public_Rec;
+   
+   CURSOR get_info_from_order_no IS
+   SELECT ORDER_NO, LINE_NO, REL_NO,LINE_ITEM_NO, CUSTOMER_PO_NO, PO_ORDER_NO, PO_LINE_NO, PO_REL_NO,RENTAL_NO
+   FROM CUSTOMER_ORDER_LINE_RMA_LOV
+   WHERE order_no = order_no_ AND line_no = NVL(line_no_, line_no) AND rel_no = NVL(rel_no_, rel_no) AND line_item_no = NVL(line_item_no_, line_item_no)
+   AND contract = contract_ AND customer_no = customer_no_ 
+   AND currency_code = currency_code_ AND catalog_no = catalog_no_ AND (qty_shipped - qty_returned > 0) AND
+   use_price_incl_tax = header_rec_.use_price_incl_tax;   
+    
+BEGIN  
+   header_rec_  := Return_Material_API.Get(rma_no_);
+   OPEN get_info_from_order_no;
+   FETCH get_info_from_order_no INTO detail_rec_.order_no, detail_rec_.line_no, detail_rec_.rel_no, detail_rec_.line_item_no,
+   detail_rec_.customer_po_no, detail_rec_.po_order_no, detail_rec_.po_line_no, detail_rec_.po_rel_no, detail_rec_.rental_no;
+   CLOSE get_info_from_order_no; 
+   order_info_rec_ := Get_Order_Info_From_Lov___(rma_no_, 
+                                                 rma_line_no_, 
+                                                 shipment_id_,
+                                                 company_, 
+                                                 objstate_,
+                                                 detail_rec_,
+                                                 qty_to_return_, 
+                                                 FALSE);
+   order_no_info_rec_.line_no               := detail_rec_.line_no;
+   order_no_info_rec_.rel_no                := detail_rec_.rel_no;
+   order_no_info_rec_.line_item_no          := detail_rec_.line_item_no;
+   order_no_info_rec_.catalog_no            := nvl(order_info_rec_.catalog_no,catalog_no_);
+   order_no_info_rec_.catalog_desc          := nvl(order_info_rec_.catalog_desc,catalog_desc_);
+   order_no_info_rec_.part_no               := nvl(order_info_rec_.part_no, part_no_);
+   order_no_info_rec_.configuration_id      := nvl(order_info_rec_.configuration_id,configuration_id_);
+   order_no_info_rec_.tax_liability         := nvl(order_info_rec_.tax_liability, tax_liability_);
+   order_no_info_rec_.conv_factor           := nvl(order_info_rec_.conv_factor, conv_factor_);
+   order_no_info_rec_.condition_code        := detail_rec_.condition_code;
+   order_no_info_rec_.inverted_conv_factor  := nvl(order_info_rec_.inverted_conv_factor,inverted_conv_factor_);
+   order_no_info_rec_.delivery_type         := nvl(order_info_rec_.delivery_type,delivery_type_);
+   order_no_info_rec_.delivery_country_code := order_info_rec_.delivery_country_code; 
+   order_no_info_rec_.qty_to_return_inv_uom := nvl(order_info_rec_.qty_to_return_inv_uom,qty_to_return_inv_uom_);
+   order_no_info_rec_.rental_db             := nvl(order_info_rec_.rental_db,rental_db_);
+   order_no_info_rec_.currency_rate         := nvl(order_info_rec_.currency_rate, currency_rate_); 
+   order_no_info_rec_.po_order_no           := detail_rec_.po_order_no;
+   order_no_info_rec_.po_line_no            := detail_rec_.po_line_no;
+   order_no_info_rec_.po_rel_no             := detail_rec_.po_rel_no;
+   order_no_info_rec_.price_conv_factor     := nvl(order_info_rec_.price_conv_factor,price_conv_factor_);  
+
+   IF detail_rec_.rental_no IS NOT NULL  THEN
+      order_no_info_rec_.rental_no  := detail_rec_.rental_no;
+   END IF;
+   order_no_info_rec_.qty_to_return         := order_info_rec_.qty_to_return; 
+   order_no_info_rec_.customer_po_no        := detail_rec_.customer_po_no;
+   IF order_no_ IS NOT NULL THEN
+      price_details_rec_ :=  Get_Price_Info___('FALSE', 
+                                            rma_no_, 
+                                            rma_line_no_, 
+                                            order_no_, 
+                                            order_no_info_rec_.line_no, 
+                                            order_no_info_rec_.rel_no, 
+                                            order_no_info_rec_.line_item_no, 
+                                            contract_, 
+                                            order_no_info_rec_.catalog_no, 
+                                            order_no_info_rec_.price_conv_factor, 
+                                            order_no_info_rec_.condition_code, 
+                                            tax_code_, 
+                                            order_no_info_rec_.qty_to_return,
+                                            debit_invoice_no_,
+                                            debit_invoice_item_id_,
+                                            debit_invoice_series_id_,
+                                            order_no_info_rec_.customer_po_no, 
+                                            company_, 
+                                            order_no_info_rec_.delivery_type, 
+                                            order_no_info_rec_.tax_liability, 
+                                            tax_liability_type_db_, 
+                                            tax_calc_structure_id_, 
+                                            order_no_info_rec_.currency_rate, 
+                                            debit_invoice_id_);                                          
+                                            
+      order_no_info_rec_.price_conv_factor         := nvl(price_details_rec_.price_conv_factor , price_conv_factor_);
+      order_no_info_rec_.base_unit_price_incl_tax  := nvl(price_details_rec_.gross_price_base, base_unit_price_incl_tax_);
+      order_no_info_rec_.unit_price_incl_tax       := nvl(price_details_rec_.gross_price_curr,unit_price_incl_tax_);
+      order_no_info_rec_.tax_code                  := nvl(price_details_rec_.tax_code,tax_code_);
+      order_no_info_rec_.tax_class_id              := nvl(price_details_rec_.tax_class_id,tax_class_id_);
+      order_no_info_rec_.tax_amount_base           := nvl(price_details_rec_.line_tax_dom_amount,tax_amount_base_); 
+      order_no_info_rec_.net_amt_base              := nvl(price_details_rec_.line_net_dom_amount,net_amt_base_);
+      order_no_info_rec_.gross_amt_base            := nvl(price_details_rec_.line_gross_dom_amount,gross_amt_base_);
+      order_no_info_rec_.net_amt_curr              := nvl(price_details_rec_.line_net_curr_amount,net_amt_curr_);
+      order_no_info_rec_.tax_amt_curr              := nvl(price_details_rec_.line_tax_curr_amount,tax_amt_curr_);
+      order_no_info_rec_.gross_amt_curr            := nvl(price_details_rec_.line_gross_curr_amount,gross_amt_curr_);
+      order_no_info_rec_.tax_calc_structure_id     := nvl(price_details_rec_.tax_calc_structure_id,tax_calc_structure_id_);  
+      order_no_info_rec_.order_validated           := price_details_rec_.order_validated; 
+   END IF; 
+   RETURN order_no_info_rec_;  
+END Get_Info_From_Order_No___;
+
+FUNCTION Get_Order_And_Invoice_Info___(
+   type_                    IN VARCHAR2,
+   rma_no_                  IN NUMBER,
+   rma_line_no_             IN NUMBER,
+   purchase_order_no_       IN VARCHAR2,
+   debit_invoice_no_        IN VARCHAR2,
+   debit_invoice_item_id_   IN NUMBER,
+   order_no_                IN VARCHAR2,
+   contract_                IN VARCHAR2,
+   company_                 IN VARCHAR2,
+   customer_no_             IN VARCHAR2,
+   currency_code_           IN VARCHAR2,
+   catalog_no_              IN VARCHAR2,
+   qty_to_return_           IN NUMBER,
+   debit_invoice_series_id_ IN VARCHAR2,
+   objstate_                IN VARCHAR2) RETURN Order_Info_Rec
+IS
+   invoice_info_rec_      Invoice_Info_Rec := NULL; 
+   detail_rec_            Order_Info_Rec := NULL;
+   order_info_rec_        Order_Info_Rec := NULL;
+   
+   CURSOR get_order_info IS
+   SELECT ORDER_NO, LINE_NO, REL_NO,LINE_ITEM_NO
+   FROM CUSTOMER_ORDER_LINE_RMA_LOV
+   WHERE order_no = order_no_ AND contract = contract_ AND customer_no = customer_no_ 
+   AND currency_code = currency_code_ AND catalog_no = catalog_no_ ;   
+   
+BEGIN
+   OPEN get_order_info;
+   FETCH get_order_info INTO detail_rec_.order_no, detail_rec_.line_no, detail_rec_.rel_no, detail_rec_.line_item_no;
+   CLOSE get_order_info; 
+   
+   order_info_rec_ := Get_Order_Info___(type_, rma_no_, rma_line_no_, purchase_order_no_, debit_invoice_no_, debit_invoice_item_id_,
+   order_no_, contract_, catalog_no_, qty_to_return_, debit_invoice_series_id_, objstate_);
+
+   IF debit_invoice_no_ IS NOT NULL THEN
+      invoice_info_rec_ := Get_Invoice_Info___(company_, 
+                                            debit_invoice_no_, 
+                                            debit_invoice_series_id_, 
+                                            order_no_, 
+                                            detail_rec_.line_no,
+                                            detail_rec_.rel_no,
+                                            detail_rec_.line_item_no );
+      order_info_rec_.debit_invoice_item_id := invoice_info_rec_.debit_invoice_item_id;
+      order_info_rec_.debit_invoice_id      := invoice_info_rec_.debit_invoice_id;
+   END IF;   
+   RETURN order_info_rec_;
+END Get_Order_And_Invoice_Info___;
+
+
+
+FUNCTION Get_Series_Info___(
+   company_             IN VARCHAR2,
+   debit_invoice_no_    IN VARCHAR2,
+   contract_            IN VARCHAR2,
+   catalog_no_          IN VARCHAR2 ) RETURN Series_Info_Rec
+IS
+   series_info_rec_     Series_Info_Rec := NULL; 
+   series_id_           VARCHAR2(20); 
+   series_validated_    BOOLEAN := FALSE;
+   series_not_exist_    BOOLEAN := FALSE;
+   
+BEGIN
+   series_id_ := Return_Material_Line_API.Get_Series_Info(company_, debit_invoice_no_, contract_, catalog_no_);
+   IF series_id_ IS NULL THEN
+      series_not_exist_ := TRUE;
+      series_validated_ := TRUE;
+   END IF;
+   
+   series_info_rec_.series_id        := series_id_;
+   series_info_rec_.series_not_exist := series_not_exist_;
+   series_info_rec_.series_validated := series_validated_;
+   RETURN series_info_rec_;
+END Get_Series_Info___;
+
+FUNCTION Get_Invoice_Info___(
+   company_                  IN VARCHAR2,
+   debit_invoice_no_         IN VARCHAR2,
+   debit_invoice_series_id_  IN VARCHAR2,
+   order_no_                 IN VARCHAR2,
+   line_no_                  IN VARCHAR2,
+   rel_no_                   IN VARCHAR2,
+   line_item_no_             IN NUMBER ) RETURN Invoice_Info_Rec
+IS
+   invoice_info_rec_      Invoice_Info_Rec := NULL; 
+   invoice_id_            NUMBER; 
+   debit_invoice_item_id_ NUMBER;   
+BEGIN
+   invoice_id_            := Customer_Order_Inv_Head_API.Get_Invoice_Id_By_No(company_, debit_invoice_no_, debit_invoice_series_id_);
+   debit_invoice_item_id_ := Customer_Order_Inv_Item_API.Get_Item_Id(invoice_id_, order_no_, line_no_, rel_no_, line_item_no_);
+   
+   invoice_info_rec_.debit_invoice_item_id := debit_invoice_item_id_;
+   invoice_info_rec_.debit_invoice_id      := invoice_id_;
+   RETURN invoice_info_rec_;
+END Get_Invoice_Info___;
+
+FUNCTION Get_Order_Data___(
+   rma_no_        IN NUMBER,
+   rma_line_no_   IN NUMBER,
+   order_no_      IN VARCHAR2,
+   line_no_       IN VARCHAR2,
+   rel_no_        IN VARCHAR2,
+   line_item_no_  IN NUMBER,
+   qty_to_return_ IN NUMBER,
+   objstate_      IN VARCHAR2,
+   allow_update_  IN VARCHAR2) RETURN Order_Info_Rec
+IS
+   order_info_rec_     Order_Info_Rec;
+   attr_               VARCHAR2(32000);
+   shipment_id_parent_ NUMBER;
+   allow_qty_to_return_update_ BOOLEAN := FALSE;
+BEGIN
+   shipment_id_parent_ := Return_Material_API.Get_Shipment_Id(rma_no_);
+   Return_Material_Line_API.Get_Co_Line_Data(attr_, order_no_, line_no_, rel_no_, line_item_no_, rma_no_, rma_line_no_, shipment_id_parent_);
+   IF allow_update_ = 'TRUE' THEN
+      allow_qty_to_return_update_ := TRUE;
+   END IF;
+   
+   order_info_rec_ := Get_Order_Info_From_Attr___(rma_no_, rma_line_no_, attr_, qty_to_return_, objstate_, allow_qty_to_return_update_);
+   RETURN order_info_rec_;
+END Get_Order_Data___;
+
+FUNCTION Validate_Invoice_Series___(
+   rma_no_                  IN NUMBER,
+   rma_line_no_             IN NUMBER,
+   shipment_id_             IN NUMBER,
+   debit_invoice_no_        IN VARCHAR2,
+   debit_invoice_item_id_   IN NUMBER,
+   debit_invoice_id_        IN NUMBER,
+   order_no_                IN VARCHAR2,
+   line_no_                 IN VARCHAR2,
+   rel_no_                  IN VARCHAR2,
+   line_item_no_            IN NUMBER,
+   contract_                IN VARCHAR2,
+   company_                 IN VARCHAR2,
+   catalog_no_              IN VARCHAR2,
+   debit_invoice_series_id_ IN VARCHAR2,
+   customer_no_             IN VARCHAR2,
+   currency_code_           IN VARCHAR2,
+   objstate_                IN VARCHAR2,
+   qty_to_return_           IN NUMBER,
+   price_conv_factor_       IN NUMBER,
+   part_no_                 IN VARCHAR2,
+   configuration_id_        IN VARCHAR2,
+   tax_liability_           IN VARCHAR2,
+   currency_rate_           IN NUMBER,
+   conv_factor_             IN NUMBER,
+   inverted_conv_factor_    IN NUMBER,
+   condition_code_          IN VARCHAR2,
+   catalog_desc_            IN VARCHAR2,
+   delivery_type_           IN VARCHAR2,
+   qty_to_return_inv_uom_   IN NUMBER,
+   rental_db_               IN VARCHAR2,
+   purchase_order_no_       IN VARCHAR2)  RETURN Invoice_Series_Info_Rec
+IS
+   CURSOR get_info_from_debit_no IS
+   SELECT ORDER_NO, LINE_NO, REL_NO, LINE_ITEM_NO, SERIES_ID, CUSTOMER_PO_NO, ITEM_ID, CATALOG_NO
+   FROM INVOICE_CUSTOMER_RMA_LOV
+   WHERE invoice_no = debit_invoice_no_ AND contract = contract_ AND customer_no = customer_no_ AND currency_code = currency_code_;   
+   
+   invoice_series_info_rec_   Invoice_Series_Info_Rec;
+   series_info_rec_           Series_Info_Rec;
+   invoice_info_rec_          Invoice_Info_Rec;
+   order_info_rec_            Order_Info_Rec;
+   info_rec_                  Order_Info_Rec := NULL;
+   
+   series_validated_flag_       BOOLEAN := FALSE;
+   
+   debit_invoice_series_id_rec_ VARCHAR2(20) := debit_invoice_series_id_;
+   debit_invoice_item_id_rec_   NUMBER       := debit_invoice_item_id_;
+   debit_invoice_id_rec_        NUMBER       := debit_invoice_id_;
+   series_not_exist_rec_        BOOLEAN      := FALSE;
+   
+   order_no_rec_              return_material_line_tab.order_no%TYPE               := order_no_;
+   line_no_rec_               return_material_line_tab.line_no%TYPE                := line_no_;
+   rel_no_rec_                return_material_line_tab.rel_no%TYPE                 := rel_no_;
+   line_item_no_rec_          return_material_line_tab.line_item_no%TYPE           := line_item_no_;
+   catalog_no_rec_            return_material_line_tab.catalog_no%TYPE             := catalog_no_;
+   part_no_rec_               return_material_line_tab.part_no%TYPE                := part_no_;
+   tax_liability_rec_         return_material_line_tab.tax_liability%TYPE          := tax_liability_;
+   currency_rate_rec_         return_material_line_tab.currency_rate%TYPE          := currency_rate_;
+   conv_factor_rec_           return_material_line_tab.conv_factor%TYPE            := conv_factor_;
+   inverted_conv_factor_rec_  return_material_line_tab.inverted_conv_factor%TYPE   := inverted_conv_factor_;
+   condition_code_rec_        return_material_line_tab.condition_code%TYPE         := condition_code_;
+   catalog_desc_rec_          return_material_line_tab.catalog_desc%TYPE           := catalog_desc_;
+   delivery_type_rec_         return_material_line_tab.delivery_type%TYPE          := delivery_type_;
+   qty_to_return_inv_uom_rec_ return_material_line_tab.qty_to_return_inv_uom%TYPE  := qty_to_return_inv_uom_;
+   rental_db_rec_             VARCHAR2(5)                                          := rental_db_;
+   price_conv_factor_rec_     return_material_line_tab.price_conv_factor%TYPE      := price_conv_factor_;
+   customer_po_no_rec_        return_material_line_tab.purchase_order_no%TYPE      := purchase_order_no_;
+   qty_to_return_rec_         return_material_line_tab.qty_to_return%TYPE          := qty_to_return_;
+   configuration_id_rec_      return_material_line_tab.configuration_id%TYPE       := configuration_id_;
+   
+BEGIN
+   info_rec_.debit_invoice_no := debit_invoice_no_;
+
+   -- Get Order Info From Lov
+   OPEN get_info_from_debit_no;
+   FETCH get_info_from_debit_no INTO info_rec_.order_no, info_rec_.line_no, info_rec_.rel_no, 
+   info_rec_.line_item_no, info_rec_.debit_invoice_series_id, info_rec_.customer_po_no, info_rec_.debit_invoice_item_id, info_rec_.catalog_no;
+   CLOSE get_info_from_debit_no; 
+   
+   order_info_rec_ := Get_Order_Info_From_Lov___(rma_no_,  
+                                                 rma_line_no_, 
+                                                 shipment_id_,
+                                                 company_, 
+                                                 objstate_,
+                                                 info_rec_, 
+                                                 qty_to_return_, 
+                                                 TRUE);
+                                                 
+   order_no_rec_                := NVL(order_no_rec_, info_rec_.order_no);
+   line_no_rec_                 := NVL(line_no_rec_, info_rec_.line_no);
+   rel_no_rec_                  := NVL(rel_no_rec_, info_rec_.rel_no);
+   line_item_no_rec_            := NVL(line_item_no_rec_, info_rec_.line_item_no);
+   debit_invoice_series_id_rec_ := NVL(info_rec_.debit_invoice_series_id, debit_invoice_series_id_rec_);
+   debit_invoice_item_id_rec_   := NVL(info_rec_.debit_invoice_item_id, debit_invoice_item_id_rec_);
+   catalog_no_rec_              := NVL(catalog_no_rec_, info_rec_.catalog_no);
+   
+   -- Series Info
+   IF debit_invoice_series_id_rec_ IS NULL AND NOT(series_validated_flag_) THEN
+      series_info_rec_             := Get_Series_Info___(company_, debit_invoice_no_, contract_, catalog_no_rec_);
+      debit_invoice_series_id_rec_ := series_info_rec_.series_id;
+      series_validated_flag_       := series_info_rec_.series_validated;
+      series_not_exist_rec_        := series_info_rec_.series_not_exist;
+      
+      IF series_validated_flag_ THEN
+         invoice_series_info_rec_.series_not_exist := series_not_exist_rec_;
+         RETURN invoice_series_info_rec_;        
+      END IF;
+   END IF;
+
+   -- Invoice Info
+   IF debit_invoice_no_ IS NOT NULL THEN
+      invoice_info_rec_          := Get_Invoice_Info___(company_, debit_invoice_no_, debit_invoice_series_id_rec_, order_no_rec_, line_no_rec_, rel_no_rec_, line_item_no_rec_);
+      debit_invoice_item_id_rec_ := invoice_info_rec_.debit_invoice_item_id;
+      debit_invoice_id_rec_      := invoice_info_rec_.debit_invoice_id;
+   END IF;
+   
+   invoice_series_info_rec_.debit_invoice_item_id   := debit_invoice_item_id_rec_;
+   invoice_series_info_rec_.debit_invoice_id        := debit_invoice_id_rec_;
+   invoice_series_info_rec_.series_not_exist        := series_not_exist_rec_;
+   invoice_series_info_rec_.debit_invoice_series_id := debit_invoice_series_id_rec_;
+   invoice_series_info_rec_.price_conv_factor       := NVL(order_info_rec_.price_conv_factor , price_conv_factor_rec_);
+   invoice_series_info_rec_.order_no                := order_no_rec_;
+   invoice_series_info_rec_.line_no                 := line_no_rec_;
+   invoice_series_info_rec_.rel_no                  := rel_no_rec_;
+   invoice_series_info_rec_.line_item_no            := line_item_no_rec_;
+   invoice_series_info_rec_.catalog_no              := catalog_no_rec_;
+   invoice_series_info_rec_.part_no		             := NVL(order_info_rec_.part_no, part_no_rec_);
+   invoice_series_info_rec_.configuration_id        := NVL(order_info_rec_.configuration_id, configuration_id_rec_);
+   invoice_series_info_rec_.qty_to_return           := NVL(order_info_rec_.qty_to_return, qty_to_return_rec_);
+   invoice_series_info_rec_.tax_liability           := NVL(order_info_rec_.tax_liability, tax_liability_rec_);
+   invoice_series_info_rec_.currency_rate           := NVL(order_info_rec_.currency_rate, currency_rate_rec_);
+   invoice_series_info_rec_.conv_factor             := NVL(order_info_rec_.conv_factor, conv_factor_rec_);
+   invoice_series_info_rec_.inverted_conv_factor    := NVL(order_info_rec_.inverted_conv_factor, inverted_conv_factor_rec_);
+   invoice_series_info_rec_.condition_code          := NVL(order_info_rec_.condition_code, condition_code_rec_);
+   invoice_series_info_rec_.catalog_desc            := NVL(order_info_rec_.catalog_desc, catalog_desc_rec_);
+   invoice_series_info_rec_.delivery_type           := NVL(order_info_rec_.delivery_type, delivery_type_rec_);
+   invoice_series_info_rec_.qty_to_return_inv_uom   := NVL(order_info_rec_.qty_to_return_inv_uom, qty_to_return_inv_uom_rec_);
+   invoice_series_info_rec_.rental_db               := NVL(order_info_rec_.rental_db, rental_db_rec_);
+   invoice_series_info_rec_.customer_po_no          := NVL(info_rec_.customer_po_no, customer_po_no_rec_);
+   invoice_series_info_rec_.debit_inv_validated     := NVL(order_info_rec_.debit_inv_validated, FALSE);
+   
+   RETURN invoice_series_info_rec_;
+END Validate_Invoice_Series___;
+
+FUNCTION Validate_Order_Info___(
+   tax_from_defaults_           IN VARCHAR2,
+   rma_no_                      IN NUMBER,
+   rma_line_no_                 IN NUMBER,
+   order_no_                    IN VARCHAR2,
+   line_no_                     IN VARCHAR2,
+   rel_no_                      IN VARCHAR2,
+   line_item_no_                IN NUMBER,
+   contract_                    IN VARCHAR2,
+   catalog_no_                  IN VARCHAR2,
+   price_conv_factor_           IN NUMBER,
+   condition_code_              IN VARCHAR2,
+   fee_code_                    IN VARCHAR2,
+   qty_to_return_               IN NUMBER,
+   debit_invoice_no_            IN VARCHAR2,
+   debit_invoice_item_id_       IN NUMBER,
+   debit_invoice_series_id_     IN VARCHAR2,
+   purchase_order_no_           IN VARCHAR2,
+   company_                     IN VARCHAR2,
+   delivery_type_               IN VARCHAR2,
+   tax_liability_               IN VARCHAR2,
+   tax_liability_type_db_       IN VARCHAR2,
+   tax_calc_structure_id_       IN VARCHAR2,
+   currency_rate_               IN NUMBER,
+   debit_invoice_id_            IN NUMBER,
+   catch_qty_                   IN NUMBER,
+   catch_unit_enabled_          IN VARCHAR2,
+   calcprice_conv_flag_         IN BOOLEAN,
+   objstate_                    IN VARCHAR2,
+   allow_qty_to_return_update_  IN VARCHAR2,
+   conv_factor_                 IN NUMBER,
+   inverted_conv_factor_        IN NUMBER,
+   catalog_desc_                IN VARCHAR2,
+   qty_to_return_inv_uom_       IN NUMBER,
+   rental_db_                   IN VARCHAR2,
+   configuration_id_            IN VARCHAR2,
+   part_no_                     IN VARCHAR2,
+   base_sale_unit_price_        IN NUMBER,
+   base_unit_price_incl_tax_    IN NUMBER,
+   sale_unit_price_             IN NUMBER,
+   unit_price_incl_tax_         IN NUMBER,
+   tax_class_id_                IN VARCHAR2,
+   multiple_tax_lines_          IN BOOLEAN,
+   tax_amount_base_             IN NUMBER,
+   net_amt_base_                IN NUMBER,
+   gross_amt_base_              IN NUMBER,
+   tax_amt_curr_                IN NUMBER,
+   net_amt_curr_                IN NUMBER,
+   gross_amt_curr_              IN NUMBER,
+   fetch_order_info_flag_       IN BOOLEAN )  RETURN Debit_Order_Info_Rec
+IS
+   debit_order_info_rec_   Debit_Order_Info_Rec;
+   order_info_rec_         Order_Info_Rec := NULL;
+   price_details_rec_      Price_Details_Rec := NULL;
+   calculated_catch_qty_   NUMBER;
+   price_conv_factor_temp_ NUMBER;
+   condition_code_temp_    VARCHAR2(10);
+   order_no_temp_          return_material_line_tab.order_no%TYPE;      
+   line_no_temp_           return_material_line_tab.line_no%TYPE;
+   rel_no_temp_            return_material_line_tab.rel_no%TYPE; 
+   line_item_no_temp_      return_material_line_tab.line_item_no%TYPE;
+   catalog_no_temp_        return_material_line_tab.catalog_no%TYPE;
+   qty_to_return_temp_     return_material_line_tab.qty_to_return%TYPE;
+   purchase_order_no_temp_ return_material_line_tab.purchase_order_no%TYPE;
+   delivery_type_temp_     return_material_line_tab.delivery_type%TYPE;
+   tax_liability_temp_     return_material_line_tab.tax_liability%TYPE;
+   currency_rate_temp_     return_material_line_tab.currency_rate%TYPE;
+BEGIN
+   -- GetOrderData
+   IF fetch_order_info_flag_ THEN
+      order_info_rec_ := Get_Order_Data___(rma_no_, rma_line_no_, order_no_, line_no_, rel_no_, line_item_no_, qty_to_return_, objstate_, allow_qty_to_return_update_);
+   END IF;
+
+   price_conv_factor_temp_ := NVL(order_info_rec_.price_conv_factor, price_conv_factor_);
+   condition_code_temp_    := NVL(order_info_rec_.condition_code, condition_code_);
+   order_no_temp_          := NVL(order_info_rec_.order_no, order_no_);      
+   line_no_temp_           := NVL(order_info_rec_.line_no, line_no_);
+   rel_no_temp_            := NVL(order_info_rec_.rel_no, rel_no_); 
+   line_item_no_temp_      := NVL(order_info_rec_.line_item_no, line_item_no_);
+   catalog_no_temp_        := NVL(order_info_rec_.catalog_no, catalog_no_);
+   qty_to_return_temp_     := NVL(order_info_rec_.qty_to_return, qty_to_return_);
+   purchase_order_no_temp_ := NVL(order_info_rec_.customer_po_no, purchase_order_no_);
+   delivery_type_temp_     := NVL(order_info_rec_.delivery_type, delivery_type_);
+   tax_liability_temp_     := NVL(order_info_rec_.tax_liability, tax_liability_);
+   currency_rate_temp_     := NVL(order_info_rec_.currency_rate, currency_rate_);
+   
+   IF catch_unit_enabled_ = 'TRUE' THEN
+      IF calcprice_conv_flag_ THEN
+         price_conv_factor_temp_ := NULL;
+      ELSE
+         IF qty_to_return_ IS NULL AND qty_to_return_ != 0 THEN
+            price_conv_factor_temp_ := catch_qty_ / qty_to_return_;
+         END IF;
+      END IF;
+   END IF;
+   
+   -- GetPriceInfo
+   price_details_rec_ := Get_Price_Info___(  tax_from_defaults_, 
+                                             rma_no_, 
+                                             rma_line_no_, 
+                                             order_no_temp_, 
+                                             line_no_temp_, 
+                                             rel_no_temp_, 
+                                             line_item_no_temp_, 
+                                             contract_,
+                                             catalog_no_temp_,
+                                             price_conv_factor_temp_,
+                                             condition_code_temp_,
+                                             fee_code_,
+                                             qty_to_return_temp_,
+                                             debit_invoice_no_,
+                                             debit_invoice_item_id_,
+                                             debit_invoice_series_id_,
+                                             purchase_order_no_temp_,
+                                             company_,
+                                             delivery_type_temp_,
+                                             tax_liability_temp_,
+                                             tax_liability_type_db_,
+                                             tax_calc_structure_id_,
+                                             currency_rate_temp_,
+                                             debit_invoice_id_ );
+                                             
+   price_conv_factor_temp_ := NVL(price_details_rec_.price_conv_factor, price_conv_factor_temp_);
+   condition_code_temp_    := NVL(price_details_rec_.condition_code, condition_code_temp_);  
+   
+   -- CalculateCatchQty
+   calculated_catch_qty_ := Calculate_Catch_Qty___(qty_to_return_temp_, price_conv_factor_temp_, catch_unit_enabled_ );
+                                              
+   -- set order_info_rec_                                           
+   debit_order_info_rec_.order_no               := order_no_temp_;
+   debit_order_info_rec_.line_no                := line_no_temp_;
+   debit_order_info_rec_.rel_no                 := rel_no_temp_; 
+   debit_order_info_rec_.line_item_no           := line_item_no_temp_;
+   debit_order_info_rec_.catalog_no             := catalog_no_temp_;
+   debit_order_info_rec_.qty_to_return          := qty_to_return_temp_;
+   debit_order_info_rec_.delivery_type          := delivery_type_temp_;
+   debit_order_info_rec_.tax_liability          := tax_liability_temp_;
+   debit_order_info_rec_.currency_rate          := currency_rate_temp_;
+   debit_order_info_rec_.conv_factor            := NVL(order_info_rec_.conv_factor, conv_factor_);
+   debit_order_info_rec_.inverted_conv_factor   := NVL(order_info_rec_.inverted_conv_factor, inverted_conv_factor_);
+   debit_order_info_rec_.catalog_desc           := NVL(order_info_rec_.catalog_desc, catalog_desc_);
+   debit_order_info_rec_.qty_to_return_inv_uom  := NVL(order_info_rec_.qty_to_return_inv_uom, qty_to_return_inv_uom_);
+   debit_order_info_rec_.rental_db              := NVL(order_info_rec_.rental_db, rental_db_);
+   debit_order_info_rec_.customer_po_no         := purchase_order_no_temp_;
+   debit_order_info_rec_.configuration_id       := NVL(order_info_rec_.configuration_id, configuration_id_);
+   debit_order_info_rec_.part_no                := NVL(order_info_rec_.part_no, part_no_);
+   
+   -- set price_details_rec_  
+   debit_order_info_rec_.net_price_base          := NVL(price_details_rec_.net_price_base, base_sale_unit_price_);
+   debit_order_info_rec_.gross_price_base        := NVL(price_details_rec_.gross_price_base, base_unit_price_incl_tax_);
+   debit_order_info_rec_.net_price_curr          := NVL(price_details_rec_.net_price_curr, sale_unit_price_);
+   debit_order_info_rec_.gross_price_curr        := NVL(price_details_rec_.gross_price_curr, unit_price_incl_tax_);
+   debit_order_info_rec_.multiple_tax            := NVL(price_details_rec_.multiple_tax, multiple_tax_lines_);
+   debit_order_info_rec_.tax_code                := NVL(price_details_rec_.tax_code, fee_code_);
+   debit_order_info_rec_.tax_calc_structure_id   := NVL(price_details_rec_.tax_calc_structure_id, tax_calc_structure_id_);
+   debit_order_info_rec_.tax_class_id            := NVL(price_details_rec_.tax_class_id, tax_class_id_);
+   debit_order_info_rec_.line_net_curr_amount    := NVL(price_details_rec_.line_net_curr_amount, net_amt_curr_);
+   debit_order_info_rec_.line_gross_curr_amount  := NVL(price_details_rec_.line_gross_curr_amount, gross_amt_curr_);
+   debit_order_info_rec_.line_tax_dom_amount     := NVL(price_details_rec_.line_tax_dom_amount, tax_amount_base_);
+   debit_order_info_rec_.line_net_dom_amount     := NVL(price_details_rec_.line_net_dom_amount, net_amt_base_);
+   debit_order_info_rec_.line_gross_dom_amount   := NVL(price_details_rec_.line_gross_dom_amount, gross_amt_base_);
+   debit_order_info_rec_.line_tax_curr_amount    := NVL(price_details_rec_.line_tax_curr_amount, tax_amt_curr_);
+   debit_order_info_rec_.info_message            := price_details_rec_.info_message;
+   debit_order_info_rec_.co_pack_chg_line_seq_no := price_details_rec_.co_pack_chg_line_seq_no;
+   
+   debit_order_info_rec_.price_conv_factor      := price_conv_factor_temp_;
+   debit_order_info_rec_.condition_code         := condition_code_temp_;
+   debit_order_info_rec_.catch_qty              := calculated_catch_qty_;
+   RETURN debit_order_info_rec_;
+END Validate_Order_Info___;
+
+FUNCTION Is_Valid_Number___(
+   line_no_ IN VARCHAR2 )  RETURN NUMBER
+IS
+   number_type_ NUMBER;
+BEGIN
+   number_type_ := TO_NUMBER(line_no_);
+   RETURN 1;
+EXCEPTION
+WHEN VALUE_ERROR THEN
+   RETURN 0;
+END Is_Valid_Number___;
+
+FUNCTION Price_Factor_With_Invoice_Info___(
+   company_                   IN VARCHAR2,
+   order_no_                  IN VARCHAR2,
+   line_no_                   IN VARCHAR2,
+   rel_no_                    IN VARCHAR2,
+   line_item_no_              IN NUMBER,
+   debit_invoice_no_          IN VARCHAR2,
+   debit_invoice_series_id_   IN VARCHAR2)  RETURN Order_Related_Info_Rec
+IS
+   invoice_info_rec_         Invoice_Info_Rec := NULL; 
+   order_related_info_rec_   OrdeR_Related_Info_Rec := NULL; 
+BEGIN
+   --sales_part_info_rec_.catalog_desc  := Customer_Order_Line_API.Get_Catalog_Desc(order_no_, line_no_,rel_no_, line_item_no_);
+   order_related_info_rec_.price_conv_factor     := Get_Price_Conversion_Factor___(order_no_ ,line_no_, rel_no_, line_item_no_);
+   IF debit_invoice_no_ IS NOT NULL THEN
+      invoice_info_rec_   := Get_Invoice_Info___(company_, debit_invoice_no_, debit_invoice_series_id_, order_no_, line_no_, rel_no_, line_item_no_);
+      order_related_info_rec_.debit_invoice_item_id := invoice_info_rec_.debit_invoice_item_id;
+      order_related_info_rec_.debit_invoice_id      := invoice_info_rec_.debit_invoice_id;
+   END IF;
+   RETURN order_related_info_rec_;
+END Price_Factor_With_Invoice_Info___;
+
+FUNCTION Get_Order_Data_Price_Info___(
+   rma_no_                      IN NUMBER,
+   rma_line_no_                 IN NUMBER,
+   order_no_                    IN VARCHAR2,
+   line_no_                     IN VARCHAR2,
+   rel_no_                      IN VARCHAR2,
+   line_item_no_                IN NUMBER,
+   contract_                    IN VARCHAR2,
+   catalog_no_                  IN VARCHAR2,
+   price_conv_factor_           IN NUMBER,
+   condition_code_              IN VARCHAR2,
+   fee_code_                    IN VARCHAR2,
+   qty_to_return_               IN NUMBER,
+   debit_invoice_no_            IN VARCHAR2,
+   debit_invoice_item_id_       IN NUMBER,
+   debit_invoice_series_id_     IN VARCHAR2,
+   purchase_order_no_           IN VARCHAR2,
+   company_                     IN VARCHAR2,
+   delivery_type_               IN VARCHAR2,
+   tax_liability_               IN VARCHAR2,
+   tax_liability_type_db_       IN VARCHAR2,
+   tax_calc_structure_id_       IN VARCHAR2,
+   currency_rate_               IN NUMBER,
+   debit_invoice_id_            IN NUMBER,
+   allow_qty_to_return_update_  IN VARCHAR2,
+   conv_factor_                 IN NUMBER,
+   inverted_conv_factor_        IN NUMBER,
+   catalog_desc_                IN VARCHAR2,
+   qty_to_return_inv_uom_       IN NUMBER,
+   rental_db_                   IN VARCHAR2,
+   configuration_id_            IN VARCHAR2,
+   part_no_                     IN VARCHAR2,
+   base_sale_unit_price_        IN NUMBER,
+   base_unit_price_incl_tax_    IN NUMBER,
+   sale_unit_price_             IN NUMBER,
+   unit_price_incl_tax_         IN NUMBER,
+   tax_class_id_                IN VARCHAR2,
+   multiple_tax_lines_          IN BOOLEAN,
+   tax_amount_base_             IN NUMBER,
+   net_amt_base_                IN NUMBER,
+   gross_amt_base_              IN NUMBER,
+   tax_amt_curr_                IN NUMBER,
+   net_amt_curr_                IN NUMBER,
+   gross_amt_curr_              IN NUMBER,
+   objstate_                    IN VARCHAR2) RETURN Debit_Order_Info_Rec
+IS
+   price_details_rec_      Price_Details_Rec := NULL;
+   order_info_rec_         Order_Info_Rec := NULL;
+   debit_order_info_rec_   Debit_Order_Info_Rec;
+   price_conv_factor_temp_ NUMBER;
+   condition_code_temp_    VARCHAR2(10);
+   catalog_no_temp_        return_material_line_tab.catalog_no%TYPE;
+   qty_to_return_temp_     return_material_line_tab.qty_to_return%TYPE;
+   purchase_order_no_temp_ return_material_line_tab.purchase_order_no%TYPE;
+   delivery_type_temp_     return_material_line_tab.delivery_type%TYPE;
+   tax_liability_temp_     return_material_line_tab.tax_liability%TYPE;
+   currency_rate_temp_     return_material_line_tab.currency_rate%TYPE;
+   order_no_temp_          return_material_line_tab.order_no%TYPE;      
+   line_no_temp_           return_material_line_tab.line_no%TYPE;
+   rel_no_temp_            return_material_line_tab.rel_no%TYPE; 
+   line_item_no_temp_      return_material_line_tab.line_item_no%TYPE;
+BEGIN  
+   order_info_rec_ := Get_Order_Data___(rma_no_, rma_line_no_, order_no_, line_no_, rel_no_, line_item_no_, qty_to_return_, objstate_, allow_qty_to_return_update_);
+   
+   price_conv_factor_temp_ := NVL(order_info_rec_.price_conv_factor, price_conv_factor_);
+   condition_code_temp_    := NVL(order_info_rec_.condition_code, condition_code_);
+   order_no_temp_          := NVL(order_info_rec_.order_no, order_no_);      
+   line_no_temp_           := NVL(order_info_rec_.line_no, line_no_);
+   rel_no_temp_            := NVL(order_info_rec_.rel_no, rel_no_); 
+   line_item_no_temp_      := NVL(order_info_rec_.line_item_no, line_item_no_);
+   catalog_no_temp_        := NVL(order_info_rec_.catalog_no, catalog_no_);
+   qty_to_return_temp_     := NVL(order_info_rec_.qty_to_return, qty_to_return_);
+   purchase_order_no_temp_ := NVL(order_info_rec_.customer_po_no, purchase_order_no_);
+   delivery_type_temp_     := NVL(order_info_rec_.delivery_type, delivery_type_);
+   tax_liability_temp_     := NVL(order_info_rec_.tax_liability, tax_liability_);
+   currency_rate_temp_     := NVL(order_info_rec_.currency_rate, currency_rate_);
+   
+   price_details_rec_ := Get_Price_Info___(  'FALSE', 
+                                             rma_no_, 
+                                             rma_line_no_, 
+                                             order_no_temp_, 
+                                             line_no_temp_, 
+                                             rel_no_temp_, 
+                                             line_item_no_temp_, 
+                                             contract_,
+                                             catalog_no_temp_,
+                                             price_conv_factor_temp_,
+                                             condition_code_temp_,
+                                             fee_code_,
+                                             qty_to_return_temp_,
+                                             debit_invoice_no_,
+                                             debit_invoice_item_id_,
+                                             debit_invoice_series_id_,
+                                             purchase_order_no_temp_,
+                                             company_,
+                                             delivery_type_temp_,
+                                             tax_liability_temp_,
+                                             tax_liability_type_db_,
+                                             tax_calc_structure_id_,
+                                             currency_rate_temp_,
+                                             debit_invoice_id_ );                                            
+                                             
+   debit_order_info_rec_.order_no               := order_no_temp_;
+   debit_order_info_rec_.line_no                := line_no_temp_;
+   debit_order_info_rec_.rel_no                 := rel_no_temp_; 
+   debit_order_info_rec_.line_item_no           := line_item_no_temp_;
+   debit_order_info_rec_.catalog_no             := catalog_no_temp_;
+   debit_order_info_rec_.qty_to_return          := qty_to_return_temp_;
+   debit_order_info_rec_.delivery_type          := delivery_type_temp_;
+   debit_order_info_rec_.tax_liability          := tax_liability_temp_;
+   debit_order_info_rec_.currency_rate          := currency_rate_temp_;
+   debit_order_info_rec_.conv_factor            := NVL(order_info_rec_.conv_factor, conv_factor_);
+   debit_order_info_rec_.inverted_conv_factor   := NVL(order_info_rec_.inverted_conv_factor, inverted_conv_factor_);
+   debit_order_info_rec_.catalog_desc           := NVL(order_info_rec_.catalog_desc, catalog_desc_);
+   debit_order_info_rec_.qty_to_return_inv_uom  := NVL(order_info_rec_.qty_to_return_inv_uom, qty_to_return_inv_uom_);
+   debit_order_info_rec_.rental_db              := NVL(order_info_rec_.rental_db, rental_db_);
+   debit_order_info_rec_.customer_po_no         := purchase_order_no_temp_;
+   debit_order_info_rec_.configuration_id       := NVL(order_info_rec_.configuration_id, configuration_id_);
+   debit_order_info_rec_.part_no                := NVL(order_info_rec_.part_no, part_no_);
+   
+      -- set price_details_rec_  
+   debit_order_info_rec_.net_price_base          := NVL(price_details_rec_.net_price_base, base_sale_unit_price_);
+   debit_order_info_rec_.gross_price_base        := NVL(price_details_rec_.gross_price_base, base_unit_price_incl_tax_);
+   debit_order_info_rec_.net_price_curr          := NVL(price_details_rec_.net_price_curr, sale_unit_price_);
+   debit_order_info_rec_.gross_price_curr        := NVL(price_details_rec_.gross_price_curr, unit_price_incl_tax_);
+   debit_order_info_rec_.multiple_tax            := NVL(price_details_rec_.multiple_tax, multiple_tax_lines_);
+   debit_order_info_rec_.tax_code                := NVL(price_details_rec_.tax_code, fee_code_);
+   debit_order_info_rec_.tax_calc_structure_id   := NVL(price_details_rec_.tax_calc_structure_id, tax_calc_structure_id_);
+   debit_order_info_rec_.tax_class_id            := NVL(price_details_rec_.tax_class_id, tax_class_id_);
+   debit_order_info_rec_.line_net_curr_amount    := NVL(price_details_rec_.line_net_curr_amount, net_amt_curr_);
+   debit_order_info_rec_.line_gross_curr_amount  := NVL(price_details_rec_.line_gross_curr_amount, gross_amt_curr_);
+   debit_order_info_rec_.line_tax_dom_amount     := NVL(price_details_rec_.line_tax_dom_amount, tax_amount_base_);
+   debit_order_info_rec_.line_net_dom_amount     := NVL(price_details_rec_.line_net_dom_amount, net_amt_base_);
+   debit_order_info_rec_.line_gross_dom_amount   := NVL(price_details_rec_.line_gross_dom_amount, gross_amt_base_);
+   debit_order_info_rec_.line_tax_curr_amount    := NVL(price_details_rec_.line_tax_curr_amount, tax_amt_curr_);
+   debit_order_info_rec_.info_message            := price_details_rec_.info_message;
+   debit_order_info_rec_.co_pack_chg_line_seq_no := price_details_rec_.co_pack_chg_line_seq_no;
+   
+   RETURN debit_order_info_rec_;
+END Get_Order_Data_Price_Info___;
+
+-- This function is used just to refresh RMA lines in client using ludependencies when needed
+PROCEDURE Refresh_Lines___
+IS   
+BEGIN
+   NULL;
+END Refresh_Lines___;
+
+FUNCTION Get_Qty_To_Return_Inv___(
+   qty_to_return_        IN NUMBER,
+   conv_factor_          IN NUMBER,
+   inverted_conv_factor_ IN NUMBER )  RETURN NUMBER
+IS
+BEGIN
+   RETURN qty_to_return_ * conv_factor_ / inverted_conv_factor_;
+END Get_Qty_To_Return_Inv___;
+
+@Override
+PROCEDURE CRUD_Default_Copy___ (
+ 	rec_  IN OUT Return_Material_Line_Rec )
+IS
+BEGIN
+   super(rec_);
+   rec_.rma_line_no := NULL;
+   rec_.note_id := NULL;
+   rec_.note_text := NULL;
+   rec_.document_text := FALSE;
+   rec_.credit_approver_id := NULL;
+   rec_.credit_inv_series_i_d := NULL;
+   rec_.credit_corr_invoice_no := NULL;
+   rec_.credit_invoice_item_id := NULL;
+   rec_.multiple_tax_lines := FALSE;
+   $IF Component_Expctr_SYS.INSTALLED $THEN
+      rec_.export_license_status_for_find_and_connect := NULL;
+   $END   
+END CRUD_Default_Copy___;

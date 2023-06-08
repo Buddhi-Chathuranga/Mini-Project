@@ -1,0 +1,553 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: TransportTaskManager
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  201027  LEPESE  SC2020R1-2109 added calls to Get_Site_Converted_Qty in Transport_Task_Supply_Pub and Transport_Task_Manager_Local_1.
+--  201027          Corrected the buildup of row_id in view Transport_Task_Suppl_Demand_Oe to avoid duplicate records. 
+--  181114  BudKlk  Bug 144811, Replaced the condition order_type IS NULL OR 'PUR ORDER' to reserved_by_source = 'FALSE' in the view Transport_Task_Manager_Local_1
+--  181114          in order to make sure that only the transport tasks not reserved by sources will be display in IPAP window.
+--  180112  BudKlk  Bug 139555, Modified the view Transport_Task_Manager_Local_1 to improve the performance.
+--  151102  MaEelk  LIM-4367, Replaced the usage of transport_task_line_nopall_pub with transport_task_line_pub
+--  151016  JeLise  LIM-3893, Removed all pallet related location types in the where-statements.
+--  150428  LEPESE  LIM-1023, Corrected erroneous adding of handling_unit_id in views. 
+--  150422  MaEelk  LIM-1282, Added handling_unit_id to necessary views.
+--  140403  LEPESE  PBSC-8115, only include lines that have order type NULL or 'PUR ORDER' in Transport_Task_Manager_Local_1.
+--  140328  LEPESE  Removed the pallet-specific contribution view Transport_Task_Manager_Local_2 and instead made view
+--  140328          Transport_Task_Manager_Local_1 generic, so that it displays both pallet and no-pallet lines.
+--  140328          Added calls to method Inventory_Part_In_Stock_API.Get_Move_Dest_Supply_Ctrl_Db to determine whether
+--  140328          the transport task line quantity should be seen as plannable supply on the destination site.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+-------------------- COMMON COLUMN DEFINITIONS ------------------------------
+
+-------------------- PUBLIC VIEW DEFINITIONS --------------------------------
+@ServerOnlyAccess
+VIEW Transport_Task_Supply_Pub IS
+   Prompt = 'Transport Task Supply'
+SELECT ttl.transport_task_id                                          transport_task_id,
+       ttl.part_no                                                    part_no,
+       ttl.from_contract                                              from_contract,
+       ttl.from_location_no                                           from_location_no,
+       ttl.to_contract                                                to_contract,
+       ttl.to_location_no                                             to_location_no,
+       Inventory_Part_API.Get_Site_Converted_Qty(ttl.from_contract,
+                                                 ttl.part_no,
+                                                 SUM(ttl.quantity),
+                                                 ttl.to_contract,
+                                                 'REMOVE')            qty_supply,
+       NVL(wt.expected_date_finished, wt.requested_date_finished)     delivery_date,
+       ttl.lot_batch_no                                               lot_batch_no,
+       ttl.serial_no                                                  serial_no,
+       ttl.waiv_dev_rej_no                                            waiv_dev_rej_no,
+       ttl.eng_chg_level                                              eng_chg_level
+FROM  transport_task_line_pub ttl, warehouse_task_pub wt
+WHERE ttl.transport_task_id = wt.source_ref1 (+) -- Outer join!
+AND   NVL(wt.task_type_db, 'TRANSPORT TASK') = 'TRANSPORT TASK'
+AND   ttl.transport_task_status_db IN ('CREATED', 'PICKED')
+GROUP BY ttl.transport_task_id, ttl.part_no, ttl.from_contract, ttl.from_location_no, ttl.to_contract,
+         ttl.to_location_no, NVL(wt.expected_date_finished, wt.requested_date_finished),
+         ttl.lot_batch_no, ttl.serial_no, ttl.waiv_dev_rej_no, ttl.eng_chg_level;
+
+
+-------------------- PRIVATE VIEW DEFINITIONS -------------------------------
+
+VIEW Transport_Task_Manager_Local_1 IS
+   Prompt = 'Transport Task Supply'
+SELECT
+       ttl.transport_task_id                                       transport_task_id,
+       ttl.line_no                                                 line_no,
+       ttl.part_no                                                 part_no,
+       ttl.to_contract                                             to_contract,
+       ttl.to_location_no                                          to_location_no,
+       ttl.from_contract                                           from_contract,
+       ttl.from_location_no                                        from_location_no,
+       ttl.configuration_id                                        configuration_id,
+       ttl.lot_batch_no                                            lot_batch_no,
+       ttl.serial_no                                               serial_no,
+       NVL(source_ipis.expiration_date, Database_SYS.Get_Last_Calendar_Date())  source_expiration_date,
+       ttl.waiv_dev_rej_no                                         waiv_dev_rej_no,
+       ttl.eng_chg_level                                           eng_chg_level,
+       ttl.activity_seq                                            activity_seq,
+       ttl.handling_unit_id                                        handling_unit_id,
+       ttl.project_id                                              project_id,
+       ttl.quantity                                                qty_demand,
+       Inventory_Part_API.Get_Site_Converted_Qty(ttl.from_contract,
+                                                 ttl.part_no,
+                                                 ttl.quantity,
+                                                 ttl.to_contract,
+                                                 'REMOVE')         qty_supply,
+       Transport_task_status_API.Decode(ttl.transport_task_status) transport_task_status,
+       source_ipis.condition_code                                  condition_code,
+       TRUNC(SYSDATE + source_site.offset/24)                      source_date_required,
+       TRUNC(SYSDATE + dest_site.offset/24)                        dest_date_required ,
+       source_ipis.part_supply_control_db                          source_part_supply_control,
+       source_ipis.part_ownership_db                               source_part_ownership,
+       source_ip.min_durab_days_planning                           source_min_durab_days,
+       dest_ip.min_durab_days_planning                             dest_min_durab_days,
+       ttl.rowkey                                                  objkey
+FROM   transport_task_line_tab ttl,
+       inventory_location_pub        dest_il,
+       inventory_location_group_pub  dest_ilg,
+       site_public                   dest_site,
+       inventory_part_in_stock_total source_ipis,
+       site_public                   source_site,
+       inventory_part_tab            source_ip,
+       inventory_part_tab            dest_ip
+WHERE  ttl.transport_task_status IN ('CREATED', 'PICKED')
+   AND ttl.reserved_by_source    = 'FALSE'
+   AND ttl.to_location_no        = dest_il.location_no
+   AND ttl.to_contract           = dest_il.contract
+   AND dest_il.location_group    = dest_ilg.location_group
+   AND ttl.from_contract         = source_site.contract
+   AND ttl.to_contract           = dest_site.contract
+   AND ttl.from_contract         = source_ipis.contract
+   AND ttl.from_location_no      = source_ipis.location_no
+   AND ttl.part_no               = source_ipis.part_no
+   AND ttl.configuration_id      = source_ipis.configuration_id
+   AND ttl.lot_batch_no          = source_ipis.lot_batch_no
+   AND ttl.serial_no             = source_ipis.serial_no
+   AND ttl.eng_chg_level         = source_ipis.eng_chg_level
+   AND ttl.waiv_dev_rej_no       = source_ipis.waiv_dev_rej_no
+   AND ttl.activity_seq          = source_ipis.activity_seq
+   AND ttl.handling_unit_id      = source_ipis.handling_unit_id
+   AND ttl.part_no               = source_ip.part_no
+   AND ttl.from_contract         = source_ip.contract
+   AND ttl.part_no               = dest_ip.part_no
+   AND ttl.to_contract           = dest_ip.contract
+   AND source_ipis.location_type_db IN ('PICKING','F','MANUFACTURING','SHIPMENT')
+   AND dest_ilg.inventory_location_type IN ('PICKING','F','MANUFACTURING','SHIPMENT');
+
+VIEW Transport_Task_Manager_Local_3 IS
+   Prompt = 'Transport Task Supply'
+SELECT
+       TO_CHAR(ttm1.transport_task_id)                              order_no,
+       TO_CHAR(NULL)                                                line_no,
+       TO_CHAR(NULL)                                                rel_no,
+       TO_NUMBER(NULL)                                              line_item_no,
+       ttm1.part_no                                                 part_no,
+       ttm1.from_contract                                           contract,
+       ttm1.configuration_id                                        configuration_id,
+       0                                                            qty_supply,
+       SUM(ttm1.qty_demand)                                         qty_demand,
+       0                                                            qty_short,
+       0                                                            qty_pegged,
+       SUM(ttm1.qty_demand)                                         qty_reserved,
+       ttm1.source_date_required                                    date_required,
+       ttm1.condition_code                                          condition_code,
+       ttm1.transport_task_status                                   status_code,
+       ttm1.transport_task_status                                   status_desc
+FROM transport_task_manager_local_1  ttm1
+ WHERE  ttm1.source_part_supply_control = 'NETTABLE'
+   AND  ttm1.source_part_ownership IN ('COMPANY OWNED','CONSIGNMENT')
+   AND  ttm1.source_expiration_date > source_date_required + source_min_durab_days
+GROUP BY ttm1.transport_task_id,
+         ttm1.part_no,
+         ttm1.from_contract,
+         ttm1.configuration_id,
+         ttm1.condition_code,
+         ttm1.transport_task_status,
+         ttm1.source_date_required
+UNION ALL
+SELECT
+       TO_CHAR(ttm1.transport_task_id)                              order_no,
+       TO_CHAR(NULL)                                                line_no,
+       TO_CHAR(NULL)                                                rel_no,
+       TO_NUMBER(NULL)                                              line_item_no,
+       ttm1.part_no                                                 part_no,
+       ttm1.to_contract                                             contract,
+       ttm1.configuration_id                                        configuration_id,
+       SUM(ttm1.qty_supply)                                         qty_supply,
+       0                                                            qty_demand,
+       0                                                            qty_short,
+       0                                                            qty_pegged,
+       0                                                            qty_reserved,
+       ttm1.dest_date_required                                      date_required,
+       ttm1.condition_code                                          condition_code,
+       ttm1.transport_task_status                                   status_code,
+       ttm1.transport_task_status                                   status_desc
+  FROM transport_task_manager_local_1 ttm1,
+       inventory_part_in_stock_total  dest_ipis
+ WHERE ttm1.to_contract          = dest_ipis.contract (+)
+   AND ttm1.to_location_no       = dest_ipis.location_no (+)
+   AND ttm1.part_no              = dest_ipis.part_no (+)
+   AND ttm1.configuration_id     = dest_ipis.configuration_id (+)
+   AND ttm1.lot_batch_no         = dest_ipis.lot_batch_no (+)
+   AND ttm1.serial_no            = dest_ipis.serial_no (+)
+   AND ttm1.eng_chg_level        = dest_ipis.eng_chg_level (+)
+   AND ttm1.waiv_dev_rej_no      = dest_ipis.waiv_dev_rej_no (+)
+   AND ttm1.activity_seq         = dest_ipis.activity_seq (+)
+   AND ttm1.handling_unit_id     = dest_ipis.handling_unit_id (+)
+   AND Inventory_Part_In_Stock_API.Get_Move_Dest_Supply_Ctrl_Db(from_contract_    => ttm1.from_contract,
+                                                                from_location_no_ => ttm1.from_location_no,
+                                                                part_no_          => ttm1.part_no,
+                                                                configuration_id_ => ttm1.configuration_id,
+                                                                lot_batch_no_     => ttm1.lot_batch_no,
+                                                                serial_no_        => ttm1.serial_no,
+                                                                eng_chg_level_    => ttm1.eng_chg_level,
+                                                                waiv_dev_rej_no_  => ttm1.waiv_dev_rej_no,
+                                                                activity_seq_     => ttm1.activity_seq,
+                                                                handling_unit_id_ => ttm1.handling_unit_id,
+                                                                to_contract_      => ttm1.to_contract,
+                                                                to_location_no_   => ttm1.to_location_no) = 'NETTABLE'
+   AND NVL(dest_ipis.part_ownership_db, ttm1.source_part_ownership) IN ('COMPANY OWNED','CONSIGNMENT')
+   AND LEAST(ttm1.source_expiration_date, NVL(dest_ipis.expiration_date, Database_SYS.Get_Last_Calendar_Date())) > ttm1.dest_date_required + dest_min_durab_days
+GROUP BY ttm1.transport_task_id,
+         ttm1.part_no,
+         ttm1.to_contract,
+         ttm1.configuration_id,
+         ttm1.condition_code,
+         ttm1.transport_task_status,
+         ttm1.dest_date_required;
+
+VIEW Transport_Task_Manager_Local_4 IS
+   Prompt = 'Transport Task Supply'
+SELECT
+TO_CHAR(ttm1.transport_task_id)                                     order_no,
+       TO_CHAR(NULL)                                                line_no,
+       TO_CHAR(NULL)                                                rel_no,
+       TO_NUMBER(NULL)                                              line_item_no,
+       ttm1.part_no                                                 part_no,
+       ttm1.from_contract                                           contract,
+       ttm1.configuration_id                                        configuration_id,
+       0                                                            qty_supply,
+       SUM(ttm1.qty_demand)                                         qty_demand,
+       0                                                            qty_short,
+       0                                                            qty_pegged,
+       SUM(ttm1.qty_demand)                                         qty_reserved,
+       ttm1.source_date_required                                    date_required,
+       ttm1.condition_code                                          condition_code,
+       ttm1.transport_task_status                                   status_code,
+       ttm1.transport_task_status                                   status_desc,
+       NULL                                                         info,
+       ttm1.project_id                                              project_id,
+       ttm1.activity_seq                                            activity_seq
+FROM transport_task_manager_local_1  ttm1
+ WHERE ttm1.source_part_supply_control = 'NETTABLE'
+   AND ttm1.source_part_ownership IN ('COMPANY OWNED','CONSIGNMENT')
+   AND ttm1.source_expiration_date > source_date_required + source_min_durab_days
+GROUP BY ttm1.transport_task_id,
+         ttm1.part_no,
+         ttm1.from_contract,
+         ttm1.configuration_id,
+         ttm1.condition_code,
+         ttm1.transport_task_status,
+         ttm1.source_date_required,
+         ttm1.project_id,
+         ttm1.activity_seq
+UNION ALL
+SELECT
+       TO_CHAR(ttm1.transport_task_id)                              order_no,
+       TO_CHAR(NULL)                                                line_no,
+       TO_CHAR(NULL)                                                rel_no,
+       TO_NUMBER(NULL)                                              line_item_no,
+       ttm1.part_no                                                 part_no,
+       ttm1.to_contract                                             contract,
+       ttm1.configuration_id                                        configuration_id,
+       SUM(ttm1.qty_supply)                                         qty_supply,
+       0                                                            qty_demand,
+       0                                                            qty_short,
+       0                                                            qty_pegged,
+       0                                                            qty_reserved,
+       ttm1.dest_date_required                                      date_required,
+       ttm1.condition_code                                          condition_code,
+       ttm1.transport_task_status                                   status_code,
+       ttm1.transport_task_status                                   status_desc,
+       NULL                                                         info,
+       ttm1.project_id                                              project_id,
+       ttm1.activity_seq                                            activity_seq
+  FROM transport_task_manager_local_1 ttm1,
+       inventory_part_in_stock_total  dest_ipis
+ WHERE ttm1.to_contract          = dest_ipis.contract (+)
+   AND ttm1.to_location_no       = dest_ipis.location_no (+)
+   AND ttm1.part_no              = dest_ipis.part_no (+)
+   AND ttm1.configuration_id     = dest_ipis.configuration_id (+)
+   AND ttm1.lot_batch_no         = dest_ipis.lot_batch_no (+)
+   AND ttm1.serial_no            = dest_ipis.serial_no (+)
+   AND ttm1.eng_chg_level        = dest_ipis.eng_chg_level (+)
+   AND ttm1.waiv_dev_rej_no      = dest_ipis.waiv_dev_rej_no (+)
+   AND ttm1.activity_seq         = dest_ipis.activity_seq (+)
+   AND ttm1.handling_unit_id     = dest_ipis.handling_unit_id (+)
+   AND Inventory_Part_In_Stock_API.Get_Move_Dest_Supply_Ctrl_Db(from_contract_    => ttm1.from_contract,
+                                                                from_location_no_ => ttm1.from_location_no,
+                                                                part_no_          => ttm1.part_no,
+                                                                configuration_id_ => ttm1.configuration_id,
+                                                                lot_batch_no_     => ttm1.lot_batch_no,
+                                                                serial_no_        => ttm1.serial_no,
+                                                                eng_chg_level_    => ttm1.eng_chg_level,
+                                                                waiv_dev_rej_no_  => ttm1.waiv_dev_rej_no,
+                                                                activity_seq_     => ttm1.activity_seq,
+                                                                handling_unit_id_ => ttm1.handling_unit_id,
+                                                                to_contract_      => ttm1.to_contract,
+                                                                to_location_no_   => ttm1.to_location_no) = 'NETTABLE'
+   AND NVL(dest_ipis.part_ownership_db, ttm1.source_part_ownership) IN ('COMPANY OWNED','CONSIGNMENT')
+   AND LEAST(ttm1.source_expiration_date, NVL(dest_ipis.expiration_date, Database_SYS.Get_Last_Calendar_Date())) > ttm1.dest_date_required + dest_min_durab_days
+GROUP BY ttm1.transport_task_id,
+         ttm1.part_no,
+         ttm1.to_contract,
+         ttm1.configuration_id,
+         ttm1.condition_code,
+         ttm1.transport_task_status,
+         ttm1.dest_date_required,
+         ttm1.project_id,
+         ttm1.activity_seq;
+
+VIEW Transport_Task_Supply_Demand IS
+   Prompt = 'Transport Task'
+SELECT
+       ttm3.order_no                                                order_no,
+       ttm3.line_no                                                 line_no,
+       ttm3.rel_no                                                  rel_no,
+       ttm3.line_item_no                                            line_item_no,
+       Order_Supply_Demand_Type_API.Get_Client_Value(33)            order_supply_demand_type,
+       ttm3.part_no                                                 part_no,
+       ttm3.contract                                                contract,
+       ttm3.configuration_id                                        configuration_id,
+       SUM(ttm3.qty_supply)                                         qty_supply,
+       SUM(ttm3.qty_demand)                                         qty_demand,
+       SUM(ttm3.qty_short)                                          qty_short,
+       SUM(ttm3.qty_pegged)                                         qty_pegged,
+       SUM(ttm3.qty_reserved)                                       qty_reserved,
+       ttm3.date_required                                           date_required,
+       ttm3.condition_code                                          condition_code,
+       ttm3.status_code                                             status_code,
+       ttm3.status_desc                                             status_desc
+FROM   transport_task_manager_local_3 ttm3
+GROUP BY ttm3.order_no,
+         ttm3.line_no,
+         ttm3.rel_no,
+         ttm3.line_item_no,
+         ttm3.part_no,
+         ttm3.contract,
+         ttm3.configuration_id,
+         ttm3.date_required,
+         ttm3.condition_code,
+         ttm3.status_code,
+         ttm3.status_desc;
+
+VIEW Transport_Task_Suppl_Demand_Oe IS
+   Prompt = 'Transport Task'
+SELECT 
+       ttm1.transport_task_id||'^'||ttm1.part_no||'^'||ttm1.from_contract||'^'||ttm1.configuration_id||'^'||ttm1.condition_code||'^'||
+       ttm1.transport_task_status||'^'||ttm1.source_date_required||'^'||ttm1.project_id||'^'||ttm1.activity_seq  row_id,
+       TO_CHAR(ttm1.transport_task_id)                              order_no,
+       TO_CHAR(NULL)                                                line_no,
+       TO_CHAR(NULL)                                                rel_no,
+       TO_NUMBER(NULL)                                              line_item_no,
+       Order_Supply_Demand_Type_API.Get_Client_Value(33)           order_supply_demand_type,
+       ttm1.part_no                                                 part_no,
+       ttm1.from_contract                                           contract,
+       ttm1.configuration_id                                        configuration_id,
+       0                                                            qty_supply,
+       SUM(ttm1.qty_demand)                                         qty_demand,
+       0                                                            qty_pegged,
+       SUM(ttm1.qty_demand)                                         qty_reserved,
+       ttm1.source_date_required                                    date_required,
+       ttm1.condition_code                                          condition_code,
+       ttm1.transport_task_status                                   status_code,
+       ttm1.transport_task_status                                   status_desc,
+       3                                                            sort_order,
+       ttm1.project_id                                              project_id,
+       ttm1.activity_seq                                            activity_seq
+FROM transport_task_manager_local_1  ttm1
+ WHERE  ttm1.source_part_supply_control = 'NETTABLE'
+   AND  ttm1.source_part_ownership IN ('COMPANY OWNED','CONSIGNMENT')
+   AND  ttm1.source_expiration_date > source_date_required + source_min_durab_days
+GROUP BY ttm1.transport_task_id||'^'||ttm1.part_no||'^'||ttm1.from_contract||'^'||ttm1.configuration_id||'^'||ttm1.condition_code||'^'||
+         ttm1.transport_task_status||'^'||ttm1.source_date_required||'^'||ttm1.project_id||'^'||ttm1.activity_seq,
+         ttm1.transport_task_id,
+         ttm1.part_no,
+         ttm1.from_contract,
+         ttm1.configuration_id,
+         ttm1.condition_code,
+         ttm1.transport_task_status,
+         ttm1.source_date_required,
+         ttm1.project_id,
+         ttm1.activity_seq
+UNION ALL
+SELECT 
+       ttm1.transport_task_id||'^'||ttm1.part_no||'^'||ttm1.to_contract||'^'||ttm1.configuration_id||'^'||ttm1.condition_code||'^'||
+       ttm1.transport_task_status||'^'||ttm1.dest_date_required||'^'||ttm1.project_id||'^'||ttm1.activity_seq  row_id,
+       TO_CHAR(ttm1.transport_task_id)                              order_no,
+       TO_CHAR(NULL)                                                line_no,
+       TO_CHAR(NULL)                                                rel_no,
+       TO_NUMBER(NULL)                                              line_item_no,
+       Order_Supply_Demand_Type_API.Get_Client_Value(33)            order_supply_demand_type,
+       ttm1.part_no                                                 part_no,
+       ttm1.to_contract                                             contract,
+       ttm1.configuration_id                                        configuration_id,
+       SUM(ttm1.qty_supply)                                         qty_supply,
+       0                                                            qty_demand,
+       0                                                            qty_pegged,
+       0                                                            qty_reserved,
+       ttm1.dest_date_required                                      date_required,
+       ttm1.condition_code                                          condition_code,
+       ttm1.transport_task_status                                   status_code,
+       ttm1.transport_task_status                                   status_desc,
+       1                                                            sort_order,
+       ttm1.project_id                                              project_id,
+       ttm1.activity_seq                                            activity_seq
+  FROM transport_task_manager_local_1 ttm1,
+       inventory_part_in_stock_total  dest_ipis
+ WHERE ttm1.to_contract          = dest_ipis.contract (+)
+   AND ttm1.to_location_no       = dest_ipis.location_no (+)
+   AND ttm1.part_no              = dest_ipis.part_no (+)
+   AND ttm1.configuration_id     = dest_ipis.configuration_id (+)
+   AND ttm1.lot_batch_no         = dest_ipis.lot_batch_no (+)
+   AND ttm1.serial_no            = dest_ipis.serial_no (+)
+   AND ttm1.eng_chg_level        = dest_ipis.eng_chg_level (+)
+   AND ttm1.waiv_dev_rej_no      = dest_ipis.waiv_dev_rej_no (+)
+   AND ttm1.activity_seq         = dest_ipis.activity_seq (+)
+   AND ttm1.handling_unit_id     = dest_ipis.handling_unit_id (+)
+   AND Inventory_Part_In_Stock_API.Get_Move_Dest_Supply_Ctrl_Db(from_contract_    => ttm1.from_contract,
+                                                                from_location_no_ => ttm1.from_location_no,
+                                                                part_no_          => ttm1.part_no,
+                                                                configuration_id_ => ttm1.configuration_id,
+                                                                lot_batch_no_     => ttm1.lot_batch_no,
+                                                                serial_no_        => ttm1.serial_no,
+                                                                eng_chg_level_    => ttm1.eng_chg_level,
+                                                                waiv_dev_rej_no_  => ttm1.waiv_dev_rej_no,
+                                                                activity_seq_     => ttm1.activity_seq,
+                                                                handling_unit_id_ => ttm1.handling_unit_id,
+                                                                to_contract_      => ttm1.to_contract,
+                                                                to_location_no_   => ttm1.to_location_no) = 'NETTABLE'
+   AND NVL(dest_ipis.part_ownership_db, ttm1.source_part_ownership) IN ('COMPANY OWNED','CONSIGNMENT')
+   AND LEAST(ttm1.source_expiration_date, NVL(dest_ipis.expiration_date, Database_SYS.Get_Last_Calendar_Date())) > ttm1.dest_date_required + ttm1.dest_min_durab_days
+GROUP BY ttm1.transport_task_id||'^'||ttm1.part_no||'^'||ttm1.to_contract||'^'||ttm1.configuration_id||'^'||ttm1.condition_code||'^'||
+         ttm1.transport_task_status||'^'||ttm1.dest_date_required||'^'||ttm1.project_id||'^'||ttm1.activity_seq,
+         ttm1.transport_task_id,
+         ttm1.part_no,
+         ttm1.to_contract,
+         ttm1.configuration_id,
+         ttm1.condition_code,
+         ttm1.transport_task_status,
+         ttm1.dest_date_required,
+         ttm1.project_id,
+         ttm1.activity_seq;
+
+VIEW Transport_Task_Suppl_Demand_Ms IS
+   Prompt = 'Transport Task'
+SELECT
+       TO_CHAR(ttm1.transport_task_id)                              order_no,
+       '*'                                                          line_no,
+       '*'                                                          rel_no,
+       1                                                            line_item_no,
+       Order_Supply_Demand_Type_API.Get_Client_Value(33)            order_supply_demand_type,
+       ttm1.part_no                                                 part_no,
+       ttm1.from_contract                                           contract,
+       ttm1.configuration_id                                        configuration_id,
+       0                                                            qty_supply,
+       SUM(ttm1.qty_demand)                                         qty_demand,
+       0                                                            qty_pegged,
+       SUM(ttm1.qty_demand)                                         qty_reserved,
+       ttm1.source_date_required                                    date_required,
+       ttm1.condition_code                                          condition_code,
+       ttm1.transport_task_status                                   status_code,
+       ttm1.transport_task_status                                   status_desc
+FROM transport_task_manager_local_1  ttm1
+ WHERE ttm1.source_part_supply_control = 'NETTABLE'
+   AND ttm1.source_part_ownership IN ('COMPANY OWNED','CONSIGNMENT')
+   AND ttm1.source_expiration_date > source_date_required + source_min_durab_days
+GROUP BY ttm1.transport_task_id,
+         ttm1.part_no,
+         ttm1.from_contract,
+         ttm1.configuration_id,
+         ttm1.condition_code,
+         ttm1.transport_task_status,
+         ttm1.source_date_required
+UNION ALL
+SELECT
+       TO_CHAR(ttm1.transport_task_id)                              order_no,
+       '*'                                                          line_no,
+       '*'                                                          rel_no,
+       1                                                            line_item_no,
+       Order_Supply_Demand_Type_API.Get_Client_Value(33)            order_supply_demand_type,
+       ttm1.part_no                                                 part_no,
+       ttm1.to_contract                                             contract,
+       ttm1.configuration_id                                        configuration_id,
+       SUM(ttm1.qty_supply)                                         qty_supply,
+       0                                                            qty_demand,
+       0                                                            qty_pegged,
+       0                                                            qty_reserved,
+       ttm1.dest_date_required                                      date_required,
+       ttm1.condition_code                                          condition_code,
+       ttm1.transport_task_status                                   status_code,
+       ttm1.transport_task_status                                   status_desc
+  FROM transport_task_manager_local_1 ttm1,
+       inventory_part_in_stock_total  dest_ipis
+ WHERE ttm1.to_contract          = dest_ipis.contract (+)
+   AND ttm1.to_location_no       = dest_ipis.location_no (+)
+   AND ttm1.part_no              = dest_ipis.part_no (+)
+   AND ttm1.configuration_id     = dest_ipis.configuration_id (+)
+   AND ttm1.lot_batch_no         = dest_ipis.lot_batch_no (+)
+   AND ttm1.serial_no            = dest_ipis.serial_no (+)
+   AND ttm1.eng_chg_level        = dest_ipis.eng_chg_level (+)
+   AND ttm1.waiv_dev_rej_no      = dest_ipis.waiv_dev_rej_no (+)
+   AND ttm1.activity_seq         = dest_ipis.activity_seq (+)
+   AND ttm1.handling_unit_id     = dest_ipis.handling_unit_id (+)
+   AND Inventory_Part_In_Stock_API.Get_Move_Dest_Supply_Ctrl_Db(from_contract_    => ttm1.from_contract,
+                                                                from_location_no_ => ttm1.from_location_no,
+                                                                part_no_          => ttm1.part_no,
+                                                                configuration_id_ => ttm1.configuration_id,
+                                                                lot_batch_no_     => ttm1.lot_batch_no,
+                                                                serial_no_        => ttm1.serial_no,
+                                                                eng_chg_level_    => ttm1.eng_chg_level,
+                                                                waiv_dev_rej_no_  => ttm1.waiv_dev_rej_no,
+                                                                activity_seq_     => ttm1.activity_seq,
+                                                                handling_unit_id_ => ttm1.handling_unit_id, 
+                                                                to_contract_      => ttm1.to_contract,
+                                                                to_location_no_   => ttm1.to_location_no) = 'NETTABLE'
+   AND NVL(dest_ipis.part_ownership_db, ttm1.source_part_ownership) IN ('COMPANY OWNED','CONSIGNMENT')
+   AND LEAST(ttm1.source_expiration_date, NVL(dest_ipis.expiration_date, Database_SYS.Get_Last_Calendar_Date())) > ttm1.dest_date_required + ttm1.dest_min_durab_days
+GROUP BY ttm1.transport_task_id,
+         ttm1.part_no,
+         ttm1.to_contract,
+         ttm1.configuration_id,
+         ttm1.condition_code,
+         ttm1.transport_task_status,
+         ttm1.dest_date_required;
+
+VIEW Transport_Task_Supp_Demand_Ext IS
+   Prompt = 'Transport Task'
+SELECT
+       ttm4.order_no                                               order_no,
+       ttm4.line_no                                                line_no,
+       ttm4.rel_no                                                 rel_no,
+       ttm4.line_item_no                                           line_item_no,
+       Order_Supply_Demand_Type_API.Get_Client_Value(33)           order_supply_demand_type,
+       ttm4.part_no                                                part_no,
+       ttm4.contract                                               contract,
+       ttm4.configuration_id                                       configuration_id,
+       SUM(ttm4.qty_supply)                                        qty_supply,
+       SUM(ttm4.qty_demand)                                        qty_demand,
+       SUM(ttm4.qty_short)                                         qty_short,
+       SUM(ttm4.qty_pegged)                                        qty_pegged,
+       SUM(ttm4.qty_reserved)                                      qty_reserved,
+       ttm4.date_required                                          date_required,
+       ttm4.condition_code                                         condition_code,
+       ttm4.status_code                                            status_code,
+       ttm4.status_desc                                            status_desc,
+       ttm4.info                                                   info,
+       ttm4.project_id                                             project_id,
+       ttm4.activity_seq                                           activity_seq
+FROM   transport_task_manager_local_4 ttm4
+GROUP BY ttm4.order_no,
+         ttm4.line_no,
+         ttm4.rel_no,
+         ttm4.line_item_no,
+         ttm4.part_no,
+         ttm4.contract,
+         ttm4.configuration_id,
+         ttm4.date_required,
+         ttm4.condition_code,
+         ttm4.status_code,
+         ttm4.status_desc,
+         ttm4.info,
+         ttm4.project_id,
+         ttm4.activity_seq;

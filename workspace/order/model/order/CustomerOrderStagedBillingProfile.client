@@ -1,0 +1,495 @@
+
+-- Date        Sign    History
+-- ----------  ------  ---------------------------------------------------------------
+-- 2019-08-22  RoJalk  SCUXXW4-23960, Added order by Stage to OrderLineStagedBillingList.
+-- 2019-07-03  SBalLK  SCUXXW4-22943, Changed the message box type according to new guidelines.
+-- 2019-05-24  SBalLK  SCUXXW4-21137, UI Changes.
+-- 2019-05-16  fgusse   SCUXXW4-20685, Added translatable to DocumentTextCommand
+-- 2019-03-13  SBalLK  SCUXXW4-9552, Restructed with new Aurena changes.
+-- 2018-05-31  RoJalk  SCUXXW4-9552, Created.
+--------------------------------------------------------------------------------------
+
+client CustomerOrderStagedBillingProfile;
+component ORDER;
+layer Core;
+projection CustomerOrderStagedBillingProfileHandling;
+
+include fragment NonRentalSalesPartLovSelector;
+include fragment DocumentText;
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+navigator {
+   entry CustomerOrderStagedBillingNavEntry parent OrderNavigator.InvoicingStagedBilling at index 200 {
+      label = "Staged Billing Profile";
+      page Form;
+   }
+}
+
+-------------------------------- MAIN PAGES ---------------------------------
+page Form using CustomerOrderStagedBillingProfileSet {
+   label = "Staged Billing Profile";
+   startupmode = search;
+   stateindicator CustomerOrderLineStateIndicator;
+   selector CustomerOrderLineSelector;
+   group StagedBillingGroup;
+   list OrderLineStagedBillingList(OrderLineStagedBillingArray);
+}
+
+-------------------------------- ASSISTANTS ---------------------------------
+
+--------------------------------- COMMANDS ----------------------------------
+@Override
+command BulkApprove for OrderLineStagedBilling {
+   label = "Approve";
+   enabled = [Objstate = "Planned"];
+   mode = SelectedRecords;
+   variable AllMilestoneClosedVar Text;
+   variable KeyListVar Text;
+   variable DoApproveVar Boolean;
+   bulkexecute {
+      stringify(records, keyref) into KeyListVar;
+      call CheckAllMilestoneClosed(KeyListVar) into AllMilestoneClosedVar;
+      if[AllMilestoneClosedVar = "FALSE"] {
+         messagebox("", question, "The connected milestone(s) for the staged billing line(s) is/are not closed. Do you want to proceed?") {
+            when "Yes" {
+               set DoApproveVar = true;
+            }
+            when "No" {
+               exit;
+            }
+         }
+
+      }
+      bulkcall Approve();
+      refresh;
+   }
+}
+
+command CreateInvoiceCommand for OrderLineStagedBilling {
+   label = "Create Invoice";
+   mode = SingleRecord;
+   enabled = [(Objstate = "Approved") and(CustomerOrderRef.BlockedType != "ManualBlocked")];
+   execute {
+      confirm("Create invoice for the approved staged billing line?") {
+         when OK {
+            set Objstate = null;
+            call CreateInvoice(OrderNo);
+         }
+      }
+   }
+}
+
+command InvoiceCommand for OrderLineStagedBilling {
+   label = "Invoice";
+   mode = SelectedRecords;
+   enabled = [Objstate = "Invoiced"];
+   bulkexecute {
+      bulknavigate "page/CustomerOrderInvoice/Form?$filter=Company eq $[Company] and InvoiceId eq $[InvoiceId]";
+   }
+}
+
+command DocumentTextCommand for OrderLineStagedBilling {
+   label = "Document Text";
+   enabled = [NoteId != null];
+   variable LabelVar Text;
+   execute {
+      set LabelVar = " for Stage ${Stage}, - Order ${OrderNo}, Line No${LineNo}, Rel No ${RelNo}, Line Item No ${LineItemNo}" {
+         translatable = true;
+      }
+      assistant DocumentText(NoteId, LabelVar) {
+         when NO {
+            exit CANCEL;
+         }
+      }
+   }
+}
+
+command DataSourceSaveCheckCommand for OrderLineStagedBilling {
+   variable TempSummedAmount Number;
+   variable TempSummedAmountInclTax Number;
+   bulkexecute {
+      if[(not parent.OrderNoRef.UsePriceInclTax and parent.computed.SummedAmount > parent.NetTotalAmount) or
+      (parent.OrderNoRef.UsePriceInclTax and parent.computed.SummedAmountInclTax > parent.GrossTotalAmount)] {
+         error("The summed amount exceeds the order line value.");
+         exit CANCEL;
+      }
+      if[parent.computed.SummedPercentage > 100] {
+         error("The sum of all stages related to one customer order line can not exceed 100%.");
+         exit CANCEL;
+      }
+      if[parent.computed.SummedPercentage < 100] {
+         confirm("100 % of the order line value is not covered yet. Do you want to save the profile?") {
+            when OK {
+               exit OK;
+            }
+            when CANCEL {
+               exit CANCEL;
+            }
+         }
+      }
+   }
+}
+
+command MilestoneIdValidateCommand for OrderLineStagedBilling {
+   execute {
+      if[MilestoneId != null] {
+         call GetExpectedApprovalDate(OrderNo, LineNo, RelNo, LineItemNo, MilestoneId) into ExpectedApprovalDate {
+            when FAIL {
+               set ExpectedApprovalDate = null;
+            }
+         }
+      }
+      else {
+         set ExpectedApprovalDate = null;
+      }
+   }
+}
+
+
+command CalculateLineAmountsCommand {
+   variable AmountStructureVar Structure(AmountStructure);
+   variable SourceRefType Text;
+   execute {
+      set SourceRefType = "CUSTOMER_ORDER_LINE";
+      call GetCalculatedAmounts(Amount, AmountInclTax, SourceRefType, OrderNo, LineNo, RelNo, LineItemNo) into AmountStructureVar;
+      set Amount = AmountStructureVar.NetAmountCurrency;
+      set AmountInclTax = AmountStructureVar.GrossAmountCurrency;
+   }
+}
+
+command TotalPercentageValidate for OrderLineStagedBilling clone CalculateLineAmountsCommand {
+   variable TempSummedAmountVar Number;
+   variable TempSummedAmountInclTaxVar Number;
+   execute {
+      if[not AmountValidationInitiated and TotalPercentage != null] {
+         if[not parent.OrderNoRef.UsePriceInclTax] {
+            if [isNew] {
+               set TempSummedAmountVar = "${parent.computed.SummedAmount}";
+            }
+            else {
+               set TempSummedAmountVar = "${parent.computed.SummedAmount}";
+               set TempSummedAmountVar = "#{TempSummedAmountVar - Amount}";
+            }
+         }
+         else {
+            if [isNew] {
+               set TempSummedAmountInclTaxVar = "${parent.computed.SummedAmountInclTax}";
+            }
+            else {
+               set TempSummedAmountInclTaxVar = "${parent.computed.SummedAmountInclTax}";
+               set TempSummedAmountInclTaxVar = "#{TempSummedAmountInclTaxVar - AmountInclTax}";
+            }
+         }
+         if[TotalPercentage <= 0 or TotalPercentage > 100] {
+            error("Percentage should be greater than 0 and less than or equal to 100.");
+            exit CANCEL;
+         }
+         set Amount = null;
+         set AmountInclTax = null;
+         set Amount = "#{(TotalPercentage * parent.NetTotalAmount)/100}";
+         set AmountInclTax = "#{(TotalPercentage * parent.GrossTotalAmount)/100}";
+         super;
+         if[parent.computed.SummedPercentage = 100] {
+            if[not parent.OrderNoRef.UsePriceInclTax] {
+               set Amount = "#{parent.NetTotalAmount - TempSummedAmountVar}";
+            }
+            else {
+               set AmountInclTax = "#{parent.GrossTotalAmount - TempSummedAmountInclTaxVar}";
+            }
+         }
+      }
+   }
+}
+
+command AmountValidateCommand for OrderLineStagedBilling clone CalculateLineAmountsCommand {
+   variable TempTotalPercentage Number;
+   execute {
+      if[not AmountValidationInitiated and Amount != null] {
+         set AmountValidationInitiated = true;
+
+         if[Amount <= 0] {
+            error("Value should be greater than 0.");
+            set AmountValidationInitiated = false;
+            exit CANCEL;
+         }
+         else {
+            if[Amount > parent.NetTotalAmount] {
+               error("The Amount exceeds the order line value.");
+               set AmountValidationInitiated = false;
+               exit CANCEL;
+            }
+         }
+
+         if [isNew] {
+            set TempTotalPercentage = "${parent.computed.SummedPercentage}";
+         }
+         else {
+            set TempTotalPercentage = "${parent.computed.SummedPercentage}";
+            set TempTotalPercentage = "#{TempTotalPercentage - TotalPercentage}";
+         }
+
+         set TotalPercentage = null;
+         set AmountInclTax = null;
+         super;
+         set TotalPercentage = "#{(Amount/parent.NetTotalAmount)*100}";
+         if[parent.computed.SummedAmount = parent.NetTotalAmount and parent.computed.SummedPercentage != 100] {
+            set TotalPercentage = "#{100 - TempTotalPercentage}";
+         }
+         set AmountValidationInitiated = false;
+      }
+   }
+}
+
+command AmountInclTaxValidateCommand for OrderLineStagedBilling clone CalculateLineAmountsCommand {
+   variable TempTotalPercentage Number;
+   variable TempTotalAmount Number;
+   execute {
+      if[not AmountValidationInitiated and AmountInclTax != null] {
+         set AmountValidationInitiated = true;
+         if[AmountInclTax <= 0] {
+            error("Value should be greater than 0.");
+            set AmountValidationInitiated = false;
+            exit CANCEL;
+         }
+         if[AmountInclTax > parent.GrossTotalAmount] {
+            error("The Amount exceeds the order line value.");
+            set AmountValidationInitiated = false;
+            exit CANCEL;
+         }
+
+
+         if [isNew] {
+            set TempTotalPercentage = "${parent.computed.SummedPercentage}";
+            set TempTotalAmount = "${parent.computed.SummedAmount}";
+         }
+         else {
+            set TempTotalPercentage = "${parent.computed.SummedPercentage}";
+            set TempTotalPercentage = "#{TempTotalPercentage - TotalPercentage}";
+
+            set TempTotalAmount = "${parent.computed.SummedAmount}";
+            set TempTotalAmount = "#{TempTotalAmount - Amount}";
+         }
+         set TotalPercentage = null;
+         set Amount = null;
+         super;
+
+         set TotalPercentage = "#{(AmountInclTax/parent.GrossTotalAmount)*100}";
+
+         if[parent.computed.SummedAmountInclTax = parent.GrossAmountTotal and parent.computed.SummedPercentage != 100] {
+            set TotalPercentage = "#{100-TempTotalPercentage}";
+         }
+         if[parent.computed.SummedAmountInclTax = parent.GrossAmountTotal and parent.computed.SummedAmount != parent.NetAmountTotal] {
+            set Amount = "#{parent.NetAmountTotal-TempTotalAmount}";
+         }
+         set AmountValidationInitiated = false;
+      }
+   }
+}
+
+
+
+--------------------------------- SELECTORS ---------------------------------
+@Override
+selector CustomerOrderLineSelector for CustomerOrderStagedBillingProfile {
+   label = "";
+   static OrderNo;
+   static LineNo;
+   static RelNo;
+   static CatalogNo;
+   badge Objstate {
+      style = TextOnly;
+      emphasis Progress3 = [Objstate = "Released"];
+      emphasis Progress5 = [Objstate = "Reserved"];
+      emphasis Progress7 = [Objstate = "Picked"];
+      emphasis Progress8 = [Objstate = "PartiallyDelivered"];
+      emphasis Progress10 = [Objstate = "Delivered"];
+      emphasis Progress12 = [Objstate = "Invoiced"];
+      emphasis StateCancelled = [Objstate = "Cancelled"];
+   }
+}
+
+---------------------------------- GROUPS -----------------------------------
+group StagedBillingGroup for CustomerOrderStagedBillingProfile {
+   label = "";
+   field OrderNoRef {
+      size = Small;
+   }
+   field LineNo {
+      size = Small;
+   }
+   field RelNo {
+      size = Small;
+   }
+   field NetTotalAmount {
+      size = Small;
+   }
+   field GrossTotalAmount {
+      size = Small;
+   }
+   field OrderNoRef.CurrencyCode {
+      label = "Currency";
+      size = Small;
+   }
+   field Objstate {
+      visible = [false];
+      searchable = true;
+   }
+   lov CatalogNoRef with ReferenceNonRentalSalesPartLovSelector {
+      description = CatalogNoRef.CatalogDesc;
+   }
+
+   computedfield SummedPercentage {
+      label = "Total (%) of All Stages";
+      value = "#{OrderLineStagedBillingArray.sum(TotalPercentage)}";
+      type = Number;
+      size = Small;
+   }
+   computedfield SummedAmount {
+      label = "Total of All Stages";
+      value = "#{OrderLineStagedBillingArray.sum(Amount)}";
+      visible = [not OrderNoRef.UsePriceInclTax];
+      type = Number;
+      format = ifscurrency;
+      size = Small;
+   }
+   computedfield SummedAmountInclTax {
+      label = "Total All Stages";
+      value = "#{OrderLineStagedBillingArray.sum(AmountInclTax)}";
+      visible = [OrderNoRef.UsePriceInclTax];
+      type = Number;
+      format = ifscurrency;
+      size = Small;
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+list OrderLineStagedBillingList for OrderLineStagedBilling {
+   label = "";
+   orderby = Stage;
+   crudactions {
+      before command DataSourceSaveCheckCommand;
+      new {
+         enabled = [(parent.Objstate != "Invoiced" and parent.Objstate != "Cancelled")];
+      }
+      edit {
+         enabled = [(parent.Objstate != "Invoiced" and parent.Objstate != "Cancelled")];
+      }
+      delete {
+         enabled = [(parent.Objstate != "Invoiced" and parent.Objstate != "Cancelled")];
+      }
+   }
+
+   field Stage {
+      size = Small;
+   }
+   field Description;
+   field TotalPercentage {
+      size = Small;
+      validate command TotalPercentageValidate;
+   }
+   field Amount {
+      size = Small;
+      editable = [not parent.OrderNoRef.UsePriceInclTax];
+      validate command AmountValidateCommand;
+
+   }
+   field AmountInclTax {
+      size = Small;
+      editable = [parent.OrderNoRef.UsePriceInclTax];
+      validate command AmountInclTaxValidateCommand;
+   }
+   lov MilestoneIdRef with ReferenceCustomerOrderMilestoneSelector {
+      description = MilestoneIdRef.Description;
+      validate command MilestoneIdValidateCommand;
+   }
+   field ExpectedApprovalDate {
+      size = Small;
+   }
+   field ApprovalDate {
+      size = Small;
+   }
+   field ApprovalType {
+      size = Small;
+   }
+   field Objstate {
+      size = Small;
+      label = "Status";
+   }
+   field InvoiceDate {
+      size = Small;
+   }
+   field InvoiceNo {
+      size = Small;
+   }
+   field NoteText {
+      size = Medium;
+      multiline = true;
+   }
+   field DocumentText;
+
+   commandgroup StatusCommandGroup {
+      command BulkApprove;
+      command BulkRemoveApproval;
+   }
+   commandgroup InvoiceCommandGroup {
+      command CreateInvoiceCommand;
+      command InvoiceCommand;
+   }
+   commandgroup DocumentTextCommandGroup {
+      command DocumentTextCommand;
+   }
+}
+
+----------------------------------- CARDS -----------------------------------
+
+---------------------------------- DIALOGS ----------------------------------
+
+---------------------------------- CHARTS -----------------------------------
+
+--------------------------------- CALENDARS ---------------------------------
+
+---------------------------------- SHEETS -----------------------------------
+
+----------------------------- STATE INDICATORS ------------------------------
+@Override
+stateindicator CustomerOrderLineStateIndicator for CustomerOrderStagedBillingProfile {
+   state "Released" {
+      completed = 25%;
+      emphasis Progress3 = [Objstate = "Released"];
+   }
+   state "Reserved" {
+      completed = 42%;
+      emphasis Progress5 = [Objstate = "Reserved"];
+   }
+   state "Picked" {
+      completed = 58%;
+      emphasis Progress7 = [Objstate = "Picked"];
+   }
+   state "PartiallyDelivered" {
+      completed = 67%;
+      emphasis Progress8 = [Objstate = "PartiallyDelivered"];
+   }
+   state "Delivered" {
+      completed = 83%;
+      emphasis Progress10 = [Objstate = "Delivered"];
+   }
+   state "Invoiced" {
+      completed = 100%;
+      emphasis Progress12 = [Objstate = "Invoiced"];
+   }
+   state "Cancelled" {
+      completed = 100%;
+      emphasis StateCancelled = [Objstate = "Cancelled"];
+   }
+   fieldorder = Released, Reserved, Picked, PartiallyDelivered, Delivered, Invoiced, Cancelled;
+}
+
+----------------------------------- TREES -----------------------------------
+
+---------------------------------- PLUGINS ----------------------------------
+
+------------------------------- IMAGE VIEWERS -------------------------------
+
+--------------------------------- CHECKLIST ---------------------------------
+
+---------------------------- GENERATED FROM APF -----------------------------

@@ -1,0 +1,410 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: ManualReservationsForShipmentAndCustomerOrderLine
+--  Component:    SHPMNT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  220503  RoJalk  SCDEV-8951, Modified Reserve_Shipment_Manually___ and passed a value to the parameter source_ref_demand_code_ in Reserve_Shipment_API.Reserve_Manually.
+--  220126  PrRtlk  SC21R2-7353, Added parent_qty_reserved_ to Calculate_Quantity___ in order to compare with full shipment orderline quantity.
+--  200819  ApWilk  Bug 160507(SCZ-15983), Added the function TranstateLabelConstant().
+--  200417  RasDlk  SCSPRING20-1954, Modified Reserve_Manually___, Reserve_Shipment_Manually___, Reserve___, Unreserve___, Reserve_Hu_Manually___
+--  200417          and Unreserve_Hu_Manually___ by adding sender related information required for manual reservations.
+--  200302  KiSalk  Bug 152676(SCZ-9021), Added parameters part_no_ and contract_ to Generate_Handing_Unit_Snapshot___
+--  190920  RasDlk  SCXTEND-564, Removed temp order reference values.
+--  190829  RasDlk  SCUXXW4-20180, Moved the quantity reservation validations to the server side.
+--  190803  MeAblk  SCUXXW4-18131, Code improvement changes done after review.
+--  190617  RasDlk  SCUXXW4-22464, Corrected an issue related to changing Reserved Qty by passing the QtyReserveDiff to the CalculateQuantity method.
+--  190410  RoJalk  SCUXXW4-4724, Added the method Generate_Handing_Unit_Snapshot___.
+--  190201  RoJalk  SCUXXW4-4704, Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Calculate_Quantity___ (
+   new_qty_reserved_      IN NUMBER,
+   old_qty_reserved_      IN NUMBER,
+   total_qty_reserved_    IN NUMBER,
+   qty_onhand_            IN NUMBER,
+   qty_reserve_diff_      IN NUMBER,
+   qty_available_         IN NUMBER,
+   qty_on_pick_list_      IN NUMBER,
+   parent_qty_reserved_   IN NUMBER,
+   parent_qty_to_reserve_ IN NUMBER,
+   parent_shipment_id_    IN NUMBER) RETURN Calculated_Quantity_Structure_Rec
+IS
+   calculated_quantity_structure_rec_   Calculated_Quantity_Structure_Rec;
+   total_qty_                           NUMBER;
+BEGIN 
+   Reserve_Shipment_API.Validate_Qty_To_Reserve(new_qty_reserved_, qty_available_);
+   
+   IF (new_qty_reserved_ < qty_on_pick_list_) THEN
+      Error_SYS.Record_General(lu_name_, 'UNRESQTYONPICKLIST: Cannot unreserve quantity that is already on a pick list.');
+   END IF; 
+   
+   calculated_quantity_structure_rec_.qty_reserve_diff      := qty_reserve_diff_ + (NVL(new_qty_reserved_,0) - NVL(old_qty_reserved_,0));
+   calculated_quantity_structure_rec_.total_qty_reserved    := (total_qty_reserved_ + NVL(new_qty_reserved_,0) - NVL(old_qty_reserved_, 0));
+   calculated_quantity_structure_rec_.qty_available         := (qty_onhand_ - calculated_quantity_structure_rec_.total_qty_reserved + NVL(new_qty_reserved_,0));
+	calculated_quantity_structure_rec_.new_line_qty_reserved := (NVL(new_qty_reserved_,0) - NVL(old_qty_reserved_, 0));
+   total_qty_                                               := parent_qty_to_reserve_ + parent_qty_reserved_;
+   IF (parent_qty_reserved_ + calculated_quantity_structure_rec_.new_line_qty_reserved > total_qty_) THEN      
+      IF (parent_shipment_id_ = 0) THEN
+         Error_SYS.Record_General(lu_name_, 'ASSIGNMORETHANORDLINEQTY: Cannot assign more than the required quantity on the order line.');
+      ELSE
+         Error_SYS.Record_General(lu_name_, 'ASSIGNMORETHANQTYRES: Cannot assign more than quantity to reserve.');
+      END IF;      
+   END IF;   
+   
+   RETURN calculated_quantity_structure_rec_;
+END Calculate_Quantity___;
+
+
+FUNCTION Check_Use_Shipment_Inventory___ (
+   source_ref1_        IN VARCHAR2,
+   source_ref2_        IN VARCHAR2,
+   source_ref3_        IN VARCHAR2,
+   source_ref4_        IN VARCHAR2,
+   source_ref_type_db_ IN VARCHAR2,
+   shipment_id_        IN NUMBER) RETURN Report_Pick_Structure_Rec
+IS
+   rec_                 Report_Pick_Structure_Rec;
+BEGIN
+	Shipment_Source_Utility_API.Check_All_License_Connected__ (rec_.display_info_type, source_ref1_, source_ref2_, source_ref3_, source_ref4_, source_ref_type_db_);
+   rec_.order_uses_shipment_inventory := Handle_Ship_Invent_Utility_API.Uses_Shipment_Inventory(source_ref1_, source_ref2_, source_ref3_, source_ref4_, source_ref_type_db_, shipment_id_);
+   RETURN rec_;
+END Check_Use_Shipment_Inventory___;
+
+PROCEDURE Reserve_As_Picked___ (
+   source_ref1_        IN VARCHAR2,
+   source_ref2_        IN VARCHAR2,
+   source_ref3_        IN VARCHAR2,
+   source_ref4_        IN VARCHAR2,
+   location_no_        IN VARCHAR2,
+   shipment_id_        IN NUMBER,
+   source_ref_type_db_ IN VARCHAR2)
+IS
+BEGIN
+	Pick_Shipment_API.Report_Reserved_As_Picked__(source_ref1_, source_ref2_, source_ref3_, source_ref4_, location_no_, shipment_id_, source_ref_type_db_);
+END Reserve_As_Picked___;
+
+PROCEDURE Reserve_Manually___ (
+   key_                        IN  Inventory_Part_In_Stock_Key,
+   source_ref1_temp_           IN  VARCHAR2,
+   source_ref2_temp_           IN  VARCHAR2,
+   source_ref3_temp_           IN  VARCHAR2,
+   source_ref4_temp_           IN  VARCHAR2,
+   source_ref_type_db_temp_    IN  VARCHAR2,
+   shipment_id_temp_           IN  NUMBER,
+   parent_shipment_line_no_    IN  NUMBER,
+   parent_supply_code_db_      IN  VARCHAR2,
+   parent_sender_type_         IN  VARCHAR2,
+   parent_sender_id_           IN  VARCHAR2,
+   parent_qty_on_order_        IN  NUMBER,
+   source_qty_reserved_        IN  NUMBER,
+   old_qty_reserved_           IN  NUMBER,
+   qty_reserve_diff_           IN  NUMBER,
+   input_qty_                  IN  NUMBER,
+   input_uom_                  IN  VARCHAR2,
+   input_conversion_           IN  NUMBER,
+   input_value_                IN  VARCHAR2,
+   condition_code_             IN  VARCHAR2,
+   blocked_for_pick_by_choice_ IN  BOOLEAN,
+   info$_                      OUT VARCHAR2)
+IS
+   info_       VARCHAR2(2000);
+BEGIN 
+   Reserve_Shipment_Manually___(key_.contract, key_.part_no, key_.configuration_id, key_.location_no, key_.lot_batch_no, key_.serial_no, key_.eng_chg_level, key_.waiv_dev_rej_no, 
+                                key_.activity_seq, key_.handling_unit_id, source_ref1_temp_, source_ref2_temp_, source_ref3_temp_, source_ref4_temp_, source_ref_type_db_temp_, 
+                                shipment_id_temp_, parent_shipment_line_no_, parent_supply_code_db_, parent_sender_type_, parent_sender_id_, parent_qty_on_order_, source_qty_reserved_, old_qty_reserved_, qty_reserve_diff_, 
+                                input_qty_, input_uom_, input_conversion_, input_value_, condition_code_, blocked_for_pick_by_choice_, info_);   
+   info$_ := info_;
+END Reserve_Manually___;
+
+PROCEDURE Reserve_Shipment_Manually___ (
+   contract_                   IN  VARCHAR2,
+   part_no_                    IN  VARCHAR2, 
+   configuration_id_           IN  VARCHAR2, 
+   location_no_                IN  VARCHAR2, 
+   lot_batch_no_               IN  VARCHAR2,  
+   serial_no_                  IN  VARCHAR2,
+   eng_chg_level_              IN  VARCHAR2, 
+   waiv_dev_rej_no_            IN  VARCHAR2, 
+   activity_seq_               IN  NUMBER,
+   handling_unit_id_           IN  NUMBER,
+   source_ref1_temp_           IN  VARCHAR2,
+   source_ref2_temp_           IN  VARCHAR2,
+   source_ref3_temp_           IN  VARCHAR2,
+   source_ref4_temp_           IN  VARCHAR2,
+   source_ref_type_db_temp_    IN  VARCHAR2,
+   shipment_id_temp_           IN  NUMBER,
+   parent_shipment_line_no_    IN  NUMBER,
+   parent_supply_code_db_      IN  VARCHAR2, 
+   sender_type_                IN  VARCHAR2,
+   sender_id_                  IN  VARCHAR2,
+   parent_qty_on_order_        IN  NUMBER,
+   source_qty_reserved_        IN  NUMBER,
+   old_qty_reserved_           IN  NUMBER,
+   qty_reserve_diff_           IN  NUMBER,
+   input_qty_                  IN  NUMBER,
+   input_uom_                  IN  VARCHAR2,
+   input_conversion_           IN  NUMBER,
+   input_value_                IN  VARCHAR2,
+   condition_code_             IN  VARCHAR2,
+   blocked_for_pick_by_choice_ IN  BOOLEAN,
+   info$_                      OUT VARCHAR2)
+IS
+   owner_                              VARCHAR2(20);
+   info_                               VARCHAR2(2000);
+   validate_ownership_info_            VARCHAR2(2000);
+   shipment_reserve_handl_unit_info_   VARCHAR2(2000);
+   inventory_part_in_stock_rec_        Inventory_Part_In_Stock_API.Public_Rec;
+   pick_by_choice_                     VARCHAR2(5);
+BEGIN    
+   IF(blocked_for_pick_by_choice_) THEN
+      pick_by_choice_ := 'TRUE';
+   ELSE
+      pick_by_choice_ := 'FALSE';
+   END IF;
+   
+	inventory_part_in_stock_rec_ := Inventory_Part_In_Stock_API.Get(contract_, part_no_, configuration_id_, location_no_, lot_batch_no_, serial_no_,
+                                                                 eng_chg_level_, waiv_dev_rej_no_, activity_seq_, handling_unit_id_);
+   
+   IF (inventory_part_in_stock_rec_.part_ownership = 'CUSTOMER OWNED') THEN
+      owner_ := inventory_part_in_stock_rec_.owning_customer_no;
+   ELSIF (inventory_part_in_stock_rec_.part_ownership IN ('CONSIGNMENT', 'SUPPLIER LOANED')) THEN  
+      owner_ := inventory_part_in_stock_rec_.owning_vendor_no;   
+   END IF;   
+   
+   Shipment_Source_Utility_API.Validate_Struc_Ownership__ (validate_ownership_info_, source_ref1_temp_, part_no_, serial_no_, lot_batch_no_,
+                                                           Part_Ownership_API.Decode(inventory_part_in_stock_rec_.part_ownership), owner_, source_ref_type_db_temp_);
+   
+   IF (source_qty_reserved_ < old_qty_reserved_) THEN      
+      Shipment_Reserv_Handl_Unit_API.Remove_Or_Modify(shipment_reserve_handl_unit_info_, source_ref1_temp_, NVL(source_ref2_temp_, '*'), NVL(source_ref3_temp_, '*'), NVL(source_ref4_temp_, '*'), 
+                                                      contract_, part_no_, location_no_, lot_batch_no_, serial_no_, eng_chg_level_, waiv_dev_rej_no_, activity_seq_, handling_unit_id_,
+                                                      configuration_id_, '*', shipment_id_temp_, parent_shipment_line_no_, source_qty_reserved_, old_qty_reserved_, TRUE);
+   END IF;
+   
+   IF (parent_supply_code_db_ IN ('SO', 'DOP') AND parent_qty_on_order_ > 0) THEN
+      Client_SYS.Add_Info(lu_name_, 'UPDATEQTYMANUALLY: Demand quantity or supply quantity should be updated manually.');
+   END IF;
+   
+   -- Implement ValidateQtyToReserve
+   
+   Reserve_Shipment_API.Reserve_Manually (info_, shipment_id_temp_, source_ref1_temp_, source_ref2_temp_, source_ref3_temp_, source_ref4_temp_, source_ref_type_db_temp_, contract_, part_no_,
+                                          configuration_id_, location_no_, lot_batch_no_, serial_no_, eng_chg_level_, waiv_dev_rej_no_, activity_seq_, handling_unit_id_,
+                                          NVL(qty_reserve_diff_,0), input_qty_, input_uom_, input_conversion_, input_value_, Part_Ownership_API.Decode(inventory_part_in_stock_rec_.part_ownership),
+                                          owner_, condition_code_, sender_type_, sender_id_, NULL, pick_by_choice_);
+   
+   info$_ := validate_ownership_info_||shipment_reserve_handl_unit_info_||info_;
+END Reserve_Shipment_Manually___;
+
+PROCEDURE Reserve___ (
+   activity_seq_               IN  NUMBER,
+   configuration_id_           IN  VARCHAR2,
+   contract_                   IN  VARCHAR2,
+   eng_chg_level_              IN  VARCHAR2,
+   handling_unit_id_           IN  NUMBER,
+   location_no_                IN  VARCHAR2,
+   lot_batch_no_               IN  VARCHAR2,
+   part_no_                    IN  VARCHAR2,
+   serial_no_                  IN  VARCHAR2,
+   waiv_dev_rej_no_            IN  VARCHAR2,
+   available_to_reserve_       IN  NUMBER,
+   parent_qty_to_reserve_      IN  NUMBER,
+   source_ref1_                IN  VARCHAR2,
+   source_ref2_                IN  VARCHAR2,
+   source_ref3_                IN  VARCHAR2,
+   source_ref4_                IN  VARCHAR2,
+   source_ref_type_db_         IN  VARCHAR2,
+   shipment_id_                IN  NUMBER,
+   shipment_line_no_           IN  NUMBER,
+   supply_code_db_             IN  VARCHAR2,
+   sender_type_                IN VARCHAR2,
+   sender_id_                  IN VARCHAR2,
+   parent_qty_on_order_        IN  NUMBER,
+   source_qty_reserved_        IN  NUMBER,
+   old_qty_reserved_           IN  NUMBER,
+   input_qty_                  IN  NUMBER,
+   input_uom_                  IN  VARCHAR2,
+   input_conversion_           IN  NUMBER,
+   input_value_                IN  VARCHAR2,
+   condition_code_             IN  VARCHAR2,
+   blocked_for_pick_by_choice_ IN  BOOLEAN,
+   info$_                      OUT VARCHAR2)
+IS
+   qty_reserve_diff_       NUMBER;
+   info_                   VARCHAR2(2000);
+BEGIN  
+   IF (available_to_reserve_ <= parent_qty_to_reserve_) THEN         
+      qty_reserve_diff_ := available_to_reserve_;
+   ELSE         
+      qty_reserve_diff_ := parent_qty_to_reserve_;
+   END IF;
+   
+   Reserve_Shipment_Manually___(contract_, part_no_, configuration_id_, location_no_, lot_batch_no_, serial_no_, eng_chg_level_, waiv_dev_rej_no_, activity_seq_, handling_unit_id_,
+                                source_ref1_, source_ref2_, source_ref3_, source_ref4_, source_ref_type_db_, shipment_id_, shipment_line_no_,
+                                supply_code_db_, sender_type_, sender_id_, parent_qty_on_order_, source_qty_reserved_, old_qty_reserved_, qty_reserve_diff_, 
+                                input_qty_, input_uom_, input_conversion_, input_value_, condition_code_, blocked_for_pick_by_choice_, info_);   
+   info$_ := info_;         
+END Reserve___;
+
+PROCEDURE Unreserve___ (
+   activity_seq_               IN  NUMBER,
+   configuration_id_           IN  VARCHAR2,
+   contract_                   IN  VARCHAR2,
+   eng_chg_level_              IN  VARCHAR2,
+   handling_unit_id_           IN  NUMBER,
+   location_no_                IN  VARCHAR2,
+   lot_batch_no_               IN  VARCHAR2,
+   part_no_                    IN  VARCHAR2,
+   serial_no_                  IN  VARCHAR2,
+   waiv_dev_rej_no_            IN  VARCHAR2,
+   source_ref1_                IN  VARCHAR2,
+   source_ref2_                IN  VARCHAR2,
+   source_ref3_                IN  VARCHAR2,
+   source_ref4_                IN  VARCHAR2,
+   source_ref_type_db_         IN  VARCHAR2,
+   shipment_id_                IN  NUMBER,
+   shipment_line_no_           IN  NUMBER,
+   supply_code_db_             IN  VARCHAR2,
+   sender_type_                IN VARCHAR2,
+   sender_id_                  IN VARCHAR2,
+   parent_qty_on_order_        IN  NUMBER,
+   source_qty_reserved_        IN  NUMBER,
+   old_qty_reserved_temp_      IN  NUMBER,
+   input_qty_                  IN  NUMBER,
+   input_uom_                  IN  VARCHAR2,
+   input_conversion_           IN  NUMBER,
+   input_value_                IN  VARCHAR2,
+   condition_code_temp_        IN  VARCHAR2,
+   blocked_for_pick_by_choice_ IN  BOOLEAN,
+   qty_on_pick_list_           IN  NUMBER,
+   info$_                      OUT VARCHAR2)
+IS
+   qty_reserve_diff_       NUMBER;
+   info_                   VARCHAR2(2000);
+BEGIN
+	IF (source_qty_reserved_ IS NOT NULL) THEN         
+      qty_reserve_diff_ := NVL(qty_reserve_diff_, 0) - (NVL(source_qty_reserved_, 0) - NVL(qty_on_pick_list_, 0));
+   END IF;
+
+   Reserve_Shipment_Manually___(contract_, part_no_, configuration_id_, location_no_, lot_batch_no_, serial_no_, eng_chg_level_, waiv_dev_rej_no_, activity_seq_, handling_unit_id_,
+                                source_ref1_, source_ref2_, source_ref3_, source_ref4_, source_ref_type_db_, shipment_id_, shipment_line_no_,
+                                supply_code_db_, sender_type_, sender_id_, parent_qty_on_order_, source_qty_reserved_, old_qty_reserved_temp_, qty_reserve_diff_, 
+                                input_qty_, input_uom_, input_conversion_, input_value_, condition_code_temp_, blocked_for_pick_by_choice_, info_);   
+   info$_ := info_;         
+END Unreserve___;
+
+PROCEDURE Reserve_Hu_Manually___ (
+   reserve_hu_selection_ IN  VARCHAR2,
+   info$_                OUT VARCHAR2)
+IS
+   info_                      VARCHAR2(2000);
+   current_selection_         VARCHAR2(32000);
+   selected_handling_unit_    NUMBER;
+   handling_unit_list_        VARCHAR2(32000);
+   records_                   json_array_t := json_array_t.parse(reserve_hu_selection_);   
+   source_ref1_               VARCHAR2(50);
+   source_ref2_               VARCHAR2(50);
+   source_ref3_               VARCHAR2(50);
+   source_ref4_               VARCHAR2(50);
+   source_ref_type_db_        VARCHAR2(20);
+   shipment_id_               NUMBER;   
+   sender_type_               VARCHAR2(20);
+   sender_id_                 VARCHAR2(50);
+BEGIN
+   FOR record_ IN 0 .. 0 LOOP 
+      current_selection_ := records_.get_string(record_);      
+      source_ref1_        := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PARENT_SOURCE_REF1');
+      source_ref2_        := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PARENT_SOURCE_REF2');
+      source_ref3_        := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PARENT_SOURCE_REF3');
+      source_ref4_        := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PARENT_SOURCE_REF4');
+      source_ref_type_db_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PARENT_SOURCE_REF_TYPE_DB');
+      shipment_id_        := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'SHIPMENT_ID'));
+      sender_type_        := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PARENT_SENDER_TYPE');
+      sender_id_          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PARENT_SENDER_ID');
+   END LOOP;
+   
+   Source_Manual_Reserv_Main_Initial_Check___(shipment_id_, source_ref1_, source_ref2_, source_ref3_, source_ref4_, source_ref_type_db_);
+   
+	FOR record_ IN 0 .. records_.get_size - 1 LOOP 
+      current_selection_      := records_.get_string(record_);
+      selected_handling_unit_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'HANDLING_UNIT_ID');
+      handling_unit_list_     := handling_unit_list_ || selected_handling_unit_ || Client_SYS.record_separator_;
+   END LOOP;
+   
+   Reserve_Shipment_API.Reserve_Manually_Hu__(info_, source_ref1_, source_ref2_, source_ref3_, source_ref4_, handling_unit_list_, shipment_id_, source_ref_type_db_, sender_type_, sender_id_);
+   info$_ := info_;
+END Reserve_Hu_Manually___;
+
+PROCEDURE Unreserve_Hu_Manually___ (
+   unreserve_hu_selection_ IN  VARCHAR2,
+   info$_                  OUT VARCHAR2)
+IS
+   info_                      VARCHAR2(2000);
+   current_selection_         VARCHAR2(32000);
+   selected_handling_unit_    NUMBER;
+   handling_unit_list_        VARCHAR2(32000);
+   records_                   json_array_t := json_array_t.parse(unreserve_hu_selection_);   
+   source_ref1_               VARCHAR2(50);
+   source_ref2_               VARCHAR2(50);
+   source_ref3_               VARCHAR2(50);
+   source_ref4_               VARCHAR2(50);
+   source_ref_type_db_        VARCHAR2(20);
+   shipment_id_               NUMBER;
+   sender_type_               VARCHAR2(20);
+   sender_id_                 VARCHAR2(50);
+BEGIN
+   FOR record_ IN 0 .. 0 LOOP 
+      current_selection_  := records_.get_string(record_);      
+      source_ref1_        := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PARENT_SOURCE_REF1');
+      source_ref2_        := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PARENT_SOURCE_REF2');
+      source_ref3_        := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PARENT_SOURCE_REF3');
+      source_ref4_        := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PARENT_SOURCE_REF4');
+      source_ref_type_db_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PARENT_SOURCE_REF_TYPE_DB');
+      shipment_id_        := Client_SYS.Attr_Value_To_Number(Client_SYS.Get_Key_Reference_Value(current_selection_, 'SHIPMENT_ID'));
+      sender_type_        := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PARENT_SENDER_TYPE');
+      sender_id_          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PARENT_SENDER_ID');
+   END LOOP;   
+   
+   Source_Manual_Reserv_Main_Initial_Check___(shipment_id_, source_ref1_, source_ref2_, source_ref3_, source_ref4_, source_ref_type_db_);
+   
+	FOR record_ IN 0 .. records_.get_size - 1 LOOP 
+      current_selection_ := records_.get_string(record_);
+      selected_handling_unit_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'HANDLING_UNIT_ID');
+      handling_unit_list_ := handling_unit_list_ || selected_handling_unit_ || Client_SYS.record_separator_;
+   END LOOP;   
+   
+   Reserve_Shipment_API.Unreserve_Manually_Hu__(info_, source_ref1_, source_ref2_, source_ref3_, source_ref4_, handling_unit_list_, shipment_id_, source_ref_type_db_, sender_type_, sender_id_);
+   info$_ := info_;
+END Unreserve_Hu_Manually___;
+
+PROCEDURE Generate_Handing_Unit_Snapshot___ (
+   source_ref1_        IN VARCHAR2,
+   source_ref2_        IN VARCHAR2,
+   source_ref3_        IN VARCHAR2,
+   source_ref4_        IN VARCHAR2,
+   source_ref_type_db_ IN VARCHAR2,
+   shipment_id_        IN NUMBER,
+   part_no_            IN VARCHAR2,
+   contract_           IN VARCHAR2 ) 
+IS
+BEGIN
+   Reserve_Shipment_API.Generate_Man_Res_Hu_Snapshot(source_ref1_, source_ref2_, source_ref3_, source_ref4_, shipment_id_, source_ref_type_db_, part_no_, contract_ );
+END Generate_Handing_Unit_Snapshot___;
+
+
+FUNCTION Transtate_Label_Constant___ (
+   source_ IN VARCHAR2) RETURN VARCHAR2
+IS
+BEGIN
+	IF  source_ = 'Customer Order Line' THEN
+      RETURN Language_SYS.Translate_Constant(lu_name_, 'CUSTORDCONST: Customer Order Line');
+   ELSIF  source_ = 'Shipment Line' THEN
+      RETURN Language_SYS.Translate_Constant(lu_name_, 'SHPMNTCONST: Shipment Line');
+   ELSE
+      RETURN source_;
+   END IF;  
+END Transtate_Label_Constant___;

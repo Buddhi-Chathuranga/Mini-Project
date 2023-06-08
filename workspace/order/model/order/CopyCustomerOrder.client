@@ -1,0 +1,336 @@
+---------------------------------------------------------------------------------------------------
+-- Date       Sign   History
+-- ---------- ------ ------------------------------------------------------------------------------
+-- 2019-06-14 fgusse SCUXXW4-21060, Added format = uppercase to CustomerNoRef and to CurrencyCode,
+--                                  added "copy CustomerOrderStructureVar into this" in SetupCustomerOrderInfo
+-- 2019-06-12 fgusse SCUXXW4-21626, Added validation for CurrencyCode, CustomerNo, CustomerOrderNo
+-- 2019-05-03 Tmahlk SCUXXW4-20291, Changed the savemode to OnFinish
+-- 2018-07-30 HaPulk SCUXXW4-8270, Converted from dlgCopyCustomerOrder using MTG Version: 1.24
+----------------------------------------------------------------------------------------------------
+
+client CopyCustomerOrder;
+component ORDER;
+layer Core;
+projection CopyCustomerOrder;
+include fragment OrdersPerSiteLovSelector;
+include fragment CustOrdCust6Selector;
+include fragment CustOrderTypeLovSelector;
+
+
+-------------------------------- MAIN PAGES ---------------------------------
+navigator {
+   entry CopyCustomerOrderAssistantNavEntry parent OrderNavigator.SalesOrder at index 400 {
+      label = "Copy Customer Order";
+      assistant Assistant;
+   }
+}
+
+--------------------------------- COMMANDS ----------------------------------
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+
+-------------------------------- MAIN PAGES ---------------------------------
+
+-------------------------------- ASSISTANTS ---------------------------------
+assistant Assistant using CopyCustomerOrderSet {
+   label = "Copy Customer Order";
+   savemode = OnFinish;
+
+   setup SetupCustomerOrderInfo {
+      variable FromOrderNoStr Text;
+      variable CustomerOrderStructureVar {
+         type = Structure(CustomerOrderStructure);
+      }
+      execute {
+
+         set FromOrderNo = FromOrderNoStr;
+         call GetCustomerOrderDetails(FromOrderNo) into CustomerOrderStructureVar;
+         copy CustomerOrderStructureVar into this;
+         set OriginalCustomerNo = CustomerNo;
+         set OriginalCurrencyCode = CurrencyCode;
+         set OriginalFetUsePriceIncTax = FetchedUsePriceIncTax;
+      }
+   }
+
+   steps {
+      step {
+         group FromCustomerOrderGroup;
+         group ToCustomerOrderGroup;
+         group CopyOptionsGroup;
+      }
+      final step {
+
+      }
+   }
+   finish command {
+      enabled = [FromOrderNo != null];
+
+      variable CopyOrderBool {
+         type = Boolean;
+      }
+
+      execute {
+         set CopyOrderBool = false;
+
+         if [CopyOrderLines = true or CopyRentalOrderLines = true]
+            {
+            call OrderLinesAvailableToCopy(FromOrderNo, CopyOrderLines, CopyRentalOrderLines) into CopyOrderBool;
+            if [CopyOrderBool = false] {
+               confirm("There are no lines available for copying, which may be because the CO originates from a different source. Do you still want to create a new CO header?") {
+                  when OK {
+                     set CopyOrderBool = true;
+                  }
+                  when CANCEL {
+                     exit CANCEL;
+                  }
+               }
+            }
+         }
+         else
+            {
+            set CopyOrderBool = true;
+         }
+
+
+         if [CopyOrderBool = true]
+            {
+            call CopyOrder(ToOrderNo, FromOrderNo, CustomerNo, OrderType, CurrencyCode, ToContract, WantedDeliveryDate,
+            CopyOrderLines, CopyRentalOrderLines, CopyCharges, CopyAddressInfo, CopyDeliveryInfo,
+            CopyMiscOrderInfo, CopyDocumentInfo, CopyTaxDetails, CopyPricing, CopyDocumentText, CopyNotes, CopyRepresentatives,
+            CopyContacts, CopyPrepostings
+            ) into ToOrderNo;
+
+            messagebox("", question, "Order No ${ToOrderNo} has been created. Do you want to view it now ?") {
+               when "Yes" {
+                  navigate "page/CustomerOrder/Form?$filter=OrderNo eq $[ToOrderNo]";
+               }
+               when "No" {
+                  exit;
+               }
+            }
+         }
+      }
+   }
+   cancel command {
+      execute {
+         navigate back;
+      }
+   }
+}
+
+--------------------------------- COMMANDS ----------------------------------
+command EnableDisablePriceAndDiscounts for CopyCustomerOrderVirtual {
+   execute {
+      if [OriginalFetUsePriceIncTax != FetchedUsePriceIncTax] {
+         set CopyPricingEnable = null;
+      }
+      else
+         {
+         if [CurrencyCode != OriginalCurrencyCode] {
+            set CopyPricingEnable = null;
+         }
+         else {
+            set CopyPricingEnable = true;
+         }
+      }
+   }
+}
+
+command ValidateEnableDisablePriceAndDiscounts for CopyCustomerOrderVirtual clone EnableDisablePriceAndDiscounts {
+   execute {
+      if [OriginalCurrencyCode != null] {
+         super;
+      }
+   }
+}
+
+command ValidateEnableDisablePriceAndDiscountsClone for CopyCustomerOrderVirtual clone EnableDisablePriceAndDiscounts {
+   execute {
+      if [OriginalCustomerNo != null and OriginalCustomerNo != CustomerNo] {
+         set CopyAddressInfo = false;
+      }
+      if [OriginalCustomerNo != null] {
+
+         if [CustomerNo != OriginalCustomerNo] {
+            set CopyTaxDetails = false;
+            set CopyCharges = false;
+            set CopyAddressInfo = false;
+            set CopyDeliveryInfo = false;
+            set CopyDocumentInfo = false;
+            set CopyRepresentatives = false;
+            set CopyContacts = false;
+            set CopyPrepostings = false;
+            set CopyDocumentText = false;
+            set CopyNotes = false;
+            set CopyMiscOrderInfo = false;
+         }
+         else {
+            set CopyContacts = true;
+            set CopyCharges = true;
+            set CopyAddressInfo = true;
+            set CopyDeliveryInfo = true;
+            set CopyDocumentInfo = true;
+            set CopyRepresentatives = true;
+            set CopyTaxDetails = true;
+            set CopyPrepostings = true;
+            set CopyDocumentText = true;
+            set CopyNotes = true;
+            set CopyMiscOrderInfo = true;
+         }
+
+         if [CustomerNo = null] {
+            set CustomerNo = OriginalCustomerNo;
+         }
+         call GetCustomerDefaults(CustomerNo, ToContract) into CustomerOrderStructureVar;
+         set OrderType = CustomerOrderStructureVar.OrderType;
+         set CurrencyCode = CustomerOrderStructureVar.CurrencyCode;
+         set FetchedUsePriceIncTax = CustomerOrderStructureVar.FetchedUsePriceIncTax;
+         super;
+      }
+   }
+}
+
+--------------------------------- SELECTORS ---------------------------------
+
+---------------------------------- GROUPS -----------------------------------
+
+group FromCustomerOrderGroup for CopyCustomerOrderVirtual {
+   label = "From Customer Order";
+
+   lov CustomerOrderNoRef with ReferenceOrdersPerSiteLovSelector {
+      size = Small;
+      validate command {
+
+         variable CustomerOrderStructureVar {
+            type = Structure(CustomerOrderStructure);
+         }
+         execute {
+            call GetCustomerOrderDetails(FromOrderNo) into CustomerOrderStructureVar;
+            set CustomerNo = CustomerOrderStructureVar.CustomerNo;
+            set OrderType = CustomerOrderStructureVar.OrderType;
+            set CurrencyCode = CustomerOrderStructureVar.CurrencyCode;
+            set ToContract = CustomerOrderStructureVar.Contract;
+            set WantedDeliveryDate = CustomerOrderStructureVar.WantedDeliveryDate;
+            set Company = CustomerOrderStructureVar.Company;
+            set FetchedUsePriceIncTax = CustomerOrderStructureVar.FetchedUsePriceIncTax;
+            set OriginalCustomerNo = CustomerNo;
+            set OriginalCurrencyCode = CurrencyCode;
+            set OriginalFetUsePriceIncTax = FetchedUsePriceIncTax;
+         }
+      }
+   }
+}
+group ToCustomerOrderGroup for CopyCustomerOrderVirtual {
+   label = "New Customer Order Info";
+
+   field ToOrderNo {
+      size = Small;
+      maxlength = 12;
+   }
+
+   lov CustomerNoRef with ReferenceCustOrdCust6Selector {
+      validate command ValidateEnableDisablePriceAndDiscountsClone;
+      format = uppercase;
+   }
+
+   lov OrderTypeRef with ReferenceCustOrderTypeLovSelector {
+      size = Small;
+   }
+
+   lov CurrencyCodeRef with ReferenceIsoCurrencySelector {
+      size = Small;
+      validate command ValidateEnableDisablePriceAndDiscounts;
+   }
+
+   field WantedDeliveryDate;
+
+}
+
+group CopyOptionsGroup for CopyCustomerOrderVirtual {
+   label = "Copy Options";
+
+   field CopyOrderLines {
+      size = Small;
+      label = "Order Lines";
+   }
+
+   field CopyRentalOrderLines {
+      size = Small;
+      label = "Rental Order Lines";
+   }
+   field CopyCharges {
+      size = Small;
+      label = "Charges";
+   }
+   field CopyAddressInfo {
+      size = Small;
+      label = "Address Information";
+      editable = [CopyAddressInfoEnable = true];
+   }
+
+   field CopyDeliveryInfo {
+      size = Small;
+      label = "Delivery Information";
+   }
+   field CopyMiscOrderInfo {
+      size = Small;
+      label = "General Order Information";
+      editable = [CopyMiscOrderInfoEnable = true];
+
+   }
+   field CopyDocumentInfo {
+      size = Small;
+      label = "Document Information";
+   }
+
+   field CopyRepresentatives {
+      size = Small;
+      label = "Representatives";
+   }
+
+   field CopyContacts {
+      size = Small;
+      label = "Contacts";
+   }
+   field CopyTaxDetails {
+      size = Small;
+      label = "Tax Details";
+   }
+   field CopyPricing {
+      size = Small;
+      label = "Price and Discount";
+      visible = [CopyPricingEnable != null];
+   }
+   field CopyPrepostings {
+      size = Small;
+      label = "Pre postings";
+   }
+   field CopyDocumentText {
+      size = Small;
+      label = "Document Text";
+   }
+   field CopyNotes {
+      size = Small;
+      label = "Notes";
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+
+----------------------------------- CARDS -----------------------------------
+
+---------------------------------- DIALOGS ----------------------------------
+
+---------------------------------- CHARTS -----------------------------------
+
+--------------------------------- CALENDARS ---------------------------------
+
+---------------------------------- SHEETS -----------------------------------
+
+----------------------------- STATE INDICATORS ------------------------------
+
+----------------------------------- TREES -----------------------------------
+
+---------------------------------- PLUGINS ----------------------------------
+
+------------------------------- IMAGE VIEWERS -------------------------------

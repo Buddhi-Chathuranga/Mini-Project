@@ -1,0 +1,96 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     FindSalesPartByCharacteristics
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+-- 2019-01-10  SaGeLK  SCUXXW4-8770, Moved the Sales part of the code from FindPartByCharacteristics
+-----------------------------------------------------------------------------
+
+layer Core;
+
+--Second Step
+--Filter SALES PART List using the characteristic value (Attribute Value) and Characteristic Template (Eng Attribute)
+FUNCTION Filter_Sales_Part_List___(
+   eng_attribute_ IN VARCHAR2 )  RETURN Objid_Arr
+IS
+   base_collection_             objid_Arr := Objid_Arr();
+   stmt_                        VARCHAR2(32000);
+   TYPE dynamic_cursor_type     IS REF CURSOR;
+   dynamic_cursor_              dynamic_cursor_type;
+   rec_                         Sales_Part%ROWTYPE;
+   check_number_                NUMBER := 0;
+   begin_number_                VARCHAR2(50);
+   end_number_                  VARCHAR2(50);
+   begin_char_                  VARCHAR2(50);
+   end_char_                    VARCHAR2(50);
+   temp_search_string_          VARCHAR2(2000);
+   
+   CURSOR get_characteristic_templ_char_list IS 
+      SELECT *
+      FROM FIND_PART_BY_CHARACTERISTICS_CHARACTERISTIC_TEMPL_CHAR_LIST_VIRTUAL_VRT
+      WHERE eng_attribute = eng_attribute_;  
+BEGIN
+   
+   IF eng_attribute_ IS NOT NULL THEN
+      stmt_ := 'SELECT * FROM SALES_PART WHERE eng_attribute = :eng_attribute_';
+   END IF;
+   
+   FOR comb_list_rec_ IN get_characteristic_templ_char_list LOOP
+      
+      IF comb_list_rec_.characteristic_value IS NOT NULL THEN
+         check_number_ := INSTR(comb_list_rec_.characteristic_value, '..');
+         IF check_number_ > 0 THEN
+            -- The user can enter a range in the field, so split the string to get the begin and end of the range. For example, R..T => Begin = R, End = T.
+            begin_char_ := substr(comb_list_rec_.characteristic_value,1,INSTR(comb_list_rec_.characteristic_value,'.',1)-1);
+            end_char_:= substr(comb_list_rec_.characteristic_value,INSTR(comb_list_rec_.characteristic_value,'.',1,2)+1);
+            Assert_SYS.Assert_Is_Alphanumeric(begin_char_);
+            Assert_SYS.Assert_Is_Alphanumeric(end_char_);
+            stmt_ :=  stmt_ || ' AND CATALOG_NO = Sales_Part_Characteristic_API.Check_Char_String_Interval(CONTRACT, CATALOG_NO, ''' || comb_list_rec_.characteristic_code || ''', ''' || begin_char_ || ''', ''' || end_char_  ||''')';
+         ELSE
+            -- If discrete charactor exists do not check for Assert_Is_Alphanumeric since Code itself may contain special charactors. But if the charactor code is type of variable, user can save any
+            -- value as the Attribute Value Alpha in inventory part. Hence for better safety any special charactors other than '%' will be rejected.
+            -- Workround: User has to replace any special charactors with the wildcard '%' when searching.
+            IF (NOT Discrete_Charac_Value_API.Exists(comb_list_rec_.characteristic_code, comb_list_rec_.characteristic_value)) THEN
+               -- Removing '%' since the wildcard is possible to enter as an attribute value, but the rest of the value will be checked for Alphanumeric by Assert_SYS and no other special charactors will be allowed.            
+               temp_search_string_ := REPLACE(comb_list_rec_.characteristic_value, '%');            
+               Assert_SYS.Assert_Is_Alphanumeric(temp_search_string_);
+            END IF;              
+            stmt_ := stmt_ || ' AND CATALOG_NO = Sales_Part_Characteristic_API.Check_Char_String(CONTRACT, CATALOG_NO, ''' || comb_list_rec_.characteristic_code || ''', ''' || comb_list_rec_.characteristic_value ||''')';
+         END IF;
+      END IF;
+      
+      IF comb_list_rec_.numeric_characteristic_value IS NOT NULL THEN
+         check_number_ := INSTR(comb_list_rec_.numeric_characteristic_value, '..');
+         IF check_number_ > 0 THEN
+            begin_number_ := substr(comb_list_rec_.numeric_characteristic_value,1,INSTR(comb_list_rec_.numeric_characteristic_value,'.',1)-1);
+            end_number_ := substr(comb_list_rec_.numeric_characteristic_value,INSTR(comb_list_rec_.numeric_characteristic_value,'.',1,2)+1);
+            Assert_SYS.Assert_Is_Number(begin_number_);
+            Assert_SYS.Assert_Is_Number(end_number_);
+            stmt_ :=  stmt_ || ' AND CATALOG_NO = Sales_Part_Characteristic_API.Check_Char_Numeric_Interval(CONTRACT, CATALOG_NO, ''' || comb_list_rec_.characteristic_code || ''', ''' || begin_number_ || ''', ''' || end_number_  ||''')';
+         ELSE
+            Assert_SYS.Assert_Is_Number(comb_list_rec_.numeric_characteristic_value);
+            stmt_ :=  stmt_ || ' AND CATALOG_NO = Sales_Part_Characteristic_API.Check_Char_Numeric(CONTRACT, CATALOG_NO, ''' || comb_list_rec_.characteristic_code || ''', ''' || comb_list_rec_.numeric_characteristic_value ||''')';
+         END IF;
+         
+      END IF;
+      
+   END LOOP;
+   
+   IF stmt_ IS NOT NULL THEN
+      @ApproveDynamicStatement(2018-11-26, SaGeLK)
+      OPEN dynamic_cursor_ FOR stmt_ USING eng_attribute_;
+      LOOP
+         FETCH dynamic_cursor_ INTO rec_;
+         EXIT WHEN dynamic_cursor_ %NOTFOUND;
+         base_collection_.extend;
+         base_collection_(base_collection_.last) := rec_.objid;
+      END LOOP;
+      CLOSE dynamic_cursor_;
+   END IF;
+
+RETURN base_collection_;
+END Filter_Sales_Part_List___;

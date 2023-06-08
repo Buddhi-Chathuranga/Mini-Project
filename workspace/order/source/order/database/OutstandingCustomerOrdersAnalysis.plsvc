@@ -1,0 +1,88 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: OutstandingCustomerOrdersAnalysis
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  190702  MaAuse  SCUXXW4-21428, Modified Get_Unique_Currency_Code___ AND Calculate_Statistics_Summary___ to handle CLOB type. Removed Get_Next_From_Attr___.
+--  180827  JeLise  SCUXXW4-8547, Created for the convertion of dlgOrdStatistics.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Get_Unique_Currency_Code___(
+   full_selection_ IN CLOB ) RETURN VARCHAR2
+IS
+   selection_         json_array_t := json_array_t.parse(full_selection_);
+ 	current_selection_ VARCHAR2(32000);
+   currency_code_     VARCHAR2(3) := NULL;
+   current_currency_  VARCHAR2(3) := NULL;
+   order_no_          VARCHAR2(12);
+   contract_          VARCHAR2(5);
+BEGIN
+   FOR i_ IN 0 .. selection_.get_size - 1 LOOP 
+      current_selection_ := selection_.get_string(i_);
+ 	 	order_no_          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');
+      contract_          := Customer_Order_API.Get_Contract(order_no_);
+      current_currency_  := Company_Finance_API.Get_Currency_Code(Site_API.Get_Company(contract_));
+      IF (NVL(currency_code_, '*') != NVL(current_currency_, '*'))THEN
+         IF (currency_code_ IS NULL)THEN
+            currency_code_ := current_currency_;
+         ELSE
+            currency_code_ := NULL;
+            EXIT;
+         END IF;
+      END IF;
+   END LOOP;
+
+   RETURN currency_code_;
+END Get_Unique_Currency_Code___;
+
+
+FUNCTION Calculate_Statistics_Summary___ (
+   full_selection_ IN CLOB ) RETURN Statistics_Summary_Structure_Rec
+IS
+   selection_           json_array_t := json_array_t.parse(full_selection_);
+ 	current_selection_   VARCHAR2(32000);
+   order_no_            VARCHAR2(12);
+   line_no_             VARCHAR2(4);
+   rel_no_              VARCHAR2(4);
+   line_item_no_        NUMBER;
+   order_total_         NUMBER;
+   contribution_margin_ NUMBER;
+   rec_                 Statistics_Summary_Structure_Rec;
+   
+   CURSOR get_totals IS
+      SELECT (NVL(buy_qty_due, 0) + (NVL(qty_shipdiff, 0) / conv_factor * inverted_conv_factor) - NVL(qty_invoiced, 0)) * NVL(base_sale_unit_price, 0) * NVL(price_conv_factor, 1) * ((100 - (NVL(order_discount, 0) + NVL(additional_discount, 0))) / 100) * ((100 - NVL(discount, 0)) / 100),
+             (NVL(buy_qty_due, 0) + (NVL(qty_shipdiff, 0) / conv_factor * inverted_conv_factor) - NVL(qty_invoiced, 0)) * ((NVL(base_sale_unit_price, 0) * NVL(price_conv_factor, 1) * ((100 - (NVL(order_discount, 0) + NVL(additional_discount, 0))) / 100) * ((100 - NVL(discount, 0)) / 100)) - cost * conv_factor/inverted_conv_factor)
+      FROM customer_order_join
+      WHERE order_no     = order_no_
+      AND   line_no      = line_no_
+      AND   rel_no       = rel_no_
+      AND   line_item_no = line_item_no_;
+BEGIN
+   rec_.outstanding_orders       := 0;
+   rec_.contribution_margin      := 0;
+   rec_.contribution_margin_rate := 0;
+   FOR i_ IN 0 .. selection_.get_size - 1 LOOP
+ 	 	current_selection_ := selection_.get_string(i_);
+ 	 	order_no_          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');
+ 	 	line_no_           := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_NO');
+ 	 	rel_no_            := Client_SYS.Get_Key_Reference_Value(current_selection_, 'REL_NO');
+ 	 	line_item_no_      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_ITEM_NO');
+         
+      OPEN get_totals;
+      FETCH get_totals INTO order_total_, contribution_margin_;
+      CLOSE get_totals;
+
+      rec_.outstanding_orders  := rec_.outstanding_orders + order_total_;
+      rec_.contribution_margin := rec_.contribution_margin + contribution_margin_;
+   END LOOP;
+   
+   rec_.contribution_margin_rate := (rec_.contribution_margin / rec_.outstanding_orders) * 100;
+   
+   RETURN rec_;
+END Calculate_Statistics_Summary___;

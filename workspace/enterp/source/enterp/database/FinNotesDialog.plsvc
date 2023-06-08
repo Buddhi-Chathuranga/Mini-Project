@@ -1,0 +1,340 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     FinNotesDialog
+--  Component:    ENTERP
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+-----------------------------------------------------------------------------
+
+layer Core;
+
+TYPE Notes_Info_Rec IS RECORD (
+   user_id                        VARCHAR2(100),
+   note_id                        NUMBER,
+   package_name                   VARCHAR2(4000),
+   calling_projection_name        VARCHAR2(4000),
+   is_new_note                    VARCHAR2(5),
+   key_attr                       VARCHAR2(4000),
+   modified_key_ref               VARCHAR2(4000),
+   title                          VARCHAR2(4000));
+
+-- Populate_Fin_Notes___
+--   Method used to load the temporary tables with the note texts for the given Note Id
+PROCEDURE Populate_Fin_Notes___ (
+   parent_objkey_ IN VARCHAR2, 
+   note_id_       IN NUMBER ) 
+IS   
+   fin_notes_virtual_rec_   Fin_Notes_Virtual_Rec;
+   CURSOR get_finnotes IS   
+      SELECT *                              
+      FROM   fin_note_text_tab
+      WHERE  note_id = note_id_; 
+BEGIN      
+   FOR rec_ IN get_finnotes LOOP  
+      fin_notes_virtual_rec_.objkey          := sys_guid();
+      fin_notes_virtual_rec_.parent_objkey   := parent_objkey_;
+      fin_notes_virtual_rec_.note_id         := note_id_;
+      fin_notes_virtual_rec_.user_id         := rec_.user_id;
+      fin_notes_virtual_rec_.timestamp       := rec_.timestamp;
+      fin_notes_virtual_rec_.text            := rec_.text;
+      fin_notes_virtual_rec_.row_no          := rec_.row_no;
+      fin_notes_virtual_rec_.note_source     := 'POPULATE';
+      CRUD_Create___(fin_notes_virtual_rec_);
+   END LOOP;
+END Populate_Fin_Notes___;
+
+
+@Override
+PROCEDURE CRUD_Create___ (
+   rec_ IN Notes_Info_Virtual_Rec )
+IS
+   temp_rec_      Notes_Info_Rec;
+   oldrec_        Notes_Info_Virtual_Rec := rec_;
+   newrec_        Notes_Info_Virtual_Rec := rec_;
+   key_           Notes_Info_Virtual_Key;
+BEGIN   
+   super(rec_);   
+   key_.objkey := rec_.objkey; 
+   newrec_ := Get_Record___(key_);
+   -- Function get data based on the passed parameters to the assistant
+   temp_rec_ := Fin_Note_Info_Data___(rec_.package_name,	
+                                      rec_.calling_projection_name,
+                                      rec_.key_ref,
+                                      rec_.entity_name,
+                                      rec_.title);
+   -- Set values to the newrec and update the record   
+   newrec_.modified_key_ref := Nvl(temp_rec_.modified_key_ref, rec_.key_ref);
+   newrec_.title := temp_rec_.title;
+   newrec_.is_new_note := temp_rec_.is_new_note;
+   newrec_.note_id := temp_rec_.note_id;   
+   CRUD_Update___(oldrec_, newrec_);
+   -- fetch the notes if notes exists
+   IF (newrec_.is_new_note = 'FALSE') THEN
+      Populate_Fin_Notes___(rec_.objkey, newrec_.note_id);
+   END IF;      
+END CRUD_Create___;
+
+
+@Override 
+PROCEDURE CRUD_Default___ (
+   rec_ IN OUT Fin_Notes_Virtual_Rec )
+IS
+   new_rec_    fin_note_text_tab%ROWTYPE;
+BEGIN      
+   super(rec_);     
+   Fin_Note_Text_API.Prepare_New(new_rec_);
+   rec_.timestamp := new_rec_.timestamp;
+   rec_.user_id := new_rec_.user_id;
+   rec_.row_no  := new_rec_.row_no;   
+END CRUD_Default___;
+
+
+-- Exist_Any_Note_Text_Lines___
+--   Return true if there are any note text lines, false if no such lines
+FUNCTION Exist_Any_Note_Text_Lines___ (
+   parent_objkey_  IN VARCHAR2 ) RETURN BOOLEAN
+IS
+   notes_info_virtual_key_ Notes_Info_Virtual_Key;
+   rows_exists_            BOOLEAN := FALSE;   
+BEGIN   
+   notes_info_virtual_key_.objkey := parent_objkey_;   
+   -- To find out if it is the last note, if so then the note will be removed from owning package and FinNote   
+   FOR i_ IN Get_Fin_Notes_Array___(notes_info_virtual_key_) LOOP
+      rows_exists_ := TRUE;               
+      EXIT;
+   END LOOP;     
+   RETURN rows_exists_;
+END Exist_Any_Note_Text_Lines___;  
+
+
+@Override
+PROCEDURE CRUD_Delete___ (
+   rec_ IN Fin_Notes_Virtual_Rec )
+IS   
+   notes_info_virtual_rec_       Notes_Info_Virtual_Rec;
+   new_notes_info_virtual_rec_   Notes_Info_Virtual_Rec;
+   notes_info_virtual_key_       Notes_Info_Virtual_Key;   
+   remrec_                       fin_note_text_tab%ROWTYPE;
+   stmt_                         VARCHAR2(32000);      
+   attr_                         VARCHAR2(2000);
+BEGIN
+   super(rec_);
+   -- Cleanup is set to TRUE when called from Remove_Temp_Note__ and then data is only removed from FinNotesVirtual
+   IF (NVL(rec_.cleanup, 'FALSE') = 'FALSE') THEN
+      notes_info_virtual_key_.objkey := rec_.parent_objkey;
+      notes_info_virtual_rec_ := Get_Record___(notes_info_virtual_key_);   
+      IF (Security_SYS.Is_Projection_Available(notes_info_virtual_rec_.calling_projection_name)) THEN      
+         remrec_.note_id := rec_.note_id;
+         remrec_.row_no := rec_.row_no;
+         Fin_Note_Text_API.Remove_Rec(remrec_);   
+         -- Remove from owning object and FinNote if it is the last Note Text.
+         IF NOT (Exist_Any_Note_Text_Lines___(rec_.parent_objkey)) THEN            
+            attr_ := Get_Attr___(notes_info_virtual_rec_.modified_key_ref);               
+            -- Assert that the package method exists and then remove the note from owning object and FinNote
+            Assert_SYS.Assert_Is_Package_Method(notes_info_virtual_rec_.package_name, 'Remove_Note');      
+            stmt_ := 'BEGIN  ' || notes_info_virtual_rec_.package_name || '.Remove_Note(:note_id, :keyattr);  END;';
+            @ApproveDynamicStatement(2018-05-14,umdolk)
+            EXECUTE IMMEDIATE stmt_ USING IN notes_info_virtual_rec_.note_id , IN OUT attr_;
+            Fin_Note_API.Remove_Note(notes_info_virtual_rec_.note_id);    
+            -- Update header to indicate that the note is new if the user start enter new note texts since we in above lines remove the Note header.
+            new_notes_info_virtual_rec_ := notes_info_virtual_rec_;
+            new_notes_info_virtual_rec_.note_id := -999;
+            new_notes_info_virtual_rec_.note_exists := 'FALSE';
+            new_notes_info_virtual_rec_.is_new_note := 'TRUE';
+            CRUD_Update___(notes_info_virtual_rec_, new_notes_info_virtual_rec_);                  
+         END IF;  
+      END IF;
+   END IF;
+END CRUD_Delete___;
+
+
+@Override
+PROCEDURE CRUD_Create___ (
+   rec_ IN Fin_Notes_Virtual_Rec )
+IS
+   stmt_                        VARCHAR2(32000);   
+   notes_info_virtual_rec_      Notes_Info_Virtual_Rec;
+   new_notes_info_virtual_rec_  Notes_Info_Virtual_Rec;
+   notes_info_virtual_key_      Notes_Info_Virtual_Key;
+   info_                        VARCHAR2(32000);   
+   new_fin_note_text_rec_       fin_note_text_tab%ROWTYPE;
+   note_id_                     NUMBER; 
+   attr_                        VARCHAR2(4000);
+   newrec_                      Fin_Notes_Virtual_Rec;
+BEGIN
+   newrec_ := rec_;   
+   -- note_source is null when calling from new command in the list
+   IF (rec_.note_source IS NULL) THEN
+      notes_info_virtual_key_.objkey   := newrec_.parent_objkey;
+      notes_info_virtual_rec_          := Get_Record___(notes_info_virtual_key_); 
+      IF (notes_info_virtual_rec_.note_id = -999 OR notes_info_virtual_rec_.is_new_note = 'TRUE') THEN
+         note_id_ := Fin_Note_API.Get_New_Note_Id;
+      ELSE
+         note_id_ := notes_info_virtual_rec_.note_id;
+      END IF;
+      newrec_.note_id := note_id_;      
+      newrec_.timestamp := SYSDATE;      
+   END IF;   
+   super(newrec_);
+   -- note_source is null when calling from new command in the list
+   IF (newrec_.note_source IS NULL) THEN
+      -- Check that the user is allowed to use the projection that is passed to the assistant, only allowed to create notes for that projection
+      IF (Security_SYS.Is_Projection_Available(notes_info_virtual_rec_.calling_projection_name)) THEN            
+         IF (notes_info_virtual_rec_.is_new_note = 'TRUE') THEN            
+            attr_ := Get_Attr___(notes_info_virtual_rec_.modified_key_ref);                        
+            new_notes_info_virtual_rec_ := notes_info_virtual_rec_;
+            new_notes_info_virtual_rec_.note_id := note_id_;
+            new_notes_info_virtual_rec_.is_new_note := 'FALSE';
+            new_notes_info_virtual_rec_.note_exists := 'TRUE';
+            -- update the header with a real NoteId and set is_new_Note to FALSE to indicate that a new id does not have to be fetched
+            CRUD_Update___(notes_info_virtual_rec_, new_notes_info_virtual_rec_);
+            Fin_Note_API.Create_Note(note_id_); 
+            -- Assert that the package and method exists
+            Assert_SYS.Assert_Is_Package_Method(notes_info_virtual_rec_.package_name, 'Create_Note');            
+            IF (Database_SYS.Package_Exist(notes_info_virtual_rec_.package_name)) THEN
+               stmt_ := 'BEGIN '||notes_info_virtual_rec_.package_name || '.Create_Note(:note_id, :keyattr); END;';
+               @ApproveDynamicStatement(2018-05-14,umdolk)            
+               EXECUTE IMMEDIATE stmt_ USING IN note_id_, IN OUT attr_;
+            END IF;            
+         END IF;   
+         new_fin_note_text_rec_.note_id := note_id_;
+         new_fin_note_text_rec_.user_id := newrec_.user_id;
+         new_fin_note_text_rec_.timestamp := newrec_.timestamp;
+         new_fin_note_text_rec_.text := newrec_.text;
+         new_fin_note_text_rec_.row_no := newrec_.row_no;
+         Fin_Note_Text_API.New_Rec(info_, new_fin_note_text_rec_);     
+      END IF;
+   END IF;   
+END CRUD_Create___;
+
+
+@Override
+PROCEDURE CRUD_Update___ (
+   old_ IN Fin_Notes_Virtual_Rec,
+   new_ IN Fin_Notes_Virtual_Rec )
+IS
+   new_rec_                  fin_note_text_tab%ROWTYPE;
+   notes_info_virtual_rec_   Notes_Info_Virtual_Rec;   
+   notes_info_virtual_key_   Notes_Info_Virtual_Key;
+BEGIN            
+   super(old_, new_);
+   IF (new_.note_id = -999) THEN
+      notes_info_virtual_key_.objkey := new_.parent_objkey;
+      notes_info_virtual_rec_        := Get_Record___(notes_info_virtual_key_);
+      new_rec_.note_id               := notes_info_virtual_rec_.note_id;
+   ELSE
+      new_rec_.note_id := new_.note_id;
+   END IF;      
+   new_rec_.user_id := new_.user_id;
+   new_rec_.timestamp := new_.timestamp;
+   new_rec_.text := new_.text;
+   new_rec_.row_no := new_.row_no;
+   new_rec_.rowkey := sys_guid();
+   Fin_Note_Text_API.Modify_Rec(new_rec_);   
+END CRUD_Update___;
+
+
+-- Get_Attr___
+--   Function that replace the selection separators with Client_SYS separators
+FUNCTION Get_Attr___ (
+   selection_ VARCHAR2 ) RETURN VARCHAR2
+IS
+   attr_        VARCHAR2(32000);
+BEGIN      
+   attr_ := REPLACE(selection_, '=', Client_SYS.field_separator_);
+   attr_ := REPLACE(attr_, Client_SYS.text_separator_, Client_SYS.record_separator_); 
+   RETURN attr_;
+END Get_Attr___;
+
+
+-- Add_Client_Value_To_Attr___
+--   merge the attribute string with db-values (for the enumeration attributes) with the attribute string with client values (for the enumeration values)
+--   without any duplicate attibute names
+FUNCTION Add_Client_Value_To_Attr___ (
+   db_attr_       IN VARCHAR2,
+   client_attr_   IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   temp_attr_        VARCHAR2(32000);   
+   ptr_              NUMBER;
+   name_             VARCHAR2(30);
+   value_            VARCHAR2(32000);  
+BEGIN
+   temp_attr_ := db_attr_;
+   ptr_ := NULL;
+   WHILE (Client_SYS.Get_Next_From_Attr(client_attr_, ptr_, name_, value_)) LOOP
+      IF NOT (Client_SYS.Item_Exist(name_, db_attr_)) THEN
+         Client_SYS.Add_To_Attr(name_, value_, temp_attr_);
+      END IF;         
+   END LOOP;
+   RETURN temp_attr_;
+END Add_Client_Value_To_Attr___;   
+
+
+-- Fin_Note_Info___
+--   Returns information about Fin notes for the given package and its key values.
+FUNCTION Fin_Note_Info_Data___ (
+   package_name_            IN VARCHAR2,	
+   calling_projection_name_ IN VARCHAR2,   
+   key_ref_                 IN VARCHAR2,
+   note_entity_name_        IN VARCHAR2,
+   title_                   IN VARCHAR2 ) RETURN Notes_Info_Rec
+IS
+   stmt_                            VARCHAR2(32000);
+   attr_                            VARCHAR2(32000);   
+   notes_structure_rec_             Notes_Info_Rec;
+   client_key_ref_                  VARCHAR2(32000);
+BEGIN      
+   IF (title_ IS NULL) THEN
+      notes_structure_rec_.title := Language_SYS.Translate_Constant(lu_name_, 'FINNOTES: Notes');	
+   ELSE
+      notes_structure_rec_.title := title_;
+   END IF;  
+   notes_structure_rec_.package_name := package_name_;   
+   notes_structure_rec_.calling_projection_name := calling_projection_name_;   
+   -- create attribute string from keyref string
+   attr_ := Get_Attr___(key_ref_);
+   -- since some note packages expects client values of enumerations and some expects db values so therefore fetch keyref with client values 
+   -- and later merge into one combined string that is sent to the note package methods.
+   client_key_ref_ := Object_Connection_SYS.Replace_Server_Values(note_entity_name_, key_ref_);
+   -- convert to attribute strings merge the attribute string based on db-value and the attribute string based on client values
+   attr_ := Add_Client_Value_To_Attr___(attr_, Get_Attr___(client_key_ref_));
+   -- Create a keyref representation of the merged attribute string.   
+   notes_structure_rec_.modified_key_ref := Replace(attr_, Client_SYS.field_separator_, '=');   
+   notes_structure_rec_.modified_key_ref := Replace(notes_structure_rec_.modified_key_ref, Client_SYS.record_separator_, Client_SYS.text_separator_);        
+   -- Assert that the package and method exists
+   Assert_SYS.Assert_Is_Package_Method(notes_structure_rec_.package_name, 'Get_Note_Id');      
+   stmt_ := 'BEGIN :note_id := '  || notes_structure_rec_.package_name || '.Get_Note_Id(:attr_); END;';
+   @ApproveDynamicStatement(2018-05-14,umdolk)
+   EXECUTE IMMEDIATE stmt_ USING OUT notes_structure_rec_.note_id,  IN attr_;     
+   notes_structure_rec_.is_new_note := 'FALSE';
+   IF (notes_structure_rec_.note_id IS NULL) THEN      
+      notes_structure_rec_.is_new_note := 'TRUE';
+      notes_structure_rec_.note_id := -999;            
+   END IF;   
+   RETURN notes_structure_rec_;
+END Fin_Note_Info_Data___;
+
+
+-- Remove_Temp_Note___
+--   Method that will remove the data from the temporary tables based on the objkey
+PROCEDURE Remove_Temp_Note___ (
+   objkey_    IN VARCHAR2 )
+IS   
+   key_        Notes_Info_Virtual_Key;
+   rec_        Notes_Info_Virtual_Rec;   
+   det_key_    Fin_Notes_Virtual_Key;
+   det_rec_    Fin_Notes_Virtual_Rec;      
+BEGIN  
+   key_.objkey := objkey_;
+   rec_ := Get_Record___(key_);   
+   FOR i_ IN Get_Fin_Notes_Array___(key_) LOOP
+      det_key_.objkey := i_.objkey;
+      det_rec_ := Get_Record___(det_key_);
+      det_rec_.cleanup := 'TRUE';
+      CRUD_Delete___(det_rec_);
+   END LOOP;   
+END Remove_Temp_Note___;
+

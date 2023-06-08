@@ -1,0 +1,198 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     PackAccordingToHandlingUnitCapacityAssistant
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  2019-06-12  JaThlk  SCUXXW4-21635, Modified Pack_According_To_Handling_Unit_Capacity___ to change the way of creating handling Unit Id list.
+--  2018-10-10  Chfolk  SCUXXW4-5636, Renamed the virtuals to avoid lengthy names.
+--  2018-09-21  ChFolk  SCUXXW4-5636, Added methods Check_Part_Handling_Unit_Exist___, Get_No_Of_Handling_Units___, Validate_No_Of_Handling_Units_And_Compute_Qty_To_Pack___,
+--  2018-09-21          Pack_Handling_Unit_Types___ and Pack_According_To_Handling_Unit_Capacity___. Override CRUD_Create___ from parent and CRUD_Update___ from child.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Check_Part_Handling_Unit_Exist___(
+   part_no_    IN VARCHAR2,
+   unit_meas_  IN VARCHAR2 )  RETURN VARCHAR2
+IS
+   
+BEGIN
+   RETURN Part_Handling_Unit_API.Part_Handling_Unit_Type_Exist(part_no_, unit_meas_);
+END Check_Part_Handling_Unit_Exist___;
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Pack_According_To_Hu_Capacity_Virtual_Rec )
+IS
+   new_parent_rec_  Pack_According_To_Hu_Capacity_Virtual_Rec;
+   new_child_rec_   Part_Handling_Unit_Virtual_Rec;
+   CURSOR get_line_rec IS
+      SELECT handling_unit_type_id, handling_unit_category_id, max_quantity_capacity, source, unit_code
+      FROM PART_HANDLING_UNIT_OPERATIVE
+      WHERE part_no = rec_.part_no
+      AND   unit_code = rec_.unit_meas; 
+     
+BEGIN
+   new_parent_rec_ := rec_;
+   new_parent_rec_.lines_ready_to_pack := Fnd_Boolean_API.DB_FALSE;
+   super(new_parent_rec_);   
+   FOR line_rec_ IN get_line_rec LOOP
+      new_child_rec_.objkey                 := sys_guid();
+      new_child_rec_.parent_objkey          := rec_.objkey;
+      new_child_rec_.handling_unit_type_id := line_rec_.handling_unit_type_id;
+      new_child_rec_.handling_unit_category_id := line_rec_.handling_unit_category_id;
+      new_child_rec_.max_quantity_capacity := line_rec_.max_quantity_capacity;
+      new_child_rec_.source := line_rec_.source;
+      new_child_rec_.unit_code := line_rec_.unit_code;
+      CRUD_Create___(new_child_rec_);
+   END LOOP;
+ 
+END CRUD_Create___;
+
+FUNCTION Get_No_Of_Handling_Units___(
+   qty_to_pack_           IN NUMBER,
+   max_quantity_capacity_ IN NUMBER )  RETURN NUMBER
+IS
+   no_of_handling_units_ NUMBER;
+BEGIN
+   IF (qty_to_pack_ IS NOT NULL) THEN
+      no_of_handling_units_ := CEIL(qty_to_pack_ / max_quantity_capacity_);
+   ELSE
+      no_of_handling_units_ := NULL;
+   END IF;   
+   RETURN no_of_handling_units_;
+   
+END Get_No_Of_Handling_Units___;
+
+FUNCTION Validate_No_Of_Handling_Units_And_Compute_Qty_To_Pack___(
+   no_of_handling_units_  IN NUMBER,
+   max_quantity_capacity_ IN NUMBER )  RETURN NUMBER
+IS
+   qty_to_pack_   NUMBER; 
+BEGIN
+   IF (no_of_handling_units_ IS NOT NULL) THEN
+      IF (no_of_handling_units_ <= 0) THEN
+         Error_SYS.Record_General(lu_name_, 'INVALID_ON_OF_HANDLING_UNITS: Number of Handling Units must be an integer greater than 0.');
+      END IF;  
+      qty_to_pack_ := no_of_handling_units_ * max_quantity_capacity_;
+   ELSE
+      qty_to_pack_ := NULL;
+   END IF;   
+   RETURN qty_to_pack_;
+END Validate_No_Of_Handling_Units_And_Compute_Qty_To_Pack___;
+
+@Override
+PROCEDURE CRUD_Update___(
+   old_                IN Part_Handling_Unit_Virtual_Rec,
+   new_                IN Part_Handling_Unit_Virtual_Rec )
+IS
+   parent_key_              Pack_According_To_Hu_Capacity_Virtual_Key; 
+   old_parent_rec_          Pack_According_To_Hu_Capacity_Virtual_Rec;
+   new_parent_rec_          Pack_According_To_Hu_Capacity_Virtual_Rec;
+   child_key_               Part_Handling_Unit_Virtual_Key;
+   old_child_rec_           Part_Handling_Unit_Virtual_Rec;
+   set_lines_ready_to_pack_ BOOLEAN := FALSE;
+BEGIN
+   super(old_, new_);
+   parent_key_.objkey := old_.parent_objkey;
+   old_parent_rec_ := Get_Record___(parent_key_);
+   IF (new_.qty_to_pack > 0) THEN
+      new_parent_rec_ := old_parent_rec_;
+      new_parent_rec_.lines_ready_to_pack := Fnd_Boolean_API.DB_TRUE;     
+      CRUD_Update___(old_parent_rec_, new_parent_rec_);
+      set_lines_ready_to_pack_ :=  TRUE;
+   ELSE
+      -- if atleast one line is having qty_to_pack > 0 it should set lines_ready_to_pack = TRUE
+      FOR line_rec_ IN Get_Handling_Unit_Types_Array___(parent_key_) LOOP
+         child_key_.objkey := line_rec_.objkey;
+         old_child_rec_ := Get_Record___(child_key_);
+         IF (old_child_rec_.qty_to_pack > 0) THEN
+            new_parent_rec_ := old_parent_rec_;
+            new_parent_rec_.lines_ready_to_pack := Fnd_Boolean_API.DB_TRUE;     
+            CRUD_Update___(old_parent_rec_, new_parent_rec_);
+            set_lines_ready_to_pack_ :=  TRUE;
+            EXIT;
+         END IF;   
+      END LOOP;   
+   END IF;   
+   IF (NOT set_lines_ready_to_pack_ AND old_parent_rec_.lines_ready_to_pack = Fnd_Boolean_API.DB_TRUE) THEN
+      new_parent_rec_ := old_parent_rec_;
+      new_parent_rec_.lines_ready_to_pack := Fnd_Boolean_API.DB_FALSE;     
+      CRUD_Update___(old_parent_rec_, new_parent_rec_);
+   END IF;   
+      
+END CRUD_Update___;
+
+FUNCTION Pack_Handling_Unit_Types___(
+   parent_objkey_ IN VARCHAR2 ) RETURN CLOB
+IS
+   parent_key_           Pack_According_To_Hu_Capacity_Virtual_Key; 
+   child_key_            Part_Handling_Unit_Virtual_Key;
+   current_child_rec_    Part_Handling_Unit_Virtual_Rec;
+   msg_                  CLOB;
+   
+BEGIN
+   parent_key_.objkey := parent_objkey_;   
+   FOR child_rec_ IN Get_Handling_Unit_Types_Array___(parent_key_) LOOP
+      child_key_.objkey := child_rec_.objkey;
+      current_child_rec_ := Get_Record___(child_key_);
+      IF (current_child_rec_.qty_to_pack > 0) THEN
+         Message_SYS.Add_Attribute(msg_, 'HANDLING_UNIT_TYPE_ID', child_rec_.handling_unit_type_id);
+         Message_SYS.Add_Attribute(msg_, 'QTY_TO_PACK', child_rec_.qty_to_pack);     
+      END IF;   
+   END LOOP;
+   RETURN msg_;
+END Pack_Handling_Unit_Types___;
+
+FUNCTION Pack_According_To_Handling_Unit_Capacity___ (
+   parent_objkey_ IN VARCHAR2 ) RETURN CLOB
+IS
+   out_msg_clob_           CLOB;
+   msg_clob_               CLOB;
+   parent_key_             Pack_According_To_Hu_Capacity_Virtual_Key;
+   parent_rec_             Pack_According_To_Hu_Capacity_Virtual_Rec;
+   message_name_arr_       Message_SYS.name_table;
+   message_value_arr_      Message_SYS.line_table;
+   count_                  NUMBER := 0;
+   created_handling_units_ CLOB; 
+BEGIN
+   msg_clob_ := Pack_Handling_Unit_Types___(parent_objkey_);
+   IF (msg_clob_ IS NOT NULL) THEN
+      parent_key_.objkey := parent_objkey_;
+      parent_rec_ := Get_Record___(parent_key_);
+      User_Allowed_Site_API.Is_Authorized(parent_rec_.contract);
+      out_msg_clob_ := Handl_Unit_Auto_Pack_Util_API.Pack_Stock_Rec_Into_Hu_Types(msg_clob_,
+                                                                                  parent_rec_.contract,
+                                                                                  parent_rec_.part_no,
+                                                                                  parent_rec_.configuration_id,
+                                                                                  parent_rec_.location_no,
+                                                                                  parent_rec_.lot_batch_no,
+                                                                                  parent_rec_.serial_no,
+                                                                                  parent_rec_.eng_chg_level,
+                                                                                  parent_rec_.waiv_dev_rej_no,
+                                                                                  parent_rec_.activity_seq,
+                                                                                  NULL,
+                                                                                  parent_rec_.parent_handling_unit_id,
+                                                                                  parent_rec_.source_ref1,
+                                                                                  parent_rec_.source_ref2,
+                                                                                  parent_rec_.source_ref3,
+                                                                                  parent_rec_.source_ref4,
+                                                                                  parent_rec_.inv_trans_source_ref_type_db);
+            
+   END IF;
+   Message_SYS.Get_Attributes(out_msg_clob_, count_, message_name_arr_, message_value_arr_);
+   FOR i_ IN 1..count_ LOOP
+      IF message_name_arr_(i_) = 'HANDLING_UNIT_ID' THEN
+         IF (created_handling_units_ IS NULL) THEN
+            created_handling_units_ := message_value_arr_(i_) ;
+         ELSE   
+            created_handling_units_ := created_handling_units_ || ';' || message_value_arr_(i_);
+         END IF; 
+      END IF;   
+   END LOOP;
+   RETURN created_handling_units_;
+END Pack_According_To_Handling_Unit_Capacity___;

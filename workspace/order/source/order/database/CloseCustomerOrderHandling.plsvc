@@ -1,0 +1,316 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: CloseCustomerOrderHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date        Sign    History
+--  ---------   ------  -----------------------------------------------------
+--  2021-06-28  ApWilk  Bug 159750(SCZ-15324), Modified Check_Customer_Order_Lines___() and Check_Customer_Order___() to handle a warning message to be raised 
+--  2021-06-28          instead of the current raising information message when going to close a customer order line which has an pegged PO connected to it.
+--  2019-06-08  ChFolk  SCZ-15099(Bug 15099), Changed the warning message when closing an order line in partially delivered status where sales promotions exists.
+--  2019-08-17  MalLlk  SCUXXW4-22978, Rename the projection HandleCloseCustomerOrderAssistant to CloseCustomerOrderHandling.
+--  2019-08-16  MalLlk  SCUXXW4-22978, Supporting to move fragment CloseCustomerOrderAssistant to a seperate projection.
+--  2019-02-13  MAHPLK  SCUXXW4-15294, Handled "Close" operation of Customer Order.
+--  2019-02-08  MAHPLK  SCUXXW4-15246, Handled "Close" operation of Customer Order Line.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Close_Order_Virtual_Rec )
+IS
+   key_ Close_Order_Virtual_Key;
+BEGIN
+   super(rec_);
+   key_.objkey := rec_.objkey;  
+   Check_Close_Order___(key_, rec_.order_selection,  rec_.source);
+END CRUD_Create___;
+
+PROCEDURE Check_Close_Order___ (
+   parent_key_     IN Close_Order_Virtual_Key,
+   full_selection_ IN VARCHAR2,
+   source_         IN VARCHAR2)
+IS         
+   orders_         json_array_t := json_array_t.parse(full_selection_);
+BEGIN
+   IF (source_ = 'CO') THEN
+      Check_Customer_Order___(orders_, parent_key_);
+   END IF;
+   IF (source_ = 'COL') THEN
+      Check_Customer_Order_Lines___(orders_, parent_key_);
+   END IF;   
+END Check_Close_Order___;
+
+PROCEDURE Check_Customer_Order___ (
+   orders_         IN json_array_t,
+   parent_key_     IN Close_Order_Virtual_Key) 
+IS  
+   order_no_                  customer_order_tab.order_no%TYPE;   
+   current_selection_         VARCHAR2(32000);     
+   old_rec_                   Close_Order_Virtual_Rec;
+   new_rec_                   Close_Order_Virtual_Rec;
+   key_                       Close_Order_Virtual_Key;
+   state_                     VARCHAR2(12) := 'Initial';
+   message_exist_             BOOLEAN := FALSE;
+   info_exist_                BOOLEAN := FALSE;
+   warning_exist_             BOOLEAN := FALSE;  
+   co_objstate_               VARCHAR2(20);
+   
+   CURSOR get_messages IS
+      SELECT message_type
+        FROM ${PROJECTION}_Close_Order_Message_Virtual_VRT
+       WHERE parent_objkey = key_.objkey;
+BEGIN
+   FOR order_ IN 0 .. orders_.get_size - 1 LOOP 
+      current_selection_ := orders_.get_string(order_);
+      order_no_    := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');     
+      
+      co_objstate_   := Customer_Order_API.Get_Objstate(order_no_);
+      IF (Customer_Order_API.Get_Promotion_Charges_Count(order_no_) = 1) THEN
+         Add_Message___(parent_key_, order_no_, NULL, NULL, NULL, 1, 'There are connected sales promotion charge lines which will not be impacted by closing the line and performing a recalculation. Consider decreasing the sales qty instead or manually review the sales promotion charge lines. Do you still want to close the line(s)?', 'BEFORE_CLOSE', 'Warning');
+      ELSE
+         Add_Message___(parent_key_, order_no_, NULL, NULL, NULL, 2, 'The order will be closed.', 'BEFORE_CLOSE', 'Information');
+      END IF;      
+      IF Close_Customer_Order_API.Connected_To_Purchase_Order(order_no_) = 1 THEN
+         Add_Message___(parent_key_, order_no_, NULL, NULL, NULL, 3, 'Connected purchase order exists for this line, which will not be updated. Consider decreasing the sales quantity instead or manually handle closing related orders. Do you want to continue?', 'BEFORE_CLOSE', 'Warning');
+      END IF;       
+      
+           
+      IF (Cancel_Customer_Order_API.Connected_To_Shop_Order(order_no_) = 1 ) THEN
+         Add_Message___(parent_key_, order_no_, NULL, NULL, NULL, 4, 'Connected Shop Order exists for this line.', 'AFTER_CLOSE', 'Information');
+      END IF;
+      IF (Customer_Order_API.Shipment_Connected_Lines_Exist(order_no_) = 1) AND (co_objstate_ = 'Picked' OR co_objstate_ = 'PartiallyDelivered') THEN
+         Add_Message___(parent_key_, order_no_, NULL, NULL, NULL, 5, 'The customer order line is connected to shipments and the picked quantity will not be automatically removed.', 'AFTER_CLOSE', 'Information');
+      END IF;
+   END LOOP;
+   
+   key_.objkey := parent_key_.objkey;   
+   FOR message_ IN get_messages LOOP
+      message_exist_ := TRUE;
+      IF message_.message_type = 'Warning' THEN
+         warning_exist_ := TRUE;
+      END IF;  
+      IF message_.message_type = 'Information' THEN
+         info_exist_ := TRUE;
+      END IF;       
+   END LOOP;
+   
+   IF warning_exist_ AND info_exist_ THEN 
+      state_ := 'Info/Warning';
+   ELSIF warning_exist_ THEN 
+      state_ := 'Warning';
+   ELSIF info_exist_ THEN 
+      state_ := 'Information';
+   END IF; 
+   
+   old_rec_ := Get_Record___(key_);
+   new_rec_ := old_rec_;
+   new_rec_.exist := message_exist_;
+   new_rec_.state := state_;
+   Crud_Update___(old_rec_, new_rec_);
+   
+END Check_Customer_Order___;
+
+PROCEDURE Check_Customer_Order_Lines___ (
+   orders_         IN json_array_t,
+   parent_key_     IN Close_Order_Virtual_Key) 
+IS   
+   col_rec_                       Customer_Order_Line_API.public_rec;
+   order_no_                      customer_order_line_tab.order_no%TYPE;   
+   line_no_                       customer_order_line_tab.line_no%TYPE;
+   rel_no_                        customer_order_line_tab.rel_no%TYPE;
+   line_item_no_                  customer_order_line_tab.line_item_no%TYPE;   
+   old_rec_                       Close_Order_Virtual_Rec;
+   new_rec_                       Close_Order_Virtual_Rec;
+   key_                           Close_Order_Virtual_Key;
+   state_                         VARCHAR2(12) := 'Initial';
+   current_selection_             VARCHAR2(32000);   
+   message_exist_                 BOOLEAN := FALSE;
+   info_exist_                    BOOLEAN := FALSE;
+   warning_exist_                 BOOLEAN := FALSE;
+   
+   CURSOR get_messages IS
+      SELECT message_type
+        FROM ${PROJECTION}_Close_Order_Message_Virtual_VRT
+       WHERE parent_objkey = key_.objkey;
+BEGIN   
+   FOR order_ IN 0 .. orders_.get_size - 1 LOOP 
+      current_selection_ := orders_.get_string(order_);
+      order_no_     := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');
+      line_no_      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_NO');
+      rel_no_       := Client_SYS.Get_Key_Reference_Value(current_selection_, 'REL_NO');
+      line_item_no_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_ITEM_NO');
+      
+      col_rec_      := Customer_Order_Line_API.Get(order_no_, line_no_, rel_no_, line_item_no_);
+            
+      IF (col_rec_.demand_code = 'PO') THEN
+         Add_Message___(parent_key_, order_no_, line_no_, rel_no_, line_item_no_, 1, 'This order is connected to a purchase order. Do you want to proceed?', 'BEFORE_CLOSE', 'Warning');
+      ELSE
+         Add_Message___(parent_key_, order_no_, line_no_, rel_no_, line_item_no_, 2, 'The order line will be closed.', 'BEFORE_CLOSE', 'Information');
+      END IF;
+      
+      IF Sales_Promotion_Util_API.Check_Promo_Exist_Ord_Line_Num(order_no_, line_no_, rel_no_, line_item_no_) = 1 THEN
+         Add_Message___(parent_key_, order_no_, line_no_, rel_no_, line_item_no_, 3, 'There are connected sales promotion charge lines which will not be impacted by closing the line and performing a recalculation. Consider decreasing the sales qty instead or manually review the sales promotion charge lines. Do you still want to close the line?', 'BEFORE_CLOSE', 'Warning');
+      END IF;
+      
+      IF (col_rec_.supply_code IN ('PD', 'PT', 'IPD', 'IPT')) THEN
+         Add_Message___(parent_key_, order_no_, line_no_, rel_no_, line_item_no_, 4, 'Connected purchase order exists for this line, which will not be updated. Consider decreasing the sales quantity instead or manually handle closing related orders. Do you want to continue?', 'BEFORE_CLOSE', 'Warning');
+      END IF;       
+      
+      IF Reserve_Customer_Order_API.Unpicked_Reservations_Exist__(order_no_, line_no_, rel_no_, line_item_no_) = 1 THEN
+         Add_Message___(parent_key_, order_no_, line_no_, rel_no_, line_item_no_, 5, 'The order line has reservations not picked. Clear the unpicked reservations?', 'BEFORE_CLOSE', 'Warning');
+      END IF;  
+      
+      IF (col_rec_.qty_on_order > 0) AND (col_rec_.supply_code = 'SO') THEN
+         Add_Message___(parent_key_, order_no_, line_no_, rel_no_, line_item_no_, 6, 'Connected Shop Order exists for this line.', 'AFTER_CLOSE', 'Information');
+      END IF;
+      IF (col_rec_.shipment_connected = 'TRUE') AND (col_rec_.rowstate = 'Picked' OR col_rec_.rowstate = 'PartiallyDelivered') THEN
+         Add_Message___(parent_key_, order_no_, line_no_, rel_no_, line_item_no_, 7, 'The customer order line is connected to shipments and the picked quantity will not be automatically removed.', 'AFTER_CLOSE', 'Information');
+      END IF;
+   END LOOP;
+   
+   key_.objkey := parent_key_.objkey;   
+   FOR message_ IN get_messages LOOP
+      message_exist_ := TRUE;
+      IF message_.message_type = 'Warning' THEN
+         warning_exist_ := TRUE;
+      END IF;  
+      IF message_.message_type = 'Information' THEN
+         info_exist_ := TRUE;
+      END IF;       
+   END LOOP;
+   
+   IF warning_exist_ AND info_exist_ THEN 
+      state_ := 'Info/Warning';
+   ELSIF warning_exist_ THEN 
+      state_ := 'Warning';
+   ELSIF info_exist_ THEN 
+      state_ := 'Information';
+   END IF;  
+      
+   old_rec_ := Get_Record___(key_);
+   new_rec_ := old_rec_;
+   new_rec_.exist := message_exist_;
+   new_rec_.state := state_;
+   Crud_Update___(old_rec_, new_rec_);
+END Check_Customer_Order_Lines___;
+ 
+PROCEDURE Add_Message___(
+   parent_key_   IN Close_Order_Virtual_Key,
+   order_no_     IN VARCHAR2,
+   line_no_      IN VARCHAR2,
+   rel_no_       IN VARCHAR2,
+   line_item_no_ IN VARCHAR2,
+   error_code_   IN NUMBER,
+   message_      IN VARCHAR2,
+   action_       IN VARCHAR2,
+   type_         IN VARCHAR2 DEFAULT NULL)
+IS
+   message_rec_ Close_Order_Message_Virtual_Rec;   
+BEGIN   
+   message_rec_.parent_objkey := parent_key_.objkey;
+   message_rec_.objkey := sys_guid();
+   message_rec_.order_no := order_no_;
+   IF line_no_ IS NOT NULL THEN 
+      message_rec_.line_no := line_no_;
+   END IF;
+   IF rel_no_ IS NOT NULL THEN 
+      message_rec_.rel_no := rel_no_;
+   END IF;
+   IF line_item_no_ IS NOT NULL THEN 
+      message_rec_.line_item_no := line_item_no_;
+   END IF;
+   message_rec_.answer := 'N';      
+   message_rec_.message := message_;
+   message_rec_.error_code := error_code_;       
+   message_rec_.close := action_;
+   message_rec_.message_type := type_;
+   CRUD_Create___(message_rec_);
+END Add_Message___;
+
+   
+PROCEDURE Process_Close_Order___ (
+   key_             IN Close_Order_Virtual_Key,
+   order_selection_ IN VARCHAR2,    
+   source_          IN VARCHAR2,
+   info$_          OUT VARCHAR2 )
+IS        
+   warning_found_                 BOOLEAN:=FALSE;   
+   close_answer_                 BOOLEAN:=FALSE;
+   close_co_                     BOOLEAN:=FALSE;      
+   order_no_                      customer_order_tab.order_no%TYPE;
+   line_no_                       customer_order_line_tab.line_no%TYPE;
+   rel_no_                        customer_order_line_tab.rel_no%TYPE;
+   line_item_no_                  customer_order_line_tab.line_item_no%TYPE;
+   orders_                        json_array_t := json_array_t.parse(order_selection_);
+   current_selection_             VARCHAR2(32000);
+   
+   CURSOR get_errors_ IS
+      SELECT answer, error_code
+        FROM ${PROJECTION}_Close_Order_Message_Virtual_VRT
+       WHERE parent_objkey = key_.objkey
+         AND order_no = order_no_
+         AND message_type = 'Warning'
+         AND close = 'BEFORE_CLOSE';    
+BEGIN
+   FOR order_ IN 0 .. orders_.get_size - 1 LOOP
+      current_selection_ := orders_.get_string(order_);
+      order_no_   := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');
+      IF (source_ = 'COL') THEN 
+         line_no_      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_NO');
+         rel_no_       := Client_SYS.Get_Key_Reference_Value(current_selection_, 'REL_NO');
+         line_item_no_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_ITEM_NO');
+      END IF;
+      close_co_ := TRUE;
+      warning_found_ := FALSE;
+      FOR rec_ IN get_errors_ LOOP 
+         warning_found_ := TRUE;
+         -- Decide whether CO is Closed or not based on the answer given to WARNINGs
+         IF rec_.answer = 'Y' THEN
+            close_answer_ := TRUE;
+         ELSE
+            close_answer_ := FALSE;         
+         END IF;      
+         close_co_ := close_co_ AND close_answer_;         
+      END LOOP;        
+
+      IF (warning_found_ AND close_co_) OR (NOT warning_found_) THEN 
+         info$_ := Close_Order___ (source_, order_no_, line_no_, rel_no_, line_item_no_);         
+      END IF;   
+   END LOOP;
+END Process_Close_Order___;
+
+FUNCTION Close_Order___(   
+   source_           IN VARCHAR2,   
+   order_no_         IN VARCHAR2,
+   line_no_          IN VARCHAR2,
+   rel_no_           IN VARCHAR2,
+   line_item_no_     IN NUMBER ) RETURN VARCHAR2
+IS    
+   head_state_       customer_order_tab.rowstate%TYPE;
+   line_state_       customer_order_line_tab.rowstate%TYPE;
+BEGIN
+   IF (source_ = 'CO') THEN
+      User_Allowed_Site_API.Is_Authorized(Customer_Order_API.Get_Contract(order_no_));
+      Close_Customer_Order_API.Close_Order__(head_state_, order_no_);
+   END IF;
+   IF (source_ = 'COL') THEN   
+      User_Allowed_Site_API.Is_Authorized(Customer_Order_Line_API.Get_Contract(order_no_, line_no_, rel_no_, line_item_no_));
+      Close_Customer_Order_API.Close_Order_Line__(head_state_, line_state_,  order_no_, line_no_, rel_no_, line_item_no_);
+   END IF;
+   RETURN Client_SYS.Get_All_Info;
+END Close_Order___;
+
+PROCEDURE Answer_All_Close_Order___ (
+   parent_objkey_ IN VARCHAR2,
+   answer_        IN NUMBER) 
+IS
+BEGIN
+   UPDATE ${PROJECTION}_Close_Order_Message_Virtual_VRT
+      SET answer = answer_
+   WHERE parent_objkey = parent_objkey_;
+END Answer_All_Close_Order___;
+

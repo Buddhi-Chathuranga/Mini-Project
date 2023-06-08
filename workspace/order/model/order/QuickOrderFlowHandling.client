@@ -1,0 +1,705 @@
+------------------------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  ------------------------------------------------------------------------------
+-- 2021-09-16  ApWilk  SC21R2-2443, Modified the command CreateInvoiceCommand to handle generating rental transactions
+-- 2021-09-16          when creating the CO invoice.
+-- 2020-03-11  RasDlk  SCSPRING20-689, Modified ReportReservedQuantitiesasPCommand by passing "SITE" for SenderType and
+-- 2020-03-11          Contract for SenderId parameters for MovePartsIntoShipmentInventoryDialog.
+-- 2020-01-29  RasDlk  SCSPRING20-689, Replaced the function name CheckDialogFour with CheckReportResQtyAsPickedForOrderFlow.
+-- 2019-01-09  RasDlk  SCUXXW4-13341, Handled the dialog dlgShipmentLocation in 'Report Reserved Quantities as Picked' RMB.
+-- 2018-09-07  SeJalk  SCUXXW4-8487, Converted from dlgOrderConfEmail using MTG Version: 1.28
+-- 2018-08-30  SeJalk  SCUXXW4-9697, Converted from tbwChooseAll using MTG Version: 1.27
+--------------------------------------------------------------------------------------------------------
+client QuickOrderFlowHandling;
+component ORDER;
+layer Core;
+include fragment UserAllowedSiteLovSelector;
+include fragment CustOrdCust1Selector;
+include fragment OrderCoordinatorLovSelector;
+include fragment SalesPartSalesmanLovSelector;
+include fragment CustomerTemplateLovSelector;
+include fragment CustomerOrderMessageHandlerDialog;
+include fragment MovePartsIntoShipmentInventoryDialog;
+
+-------------------------------- MAIN PAGES ---------------------------------
+
+
+--------------------------------- COMMANDS ----------------------------------
+
+
+----------------------------- VISUAL COMPONENTS -----------------------------
+
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+navigator {
+   entry ChooseAllNavEntry parent OrderNavigator.SalesOrder at index 500 {
+      label = "Quick Order Flow Handling";
+      page List;
+   }
+}
+
+-------------------------------- MAIN PAGES ---------------------------------
+page List using CustomerOrderSet {
+   label = "Quick Order Flow Handling";
+   startupmode = search;
+   list ChooseAllList;
+}
+
+-------------------------------- ASSISTANTS ---------------------------------
+assistant MinSalesAmountDisplayAssistant using SelectedOrdersVirtuals {
+   label = "Release Customer Orders not exceeding customer minimum sales amount";
+   input(Selection, Operation);
+   output(Selection);
+   steps {
+      step {
+         list MessageList(MessageListArray);
+      }
+
+      final step {
+      }
+
+   }
+   finish command {
+      variable SelectionListVar {
+         type = Text;
+      }
+      execute {
+         call Finish(component.MessageList.Selection) into SelectionListVar;
+         set Selection = SelectionListVar;
+         exit OK;
+      }
+   }
+   cancel command {
+      visible = [false];
+   }
+}
+
+assistant PrintedOrderConfDisplayAssistant using SelectedOrdersVirtuals {
+   label = "Reprint Order Confirmations already printed";
+   input(Selection, Operation);
+   output(Selection);
+   steps {
+      step {
+         list MessageList(MessageListArray);
+      }
+
+      final step {
+      }
+
+   }
+   finish command {
+      variable SelectionListVar {
+         type = Text;
+      }
+      execute {
+         call Finish(component.MessageList.Selection) into SelectionListVar;
+         set Selection = SelectionListVar;
+         exit OK;
+      }
+   }
+   cancel command {
+      visible = [false];
+   }
+}
+
+assistant OrderConfEmailAssistant using OrderConfEmailSet {
+   label = "E-mail Order Confirmation";
+   input(Selection);
+   steps {
+      step {
+         list EmailConfirmationList(EmailConfirmationArray);
+      }
+      final step {
+
+      }
+      cancelled step {
+
+      }
+   }
+   finish command {
+      execute {
+         call EmailOrderReport();
+         exit OK;
+      }
+   }
+   cancel command {
+      execute {
+         exit CANCEL;
+      }
+   }
+   restart command {
+      visible = [false];
+   }
+}
+
+
+--------------------------------- COMMANDS ----------------------------------
+command ReleaseCommand for CustomerOrder {
+   label = "Release";
+   mode = SelectedRecords;
+   enabled = [substring(Condition, 0, 1) != "*"];
+
+   variable ValidateAttrVar {
+      type = ValidateAttrStructure;
+   }
+   variable CreateRentalTransVar {
+      type = Text;
+   }
+   variable SelectetListVar {
+      type = Text;
+
+   }
+
+   bulkexecute {
+      set SelectetListVar = Selection;
+      confirm("The customer order(s) will be released.") {
+         when OK {
+            call ValidateAttributes(Selection) into ValidateAttrVar;
+
+            if [not ValidateAttrVar.MinSalesAmountExceed] {
+               assistant MinSalesAmountDisplayAssistant(Selection, "RELEASE") into(SelectetListVar) {
+                  when OK {
+                     if [SelectetListVar = null] {
+                        exit;
+                     }
+                  }
+
+                  when CANCEL {
+                     exit;
+                  }
+               }
+            }
+            if [ValidateAttrVar.RentalTransactionExist] {
+               inquire("Would you like to generate up to date Rental Transactions and include them on the Invoice(s)?") {
+                  when YES {
+                     set CreateRentalTransVar = "TRUE";
+                  }
+                  when NO {
+                     set CreateRentalTransVar = "FALSE";
+                  }
+                  when CANCEL {
+                     set CreateRentalTransVar = "CANCEL";
+                     exit;
+                  }
+               }
+
+            }
+            if [ValidateAttrVar.AllLinesConnected = 1] {
+               confirm("There are order line(s) which are not connected to an export license. Do you want to proceed?") {
+                  when CANCEL {
+                     exit;
+                  }
+               }
+            }
+            else {
+               if [ValidateAttrVar.AllLinesConnected = 2] {
+                  confirm("Customer order lines which are not connected to an export license will not be included in the created pick list. Do you want to proceed?") {
+                     when CANCEL {
+                        exit;
+                     }
+                  }
+
+               }
+               else {
+                  if [ValidateAttrVar.AllLinesConnected = 3] {
+                     alert("Export Licenses must be connected to order line(s) to proceed, please use the Find and Connect License.");
+                     exit;
+                  }
+               }
+            }
+
+            if [ValidateAttrVar.DistOrdersExist] {
+               alert("Cannot release Customer Order(s) connected to Distribution Order(s).");
+            }
+
+            call ProcessOrders(SelectetListVar, 20, CreateRentalTransVar);
+            hideselection();
+         }
+      }
+   }
+}
+command PrintOrderConfirmationCommand for CustomerOrder {
+   label = "Print Order Confirmation";
+   mode = SelectedRecords;
+   enabled = [substring(Condition, 2, 1) != "*"];
+   variable ResultKeyListVar {
+      type = ReportKeyListStructure;
+   }
+   variable OrderConfRepKeyVar {
+      type = Text;
+   }
+   variable StageBillingRepKeyVar {
+      type = Text;
+   }
+   variable NotPritedOrdersVar {
+      type = Text;
+   }
+   variable SelectetListVar {
+      type = Text;
+   }
+   variable ProceedSuccessVar {
+      type = Boolean;
+   }
+
+   bulkexecute {
+      confirm("Order Confirmation will be printed for the customer orders(s).") {
+         when OK {
+            set SelectetListVar = Selection;
+            call GetNotPrintedOrderList(Selection) into NotPritedOrdersVar;
+            if [Selection != NotPritedOrdersVar] {
+               assistant PrintedOrderConfDisplayAssistant(Selection, "PRINT") into(SelectetListVar) {
+                  when OK {
+                     if [SelectetListVar = null] {
+                        exit;
+                     }
+                  }
+
+                  when CANCEL {
+                     exit;
+                  }
+               }
+            }
+            call PrintOrderConfirmationReport(SelectetListVar) into ResultKeyListVar;
+            set OrderConfRepKeyVar = ResultKeyListVar.OrderConfRepKey;
+            printdialog OrderConfRepKeyVar;
+            set StageBillingRepKeyVar = ResultKeyListVar.StageBillingRepKey;
+
+            if [StageBillingRepKeyVar != null] {
+               printdialog StageBillingRepKeyVar;
+            }
+
+            call ProceedAfterPrintConf(NotPritedOrdersVar) into ProceedSuccessVar;
+            if [not ProceedSuccessVar] {
+               alert("The rest of the order flow could not be successfully carried out after printing the order confirmation. Please proceed manually.");
+            }
+            if [ProceedSuccessVar] {
+               hideselection();
+            }
+         }
+      }
+
+   }
+}
+command EmailOrderConfirmationCommand for CustomerOrder {
+   label = "E-mail Order Confirmation";
+   mode = SelectedRecords;
+   enabled = [substring(Condition, 15, 1) != "*"];
+   bulkexecute {
+      assistant OrderConfEmailAssistant(Selection) {
+         when CANCEL {
+            exit;
+         }
+      }
+
+   }
+}
+command SendOrderConfirmationCommand for CustomerOrder {
+   label = "Send Order Confirmation";
+   enabled = [substring(Condition, 2, 1) != "*" and AllowedToSend = 1];
+   execute {
+      dialog CustomerOrderTransferMessageDialog(OrderNo, CustomerNo, CustomerNoRef.Name, null, "MSGTYPE_Confirm") {
+         when OK {
+            exit;
+            --alert("TEUXX-12325");
+         }
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+command ReserveCommand for CustomerOrder {
+   label = "Reserve";
+   mode = SelectedRecords;
+   enabled = [substring(Condition, 3, 1) != "*"];
+   bulkexecute {
+      bulknavigate "page/ReserveCustomerOrders/List?$filter=OrderNo eq $[OrderNo]";
+   }
+}
+command ReportReservedQuantitiesasPCommand for CustomerOrder {
+   label = "Report Reserved Quantities as Picked";
+   mode = SelectedRecords;
+   enabled = [count(Contract) = 1 and  PickReservedQty != "FALSE" and Objstate != "Blocked"];
+
+   variable KeyrefsVar {
+      type = Text;
+   }
+   variable ReportPickVar {
+      type = ReportPickStructure;
+   }
+   variable LocationNoVar {
+      type = Text;
+   }
+   variable ReportPickSelectionVar {
+      type = Text;
+   }
+   variable ShipmentInvLocVar {
+      type = Structure(ShipmentInventoryLocationStructure);
+   }
+   bulkexecute {
+      confirm("Reserved quantities will be reported as picked") {
+         when OK {
+            set LocationNoVar = null;
+
+            stringify(records, "CONTRACT=${Contract}^ORDER_NO=${OrderNo}^", JSON) into ReportPickSelectionVar;
+            call CheckUseShipmentInventory(ReportPickSelectionVar) into ReportPickVar;
+
+            if [ReportPickVar.ShipmentLinesExist] {
+               call CheckReportResQtyAsPickedForOrderFlow(ReportPickVar.Contract, ReportPickVar.OrderNo, "CUSTOMER_ORDER") into ShipmentInvLocVar;
+               if [ShipmentInvLocVar.ShowDialog = "TRUE"] {
+                  dialog MovePartsIntoShipmentInventoryDialog(ShipmentInvLocVar.LocationNo, ReportPickVar.Contract, "Site", ReportPickVar.Contract) into(LocationNoVar) {
+                     when CANCEL {
+                        exit;
+                     }
+                  }
+               }
+            }
+            // User has override license connection authority. So raise the question.
+            if [ReportPickVar.AllLinesConnected = 1] {
+               confirm("There are order line(s) which are not connected to an export license. Do you want to proceed?") {
+                  when CANCEL {
+                     exit;
+                  }
+               }
+            }
+            else {
+               // There are mix of export controlled and non-export controlled CO lines. So raise the question to exclude export controlled CO lines which are not license connected.
+               if [ReportPickVar.AllLinesConnected = 2] {
+                  confirm("Customer order lines which are not connected to export license will not be report as picked. Do you want to proceed?") {
+                     when CANCEL {
+                        exit;
+                     }
+                  }
+
+               }
+               else {
+                  if [ReportPickVar.AllLinesConnected = 3] {
+                     alert("Export Licenses must be connected to order line(s) to proceed, please use the Find and Connect License.");
+                     exit;
+                  }
+               }
+            }
+            bulkcall ReportReservedAsPicked(Selection, LocationNoVar) {
+               continueonerror = [true];
+            }
+         }
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+command CreatePickListCommand for CustomerOrder {
+   label = "Create Pick List";
+   mode = SelectedRecords;
+   enabled = [substring(Condition, 4, 1) != "*"];
+   variable AllLinesConectedVar {
+      type = Number;
+   }
+
+   bulkexecute {
+      confirm("Create pick list for the customer order(s).") {
+         when OK {
+            call CheckAllLinesConected(Selection) into AllLinesConectedVar;
+            if [AllLinesConectedVar = 1] {
+               confirm("There are order line(s) which are not connected to an export license. Do you want to proceed?") {
+                  when CANCEL {
+                     exit;
+                  }
+               }
+            }
+            else {
+               // There are mix of export controlled and non-export controlled CO lines. So raise the question to exclude export controlled CO lines which are not license connected.
+               if [AllLinesConectedVar = 2] {
+                  confirm("Customer order lines which are not connected to export license will not be report as picked. Do you want to proceed?") {
+                     when CANCEL {
+                        exit;
+                     }
+                  }
+
+               }
+               else {
+                  if [AllLinesConectedVar = 3] {
+                     alert("Export Licenses must be connected to order line(s) to proceed, please use the Find and Connect License.");
+                     exit;
+                  }
+               }
+            }
+            call ProcessOrders(Selection, 70, "");
+            hideselection();
+         }
+      }
+
+   }
+}
+command ReportPickingCommand for CustomerOrder {
+   label = "Report Picking";
+   mode = SelectedRecords;
+   enabled = [substring(Condition, 6, 1) != "*"];
+   bulkexecute {
+      bulknavigate "page/ReportPickingOfPickLists/List?$filter=OrderNo eq $[OrderNo]";
+
+   }
+}
+command DeliverCommand for CustomerOrder {
+   label = "Deliver";
+   mode = SelectedRecords;
+   enabled = [substring(Condition, 7, 1) != "*" and Objstate != "Blocked"];
+   variable AllLinesConectedVar {
+      type = Number;
+   }
+   bulkexecute {
+      confirm("The customer order(s) will be delivered.") {
+         when OK {
+            call CheckAllLinesConected(Selection) into AllLinesConectedVar;
+            if [AllLinesConectedVar = 1] {
+               confirm("There are order line(s) which are not connected to an export license. Do you want to proceed?") {
+                  when CANCEL {
+                     exit;
+                  }
+               }
+            }
+            else {
+               // There are mix of export controlled and non-export controlled CO lines. So raise the question to exclude export controlled CO lines which are not license connected.
+               if [AllLinesConectedVar = 2] {
+                  confirm("Customer order lines which are not connected to export license will not be report as picked. Do you want to proceed?") {
+                     when CANCEL {
+                        exit;
+                     }
+                  }
+
+               }
+               else {
+                  if [AllLinesConectedVar = 3] {
+                     alert("Export Licenses must be connected to order line(s) to proceed, please use the Find and Connect License.");
+                     exit;
+                  }
+               }
+            }
+            call ProcessOrders(Selection, 90, "");
+            hideselection();
+         }
+      }
+
+   }
+}
+command CreateDeliveryNoteCommand for CustomerOrder {
+   label = "Create Delivery Note";
+   mode = SelectedRecords;
+   enabled = [substring(Condition, 8, 1) != "*"];
+   bulkexecute {
+      confirm("Create delivery note for the customer order(s).") {
+         when OK {
+            call ProcessOrders(Selection, 100, "");
+            hideselection();
+
+         }
+      }
+   }
+}
+command DeliveryConfirmationCommand for CustomerOrder {
+   label = "Delivery Confirmation";
+   mode = SelectedRecords;
+   enabled = [substring(Condition, 14, 1) != "*"];
+   bulkexecute {
+      bulknavigate "page/DeliveryConfirmationOfCustomerOrders/List?$filter=OrderNo eq $[OrderNo]";
+   }
+}
+command CreateInvoiceCommand for CustomerOrder {
+   label = "Create Invoice";
+   mode = SelectedRecords;
+   enabled = [substring(Condition, 10, 1) != "*"];
+   variable ValidateAttrVar {
+      type = ValidateAttrStructure;
+   }
+   variable CreateRentalTransVar {
+      type = Text;
+   }
+   bulkexecute {
+      confirm("Create invoice for the customer order(s).") {
+         when OK {
+            call ValidateAttributes(Selection) into ValidateAttrVar;
+
+            if [ValidateAttrVar.RentalTransactionExist] {
+               inquire("Would you like to generate up to date Rental Transactions and include them on the Invoice(s)?") {
+                  when YES {
+                     set CreateRentalTransVar = "TRUE";
+                  }
+                  when NO {
+                     set CreateRentalTransVar = "FALSE";
+                  }
+                  when CANCEL {
+                     set CreateRentalTransVar = "CANCEL";
+                     exit;
+                  }
+               }
+
+            }
+            call ProcessOrders(Selection, 500, CreateRentalTransVar);
+            hideselection();
+
+         }
+      }
+   }
+}
+
+command CustomerOrdersCommand for CustomerOrder {
+   label = "Customer Orders";
+   mode = SelectedRecords;
+   enabled = [true];
+   bulkexecute {
+      bulknavigate "page/CustomerOrders/List?$filter=OrderNo eq $[OrderNo]";
+   }
+}
+command CustomerOrderLinesCommand for CustomerOrder {
+   label = "Customer Order Lines";
+   mode = SelectedRecords;
+   enabled = [true];
+   bulkexecute {
+      bulknavigate "page/CustomerOrderLines/List?$filter=OrderNo eq $[OrderNo]";
+   }
+}
+command ShipmentLinesCommand for CustomerOrder {
+   label = "Shipment Lines";
+   mode = SelectedRecords;
+   enabled = [ShipmentConnected != "0"];
+   bulkexecute {
+      bulknavigate "page/ShipmentLines/List?$filter=SourceRef1 eq $[OrderNo]";
+   }
+}
+
+--------------------------------- SELECTORS ---------------------------------
+
+---------------------------------- GROUPS -----------------------------------
+
+----------------------------------- LISTS -----------------------------------
+
+list ChooseAllList for CustomerOrder {
+
+   field OrderNoRef {
+      size = Small;
+   }
+
+   lov ContractRef with ReferenceUserAllowedSiteLovSelector {
+      size = Small;
+   }
+   field Objstate {
+      size = Small;
+      label = "Status";
+   }
+   field OrderIdRef {
+      size = Small;
+   }
+   lov CustomerNoRef with ReferenceCustOrdCust1Selector {
+      size = Small;
+      description = CustomerNoRef.Name;
+      contactwidget {
+         enabled = [CustomerNo != null];
+         source = Customer;
+      }
+   }
+
+   lov AuthorizeCodeRef with ReferenceOrderCoordinatorLovSelector {
+      size = Small;
+      contactwidget {
+         enabled = [AuthorizeCode != null];
+         source = Person;
+      }
+   }
+   lov SalesmanCodeRef with ReferenceSalesPartSalesmanLovSelector {
+      size = Small;
+      contactwidget {
+         enabled = [SalesmanCode != null];
+         source = Person;
+      }
+   }
+   field WantedDeliveryDate;
+   field NextStepInOrderFlow {
+      size = Large;
+      searchable = false;
+   }
+   field OrderConfFlag {
+      size = Small;
+   }
+   field OrderConf {
+      size = Small;
+   }
+   field PickListFlag {
+      size = Small;
+   }
+   field PackListFlag {
+      size = Small;
+   }
+   field RouteIdRef {
+      size = Small;
+   }
+   field RouteDescription;
+   field Priority;
+
+   // fieldranking OrderNoRef, ContractRef, Objstate, OrderIdRef, CustomerNoRef, CustomerName, AuthorizeCodeRef, SalesmanCodeRef, WantedDeliveryDate, Null;
+
+   commandgroup CommandGroupCmdGroup {
+
+      command ReleaseCommand;
+      command PrintOrderConfirmationCommand;
+      command EmailOrderConfirmationCommand;
+      command SendOrderConfirmationCommand;
+      command ReserveCommand;
+      command ReportReservedQuantitiesasPCommand;
+      command CreatePickListCommand;
+      command ReportPickingCommand;
+      command DeliverCommand;
+      command CreateDeliveryNoteCommand;
+      command DeliveryConfirmationCommand;
+      command CreateInvoiceCommand;
+   }
+
+   commandgroup CommandGroup2CmdGroup {
+
+      command CustomerOrdersCommand;
+      command CustomerOrderLinesCommand;
+      command ShipmentLinesCommand;
+   }
+}
+
+list MessageList for MessageListVirtual {
+   field OrderNo {
+      searchable = false;
+   }
+   field CustomerNo {
+      label = "Customer";
+      searchable = false;
+      contactwidget {
+         enabled = [CustomerNo != null];
+         source = Customer;
+      }
+
+   }
+//   field Message {
+//      size = Large;
+//      searchable = false;
+//   }
+}
+
+list EmailConfirmationList for CustomerOrdersVirtual {
+   label = "E-mail Order Confirmation";
+   field OrderNo {
+      size = Small;
+   }
+   field CustomerNo {
+      contactwidget {
+         enabled = [CustomerNo != null];
+         source = Customer;
+      }
+   }
+   field CustomerContact {
+      size = Small;
+   }
+   field EMail {
+      size = Small;
+   }
+    // fieldranking OrderNo, CustomerNoRef, CustomerContact, EMail;
+}
+
+--------------------------------- CHECKLIST ---------------------------------
+

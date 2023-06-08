@@ -1,0 +1,371 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: CreateCreditInvoice
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+-- Date        Sign    History
+-- ----------  ------  ---------------------------------------------------------------
+-- 2021-08-17  DhAplk  SC21R2-2302, Added temporary fix to Process_Create_Credit_Invoice___ to fetch correct currency rate for Creating credit invoice through RMA header.
+-- 2019-08-22  MaEelk  SCUXXW4-23909, Moved the code from the obsolete CreateCreditInvoiceAssistant.plsvc
+-----------------------------------------------------------------------------
+
+layer Core;
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Create_Credit_Invoice_Virtual_Rec )
+IS
+   key_ Create_Credit_Invoice_Virtual_Key;
+BEGIN
+   super(rec_);
+   key_.objkey := rec_.objkey;
+   Check_Create_Credit_Invoice___(key_, rec_.selection, rec_.source);
+END CRUD_Create___;
+
+PROCEDURE Check_Create_Credit_Invoice___ (
+   parent_key_     IN Create_Credit_Invoice_Virtual_Key,
+   selection_      IN VARCHAR2,
+   source_         IN VARCHAR2)
+IS         
+   return_materials_         json_array_t := json_array_t.parse(selection_);
+BEGIN
+   IF (source_ = 'RM') THEN
+      Check_Return_Material_Authorization___(return_materials_, parent_key_);
+   ELSIF (source_ = 'RMC') THEN
+      Check_Return_Material_Charge___(return_materials_, parent_key_);
+   ELSIF (source_ = 'RML') THEN 
+      Check_Return_Material_Line___(return_materials_, parent_key_);
+   END IF;   
+END Check_Create_Credit_Invoice___;
+
+PROCEDURE Check_Return_Material_Authorization___ (
+   return_materials_         IN json_array_t,
+   parent_key_     IN Create_Credit_Invoice_Virtual_Key ) 
+IS  
+   rma_no_                    return_material_tab.rma_no%TYPE;
+   return_material_rec_       Return_Material_API.Public_Rec;
+   state_                     VARCHAR2(12) := 'Initial';
+   current_selection_         VARCHAR2(32000);   
+   debit_invoice_no_          NUMBER;
+   old_rec_                   Create_Credit_Invoice_Virtual_Rec;
+   new_rec_                   Create_Credit_Invoice_Virtual_Rec;
+   key_                       Create_Credit_Invoice_Virtual_Key;
+   info_exist_                BOOLEAN := FALSE;
+   warning_exist_             BOOLEAN := FALSE;      
+   
+
+BEGIN
+   FOR rma_ IN 0 .. return_materials_.get_size - 1 LOOP 
+      current_selection_ := return_materials_.get_string(rma_);
+      rma_no_    := Client_SYS.Get_Key_Reference_Value(current_selection_, 'RMA_NO');
+      return_material_rec_ := Return_Material_API.Get(rma_no_);
+      IF (Invoice_Customer_Order_API.Is_Create_Credit_Invoice_Ok(return_material_rec_.customer_no, return_material_rec_.contract) = 'TRUE') THEN
+         IF (Return_Material_API.Is_Create_Credit_Allowed__(rma_no_, 'CREDIT') = 'TRUE') THEN
+            Add_Message___(parent_key_, rma_no_, 1, 'Some of the RMA lines/charges are not approved. Do you want to proceed?', 'Information');   
+            info_exist_ := TRUE;
+         END IF; 
+         IF (Return_Material_API.Inquire_Operation__(rma_no_, 'CREDIT') != 'TRUE') THEN
+            Add_Message___(parent_key_, rma_no_, 2, 'The quantity to return is more than the quantity invoiced for one or more lines.', 'Warning');   
+            warning_exist_ := TRUE;            
+         END IF;
+         debit_invoice_no_ := Return_Material_API.Check_Debit_Inv_Numbers(rma_no_);
+         IF (debit_invoice_no_ = 1) THEN
+            IF (Company_Finance_API.Get_Currency_Code(Site_API.Get_Company(return_material_rec_.contract)) != return_material_rec_.currency_code) THEN
+               Add_Message___(parent_key_, rma_no_, 3, 'Do you want to use the currency rate from the Debit Invoice?
+                                                              If Yes - the system will use the currency rate from the Debit Invoice.
+                                                              If No -  the system will use the currency rate valid for the Invoice Date.', 'Information', 1); 
+               info_exist_ := TRUE;                                      
+            END IF;
+         ELSIF (debit_invoice_no_ = 2) THEN
+            IF (Company_Finance_API.Get_Currency_Code(Site_API.Get_Company(return_material_rec_.contract)) != return_material_rec_.currency_code) THEN
+               Add_Message___(parent_key_, rma_no_, 4, 'The same Debit/Correction Invoice is not used for all lines. If continuing the system will use the currency rate at the date of creation. If you want to use the currency rate from the Debit/Correction Invoice the credit invoice must instead be created for each line.', 'Information', 2);                  
+               info_exist_ := TRUE;
+            END IF;
+         END IF;
+         Add_Message___(parent_key_, rma_no_, 5, 'Create credit invoice for RMA', 'Information');  
+         info_exist_ := TRUE;
+      ELSE
+         Add_Message___(parent_key_, rma_no_, 6, 'Creating credit invoices for internal customers not possible.', 'Error');                  
+         state_ := 'Error';         
+      END IF;
+   END LOOP;
+   
+   key_.objkey := parent_key_.objkey;   
+   
+   IF state_ != 'Error' THEN   
+      IF warning_exist_ AND info_exist_ THEN 
+         state_ := 'Info/Warning';
+      ELSIF warning_exist_ THEN 
+         state_ := 'Warning';
+      ELSIF info_exist_ THEN 
+         state_ := 'Information';
+      END IF;
+   END IF;  
+      
+   old_rec_ := Get_Record___(key_);
+   new_rec_ := old_rec_;
+   new_rec_.state := state_;
+   Crud_Update___(old_rec_, new_rec_);
+END Check_Return_Material_Authorization___;
+
+PROCEDURE Check_Return_Material_Charge___ (
+   return_materials_         IN json_array_t,
+   parent_key_     IN Create_Credit_Invoice_Virtual_Key ) 
+IS  
+   rma_no_                    return_material_charge_tab.rma_no%TYPE;
+   rma_charge_no_             return_material_charge_tab.rma_charge_no%TYPE;
+   company_                   return_material_charge_tab.company%TYPE;
+   parent_currency_code_      return_material_tab.currency_code%TYPE;
+   base_currency_code_        company_finance_tab.currency_code%TYPE;
+  return_material_charge_rec_ Return_Material_Charge_API.Public_Rec;
+   state_                     VARCHAR2(12) := 'Initial';
+   current_selection_         VARCHAR2(32000);   
+   old_rec_                   Create_Credit_Invoice_Virtual_Rec;
+   new_rec_                   Create_Credit_Invoice_Virtual_Rec;
+   key_                       Create_Credit_Invoice_Virtual_Key;
+   info_exist_                BOOLEAN := FALSE;
+   warning_exist_             BOOLEAN := FALSE;  
+   debit_invoice_flag_        BOOLEAN := FALSE;
+   
+
+BEGIN
+   FOR rma_ IN 0 .. return_materials_.get_size - 1 LOOP 
+      current_selection_ := return_materials_.get_string(rma_);
+
+      rma_no_    := Client_SYS.Get_Key_Reference_Value(current_selection_, 'RMA_NO');
+      rma_charge_no_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'RMA_CHARGE_NO');
+      return_material_charge_rec_ := Return_Material_Charge_API.Get(rma_no_, rma_charge_no_);                       
+      company_ := return_material_charge_rec_.company;
+      
+      IF return_material_charge_rec_.order_no IS NOT NULL THEN
+         debit_invoice_flag_ := TRUE;
+         EXIT;
+      END IF;
+   END LOOP;
+   
+   Add_Message___(parent_key_, rma_no_, 1, 'Create credit invoice for RMA charge/charges', 'Information');
+   info_exist_ := TRUE;
+   
+   parent_currency_code_ := Return_Material_API.Get_Currency_Code(rma_no_);
+   base_currency_code_   := Company_Finance_API.Get_Currency_Code(company_);
+   IF debit_invoice_flag_ AND parent_currency_code_ != base_currency_code_ THEN
+      Add_Message___(parent_key_, rma_no_, 2, 'Do you want to use the currency rate from the Debit/Correction Invoice?
+                     If Yes - the system will use the currency rate from the Debit/Correction Invoice.
+                     If No - the system will use the currency rate valid at the date of creation.', 'Warning');   
+      warning_exist_ := TRUE; 
+   END IF;
+   
+   key_.objkey := parent_key_.objkey;   
+   
+   IF state_ != 'Error' THEN   
+      IF warning_exist_ AND info_exist_ THEN 
+         state_ := 'Info/Warning';
+      ELSIF warning_exist_ THEN 
+         state_ := 'Warning';
+      ELSIF info_exist_ THEN 
+         state_ := 'Information';
+      END IF;
+   END IF;  
+      
+   old_rec_ := Get_Record___(key_);
+   new_rec_ := old_rec_;
+   new_rec_.state := state_;
+   Crud_Update___(old_rec_, new_rec_);
+END Check_Return_Material_Charge___;
+
+PROCEDURE Check_Return_Material_Line___ (
+   return_materials_         IN json_array_t,
+   parent_key_     IN Create_Credit_Invoice_Virtual_Key ) 
+IS  
+   rma_no_                    return_material_line_tab.rma_no%TYPE;
+   rma_line_no_               return_material_line_tab.rma_line_no%TYPE;
+   company_                   return_material_charge_tab.company%TYPE;
+   parent_currency_code_      return_material_tab.currency_code%TYPE;
+   base_currency_code_        company_finance_tab.currency_code%TYPE;
+   return_material_line_rec_  Return_Material_Line_API.Public_Rec;
+   customer_no_               VARCHAR2(40);
+   contract_                  VARCHAR2(40);    
+   state_                     VARCHAR2(12) := 'Initial';
+   current_selection_         VARCHAR2(32000);   
+   old_rec_                   Create_Credit_Invoice_Virtual_Rec;
+   new_rec_                   Create_Credit_Invoice_Virtual_Rec;
+   key_                       Create_Credit_Invoice_Virtual_Key;
+   info_exist_                BOOLEAN := FALSE;
+   warning_exist_             BOOLEAN := FALSE;  
+   debit_invoice_flag_        BOOLEAN := FALSE;  
+
+BEGIN   
+   FOR rma_ IN 0 .. return_materials_.get_size - 1 LOOP
+      current_selection_ := return_materials_.get_string(rma_);
+      rma_no_                   := Client_SYS.Get_Key_Reference_Value(current_selection_, 'RMA_NO');
+      rma_line_no_              := Client_SYS.Get_Key_Reference_Value(current_selection_, 'RMA_LINE_NO');
+      return_material_line_rec_ := Return_Material_Line_API.Get(rma_no_, rma_line_no_);                       
+      company_                  := return_material_line_rec_.company;
+      customer_no_              := Return_Material_API.Get_Customer_No(rma_no_);
+      contract_                 := Return_Material_API.Get_Contract(rma_no_);
+      IF (Invoice_Customer_Order_API.Is_Create_Credit_Invoice_Ok(customer_no_, contract_) = 'TRUE') THEN     
+         IF return_material_line_rec_.debit_invoice_no IS NOT NULL THEN
+            debit_invoice_flag_ := TRUE;  
+            EXIT;
+         END IF;
+         IF (Return_Material_Line_API.Inquire_Operation__(rma_no_, rma_line_no_, 'CREDIT') = 'FALSE') THEN
+            Add_Message___(parent_key_, rma_no_, 3, 'The quantity to return is more than the quantity invoiced', 'Warning');   
+            warning_exist_ := TRUE;
+            EXIT;
+         END IF;  
+      ELSE
+         Add_Message___(parent_key_, rma_no_, 4, 'It is not possible to create credit invoices for internal customers', 'Error');     
+         state_ := 'Error';    
+      END IF;
+   END LOOP;
+   
+   Add_Message___(parent_key_, rma_no_, 1, 'Create credit invoice for RMA line/lines', 'Information');
+   info_exist_ := TRUE; 
+   
+   parent_currency_code_ := Return_Material_API.Get_Currency_Code(rma_no_);
+   base_currency_code_   := Company_Finance_API.Get_Currency_Code(company_);
+   IF debit_invoice_flag_ AND parent_currency_code_ != base_currency_code_ THEN
+      Add_Message___(parent_key_, rma_no_, 2, 'Do you want to use the currency rate from the Debit/Correction Invoice? 
+      If Yes - The system will use the currency rate from the Debit/Correction Invoice.
+      If No - The system will use the currency rate valid at the date of creation.', 'Warning');   
+      warning_exist_ := TRUE;    
+   END IF;
+
+   key_.objkey := parent_key_.objkey;   
+   
+   IF state_ != 'Error' THEN   
+      IF warning_exist_ AND info_exist_ THEN 
+         state_ := 'Info/Warning';
+      ELSIF warning_exist_ THEN 
+         state_ := 'Warning';
+      ELSIF info_exist_ THEN 
+         state_ := 'Information';
+      END IF;
+   END IF;  
+      
+   old_rec_ := Get_Record___(key_);
+   new_rec_ := old_rec_;
+   new_rec_.state := state_;
+   Crud_Update___(old_rec_, new_rec_);
+END Check_Return_Material_Line___;
+
+PROCEDURE Add_Message___(
+   parent_key_   IN Create_Credit_Invoice_Virtual_Key,
+   rma_no_       IN NUMBER,
+   message_no_   IN NUMBER,
+   message_text_ IN VARCHAR2,
+   message_type_ IN VARCHAR2 DEFAULT NULL,
+   debit_invoice_no_ IN NUMBER DEFAULT NULL )
+IS
+   message_rec_ Create_Credit_Invoice_Message_Virtual_Rec;   
+BEGIN   
+   message_rec_.parent_objkey := parent_key_.objkey;
+   message_rec_.objkey := sys_guid();
+   message_rec_.rma_no        := rma_no_;   
+   message_rec_.answer := 'N';
+   message_rec_.message_no := message_no_; 
+   message_rec_.debit_invoice_no := debit_invoice_no_;
+   message_rec_.message_text := message_text_;
+   message_rec_.message_type := message_type_;
+   CRUD_Create___(message_rec_);
+END Add_Message___;
+
+PROCEDURE Answer_All_Messages___ (
+   parent_objkey_     IN VARCHAR2,
+   answer_all_        IN BOOLEAN) 
+IS
+   answer_   VARCHAR2(1) := 'N';
+BEGIN
+   IF (answer_all_) THEN
+      answer_ := 'Y';   
+   END IF;
+   UPDATE ${PROJECTION}_Create_Credit_Invoice_Message_Virtual_VRT
+      SET answer = answer_
+   WHERE parent_objkey = parent_objkey_;
+END Answer_All_Messages___;
+
+PROCEDURE Process_Create_Credit_Invoice___ (
+   key_       IN Create_Credit_Invoice_Virtual_Key,
+   selection_ IN VARCHAR2,
+   source_    IN VARCHAR2,
+   info$_ OUT VARCHAR2 ) 
+IS
+   close_answer_                BOOLEAN:=FALSE;
+   return_materials_            json_array_t := json_array_t.parse(selection_);
+   current_selection_           VARCHAR2(32000);
+   create_                      BOOLEAN := FALSE; 
+   rma_no_                      NUMBER;
+   rma_line_no_                 NUMBER;
+   rma_charge_no_               NUMBER;
+   debit_invoice_no_            NUMBER;
+   
+   CURSOR get_messages_ IS
+      SELECT answer, debit_invoice_no, message_type, message_no
+        FROM ${PROJECTION}_Create_Credit_Invoice_Message_Virtual_VRT
+       WHERE parent_objkey = key_.objkey
+         AND message_type != 'Error';    
+BEGIN
+   FOR rma_ IN 0 .. return_materials_.get_size - 1 LOOP
+      current_selection_ := return_materials_.get_string(rma_);
+      rma_no_    := Client_SYS.Get_Key_Reference_Value(current_selection_, 'RMA_NO');
+      Return_Material_Initial_Check___(rma_no_);
+      IF (source_ = 'RMC') THEN 
+         rma_charge_no_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'RMA_CHARGE_NO');
+         Return_Material_Charge_Initial_Check___(rma_no_, rma_charge_no_);
+      ELSIF (source_ = 'RML') THEN
+         rma_line_no_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'RMA_LINE_NO');
+         Return_Material_Line_Initial_Check___(rma_no_, rma_line_no_);
+      END IF;
+      create_ := FALSE;
+      FOR rec_ IN get_messages_ LOOP 
+         IF (rec_.answer = 'Y' OR (source_ = 'RMC' AND rec_.message_type = 'Warning')) THEN
+            close_answer_ := TRUE;
+            IF (source_ IN ('RMC', 'RML') AND rec_.message_type = 'Warning') THEN
+               IF rec_.answer = 'Y' THEN
+                  debit_invoice_no_ := 1;
+               ELSE
+                  debit_invoice_no_ := 2;
+               END IF;
+            END IF;
+         ELSE
+            close_answer_ := FALSE;  
+         END IF;
+         create_ := create_ OR close_answer_;  
+         IF (rec_.debit_invoice_no IS NOT NULL) THEN
+            debit_invoice_no_ :=  rec_.debit_invoice_no; 
+         END IF;
+         
+         -- Temporary solution is added to fix SC21R2-2302
+         -- Need restructure the logic in this method after a funtional investigation about
+         -- creating Credit invoice scenarios (RM/RML/RMC)
+         IF (source_ = 'RM' AND rec_.message_type = 'Information') THEN
+            IF (rec_.message_no = 3 AND rec_.answer = 'N') THEN
+                debit_invoice_no_ := NULL;
+            END IF;
+         END IF;     
+      END LOOP;
+
+      IF (create_) THEN 
+         info$_ := Create_Credit_Invoice___ (rma_no_, rma_line_no_, rma_charge_no_, debit_invoice_no_);   
+      END IF;   
+   END LOOP;
+END Process_Create_Credit_Invoice___;
+
+FUNCTION Create_Credit_Invoice___(   
+   rma_no_           IN NUMBER,
+   rma_line_no_      IN NUMBER,
+   rma_charge_no_    IN NUMBER,
+   debit_invoice_no_ IN NUMBER ) RETURN VARCHAR2
+IS    
+   use_debit_inv_rate_ NUMBER := 0;
+BEGIN
+   IF (debit_invoice_no_ = 1) THEN
+     use_debit_inv_rate_ := 1;
+   ELSIF (debit_invoice_no_ = 2) THEN
+     use_debit_inv_rate_ := 0; 
+   END IF;  
+   Invoice_Customer_Order_API.Create_Invoice_From_Return__(rma_no_ , rma_line_no_, rma_charge_no_, use_debit_inv_rate_);
+   RETURN Client_SYS.Get_All_Info;
+END Create_Credit_Invoice___;

@@ -1,0 +1,299 @@
+-------------------------------------------------------------------------------------------------
+-- Date        Sign     History
+-- ----------  ------   -------------------------------------------------------------------------
+-- 2020-11-17  RavDlk   SC2020R1-11227, Handled the enumeration ConsignmentStock
+-- 2020-05-18  BudKLK   Bug 153735(SCZ-9998), CustomerConsignmentStockDetailArray by adding a condition and passed parent catalog no to make sure the child list will have consignment quanities only related to the parent catalogno and added a method call in the quantity column to get the relevant quantities.
+-- 2020-03-26  BudKLK   Bug 152192(SCZ-8629), Added PartNo to the CustomerConsignmentStock in order to replace catalogNo to PartNo in to the CustomerConsignmentStockDetailArray.
+-- 2019-05-13  LaThlk   SCUXXW4-18796, Added the key attribute ExpirationDateBase to the CustomerConsignmentStockDetail entity.
+-- 2019-04-28  LaThlk   SCUXXW4-18796, Removed the Quantity from the CustomerConsignmentStockDetail keys.
+-- 2019-04-25  LaThlk   SCUXXW4-18791, Added missing keys to the entity CustomerConsignmentStockDetail.
+-- 2019-04-02  LaThlk   SCUXXW4-11443, Added the action ReportConsumed.
+-- 2018-10-25  RuLiLk   SCUXXW4-9755, Converted from tbwConsignmentStockConsumption using MTG Version: 1.31
+-------------------------------------------------------------------------------------------------
+projection CustomerConsignmentStockConsumptionsHandling;
+component ORDER;
+layer Core;
+description "Use this API to report the quantity consumed by the customer in a consignment stock. You can search for consignment stock handled lines and report the customer consumption.";
+category Users;
+include fragment CustAddressShipLovSelector;
+include fragment NonRentalSalesPartLovSelector;
+include fragment CustOrdCust1Selector;
+include fragment CreateRefillOrderAssistant;
+include fragment OrderCoordinatorLovSelector;
+include fragment CreatedRefillOrdersAssistant;
+include fragment CustomerConsignmentStockInitialCheck;
+
+----------------------------- MAIN ENTRY POINTS -----------------------------
+entityset CustomerConsignmentStockSet for CustomerConsignmentStock;
+
+------------------------------ ENTITY DETAILS -------------------------------
+@Override
+entity CustomerConsignmentStock {
+   ludependencies = CustomerConsignmentStock;
+
+   crud = Read, Update;
+
+   use attributes = ConsignmentStockQty, OrderPoint, OrderQty;
+   attribute QtyToConsume Number {
+      fetch = "null";
+      label = "Consumed Qty";
+      editable = [ETag != null];
+   }
+   attribute InventoryUom Text {
+      fetch = "Inventory_Part_API.Get_Unit_Meas(contract, Sales_Part_API.Get_Part_No(contract, catalog_no))";
+      label = "Inventory UoM";
+      maxlength = 10;
+      editable = [false];
+   }
+   attribute Contract Text {
+      editable = [false];
+   }
+   attribute CatalogNo Text {
+      label = "Sales Part No";
+      editable = [false];
+   }
+   attribute SalesPartDescription Text {
+      fetch = "Sales_Part_API.Get_Catalog_Desc(contract,catalog_no)";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute PartDescription Text {
+      fetch = "Inventory_Part_API.Get_Description(contract, Sales_Part_API.Get_Part_No(contract, catalog_no))";
+      maxlength = 2000;
+      editable = [false];
+   }
+
+   attribute AddrNo Text {
+      label = "Delivery Address";
+      editable = [false];
+   }
+   attribute OrderPoint Number {
+      editable = [false];
+   }
+
+   attribute OrderQty Number {
+      editable = [false];
+   }
+   attribute ConsignmentStock Enumeration(ConsignmentStock) {
+      fetch = "consignment_stock_db";
+      label = "Consignment Stock Active";
+      editable = [false];
+      required = [true];
+   }
+   attribute AllowAggregatedReporting Boolean("TRUE", "FALSE") {
+      fetch = "allow_aggregated_reporting_db";
+      label = "Aggregated Reporting Allowed";
+      editable = [false];
+   }
+   attribute DefaultCustomerOrderType Text {
+      fetch = "NVL(Message_Defaults_Per_Cust_API.Get_Order_Id(contract, customer_no), NVL(Site_Discom_Info_API.Get_Order_Id(contract), Cust_Ord_Customer_API.Get_Order_Id(customer_no)))";
+      label = "Default Customer Order Type";
+      maxlength = 3;
+      editable = [false];
+      format = uppercase;
+   }
+   attribute PartNo Text {
+      fetch = "Sales_Part_API.Get_Part_No(contract, catalog_no)";
+      maxlength = 25;
+      editable = [false];
+   }
+   reference SalesPartRef(Contract, CatalogNo) to SalesPart(Contract, CatalogNo);
+   reference InventoryUomRef(InventoryUom) to IsoUnit(UnitCode) {
+      label = "Inventory UoM";
+   }
+   reference CatalogNoRef(Contract, CatalogNo) to NonRentalSalesPartLov(Contract, CatalogNo) {
+      label = "Sales Part No";
+   }
+
+   reference AddrNoRef(CustomerNo, AddrNo) to CustAddressShipLov(CustomerNo, AddrNo) {
+      label = "Delivery Address";
+   }
+   reference CustomerNoRef(CustomerNo) to CustOrdCust1(CustomerNo) {
+      label = "Customer";
+   }
+   array CustomerConsignmentStockDetailArray(Contract, PartNo, CatalogNo, CustomerNo, AddrNo) to CustomerConsignmentStockDetail(Contract, PartNo, CatalogNo, CustomerNo, AddrNo) {
+      where = "(:child.Quantity > 0 )";
+   }
+}
+
+@Override
+entity CustomerConsignmentStockDetail using CustomerConsignmentStock {
+   ludependencies = CustomerConsignmentStock;
+   crud = Read, Update;
+
+   from = "customer_consignment_inv_parts , (SELECT catalog_no parent_catalog_no, part_no parent_part_no, contract parent_contract FROM SALES_PART)";
+   where = "contract = parent_contract AND part_no = parent_part_no";
+
+   keys = Contract, CatalogNo, CustomerNo, AddrNo, ConfigurationId, LotBatchNo, SerialNo, EngChgLevel, WaivDevRejNo, ActivitySeq, HandlingUnitId, ProcessType, ExpirationDateBase, PartNo;
+
+   attribute QtyToConsume Number {
+      fetch = "null";
+      label = "Consumed Qty";
+      editable = [ETag != null];
+   }
+
+   attribute Contract Text {
+      fetch = "contract";
+      label = "Contract";
+      maxlength = 5;
+      required = [true];
+      editable = [false];
+      format = uppercase;
+   }
+   attribute CatalogNo Text {
+      fetch = "parent_catalog_no";
+      label = "Catalog No";
+      maxlength = 25;
+      required = [true];
+      editable = [false];
+      format = uppercase;
+   }
+   attribute PartNo Text {
+      fetch = "part_no";
+      label = "Part No";
+      maxlength = 25;
+      required = [true];
+      editable = [false];
+      format = uppercase;
+   }
+   attribute CustomerNo Text {
+      fetch = "customer_no";
+      label = "Customer No";
+      maxlength = 20;
+      required = [true];
+      editable = [ETag = null];
+      format = uppercase;
+   }
+   attribute AddrNo Text {
+      fetch = "addr_no";
+      label = "Addr No";
+      maxlength = 50;
+      required = [true];
+      editable = [ETag = null];
+   }
+   attribute Quantity Number {
+      fetch = "Deliver_Customer_Order_API.Get_Consignment_Stock_Qty__(contract, parent_catalog_no, customer_no, addr_no, configuration_id, lot_batch_no, serial_no, eng_chg_level, waiv_dev_rej_no, activity_seq, handling_unit_id, expiration_date)";
+      label = "Consignment Stock Qty";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute UnitMeas Text {
+      fetch = "unit_meas";
+      label = "Inventory UoM";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute ConfigurationId Text {
+      fetch = "configuration_id";
+      label = "Configuration ID";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute HandlingUnitId Number {
+      fetch = "handling_unit_id";
+      label = "Handling Unit ID";
+      editable = [false];
+   }
+   attribute LotBatchNo Text {
+      fetch = "lot_batch_no";
+      label = "Lot/Batch No";
+      maxlength = 20;
+      required = [true];
+      editable = [ETag = null];
+   }
+   attribute SerialNo Text {
+      fetch = "serial_no";
+      label = "Serial No";
+      maxlength = 50;
+      required = [true];
+      editable = [ETag = null];
+   }
+   attribute ConditionCode Text {
+      fetch = "condition_code";
+      label = "Condition Code";
+      maxlength = 10;
+      editable = [false];
+      format = uppercase;
+   }
+   attribute ConditionCodeDesc Text {
+      fetch = "condition_code_desc";
+      label = "Condition Code Description";
+      maxlength = 35;
+      editable = [false];
+   }
+   attribute EngChgLevel Text {
+      fetch = "eng_chg_level";
+      label = "Rev No";
+      maxlength = 6;
+      required = [true];
+      editable = [ETag = null];
+   }
+   attribute WaivDevRejNo Text {
+      fetch = "waiv_dev_rej_no";
+      label = "W/D/R No";
+      maxlength = 15;
+      required = [true];
+      editable = [ETag = null];
+   }
+   attribute ActivitySeq Number {
+      fetch = "activity_seq";
+      label = "Activity Sequence";
+      maxlength = 10;
+      required = [true];
+      editable = [ETag = null];
+   }
+   attribute ExpirationDate Date {
+      fetch = "expiration_date";
+      label = "Expiration Date";
+      editable = [false];
+   }
+   attribute ProcessTypeDb Text {
+      fetch = "process_type_db";
+      label = "Process Type";
+      maxlength = 100;
+      editable = [false];
+      format = uppercase;
+   }
+   attribute ProcessType Text {
+      editable = [false];
+   }
+   attribute ExpirationDateBase Date;
+
+   reference HandlingUnitRef(HandlingUnitId) to HandlingUnit(HandlingUnitId);
+   reference CatalogNoRef(Contract, CatalogNo) to SalesPart(Contract, CatalogNo) {
+      label = "Catalog No";
+   }
+   reference AddrNoRef(CustomerNo, AddrNo) to CustOrdCustomerAddress(CustomerNo, AddrNo) {
+      label = "Addr No";
+   }
+
+   action ConsumeConsignmentStock {
+      ludependencies = CustomerConsignmentStockDetail;
+      parameter QtyToConsume Number;
+   }
+}
+
+------------------------------- ENUMERATIONS --------------------------------
+
+---------------------------------- QUERIES ----------------------------------
+
+---------------------------------- ACTIONS ----------------------------------
+
+action ReportConsumed Text {
+   initialcheck implementation;
+   parameter FullSelection Text;
+   ludependencies = CustomerConsignmentStock;
+}
+
+--------------------------------- FUNCTIONS ---------------------------------
+function RaiseCreatedRefillOrders Text {
+   parameter UpdateList Text;
+}
+-------------------------------- STRUCTURES ---------------------------------
+
+--------------------------------- VIRTUALS ----------------------------------
+
+--------------------------------- SUMMARIES ---------------------------------
+
+-------------------------------- SINGLETONS ---------------------------------
+

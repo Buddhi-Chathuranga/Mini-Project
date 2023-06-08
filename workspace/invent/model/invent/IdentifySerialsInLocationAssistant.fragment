@@ -1,0 +1,504 @@
+-------------------------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  --------------------------------------------------------------------------------
+-- 2022-01-17  DigPlk  SC21R2-2384, Removed IdentifySerialsInLocAssistant as its all usages are replaced by IdentifySerialsInLocRepeatAssistant
+-- 2019-04-11  JaThlk  SCUXXW4-18432, Moved the where clause for SerialNo to projection file from plsvc file.
+-- 2018-12-18  ChFolk  SCUXXW4-5511, Included fragments TemporaryPartTrackingSerialSelector, SequenceGeneratorAssistant and IdentifySerialsByBarcodeDynamicAssistant.
+-- 2018-11-22  ChFolk  SCUXXW4-5511, Renamed GetCatchUom as GetCatchUomForInLocSerials, CreateLines as CreateLinesForInLocSerials, CatchUnitInfoStructure as CatchUnitInfoForInLocSerialsStructure
+-- 2018-11-22          SerialsList as InLocSerialsList SerialsArray as InLocSerialsArray to distinguish methods names in IdentifySerialsInLocationAssistant and IdentifySerialsInMultipleLocationsAssistant.
+-- 2018-11-07  JaThlk  SCUXXW4-5511, Implemented SequenceGeneratorAssistant.
+-- 2018-09-27  JaThlk  SCUXXW4-5511, Made the fields noneditable in IdentifySerialsInLocationVirtual.
+-- 2018-09-13  JaThlk  SCUXXW4-5511, Created the fragment to identify serials.
+-- 2020-03-11  Asiglk  MFXTEND-304, We can't issue more than one serial part which is not tracked in inventory.
+-------------------------------------------------------------------------------------------------------
+
+fragment IdentifySerialsInLocationAssistant;
+component INVENT;
+layer Core;
+description "Assistant to identify serial numbers in location whenever the need arises.";
+include fragment TemporaryPartTrackingSerialSelector;
+include fragment SequenceGeneratorAssistant;
+include fragment IdentifySerialsByBarcodeDynamicAssistant;
+include fragment CreateSessionIdSelection;
+
+//warningsenabled = CreateSerialSequence;
+----------------------------- CLIENT FRAGMENTS ------------------------------
+
+
+-------------------------------- ASSISTANTS ---------------------------------
+assistant IdentifySerialsInLocRepeatAssistant using IdentifySerialsInLocationSet {
+   label = "${AssistantTitle}";
+   autorestart = [RemainingSelection != null];
+
+   input(RemainingSelection, TotalCount, CurrentCount, SelectionRec);
+   output(SelectionRec);
+   keeponrestart(RemainingSelection, TotalCount, CurrentCount, SelectionRec);
+   init command {
+      execute {
+         if [TotalCount > 0] {
+            if [TotalCount > 0 and CurrentCount = null] {
+               set CurrentCount = 1;
+            }
+            else {
+               set CurrentCount = "#{CurrentCount + 1}";
+            }
+         }
+         call CheckSerialRecords(RemainingSelection) into SerialRecordPickListStructure;
+         set Contract = SerialRecordPickListStructure.Contract;
+         set PartNo = SerialRecordPickListStructure.PartNo;
+         set  ConfigurationId = SerialRecordPickListStructure.ConfigurationId;
+         set  LocationNo = SerialRecordPickListStructure.LocationNo;
+         set  LotBatchNo = SerialRecordPickListStructure.LotBatchNo;
+         set  EngChgLevel = SerialRecordPickListStructure.EngChgLevel;
+         set  WaivDevRejNo = SerialRecordPickListStructure.WaivDevRejNo;
+         set  ActivitySeq = SerialRecordPickListStructure.ActivitySeq;
+         set HandlingUnitId = SerialRecordPickListStructure.HandlingUnitId;
+         set  QtyIssue = SerialRecordPickListStructure.QtyIssue;
+         set  CatchQtyIssue = SerialRecordPickListStructure.CatchQtyIssue;
+         set  AssistantTitle = SerialRecordPickListStructure.AssistantTitle;
+         set  AssistantContext = SerialRecordPickListStructure.AssistantContext;
+         set  SessionId = SerialRecordPickListStructure.SessionId;
+         set  RemainingSelection = SerialRecordPickListStructure.RemainingSelection;
+         set  RunningSelection = SerialRecordPickListStructure.SelectionRec;
+
+         call GetInitialInfoForInLocSerials(Contract, PartNo, SessionId) into InitialInfoForInLocSerialsStructure;
+         set SessionId = InitialInfoForInLocSerialsStructure.SessionId;
+         set CatchUoM = InitialInfoForInLocSerialsStructure.CatchUom;
+         set CatchUnitEnabled = InitialInfoForInLocSerialsStructure.CatchUnitEnabled;
+         if [not AssistantTitle] {
+            set AssistantTitle = "Identify Serials (${CurrentCount} of ${TotalCount})";
+         }
+      }
+   }
+   steps {
+      step {
+         group InvStockRecordGroup;
+         group QuantitiesGroup;
+         list InLocSerialsList(InLocSerialsArray);
+      }
+      final step {
+
+      }
+      cancelled step {
+
+      }
+   }
+   finish command {
+      enabled = [(AssistantContext = "IDENTIFY_SERIALS_IN_STOCK" and computed.SerialsIdentified > 0 and computed.SerialsIdentified <= QtyIssue) or(AssistantContext != "IDENTIFY_SERIALS_IN_STOCK" and computed.SerialsIdentified = QtyIssue)];
+      execute {
+         call CreateSessionId(SelectionRec, RunningSelection, SessionId) into SelectionRec;
+         exit OK;
+      }
+   }
+   cancel command {
+      execute {
+         exit OK;
+      }
+   }
+   restart command {
+      enabled = [RemainingSelection != null];
+   }
+}
+--------------------------------- COMMANDS ----------------------------------
+command GenerateSequenceInLocCommand for TempPartTrackingForInLocSerialsVirtual {
+   label = "Sequence";
+   mode = Global;
+   variable SerialListStr {
+      type = LongText;
+   }
+   variable ReserveSerialVar {
+      type = Number;
+   }
+   enabled = [QtyIssue > computed.SerialsIdentified];
+   execute {
+      set ReserveSerialVar = "#{(QtyIssue - computed.SerialsIdentified)}";
+      assistant SequenceGeneratorAssistant(ReserveSerialVar) into(SerialListStr) {
+         when OK {
+            call CreateLinesForInLocSerials(Objkey, SerialListStr, SessionId, Contract, PartNo);
+         }
+      }
+   }
+}
+
+command IdentifySerialsByBarcodeInLocCommand for TempPartTrackingForInLocSerialsVirtual {
+   label = "Barcode ID";
+   mode = Global;
+   variable SessionIdStr {
+      type = Text;
+   }
+   variable ParentSessionIdStr {
+      type = Text;
+   }
+   variable ActivitySeqStr {
+      type = Text;
+   }
+   enabled = [QtyIssue > computed.SerialsIdentified];
+
+   execute {
+      call GetBarcodeInfoInLoc(SessionId, ActivitySeq) into BarcodeInfoInLocStructure;
+      set SessionIdStr = BarcodeInfoInLocStructure.SessionIdStr;
+      set SessionIdVar = BarcodeInfoInLocStructure.SessionId;
+      set ParentSessionIdStr = BarcodeInfoInLocStructure.ParentSessionIdStr;
+      set ActivitySeqStr = BarcodeInfoInLocStructure.ActivitySeqStr;
+
+      assistant IdentifySerialsByBarcodeAssistant(Contract, PartNo, ConfigId, LotBatchNo, EngChgLevel, WaivDevRejNo, ActivitySeqStr, SessionIdVar, SessionIdStr, ParentSessionIdStr) into(SessionIdVar) {
+         when CANCEL {
+            call InsertLinesForInLocSerials(Objkey, SessionIdVar, SessionId, Contract, PartNo);
+            exit;
+         }
+
+      }
+   }
+}
+---------------------------------- GROUPS -----------------------------------
+
+group InvStockRecordGroup for IdentifySerialsInLocationVirtual {
+   label = "Stock Record";
+   field Contract {
+      size = Small;
+   }
+   field PartNo {
+      size = Small;
+   }
+   field ConfigurationId {
+      size = Small;
+   }
+   field LocationNo {
+      size = Small;
+   }
+   field LotBatchNo {
+      size = Small;
+   }
+   field EngChgLevel {
+      size = Small;
+   }
+   field WaivDevRejNo {
+      size = Small;
+   }
+   field ActivitySeq;
+   field HandlingUnitId;
+   field SessionId {
+      visible = [false];
+   }
+   field AssistantTitle {
+      visible = [false];
+   }
+
+}
+group QuantitiesGroup for IdentifySerialsInLocationVirtual {
+   label = "Quantities";
+   measure QtyIssue(UoM);
+   measure CatchQtyIssue(CatchUoM);
+   computedfield SerialsIdentified {
+      label = "No of Serials Identified";
+      value = "#{InLocSerialsArray.count(SessionId)}";
+      type = Number;
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+
+list InLocSerialsList for TempPartTrackingForInLocSerialsVirtual {
+   label = "";
+   editmode = SingleCellEdit;
+   crudactions {
+      new {
+         enabled = [component.InLocSerialsList.RowCount < parent.QtyIssue];
+      }
+   }
+   field SerialNo {
+      lovswitch {
+         when [AssistantContext = "PURCHASE_RETURN"] {
+            lov SerialNoRef with ReferenceTemporaryPartTrackingSerialSelector using GetSerialNumbersForPr(Contract, LocationNo, PartNo, SessionId, LotBatchNo, ConfigurationId, EngChgLevel, WaivDevRejNo, ActivitySeq, HandlingUnitId, PartOwnershipDb) {
+               size = Small;
+               freeinput = [true];
+            }
+         }
+         when [true] {
+            lov SerialNoRef with ReferenceTemporaryPartTrackingSerialSelector using GetSerialNumbers(Contract, LocationNo, PartNo, SessionId, LotBatchNo, ConfigurationId, EngChgLevel, WaivDevRejNo, ActivitySeq, HandlingUnitId, PartOwnershipDb) {
+               size = Small;
+               freeinput = [true];
+            }
+         }
+      }
+
+   }
+   field CatchQty {
+      editable = [parent.CatchUnitEnabled = "TRUE"];
+   }
+   fieldranking SerialNoRef, CatchQty;
+   command GenerateSequenceInLocCommand;
+   command IdentifySerialsByBarcodeInLocCommand;
+}
+
+
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+
+
+----------------------------- MAIN ENTRY POINTS -----------------------------
+entityset IdentifySerialsInLocationSet for IdentifySerialsInLocationVirtual;
+
+---------------------------------- ACTIONS ----------------------------------
+//! TODO: Should be refactored as a function!
+action GetInitialInfoForInLocSerials Structure(InitialInfoForInLocSerialsStructure) {
+   initialcheck none;
+   parameter Contract Text;
+   parameter PartNo Text;
+   parameter SessionId Number;
+}
+
+action CreateLinesForInLocSerials {
+   initialcheck none;
+   parameter ParentObjkey Text;
+   parameter SerialList LongText;
+   parameter SessionId Number;
+   parameter Contract Text;
+   parameter PartNo Text;
+   ludependencies = TempPartTrackingForInLocSerialsVirtual;
+   supportwarnings = [true];
+
+}
+
+action InsertLinesForInLocSerials {
+   initialcheck none;
+   parameter ParentObjkey Text;
+   parameter SessionIdVar Number;
+   parameter SessionId Number;
+   parameter Contract Text;
+   parameter PartNo Text;
+   ludependencies = TempPartTrackingForInLocSerialsVirtual;
+}
+//! TODO: Should be refactored as a function!
+action GetBarcodeInfoInLoc Structure(BarcodeInfoInLocStructure) {
+   initialcheck none;
+   parameter ParentSessionId Number;
+   parameter ActivitySeq Number;
+}
+--------------------------------- FUNCTIONS ---------------------------------
+
+function GetSerialNumbers List < Entity(TemporaryPartTrackingSerial) > {
+   ludependencies = TempPartTrackingForInLocSerialsVirtual;
+   parameter Contract Text;
+   parameter LocationNo Text;
+   parameter PartNo Text;
+   parameter SessionId Number;
+   parameter LotBatchNo Text;
+   parameter ConfigurationId Text;
+   parameter EngChgLevel Text;
+   parameter WaivDevRejNo Text;
+   parameter ActivitySeq Number;
+   parameter HandlingUnitId Number;
+   parameter PartOwnershipDb Text;
+   where = "PART_NO = :PartNo AND CONTRACT = :Contract AND LOT_BATCH_NO = :LotBatchNo AND CONFIGURATION_ID = :ConfigurationId AND SERIAL_NO NOT IN (SELECT t.SERIAL_NO FROM TEMPORARY_PART_TRACKING t WHERE t.SESSION_ID = :SessionId) AND ((Inventory_Part_In_Stock_API.Check_Individual_Exist(TEMPORARY_PART_TRACKING_SERIAL.PART_NO, TEMPORARY_PART_TRACKING_SERIAL.SERIAL_NO) = 0 AND PART_OWNERSHIP_DB = :PartOwnershipDb))";
+}
+
+function GetSerialNumbersForPr List < Entity(TemporaryPartTrackingSerial) > {
+   parameter Contract Text;
+   parameter LocationNo Text;
+   parameter PartNo Text;
+   parameter SessionId Number;
+   parameter LotBatchNo Text;
+   parameter ConfigurationId Text;
+   parameter EngChgLevel Text;
+   parameter WaivDevRejNo Text;
+   parameter ActivitySeq Number;
+   parameter HandlingUnitId Number;
+   parameter PartOwnershipDb Text;
+   ludependencies = TempPartTrackingForInLocSerialsVirtual;
+   where = "PART_NO = :PartNo AND CONTRACT = :Contract AND LOT_BATCH_NO = :LotBatchNo AND CONFIGURATION_ID = :ConfigurationId AND SERIAL_NO NOT IN (SELECT t.SERIAL_NO FROM TEMPORARY_PART_TRACKING t WHERE t.SESSION_ID = :SessionId)
+   AND ((Inventory_Part_In_Stock_API.Check_Individual_Exist(TEMPORARY_PART_TRACKING_SERIAL.PART_NO, TEMPORARY_PART_TRACKING_SERIAL.SERIAL_NO) = 0 AND PART_OWNERSHIP_DB = :PartOwnershipDb) OR
+   SERIAL_NO IN ( SELECT SERIAL_NO
+                  FROM INVENTORY_PART_IN_STOCK ipis
+                  WHERE ipis.PART_NO           = TEMPORARY_PART_TRACKING_SERIAL.PART_NO
+                  AND   ipis.SERIAL_NO         = TEMPORARY_PART_TRACKING_SERIAL.SERIAL_NO
+                  AND   ipis.CONTRACT          = :Contract
+                  AND   ipis.CONFIGURATION_ID  = :ConfigurationId
+                  AND   ipis.LOT_BATCH_NO      = :LotBatchNo
+                  AND   ipis.LOCATION_NO       = :LocationNo
+                  AND   ipis.ENG_CHG_LEVEL     = :EngChgLevel
+                  AND   ipis.WAIV_DEV_REJ_NO   = :WaivDevRejNo
+                  AND   ipis.ACTIVITY_SEQ      = :ActivitySeq
+                  AND   ipis.HANDLING_UNIT_ID  = :HandlingUnitId))";
+}
+
+function CheckSerialRecords Structure(SerialRecordPickListStructure) {
+   parameter RemainingSelection Text;
+}
+function CreateSessionId Text {
+   parameter OldSelection  Text;
+   parameter Selection     Text;
+   parameter SessionId     Number;
+}
+-------------------------------- STRUCTURES ---------------------------------
+
+structure InitialInfoForInLocSerialsStructure {
+   attribute CatchUom Text;
+   attribute CatchUnitEnabled Text;
+   attribute SessionId Number;
+}
+structure BarcodeInfoInLocStructure {
+   attribute SessionId Number;
+   attribute SessionIdStr Text;
+   attribute ParentSessionIdStr Text;
+   attribute ActivitySeqStr Text;
+}
+structure SerialRecordPickListStructure {
+   attribute Contract Text;
+   attribute PartNo Text;
+   attribute ConfigurationId Text;
+   attribute LocationNo Text;
+   attribute LotBatchNo Text;
+   attribute EngChgLevel Text;
+   attribute WaivDevRejNo Text;
+   attribute ActivitySeq Number;
+   attribute HandlingUnitId Number;
+   attribute QtyIssue Number;
+   attribute AssistantContext Text;
+   attribute AssistantTitle Text;
+   attribute SessionId Text;
+   attribute CatchQtyIssue Number;
+   attribute RemainingSelection Text;
+   attribute SelectionRec Text;
+}
+
+--------------------------------- VIRTUALS ----------------------------------
+
+virtual IdentifySerialsInLocationVirtual {
+   attribute Contract Text {
+      label = "Site";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute PartNo Text {
+      label = "Part No";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute ConfigurationId Text {
+      label = "Configuration ID";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute LocationNo Text {
+      label = "Location No";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute LotBatchNo Text {
+      label = "Lot/Batch No";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute EngChgLevel Text {
+      label = "Revision No";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute WaivDevRejNo Text {
+      label = "W/D/R No";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute ActivitySeq Number {
+      label = "Activity Sequence";
+      editable = [false];
+   }
+   attribute HandlingUnitId Number {
+      label = "Handling Unit ID";
+      editable = [false];
+   }
+   attribute QtyIssue Number {
+      label = "Quantity";
+      editable = [false];
+   }
+   attribute UoM Text {
+      fetch = "Inventory_Part_API.Get_Unit_Meas(CONTRACT,PART_NO)";
+      editable = [false];
+   }
+   attribute CatchQtyIssue Number {
+      label = "Catch Quantity";
+      editable = [false];
+   }
+   attribute CatchUoM Text {
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute PartOwnershipDb Text {
+      fetch = "Inventory_Part_In_Stock_API.Get_Part_Ownership_Db(CONTRACT, PART_NO, CONFIGURATION_ID, LOCATION_NO, LOT_BATCH_NO, '*', ENG_CHG_LEVEL, WAIV_DEV_REJ_NO, ACTIVITY_SEQ, HANDLING_UNIT_ID)";
+   }
+   attribute SerialsIdentified Number {
+      label = "No of Serials Identified";
+   }
+   attribute SessionId Number;
+   attribute CatchUnitEnabled Text;
+   attribute AssistantTitle Text;
+   attribute AssistantContext Text;
+
+   attribute RemainingSelection Text;
+   attribute TotalCount Number;
+   attribute CurrentCount Number;
+   attribute SelectionRec Text;
+   attribute RunningSelection Text;
+   array InLocSerialsArray(Contract, PartNo, LocationNo, SessionId, LotBatchNo, ConfigurationId, EngChgLevel, WaivDevRejNo, ActivitySeq, HandlingUnitId, AssistantContext, PartOwnershipDb) to TempPartTrackingForInLocSerialsVirtual(Contract, PartNo, LocationNo, SessionId, LotBatchNo, ConfigurationId, EngChgLevel, WaivDevRejNo, ActivitySeq, HandlingUnitId, AssistantContext, PartOwnershipDb);
+
+}
+
+
+virtual TempPartTrackingForInLocSerialsVirtual {
+   crud = Create, Read, Update, Delete;
+
+   attribute SessionId Number {
+      fetch = "SESSION_ID";
+      label = "Session ID";
+      required = [true];
+      editable = [ETag = null];
+   }
+   attribute SerialNo Text {
+      fetch = "SERIAL_NO";
+      label = "Serial No";
+      maxlength = 50;
+      required = [true];
+      editable = [ETag = null];
+      format = uppercase;
+   }
+   attribute CatchQty Number {
+      fetch = "CATCH_QTY";
+      label = "Catch Qty";
+   }
+   attribute PartNo Text {
+      fetch = "PART_NO";
+      label = "Part No";
+      maxlength = 25;
+      editable = [ETag = null];
+      format = uppercase;
+   }
+   attribute Contract Text {
+      fetch = "CONTRACT";
+      label = "Contract";
+      maxlength = 5;
+      editable = [ETag = null];
+      format = uppercase;
+   }
+   attribute AssistantContext Text;
+   attribute SerialNoAttr Text;
+   attribute Generated Boolean;
+   attribute LocationNo Text;
+   attribute LotBatchNo Text;
+   attribute ConfigurationId Text;
+   attribute EngChgLevel Text;
+   attribute WaivDevRejNo Text;
+   attribute ActivitySeq Number;
+   attribute HandlingUnitId Number;
+   attribute PartOwnershipDb Text;
+   reference SerialNoRef(SerialNo) to TemporaryPartTrackingSerial(SerialNo) {
+      label = "Serial No";
+   }
+}
+
+
+
+
+
+
+

@@ -1,0 +1,1181 @@
+----------------------------------------------------------------------------------------------
+--  Module : INVENT
+--
+--  Purpose: Upgrade of INVENT database objects from release 14.0.0 to 14.1.0.
+--
+--  File   : 1410.upg
+--
+--  IFS/Design Template Version 2.3
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------------------------
+--  210301  Asawlk  SC2020R1-12698, Modified Materialized View creation to support Oracle Edition Based Redefinition.
+--  150529  IsSalk  KES-402, Added new columns source_ref1, source_ref2, source_ref3, source_ref4 and source_ref_type
+--  150529          to the view INVENT_TRANSACTION_HIST_MV. Renamed usages of order_no, release_no, sequence_no, line_item_no
+--  150529          attributes of InventoryTransactionHist to source_ref1, source_ref2, source_ref3, source_ref4.
+--  141202  RALASE  PRMF-3264, Added INV_TRANS_HIST_CHK_MV to support BI Incremental Update.
+--  141123  MalLlk  Bug 119662, Modified INVENTORY_VALUE_PART_MV by adding location_group column and moving unit_cost to the light items section.
+--  141123  MalLlk  Bug 119316, Modified INVENTORY_VALUE_PART_MV by adding location_group_key as a key column and change the view accordingly.
+--  141030  ChJalk  PRSC-3726, Modified INVENTORY_VALUE_PART_MV to avoid division by zero error.
+--  140901  AyAmlk  Bug 118474, Modified INVENTORY_VALUE_PART_MV to change the calculation logic of total_value and unit_cost.
+--  130529  ChJalk  PBSC-9752, Removed column inventory_location_group from the view INVENT_TRANSACTION_HIST_MV.
+--  130527  ChJalk  PBSC-9752, Added column inventory_location_group into the view INVENT_TRANSACTION_HIST_MV.
+--  131010  MaEelk  SP2 - Merge
+-----------------------------------------------------------------------------------------------
+
+SET SERVEROUTPUT ON
+exec Database_SYS.Log_Detail_Time_Stamp('INVENT','1410.upg','Timestamp_1');
+PROMPT Start upgrading with 1410.upg
+
+------------------------------------------------------------------------------------------
+---------------------------- Instructions for upg files ----------------------------------
+------------------------------------------------------------------------------------------
+
+-- If possible, everything regarding one table should be placed in one section.
+-- If this is not possible, a proper comment about the reason should be added.
+
+-- Each section should be started with a "-----" line and a empty line.
+-- This section should then start with a line like: "-- ***** Example_Tab Start *****"
+-- and end with a line like:                       "-- ***** Example_Tab End *****"
+-- Don't forget UPPER/lower case !
+
+-- Every part inside the section should start with a "PROMPT" line explaining what is done by the block.
+
+-- If the Pl/SQL block has DML instructions (INSERT,UPDATE,DELETE etc) there should always be a "COMMIT;" line after the block.
+
+-- Remember ordinary coding standard rules !
+
+-- Don't drop any Table/Column !
+
+-- Don't forget performance when updating large table !
+
+-- No unnecessary blank lines or comments !
+
+-- If possible, use pure SQL commands
+-- If possible, try to group several updates together in one statement.
+
+-- For more information refer the "Upgrade Script Standards document and the Performance Guide.
+
+-- Timestamps will be added automatically at the end of the project.
+
+
+---------------------------------------------------------------------------------------------
+--------------------- CREATE/ALTER TABLES/INDEXES AND DATA CORRECTIONS ----------------------
+---------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------
+
+-- ****** INVENT_TURNOVER_MV Start *****
+
+exec Database_SYS.Log_Detail_Time_Stamp('INVENT','1410.upg','Timestamp_2');
+PROMPT Recreating the materialized view INVENTORY_TURNOVER_MV and indexes
+
+DEFINE TAB    = INVENTORY_PART_PERIOD_HIST_TAB
+DEFINE MV     = INVENTORY_TURNOVER_MV
+
+DECLARE
+   stmt_                    VARCHAR2(32000);
+   columns_                 Database_SYS.ColumnTabType;
+   table_name_              VARCHAR2(30) := '&MV';
+   index_name_              VARCHAR2(30);
+   constraint_name_         VARCHAR2(30);
+BEGIN
+   dbms_output.put_line('Primary key cascade drop ON &MV');
+   Database_SYS.Remove_All_Cons_And_Idx('&MV', TRUE);
+
+   dbms_output.put_line('Drop Materialized View &MV');
+   Database_SYS.Remove_Materialized_View('&MV', TRUE);
+
+   dbms_output.put_line('Create Materialized View &MV');
+   stmt_ :=
+   'CREATE MATERIALIZED VIEW &MV
+    TABLESPACE &IFSAPP_DATA
+    BUILD DEFERRED
+    USING NO INDEX
+    REFRESH COMPLETE ON DEMAND
+    EVALUATE USING CURRENT EDITION
+    AS
+    SELECT
+      -- original key columns
+      part_no                                         part_no_key,
+      contract                                        contract_key,
+      configuration_id                                configuration_id_key,
+      stat_year_no                                    stat_year_no_key,
+      stat_period_no                                  stat_period_no_key,
+      -- measure items
+      beg_balance                                     beg_balance,
+      count_adjust                                    count_adjust,
+      count_issues                                    count_issues,
+      count_abnormal_issues                           count_abnormal_issues,
+      count_issues + count_abnormal_issues            count_issues_with_abnormal,
+      count_receipts                                  count_receipts,
+      mtd_adjust                                      adjusted_qty,
+      mtd_issues                                      issued_qty,
+      mtd_abnormal_issues                             issued_abnormal_qty,
+      mtd_issues + mtd_abnormal_issues                issued_with_abnormal_qty,
+      mtd_receipts                                    received_qty,
+      qty_onhand                                      qty_onhand,
+      qty_onhand * Inventory_Value_Part_Api.Get_Unit_Cost__(contract, stat_year_no, stat_period_no, part_no, configuration_id, ''*'', ''*'', ''*'')
+                                                      inventory_value,
+      (mtd_issues) * Inventory_Value_Part_Api.Get_Unit_Cost__(contract, stat_year_no, stat_period_no, part_no, configuration_id, ''*'', ''*'', ''*'')
+                                                      issued_value,
+      (mtd_abnormal_issues) * Inventory_Value_Part_Api.Get_Unit_Cost__(contract, stat_year_no, stat_period_no, part_no, configuration_id, ''*'', ''*'', ''*'')
+                                                      issued_abnormal_value,
+      mtd_issues/DECODE(qty_onhand,0,1,qty_onhand)    turnover_rate,
+      (mtd_issues + mtd_abnormal_issues)/DECODE(qty_onhand,0,1,qty_onhand)
+                                                      turnover_rate_with_abnormal,
+      -- light items
+      configuration_id                                configuration_id,
+      -- dimension identifiers
+      Site_API.Get_Company(contract)                  dim_company_id,
+      contract                                        dim_site_id,
+      contract||''^''||part_no                        dim_inventory_part_id,
+      TRUNC(create_date)                              dim_it_date_created_id,
+      second_commodity                                dim_second_commodity_id,
+      stat_year_no||''^''||stat_period_no             dim_stat_period_id,
+      Site_API.Get_Company(contract)||''^''||TO_CHAR(TRUNC(create_date),''YYYY-MM-DD'')
+                                                      dim_rpd_company_period_id,
+      TRUNC(create_date)    dim_rpd_period_id,
+      -- joiners
+      Site_API.Get_Company(contract)                  company,
+      contract                                        site,
+      part_no                                         inventory_part,
+      second_commodity                                second_commodity,
+      stat_year_no                                    stat_year_no,
+      stat_period_no                                  stat_period_no,
+      TRUNC(create_date)                              it_date_created,
+      TRUNC(create_date)                              reporting_date,
+      -- unique key
+      part_no || ''^'' || contract || ''^'' || configuration_id || ''^'' || TO_CHAR(stat_year_no) || ''^'' || TO_CHAR(stat_period_no)
+                                                         objid
+    FROM &TAB';
+
+   EXECUTE IMMEDIATE stmt_;
+END;
+/
+
+DECLARE
+   columns_         Database_SYS.ColumnTabType;
+   table_name_      VARCHAR2(30) := '&MV';
+   index_name_      VARCHAR2(30);
+   constraint_name_ VARCHAR2(30);
+BEGIN
+   dbms_output.put_line('Create constraints and index(s) on Materialized View &MV');
+
+   constraint_name_ := table_name_ || '_PK';
+   Database_SYS.Set_Table_Column (columns_ , 'part_no_key');
+   Database_SYS.Set_Table_Column (columns_ , 'contract_key');
+   Database_SYS.Set_Table_Column (columns_ , 'configuration_id_key');
+   Database_SYS.Set_Table_Column (columns_ , 'stat_year_no_key');
+   Database_SYS.Set_Table_Column (columns_ , 'stat_period_no_key');
+   Database_Sys.Create_Constraint(table_name_,
+                                  constraint_name_,
+                                  columns_,
+                                  'P',
+                                  '&IFSAPP_INDEX',
+                                  NULL,
+                                  TRUE,
+                                  TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX1';
+   Database_SYS.Set_Table_Column (columns_, 'dim_company_id');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX2';
+   Database_SYS.Set_Table_Column (columns_, 'dim_site_id');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX3';
+   Database_SYS.Set_Table_Column (columns_, 'dim_inventory_part_id');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX4';
+   Database_SYS.Set_Table_Column (columns_, 'dim_second_commodity_id');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+EXCEPTION
+   WHEN OTHERS THEN
+      dbms_output.put_line('Error when creating MV &MV');
+      dbms_output.put_line(SQLERRM);
+END;
+/
+
+UNDEFINE TAB
+UNDEFINE MV
+
+-- ****** INVENT_TURNOVER_MV End *****
+
+---------------------------------------------------------------------------------------------
+
+-- ****** COMMODITY_GROUP_MV Start *****
+
+DEFINE TAB = COMMODITY_GROUP_TAB
+DEFINE MV =  COMMODITY_GROUP_MV
+
+exec Database_SYS.Log_Detail_Time_Stamp('INVENT','1410.upg','Timestamp_3');
+PROMPT Creating Materialized view COMMODITY_GROUP_MV.
+DECLARE
+   stmt_        VARCHAR2(32000);
+BEGIN
+   Database_SYS.Remove_All_Cons_And_Idx('&MV', TRUE);
+   Database_SYS.Remove_Materialized_View('&MV', TRUE);
+
+   stmt_ :=
+   'CREATE MATERIALIZED VIEW &MV
+    TABLESPACE &IFSAPP_DATA
+    BUILD DEFERRED
+    USING NO INDEX
+    REFRESH COMPLETE ON DEMAND
+    EVALUATE USING CURRENT EDITION
+    AS
+    SELECT
+       -- ID (unique identity) column
+       a.commodity_code                                                      id,
+       -- key (CODE) column
+       a.commodity_code                                                      code,
+       -- other attributes
+       a.description                                                         description,
+       a.min_periods                                                         min_periods
+    FROM &TAB a
+    WHERE a.commodity_code != ''#''
+    UNION ALL
+    SELECT
+       ''#''                                                                 id,
+       NULL                                                                  code,
+       NULL                                                                  description,
+       NULL                                                                  min_periods
+    FROM BI_DUAL_TAB';
+
+    EXECUTE IMMEDIATE stmt_;
+END;
+/
+
+exec Database_SYS.Log_Detail_Time_Stamp('INVENT','1410.upg','Timestamp_4');
+PROMPT Create constraint and index(s) on Materialized View &MV
+
+DECLARE
+   table_name_       VARCHAR2(30) := '&MV';
+   columns_          Database_SYS.ColumnTabType;
+   index_name_       VARCHAR2(30);
+   constraint_name_  VARCHAR2(30);
+
+BEGIN
+   constraint_name_ := table_name_ || '_PK';
+   Database_SYS.Set_Table_Column (columns_ , 'ID');
+   Database_Sys.Create_Constraint(table_name_,
+                                  constraint_name_,
+                                  columns_,
+                                  'P',
+                                  '&IFSAPP_INDEX',
+                                  NULL,
+                                  TRUE,
+                                  TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+
+   index_name_ := table_name_ || '_IX1';
+   Database_SYS.Set_Table_Column (columns_ , 'CODE');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+END;
+/
+
+UNDEFINE TAB
+UNDEFINE MV
+
+
+-- ****** COMMODITY_GROUP_MV End *****
+
+---------------------------------------------------------------------------------------------
+
+-- ****** INVENTORY_VALUE_PART_MV Start *****
+
+exec Database_SYS.Log_Detail_Time_Stamp('INVENT','1410.upg','Timestamp_5');
+PROMPT Recreating the materialized view INVENTORY_VALUE_PART_MV and indexes
+
+DEFINE TAB =        INVENTORY_VALUE_PART_TAB
+DEFINE TAB_DETAIL = INVENT_VALUE_PART_DETAIL_TAB
+DEFINE MV         = INVENTORY_VALUE_PART_MV
+
+DECLARE
+   stmt_                    VARCHAR2(32000);
+   columns_                 Database_SYS.ColumnTabType;
+   table_name_              VARCHAR2(30) := '&MV';
+   index_name_              VARCHAR2(30);
+   constraint_name_         VARCHAR2(30);
+BEGIN
+
+   dbms_output.put_line('Primary key cascade drop ON &MV');
+   Database_SYS.Remove_All_Cons_And_Idx('&MV', TRUE);
+
+   dbms_output.put_line('Drop Materialized View &MV');
+   Database_SYS.Remove_Materialized_View('&MV', TRUE);
+
+   dbms_output.put_line('Create Materialized View &MV');
+   stmt_ :=
+   'CREATE MATERIALIZED VIEW &MV
+    TABLESPACE &IFSAPP_DATA
+    BUILD DEFERRED
+    USING NO INDEX
+    REFRESH COMPLETE ON DEMAND
+    EVALUATE USING CURRENT EDITION
+    AS
+    SELECT
+         -- key columns
+         ivp.contract                                                      contract_key,
+         ivp.stat_year_no                                                  stat_year_no_key,
+         ivp.stat_period_no                                                stat_period_no_key,
+         ivp.part_no                                                       part_no_key,
+         ivp.configuration_id                                              configuration_id_key,
+         ivp.lot_batch_no                                                  lot_batch_no_key,
+         ivp.serial_no                                                     serial_no_key,
+         ivp.condition_code                                                condition_code_key,
+         ivp.location_group                                                location_group_key,
+         -- measure items
+         SUM(ivp.qty_waiv_dev_rej)                                         qty_waiv_dev_rej,
+         SUM(ivp.quantity)                                                 quantity,
+         SUM(ivp.qty_in_transit)                                           qty_in_transit,
+         SUM(ivp.qty_at_customer)                                          qty_at_customer,
+         SUM(ivp.vendor_owned_qty)                                         vendor_owned_qty,
+         Inventory_Value_Part_API.Get_Location_Group_Value__(ivp.contract,
+                                                             ivp.stat_year_no,
+                                                             ivp.stat_period_no,
+                                                             ivp.part_no,
+                                                             ivp.location_group,
+                                                             ivp.configuration_id,
+                                                             ivp.lot_batch_no,
+                                                             ivp.serial_no,
+                                                             ivp.condition_code)
+                                                                           total_value,
+         -- light items
+         ivp.contract                                                      contract,
+         ivp.part_no                                                       part_no,
+         ivp.configuration_id                                              configuration_id,
+         ivp.lot_batch_no                                                  lot_batch_no,
+         ivp.serial_no                                                     serial_no,
+         ivp.location_group                                                location_group,
+         Inventory_Value_Part_API.Get_Unit_Cost__(ivp.contract,
+                                                  ivp.stat_year_no,
+                                                  ivp.stat_period_no,
+                                                  ivp.part_no,
+                                                  ivp.configuration_id,
+                                                  ivp.lot_batch_no,
+                                                  ivp.serial_no,
+                                                  ivp.condition_code)      unit_cost,
+         -- dimension identifiers
+         Site_API.Get_Company(ivp.contract)                                dim_company_id,
+         ivp.contract                                                      dim_site_id,
+         ivp.contract||''^''||ivp.part_no                                  dim_inventory_part_id,
+         ivp.condition_code                                                dim_condition_code_id,
+         TRUNC(MIN(ivp.create_date))                                       dim_iv_date_created_id,
+         ivp.stat_year_no ||''^''|| ivp.stat_period_no                     dim_statistic_period_id,
+         Site_API.Get_Company(ivp.contract)||''^''||TO_CHAR(TRUNC(Statistic_Period_Api.Get_Begin_Date(ivp.stat_year_no, ivp.stat_period_no)),''YYYY-MM-DD'')
+                                                                           dim_rpd_company_period_id,
+         TRUNC(Statistic_Period_Api.Get_Begin_Date(ivp.stat_year_no, ivp.stat_period_no))
+                                                                           dim_rpd_period_id,
+         -- joiners
+         Site_API.Get_Company(ivp.contract)                                company,
+         ivp.contract                                                      site,
+         ivp.part_no                                                       inventory_part,
+         ivp.condition_code                                                condition_code,
+         ivp.stat_year_no                                                  stat_year_no,
+         ivp.stat_period_no                                                stat_period_no,
+         TRUNC(MIN(ivp.create_date))                                       iv_date_created,
+         TRUNC(Statistic_Period_Api.Get_Begin_Date(ivp.stat_year_no, ivp.stat_period_no))
+                                                                           reporting_date,
+         -- unique key
+         ivp.contract || ''^'' || TO_CHAR(ivp.stat_year_no) || ''^'' || TO_CHAR(ivp.stat_period_no) || ''^'' || ivp.part_no
+            || ''^'' || ivp.configuration_id || ''^'' ||ivp.lot_batch_no || ''^'' || ivp.serial_no || ''^'' || ivp.condition_code || ''^'' || ivp.location_group
+                                                                           objid
+         FROM &TAB ivp
+         GROUP BY ivp.contract, ivp.stat_year_no, ivp.stat_period_no, ivp.part_no,
+                  ivp.configuration_id, ivp.lot_batch_no, ivp.serial_no, ivp.condition_code, ivp.location_group';
+
+   EXECUTE IMMEDIATE stmt_;
+END;
+/
+
+DECLARE
+   columns_         Database_SYS.ColumnTabType;
+   table_name_      VARCHAR2(30) := '&MV';
+   index_name_      VARCHAR2(30);
+   constraint_name_ VARCHAR2(30);
+BEGIN
+   dbms_output.put_line('Create constraints and index(s) on Materialized View &MV');
+
+   constraint_name_ := table_name_ || '_PK';
+   Database_SYS.Set_Table_Column (columns_ , 'contract_key');
+   Database_SYS.Set_Table_Column (columns_ , 'stat_year_no_key');
+   Database_SYS.Set_Table_Column (columns_ , 'stat_period_no_key');
+   Database_SYS.Set_Table_Column (columns_ , 'part_no_key');
+   Database_SYS.Set_Table_Column (columns_ , 'configuration_id_key');
+   Database_SYS.Set_Table_Column (columns_ , 'lot_batch_no_key');
+   Database_SYS.Set_Table_Column (columns_ , 'serial_no_key');
+   Database_SYS.Set_Table_Column (columns_ , 'condition_code_key');
+   Database_SYS.Set_Table_Column (columns_ , 'location_group_key');
+   Database_Sys.Create_Constraint(table_name_,
+                                  constraint_name_,
+                                  columns_,
+                                  'P',
+                                  '&IFSAPP_INDEX',
+                                  NULL,
+                                  TRUE,
+                                  TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX1';
+   Database_SYS.Set_Table_Column (columns_, 'DIM_COMPANY_ID');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX2';
+   Database_SYS.Set_Table_Column (columns_, 'DIM_SITE_ID');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX3';
+   Database_SYS.Set_Table_Column (columns_, 'DIM_INVENTORY_PART_ID');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX4';
+   Database_SYS.Set_Table_Column (columns_, 'DIM_CONDITION_CODE_ID');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                               NULL,
+                               TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+EXCEPTION
+   WHEN OTHERS THEN
+      dbms_output.put_line('Error when creating MV &MV');
+      dbms_output.put_line(SQLERRM);
+END;
+/
+
+UNDEFINE TAB
+UNDEFINE TAB_DETAIL
+UNDEFINE MV
+
+
+-- ****** INVENTORY_VALUE_PART_MV End *****
+
+---------------------------------------------------------------------------------------------
+
+-- ****** INVENTORY_LOCATION_MV Start *****
+
+
+DEFINE TAB      = WAREHOUSE_BAY_BIN_TAB
+DEFINE TAB_SITE = SITE_TAB
+DEFINE MV       = INVENTORY_LOCATION_MV
+
+exec Database_SYS.Log_Detail_Time_Stamp('INVENT','1410.upg','Timestamp_6');
+PROMPT Create Materialized View &MV
+DECLARE
+   stmt_            VARCHAR2(32000);
+BEGIN
+   Database_SYS.Remove_All_Cons_And_Idx('&MV', TRUE);
+   Database_SYS.Remove_Materialized_View('&MV', TRUE);
+
+   stmt_ :=
+   'CREATE MATERIALIZED VIEW &MV
+    TABLESPACE &IFSAPP_DATA
+    BUILD DEFERRED
+    USING NO INDEX
+    REFRESH COMPLETE ON DEMAND
+    EVALUATE USING CURRENT EDITION
+    AS
+    SELECT
+       -- ID (unique identity) column
+       a.contract||''^''||a.location_no id,
+       -- parent columns
+       a.contract                       contract,
+       -- key (CODE) column
+       a.location_no                    code,
+       -- other attributes
+       a.warehouse_id                   warehouse,
+       a.bay_id                         bay_no,
+       a.row_id                         row_no,
+       a.tier_id                        tier_no,
+       a.bin_id                         bin_no,
+       a.description                    location_name,
+       a.location_group                 location_group,
+       a.location_sequence              location_sequence
+    FROM &TAB a
+    WHERE a.location_no != ''#''
+    UNION ALL
+    SELECT
+       b.contract||''^''||''#''         id,
+       b.contract                       contract,
+       NULL                             code,
+       NULL                             warehouse,
+       NULL                             bay_no,
+       NULL                             row_no,
+       NULL                             tier_no,
+       NULL                             bin_no,
+       NULL                             location_name,
+       NULL                             location_group,
+       NULL                             location_sequence
+    FROM &TAB_SITE b
+    UNION ALL
+    SELECT
+       ''#''||''^''||''#''              id,
+       NULL                             contract,
+       NULL                             code,
+       NULL                             warehouse,
+       NULL                             bay_no,
+       NULL                             row_no,
+       NULL                             tier_no,
+       NULL                             bin_no,
+       NULL                             location_name,
+       NULL                             location_group,
+       NULL                             location_sequence
+    FROM BI_DUAL_TAB';
+
+   EXECUTE IMMEDIATE stmt_;
+END;
+/
+
+exec Database_SYS.Log_Detail_Time_Stamp('INVENT','1410.upg','Timestamp_7');
+PROMPT Create constraint and index(s) on Materialized View &MV
+DECLARE
+   columns_         Database_SYS.ColumnTabType;
+   table_name_      VARCHAR2(30) := '&MV';
+   index_name_      VARCHAR2(30);
+   constraint_name_ VARCHAR2(30);
+BEGIN
+   constraint_name_ := table_name_ || '_PK';
+   Database_SYS.Set_Table_Column (columns_ , 'ID');
+   Database_Sys.Create_Constraint(table_name_,
+                                  constraint_name_,
+                                  columns_,
+                                  'P',
+                                  '&IFSAPP_INDEX',
+                                  NULL,
+                                  TRUE,
+                                  TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX1';
+   Database_SYS.Set_Table_Column (columns_ , 'CONTRACT');
+   Database_SYS.Set_Table_Column (columns_ , 'CODE');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+END;
+/
+
+
+UNDEFINE TAB
+UNDEFINE TAB_SITE
+UNDEFINE MV
+
+-- ***** INVENTORY_LOCATION_MV - End *****
+
+---------------------------------------------------------------------------------------------
+
+-- ***** INVENT_TRANSACTION_HIST_MV - Start *****
+
+exec Database_SYS.Log_Detail_Time_Stamp('INVENT','1410.upg','Timestamp_8');
+PROMPT Recreating the materialized view INVENT_TRANSACTION_HIST_MV and indexes
+
+DEFINE TAB    = INVENTORY_TRANSACTION_HIST_TAB
+DEFINE MV     = INVENT_TRANSACTION_HIST_MV
+
+DECLARE
+   stmt_                    VARCHAR2(32000);
+BEGIN
+   dbms_output.put_line('Primary key cascade drop ON &MV');
+   Database_SYS.Remove_All_Cons_And_Idx('&MV', TRUE);
+
+   dbms_output.put_line('Drop Materialized View &MV');
+   Database_SYS.Remove_Materialized_View('&MV', TRUE);
+
+   dbms_output.put_line('Create Materialized View &MV');
+   stmt_ :=
+   'CREATE MATERIALIZED VIEW &MV
+    TABLESPACE &IFSAPP_DATA
+    BUILD DEFERRED
+    USING NO INDEX
+    REFRESH COMPLETE ON DEMAND
+    EVALUATE USING CURRENT EDITION
+    AS
+    SELECT
+       -- original key columns
+       transaction_id                                            transaction_id_key,
+       -- measure items
+       quantity                                                  quantity,
+       DECODE(direction, ''+'', quantity, ''-'', -quantity, 0)   quantity_change,
+       catch_quantity                                            catch_quantity,
+       Inventory_Transaction_Hist_API.Get_Cost(transaction_id)   cost,
+       quantity*Inventory_Transaction_Hist_API.Get_Cost(transaction_id)
+                                                                 inventory_cost,
+       Inventory_Transaction_Cost_API.Get_Sum_Unit_Cost(transaction_id,''TRUE'',''TRUE'')
+                                                                 sum_unit_cost,
+       quantity*Inventory_Transaction_Cost_API.Get_Sum_Unit_Cost(transaction_id,''TRUE'',''TRUE'')
+                                                                 total_cost,
+       1                                                         count_transaction,
+       DECODE(direction, ''-'', 1, 0)                            count_decrease_transaction,
+       DECODE(direction, ''+'', 1, 0)                            count_increase_transaction,
+       DECODE(direction, ''0'', 1, 0)                            count_unaffected_transaction,
+       -- light items
+       transaction_id                                            transaction_id,
+       configuration_id                                          configuration_id,
+       lot_batch_no                                              lot_batch_no,
+       serial_no                                                 serial_no,
+       waiv_dev_rej_no                                           waiv_dev_rej_no,
+       eng_chg_level                                             eng_chg_level,
+       source_ref1                                               order_no,
+       source_ref2                                               release_no,
+       source_ref3                                               sequence_no,
+       source_ref4                                               line_item_no,
+       source_ref_type                                           order_type,
+       source_ref1                                               source_ref1,
+       source_ref2                                               source_ref2,
+       source_ref3                                               source_ref3,
+       source_ref4                                               source_ref4,
+       source_ref_type                                           source_ref_type,
+       userid                                                    userid,
+       source                                                    source,
+       direction                                                 direction,
+       -- dimension identifiers
+       Site_API.Get_Company(contract)                            dim_company_id,
+       contract                                                  dim_site_id,
+       contract||''^''||part_no                                  dim_inventory_part_id,
+       transaction_code                                          dim_mpccom_transaction_code_id,
+       contract||''^''||NVL(location_no,''#'')                   dim_inventory_location_id,
+       condition_code                                            dim_condition_code_id,
+       (CASE
+          WHEN transaction_code IN(''INVSCPCOR'', ''CO-SCRPCOR'',
+                                   ''SCPCREDIT'', ''INVSCRAP'',
+                                   ''CO-SCRAP'',  ''PICKSCRAP'',
+                                   ''TO4-OPREP'', ''PSSCRAP'',
+                                   ''RPSSCRAP'',  ''REP-SCRAP'',
+                                   ''UNREPSCRAP'',''OERET-SPEX'',
+                                   ''OPFEED-SCP'',''OERET-SPNO'',
+                                   ''OERET-SCP'', ''UNSODSPSCP'',
+                                   ''UNOPFDSCP'', ''SODSPSCP'',
+                                   ''OERET-SINT'',''OERET-SPNC'',
+                                   ''RET-CHARGE'',''CO-SCPCRED'',
+                                   ''CO-PCKSCRP'')
+          THEN reject_code
+          ELSE ''#''
+       END)                                                      dim_scrapping_cause_id,
+       (CASE
+          WHEN transaction_code NOT IN(''INVSCPCOR'', ''CO-SCRPCOR'',
+                                       ''SCPCREDIT'', ''INVSCRAP'',
+                                       ''CO-SCRAP'',  ''PICKSCRAP'',
+                                       ''TO4-OPREP'', ''PSSCRAP'',
+                                       ''RPSSCRAP'',  ''REP-SCRAP'',
+                                       ''UNREPSCRAP'',''OERET-SPEX'',
+                                       ''OPFEED-SCP'',''OERET-SPNO'',
+                                       ''OERET-SCP'', ''UNSODSPSCP'',
+                                       ''UNOPFDSCP'', ''SODSPSCP'',
+                                       ''OERET-SINT'',''OERET-SPNC'',
+                                       ''RET-CHARGE'',''CO-SCPCRED'',
+                                       ''CO-PCKSCRP'')
+          THEN reject_code
+          ELSE ''#''
+       END)                                                      dim_return_cause_id,
+       NVL(project_id, ''#'')                                    dim_project_id,
+       NVL(activity_seq, 0)                                      dim_activity_id,
+       Statistic_Period_API.Get_Stat_Year_No(date_applied)||''^''||Statistic_Period_API.Get_Stat_Period_No(date_applied)
+                                                                 dim_statistic_period_id,
+       TRUNC(date_created)                                       dim_ith_date_created_id,
+       TRUNC(date_applied)                                       dim_ith_date_applied_id,
+       NVL(TRUNC(expiration_date),TO_DATE(''1900-01-01'',''YYYY-MM-DD'',''NLS_CALENDAR=Gregorian''))
+                                                                 dim_ith_expiration_date_id,
+       Site_API.Get_Company(contract)||''^''||TO_CHAR(TRUNC(date_applied),''YYYY-MM-DD'')
+                                                                 dim_rpd_company_period_id,
+       TRUNC(date_applied)                                       dim_rpd_period_id,
+       -- joiners
+       Site_API.Get_Company(contract)                            company,
+       contract                                                  site,
+       part_no                                                   inventory_part,
+       transaction_code                                          mpccom_transaction_code,
+       location_no                                               inventory_location,
+       condition_code                                            condition_code,
+       (CASE
+          WHEN transaction_code IN(''INVSCPCOR'', ''CO-SCRPCOR'',
+                                   ''SCPCREDIT'', ''INVSCRAP'',
+                                   ''CO-SCRAP'',  ''PICKSCRAP'',
+                                   ''TO4-OPREP'', ''PSSCRAP'',
+                                   ''RPSSCRAP'',  ''REP-SCRAP'',
+                                   ''UNREPSCRAP'',''OERET-SPEX'',
+                                   ''OPFEED-SCP'',''OERET-SPNO'',
+                                   ''OERET-SCP'', ''UNSODSPSCP'',
+                                   ''UNOPFDSCP'', ''SODSPSCP'',
+                                   ''OERET-SINT'',''OERET-SPNC'',
+                                   ''RET-CHARGE'',''CO-SCPCRED'',
+                                   ''CO-PCKSCRP'')
+          THEN reject_code
+       END)                                                      scrapping_cause,
+       (CASE
+          WHEN transaction_code NOT IN(''INVSCPCOR'', ''CO-SCRPCOR'',
+                                       ''SCPCREDIT'', ''INVSCRAP'',
+                                       ''CO-SCRAP'',  ''PICKSCRAP'',
+                                       ''TO4-OPREP'', ''PSSCRAP'',
+                                       ''RPSSCRAP'',  ''REP-SCRAP'',
+                                       ''UNREPSCRAP'',''OERET-SPEX'',
+                                       ''OPFEED-SCP'',''OERET-SPNO'',
+                                       ''OERET-SCP'', ''UNSODSPSCP'',
+                                       ''UNOPFDSCP'', ''SODSPSCP'',
+                                       ''OERET-SINT'',''OERET-SPNC'',
+                                       ''RET-CHARGE'',''CO-SCPCRED'',
+                                       ''CO-PCKSCRP'')
+          THEN reject_code
+       END)                                                      return_cause,
+       project_id                                                project,
+       activity_seq                                              activity,
+       Statistic_Period_API.Get_Stat_Year_No(date_applied)       stat_year,
+       Statistic_Period_API.Get_Stat_Period_No(date_applied)     stat_period,
+       TRUNC(date_created)                                       ith_date_created,
+       TRUNC(date_applied)                                       ith_date_applied,
+       TRUNC(expiration_date)                                    ith_expiration_date,
+       TRUNC(date_applied)                                       reporting_date,
+       -- unique key
+       transaction_id                                            objid
+     FROM &TAB';
+
+   EXECUTE IMMEDIATE stmt_;
+END;
+/
+
+DECLARE
+   columns_         Database_SYS.ColumnTabType;
+   table_name_      VARCHAR2(30) := '&MV';
+   index_name_      VARCHAR2(30);
+   constraint_name_ VARCHAR2(30);
+BEGIN
+
+   dbms_output.put_line('Create constraints and index(s) on Materialized View &MV');
+
+   constraint_name_ := table_name_ || '_PK';
+   Database_SYS.Set_Table_Column (columns_, 'transaction_id_key');
+   Database_Sys.Create_Constraint( table_name_,
+                                   constraint_name_,
+                                   columns_,
+                                   'P',
+                                   '&IFSAPP_INDEX',
+                                   NULL,
+                                   TRUE,
+                                   TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX1';
+   Database_SYS.Set_Table_Column (columns_ , 'dim_company_id');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX2';
+   Database_SYS.Set_Table_Column (columns_ , 'dim_site_id');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX3';
+   Database_SYS.Set_Table_Column (columns_ , 'dim_inventory_part_id');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX4';
+   Database_SYS.Set_Table_Column (columns_ , 'dim_mpccom_transaction_code_id');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX5';
+   Database_SYS.Set_Table_Column (columns_ , 'dim_inventory_location_id');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX6';
+   Database_SYS.Set_Table_Column (columns_ , 'dim_condition_code_id');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX7';
+   Database_SYS.Set_Table_Column (columns_ , 'dim_scrapping_cause_id');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX8';
+   Database_SYS.Set_Table_Column (columns_ , 'dim_project_id');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX9';
+   Database_SYS.Set_Table_Column (columns_ , 'dim_activity_id');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+EXCEPTION
+   WHEN OTHERS THEN
+      dbms_output.put_line('Error when creating MV &MV');
+      dbms_output.put_line(SQLERRM);
+END;
+/
+
+UNDEFINE TAB
+UNDEFINE MV
+
+-- ***** INVENT_TRANSACTION_HIST_MV - End *****
+
+-----------------------------------------------------------------------------------------
+
+-- ***** Inventory_Part_MV - Start *****
+
+DEFINE TAB     = INVENTORY_PART_TAB
+DEFINE TAB_SITE= SITE_TAB
+DEFINE MV      = INVENTORY_PART_MV
+
+exec Database_SYS.Log_Detail_Time_Stamp('INVENT','1410.upg','Timestamp_9');
+PROMPT Create Materialized View &MV
+DECLARE
+   stmt_            VARCHAR2(32000);
+BEGIN
+
+   Database_SYS.Remove_All_Cons_And_Idx('&MV', TRUE);
+   Database_SYS.Remove_Materialized_View('&MV', TRUE);
+
+   stmt_ :=
+   'CREATE MATERIALIZED VIEW &MV
+    TABLESPACE &IFSAPP_DATA
+    BUILD DEFERRED
+    USING NO INDEX
+    REFRESH COMPLETE ON DEMAND
+    EVALUATE USING CURRENT EDITION
+    AS
+    SELECT
+       -- ID (unique identity) column
+       a.contract||''^''||a.part_no                                          id,
+       -- parent columns
+       a.contract                                                            contract,
+       -- key (CODE) column
+       a.part_no                                                             code,
+       -- other attributes
+       Inventory_Part_API.Get_Description(a.contract, a.part_no)             description,
+       a.type_code                                                           type_code,
+       a.unit_meas                                                           unit_meas,
+       Inventory_Part_API.Get_Enabled_Catch_Unit_Meas(a.contract, a.part_no) catch_unit_meas,
+       a.prime_commodity                                                     prime_commodity,
+       a.second_commodity                                                    second_commodity,
+       a.part_status                                                         part_status,
+       a.abc_class                                                           abc_class,
+       a.part_product_code                                                   part_product_code,
+       a.part_product_family                                                 part_product_family,
+       a.supply_chain_part_group                                             supply_chain_part_group,
+       a.inventory_valuation_method                                          inventory_valuation_method,
+       a.inventory_part_cost_level                                           inventory_part_cost_level,
+       a.invoice_consideration                                               invoice_consideration,
+       a.part_cost_group_id                                                  part_cost_group_id,
+       Inventory_Part_Planning_API.Get_Planning_Method(a.contract, a.part_no) mrp_order_code,
+       a.accounting_group                                                    accounting_group,
+       a.asset_class                                                         asset_class,
+       a.hazard_code                                                         hazard_code,
+       a.lifecycle_stage                                                     lifecycle_stage,
+       a.planner_buyer                                                       planner_buyer
+    FROM &TAB a
+    WHERE a.part_no != ''#''
+    UNION ALL
+    SELECT
+       b.contract||''^''||''#''                                              id,
+       b.contract                                                            contract,
+       NULL                                                                  code,
+       NULL                                                                  description,
+       NULL                                                                  type_code,
+       NULL                                                                  unit_meas,
+       NULL                                                                  catch_unit_meas,
+       NULL                                                                  prime_commodity,
+       NULL                                                                  second_commodity,
+       NULL                                                                  part_status,
+       NULL                                                                  abc_class,
+       NULL                                                                  part_product_code,
+       NULL                                                                  part_product_family,
+       NULL                                                                  supply_chain_part_group,
+       NULL                                                                  inventory_valuation_method,
+       NULL                                                                  inventory_part_cost_level,
+       NULL                                                                  invoice_consideration,
+       NULL                                                                  part_cost_group_id,
+       NULL                                                                  mrp_order_code,
+       NULL                                                                  accounting_group,
+       NULL                                                                  asset_class,
+       NULL                                                                  hazard_code,
+       NULL                                                                  lifecycle_stage,
+       NULL                                                                  planner_buyer
+    FROM &TAB_SITE b
+    UNION ALL
+    SELECT
+       ''^''||''^''||''#''                                                   id,
+       NULL                                                                  contract,
+       NULL                                                                  code,
+       NULL                                                                  description,
+       NULL                                                                  type_code,
+       NULL                                                                  unit_meas,
+       NULL                                                                  catch_unit_meas,
+       NULL                                                                  prime_commodity,
+       NULL                                                                  second_commodity,
+       NULL                                                                  part_status,
+       NULL                                                                  abc_class,
+       NULL                                                                  part_product_code,
+       NULL                                                                  part_product_family,
+       NULL                                                                  supply_chain_part_group,
+       NULL                                                                  inventory_valuation_method,
+       NULL                                                                  inventory_part_cost_level,
+       NULL                                                                  invoice_consideration,
+       NULL                                                                  part_cost_group_id,
+       NULL                                                                  mrp_order_code,
+       NULL                                                                  accounting_group,
+       NULL                                                                  asset_class,
+       NULL                                                                  hazard_code,
+       NULL                                                                  lifecycle_stage,
+       NULL                                                                  planner_buyer
+    FROM BI_DUAL_TAB';
+
+   EXECUTE IMMEDIATE stmt_;
+END;
+/
+
+exec Database_SYS.Log_Detail_Time_Stamp('INVENT','1410.upg','Timestamp_10');
+PROMPT Create constraint and index(s) on Materialized View &MV
+DECLARE
+   columns_         Database_SYS.ColumnTabType;
+   table_name_      VARCHAR2(30) := '&MV';
+   index_name_      VARCHAR2(30);
+   constraint_name_ VARCHAR2(30);
+BEGIN
+   constraint_name_ := table_name_ || '_PK';
+   Database_SYS.Set_Table_Column (columns_ , 'ID');
+   Database_Sys.Create_Constraint(table_name_,
+                                  constraint_name_,
+                                  columns_,
+                                  'P',
+                                  '&IFSAPP_INDEX',
+                                  NULL,
+                                  TRUE,
+                                  TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+
+   index_name_ := table_name_ || '_IX1';
+   Database_SYS.Set_Table_Column (columns_ , 'CONTRACT');
+   Database_SYS.Set_Table_Column (columns_ , 'CODE');
+   Database_Sys.Create_Index( table_name_,
+                              index_name_,
+                              columns_,
+                              'N',
+                              '&IFSAPP_INDEX',
+                              NULL,
+                              TRUE,
+                              TRUE);
+   Database_SYS.Reset_Column_Table(columns_);
+END;
+/
+
+UNDEFINE TAB
+UNDEFINE TAB_SITE
+UNDEFINE MV
+
+-- ***** Inventory_Part_MV - End *****
+-----------------------------------------------------------------------------
+------------------- MATERIALIZED VIEWS TO CHECK ROWVERSION ------------------
+-----------------------------------------------------------------------------
+
+exec Database_SYS.Log_Detail_Time_Stamp('INVENT','1410.upg','Timestamp_11');
+PROMPT Create materialized VIEWS TO CHECK rowversion.
+DEFINE MV_NAME       = INV_TRANS_HIST_CHK_MV
+DEFINE SOURCE_TABLE  = INVENTORY_TRANSACTION_HIST_TAB
+
+DECLARE
+   stmt_            VARCHAR2(32000);
+BEGIN
+   Database_SYS.Remove_Materialized_View('&MV_NAME',TRUE);
+   stmt_ :=
+'CREATE MATERIALIZED VIEW &MV_NAME
+ BUILD DEFERRED
+ USING NO INDEX
+ REFRESH COMPLETE ON DEMAND
+ EVALUATE USING CURRENT EDITION
+ AS
+ SELECT MAX(ROWVERSION) MAX_ROWVERSION
+ FROM &SOURCE_TABLE';
+
+   EXECUTE IMMEDIATE stmt_;
+
+   IS_MV_REFRESH_INFO_API.Clear_Refresh_Info('&MV_NAME');
+END;
+/
+UNDEFINE MV_NAME
+UNDEFINE SOURCE_TABLE
+
+---------------------------------------------------------------------------------------------
+------------------------------ CREATE NEW SEQUENCES  ----------------------------------------
+---------------------------------------------------------------------------------------------
+
+
+---------------------------------------------------------------------------------------------
+------------------------------ RENAME OBSOLETE TABLES ---------------------------------------
+---------------------------------------------------------------------------------------------
+
+
+
+---------------------------------------------------------------------------------------------
+------------------------------ DROP OBSOLETE RPT TABLES ------------------------------------
+---------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------
+------------------------------ DROP OBSOLETE TEMPORARY TABLES -------------------------------
+---------------------------------------------------------------------------------------------
+
+
+---------------------------------------------------------------------------------------------
+------------------------------ DROP OBSOLETE PACKAGES ---------------------------------------
+---------------------------------------------------------------------------------------------
+
+
+---------------------------------------------------------------------------------------------
+------------------------------ DROP OBSOLETE VIEWS ------------------------------------------
+---------------------------------------------------------------------------------------------
+
+
+
+---------------------------------------------------------------------------------------------
+exec Database_SYS.Log_Detail_Time_Stamp('INVENT','1410.upg','Timestamp_12');
+PROMPT Upgrade statements in file 1410.upg end here.
+
+-- Nothing is allowed to be placed below here
+---------------------------------------------------------------------------------------------
+exec Database_SYS.Log_Detail_Time_Stamp('INVENT','1410.upg','Done');
+
+

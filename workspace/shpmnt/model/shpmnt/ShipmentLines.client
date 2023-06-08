@@ -1,0 +1,252 @@
+--  Date       Sign    History
+--  ---------  ------  ---------------------------------------------------------
+--  2021-12-10 Diablk  SC21R2-6181, Added validate methods to InvPartStockCommand.
+--  2021-11-25 Diablk  SC21R2-6181, Implementation to open receipt window if sourcereftype is PURCH_RECEIPT_RETURN of command SourceDetailsCommand
+--  2021-10-18 Skanlk  Bug 161110(SC21R2-3223), Modified OverviewShipmentLinesList by SourcePartDescription fields as multiline field.
+--  2021-03-11 SBalLK  SC2020R1-12873, Added dynamic dependency for navigator entries.
+--  2020-02-10 RasDlk  SCSPRING20-170, Modified the command ManualReservationsCommand by adding initcontext to show the title correctly
+--  2020-02-10         when navigating to the manual reservations page.
+--  2019-10-31 AyAmlk  SCXTEND-1202, Added the startup mode as search.
+--  2019-06-17 SBalLK  SCUXXW4-22436, Handled Multi record navigation to Handling Units in Shipment Inventory.
+--  2019-04-15 fandse  SCUXXW4-4759: Implementation of reassign of Package Part
+--  2019-03-13 fandse  SCUXXW4-4759: Implementation of frmReassignShipConnectedQty and tbwSingleReassignShipConQty
+--  2019-03-12 Kubalk  SCUXXW4-17360, Dependency annotations added.
+--  2019-02-13  KuBaLk  SCUXXW4-16138, added status badges.
+--  2018-07-16 Dinglk  SCUXXW4-4859, Converted tbwOverviewShipmentLines using MTG Version: 1.23
+--  ---------  ------  ---------------------------------------------------------
+
+client ShipmentLines;
+component SHPMNT;
+layer Core;
+projection ShipmentLinesHandling;
+include fragment IntorderPartAlternateLovSelector;
+include fragment ReassignShipmentLineAssistant;
+include fragment ShipmentReceiverSelector;
+
+warningsenabled = ShipmentLine;
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+
+navigator {
+   entry ShipmentManagementOverviewShipmentLinesNavEntry parent ShpmntNavigator.ShipmentManagementOutboundShipment at index 500 {
+      label = "Shipment Lines";
+      page List home ShipmentLine;
+   }
+
+   @DynamicComponentDependency ORDER
+   entry SalesOverviewShipmentLinesNavEntry parent OrderNavigator.ShippingShipmentDelivery at index 500 {
+      label = "Shipment Lines";
+      page List;
+   }
+}
+
+-------------------------------- MAIN PAGES ---------------------------------
+
+page List using ShipmentLineSet {
+   label = "Shipment Lines";
+   startupmode = search;
+   list OverviewShipmentLinesList {
+      details = "page/Shipment/Form?$filter=ShipmentId eq $[ShipmentId]";
+   }
+}
+
+-------------------------------- ASSISTANTS ---------------------------------
+
+--------------------------------- COMMANDS ----------------------------------
+
+command ConsolidatedShipmentCommand for ShipmentLine {
+   label = "Consolidated Shipment";
+   mode = SelectedRecords;
+   enabled = [ParentConsolShipmentId != NULL];
+   bulkexecute {
+      bulknavigate "page/ConsolidatedShipment/Form?$filter=ShipmentId eq $[ParentConsolShipmentId]";
+   }
+}
+command SourceDetailsCommand for ShipmentLine {
+   label = "Source Details";
+   mode = SelectedRecords;
+   enabled = [count(SourceRefTypeDb) = 1];
+   bulkexecute {
+      ifany [SourceRefTypeDb = "CUSTOMER_ORDER"] {
+         bulknavigate "page/CustomerOrderLines/List?$filter=OrderNo eq $[SourceRef1] and LineNo eq $[SourceRef2] and RelNo eq $[SourceRef3] and LineItemNo eq $[SourceRef4Number]";
+      }
+      else {
+         ifany [SourceRefTypeDb = "PROJECT_DELIVERABLES"] {
+            bulknavigate  "page/DeliverablePlanningHandling/List?$filter=ItemNo eq $[SourceRef1Number] and ItemRevision eq $[SourceRef2] and PlanningNo eq $[SourceRef3Number]";
+         }
+      }
+      ifany [SourceRefTypeDb = "SHIPMENT_ORDER"] {
+         bulknavigate "page/ShipmentOrderLines/List?$filter=ShipmentOrderId eq $[SourceRef1Number] and LineNo eq $[SourceRef2Number]";
+      }
+      ifany [SourceRefTypeDb = "PURCH_RECEIPT_RETURN"] {
+         bulknavigate "page/Receipts/List?$filter=SourceRef1 eq $[SourceRef1] and SourceRef2 eq $[SourceRef2] and SourceRef3 eq $[SourceRef3] and ReceiptNo eq $[ReceiptNo]";
+      }
+   }
+}
+
+command PartsInShipmentInventoryCommand for ShipmentLine {
+   label = "Inventory Parts in Shipment Inventory";
+   mode = SelectedRecords;
+   enabled = [(InventoryPartNo != null) and(PickedQty != 0) and not(SourceRefTypeDb = "CUSTOMER_ORDER" and SourceRef4 = "-1")];
+   bulkexecute {
+      bulknavigate "page/InventoryPartsInShipmentInventory/List?$filter=ShipmentId eq $[ShipmentId] and ShipmentLineNo eq $[ShipmentLineNo] ";
+   }
+}
+command HUsInShipmentInventoryCommand for ShipmentLine {
+   label = "Handling Units in Shipment Inventory";
+   mode = SelectedRecords;
+   enabled = [(InventoryPartNo != null) and(PickedQty != 0) and not(SourceRefTypeDb = "CUSTOMER_ORDER" and SourceRef4 = "-1")];
+   variable ShipmentNavigateKeyStructureVar Structure(ShipmentLineBulkNavigateKeyStructure);
+   bulkexecute {
+      call GenerateShipmentListForNavigate(Selection) into ShipmentNavigateKeyStructureVar;
+      navigate "page/HandlingUnitsInShipmentInventory/List;searchcontext=ShipmentIdList:$[ShipmentNavigateKeyStructureVar.ShipmentIdList],ShipmentLineNoList:$[ShipmentNavigateKeyStructureVar.ShipmentLineNoList]";
+   }
+}
+command ManualReservationsCommand for ShipmentLine {
+   label = "Manual Reservations";
+   mode = SelectedRecords;
+   enabled = [(ShipmentRowstate = "Preliminary") and not(QtytoReserve = 0 and ReservedQty = 0) and(ManualReservationAllowed = "TRUE") and(InventoryPartNo != null) and((SourceRefTypeDb != "CUSTOMER_ORDER") or(SourceRefTypeDb = "CUSTOMER_ORDER" and SourceRef4 != "-1"))];
+   bulkexecute {
+      bulknavigate "page/ManualReservationsForShipmentAndCustomerOrderLine/Form?initcontext=Source:'Shipment Line'&$filter=ShipmentId eq $[ShipmentId] and ShipmentLineNo eq $[ShipmentLineNo]";
+   }
+}
+command ReassignQuantityCommand for ShipmentLine {
+   label = "Reassign";
+   mode = SingleRecord;
+   enabled = [(ShipmentRowstate = "Preliminary" or ShipmentRowstate = "Completed") and(DeliveredQty = 0) and(MaximumShipmentQuantityToReassign > 0)];
+   execute {
+      assistant ReassignShipmentLineAssistant(ShipmentId, ShipmentLineNo) {
+         when NO {
+            exit CANCEL;
+         }
+      }
+   }
+}
+
+command InvPartStockCommand for ShipmentLine {
+   label = "Inventory Part in Stock Reservations";
+   mode = SelectedRecords;
+   enabled = [InventoryPartNo != null and QtyShipped = 0];
+   bulkexecute {
+      bulknavigate "page/InventoryPartInStockReservations/List?$filter=ShipmentId eq $[ShipmentId] and OrdRef1 eq $[SourceRef1] and OrdRef2 eq $[SourceRef2] and OrdRef3 eq $[SourceRef3] and OrdRef4 eq $[SourceRef4]";
+   }
+}
+
+--------------------------------- SELECTORS ---------------------------------
+
+---------------------------------- GROUPS -----------------------------------
+
+----------------------------------- LISTS -----------------------------------
+
+list OverviewShipmentLinesList for ShipmentLine {
+   orderby = ShipmentId, ShipmentLineNo;
+   field ShipmentIdRef;
+   field ShipmentLineNo;
+   field SourceRef1;
+
+   field SourceRef2;
+   field SourceRef3;
+   field SourceRef4;
+   field SourceRefType {
+      size = Large;
+   }
+   field ParentConsolShipmentId;
+   field ReceiverIdRef {
+      size = Large;
+      contactwidget {
+         enabled = [ReceiverId != null];
+         source = Customer;
+      }
+   }
+   field Contract;
+   field SourcePartNo {
+      size = Large;
+   }
+   field SourcePartDescription {
+      multiline = true;
+      size = Medium;
+   }
+   lov InventoryPartNoRef with ReferenceIntorderPartAlternateLovSelector;
+   field ReceiversPartNo;
+   field ConnectedSourceQty {
+      editable = [SourceRefTypeDb = "CUSTOMER_ORDER" and SourceRef4 <= 0];
+   }
+   field ConnectableSourceQty;
+   field SourceUnitMeas;
+   field InventoryQty;
+   field InventoryUoM;
+   field PlannedDueDate;
+   field ReservedQty;
+   field QtytoReserve;
+   field QtyToShip;
+   field QtyToPick;
+   field PickedQty;
+   field DeliveredQty;
+   field PickedvsPackedQty;
+   badge ShipmentIdRef.Objstate {
+      label = "Shipment Status";
+      style = TextOnly;
+      emphasis Progress1 = [ShipmentIdRef.Objstate = "Preliminary"];
+      emphasis Progress8 = [ShipmentIdRef.Objstate = "Completed"];
+      emphasis Progress12 = [ShipmentIdRef.Objstate = "Closed"];
+      emphasis StateCancelled = [ShipmentIdRef.Objstate = "Cancelled"];
+   }
+   field Blocked;
+   field DelNotePrinted;
+   field ConsignmentPrinted;
+   @DynamicComponentDependency PROJ
+   field ProgramID;
+   @DynamicComponentDependency PROJ
+   field ProgramDescription;
+   field ProjectID;
+   @DynamicComponentDependency PROJ
+   field ProjectName;
+   @DynamicComponentDependency PROJ
+   field SubProjectID;
+   @DynamicComponentDependency PROJ
+   field SubProjectDescription;
+   @DynamicComponentDependency PROJ
+   field ActivityID;
+   @DynamicComponentDependency PROJ
+   field ActivityDescription;
+   field ActivitySequence;
+   field ConfigurationID;
+   field PlannedDeliveryDateTime;
+   field PlannedShipDateTime;
+   field PlannedShipPeriod;
+   field Rental;
+   field CustomsValue;
+   field LabelNote;
+
+   commandgroup CommandGroupCmdGroup {
+      command ConsolidatedShipmentCommand;
+      command SourceDetailsCommand;
+      command PartsInShipmentInventoryCommand;
+      command HUsInShipmentInventoryCommand;
+      command InvPartStockCommand;
+   }
+
+   commandgroup ReservationAndReassignCmdGroup {
+      command ManualReservationsCommand;
+      command ReassignQuantityCommand;
+   }
+}
+
+----------------------------------- CARDS -----------------------------------
+
+---------------------------------- DIALOGS ----------------------------------
+
+---------------------------------- CHARTS -----------------------------------
+
+--------------------------------- CALENDARS ---------------------------------
+
+---------------------------------- SHEETS -----------------------------------
+
+----------------------------- STATE INDICATORS ------------------------------
+
+----------------------------------- TREES -----------------------------------
+
+---------------------------------- PLUGINS ----------------------------------
+
+------------------------------- IMAGE VIEWERS -------------------------------
+

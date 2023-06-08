@@ -1,0 +1,850 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     SalesOrderLineCommonCommands
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign    History
+--  ---------  ------  ---------------------------------------------------------
+--  2021-06-07 KETKLK  PJ21R2-749, Replaced Project Delivery supply code 'PRD' with Project Deliverables supply code 'PJD' as Project Delivery functionality will be removed.
+--  2020-12-02 PamPlk  Bug 154128(SCZ-12746), Modified Get_Supply_Site_Part_No_Var___ by getting the value to supply_site_part_no_.
+--  2020-06-10 Skanlk  Bug 153995(SCZ-10155), Modified Get_Supply_Site_Part_No_Var___() to pass the Project ID only 
+--  2020-06-10         when the supply code is Project Inventory, Project Delivery or have Pegged Supply Codes
+--  2020-06-10         Purchase Transit,DOP,Shop Order and Purchase Direct.
+--  2019-10-29 JaThlk  SCXTEND-535, Added the enable function GenerateSerialNumbersEnable.
+--  2019-04-05 MiKulk  SCUXXW4-9285 Created to handle the common commands for sales order line objects.
+-----------------------------------------------------------------------------
+layer Core;
+
+ --Replication, start
+PROCEDURE Unpeg_Ipd___ (
+   order_no_     IN  VARCHAR2,
+   line_no_      IN  VARCHAR2,
+   rel_no_       IN  VARCHAR2,
+   line_item_no_ IN  NUMBER,
+   info$_        OUT VARCHAR2 ) 
+IS
+   source_          VARCHAR2(3) := 'COL';
+   cancel_reason_   VARCHAR2(5);
+   change_req_flag_ VARCHAR2(5) := 'TRUE'; 
+   replicate_flag_  VARCHAR2(5) := 'TRUE'; 
+   unpeg_ipd_flag_  VARCHAR2(5) := 'TRUE'; 
+   change_wo_flag_  VARCHAR2(5);
+BEGIN
+   info$_ := Cancel_Customer_Order_API.Cancel_Order__(source_, 
+                             cancel_reason_, 
+                             change_req_flag_, 
+                             replicate_flag_, 
+                             unpeg_ipd_flag_, 
+                             change_wo_flag_,
+                             order_no_, 
+                             line_no_, 
+                             rel_no_, 
+                             line_item_no_);
+END Unpeg_Ipd___;
+ --Replication, end
+
+PROCEDURE Release_Source_Line___ (
+   order_no_     IN VARCHAR2,
+   line_no_      IN VARCHAR2,
+   rel_no_       IN VARCHAR2,
+   line_item_no_ IN NUMBER ) 
+IS
+BEGIN
+   Customer_Order_Flow_API.Release_Source_Line(order_no_, line_no_, rel_no_, line_item_no_);
+END Release_Source_Line___ ;
+
+--PROCEDURE Source_Automatically___ (
+--   order_no_     IN VARCHAR2,
+--   line_no_      IN VARCHAR2,
+--   rel_no_       IN VARCHAR2,
+--   line_item_no_ IN NUMBER,
+--   info$_        OUT VARCHAR2)
+--IS
+--BEGIN
+--   Source_Order_Lines_API.Source_Automatically__( info$_ ,order_no_,line_no_, rel_no_ ,line_item_no_);
+--END Source_Automatically___;
+
+PROCEDURE Source_Automatically___ (
+   selection_    IN VARCHAR2,
+   info$_        OUT VARCHAR2) 
+IS
+   records_                 json_array_t := json_array_t.parse(selection_);
+   current_selection_       VARCHAR2(32000);
+   order_no_                VARCHAR2(12);
+   line_no_                 VARCHAR2(4);
+   rel_no_                  VARCHAR2(4);
+   line_item_no_            NUMBER;
+BEGIN
+   FOR i_ IN 0 .. records_.get_size - 1 LOOP      
+      current_selection_ := records_.get_string(i_);
+      order_no_          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');
+      line_no_           := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_NO');
+      rel_no_            := Client_SYS.Get_Key_Reference_Value(current_selection_, 'REL_NO');
+      line_item_no_      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_ITEM_NO');
+      Customer_Order_Line_Initial_Check___(order_no_, line_no_, rel_no_, line_item_no_);
+
+      Source_Order_Lines_API.Source_Automatically__( info$_ ,order_no_,line_no_, rel_no_ ,line_item_no_);
+   END LOOP;
+END Source_Automatically___;
+
+
+
+
+
+
+
+
+PROCEDURE Reserve_As_Picked___ (
+   order_no_       IN VARCHAR2,
+   line_no_        IN VARCHAR2,
+   rel_no_         IN VARCHAR2,
+   line_item_no_   IN NUMBER,
+   location_no_    IN VARCHAR2)
+IS
+BEGIN
+	Pick_Customer_Order_API.Report_Reserved_As_Picked__(order_no_, line_no_, rel_no_, line_item_no_, location_no_);
+END Reserve_As_Picked___;
+
+FUNCTION Extract_Shipment_Inv_Values___ (
+   selection_ IN VARCHAR2) RETURN Report_Pick_Structure_Rec
+IS
+   current_selection_   VARCHAR2(32000);
+   rec_                 Report_Pick_Structure_Rec;
+   records_             json_array_t := json_array_t.parse(selection_);
+BEGIN
+	FOR record_ IN 0 .. records_.get_size - 1 LOOP 
+      current_selection_ := records_.get_string(record_);
+      
+      rec_.order_no     := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');
+      rec_.line_no      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_NO');
+      rec_.rel_no       := Client_SYS.Get_Key_Reference_Value(current_selection_, 'REL_NO');
+      rec_.line_item_no := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_ITEM_NO');
+      rec_.contract     := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT');
+      
+      Pick_Customer_Order_API.Check_All_License_Connected (rec_.display_info_type, rec_.order_no, rec_.line_no, rec_.rel_no, rec_.line_item_no);
+      EXIT;
+   END LOOP;
+   RETURN rec_;
+END Extract_Shipment_Inv_Values___;
+
+FUNCTION Unreserve_Cust_Order_Line___ (
+   selection_ IN VARCHAR2) RETURN VARCHAR2
+IS
+   records_                       json_array_t := json_array_t.parse(selection_);
+   current_selection_             VARCHAR2(32000);
+   order_no_                      customer_order_line_tab.order_no%TYPE;
+   line_no_                       customer_order_line_tab.line_no%TYPE;
+   rel_no_                        customer_order_line_tab.rel_no%TYPE;
+   line_item_no_                  customer_order_line_tab.line_item_no%TYPE;
+   order_line_rec_                Customer_Order_Line_API.Public_Rec;
+   info_                          VARCHAR2(32000);
+BEGIN
+   FOR i_ IN 0 .. records_.get_size - 1 LOOP    
+      current_selection_ := records_.get_string(i_);
+      order_no_      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');
+      line_no_       := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_NO');
+      rel_no_        := Client_SYS.Get_Key_Reference_Value(current_selection_, 'REL_NO');
+      line_item_no_  := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_ITEM_NO');
+      
+      Customer_Order_Line_Initial_Check___(order_no_, line_no_, rel_no_, line_item_no_);
+      
+      order_line_rec_ := Customer_Order_Line_API.Get(order_no_, line_no_, rel_no_, line_item_no_);
+      IF (line_item_no_ != -1 AND order_line_rec_.qty_assigned > 0 AND (order_line_rec_.qty_assigned - order_line_rec_.qty_picked > 0)) AND
+         (order_line_rec_.supply_code IN('IO','PD', 'IPD', 'PI', 'PJD', 'PS', 'PMRP', 'MRP')) THEN
+         Reserve_Customer_Order_API.Unreserve_Cust_Order_Lines__(info_, order_no_, line_no_, rel_no_, line_item_no_,0);
+      END IF;
+   END LOOP; 
+END Unreserve_Cust_Order_Line___;
+
+FUNCTION Check_Edit_Config_Allowed___ (
+   order_no_     IN  VARCHAR2,
+   line_no_      IN  VARCHAR2,
+   rel_no_       IN  VARCHAR2,
+   line_item_no_ IN  NUMBER,
+   info$_        OUT VARCHAR2) RETURN Edit_Config_Allow_Return_Structure_Rec
+IS
+   rec_  Edit_Config_Allow_Return_Structure_Rec;
+BEGIN
+	Order_Config_Util_API.Check_Edit_Config_Allowed(rec_.order_type, 
+                                                 rec_.ctp_planned, 
+                                                 rec_.int_order_exist, 
+                                                 info$_,
+                                                 order_no_, 
+                                                 line_no_, 
+                                                 rel_no_, 
+                                                 line_item_no_);
+   rec_.order_conf := Customer_Order_API.Get_Order_Conf_Db(order_no_);                                                
+   RETURN rec_;
+END Check_Edit_Config_Allowed___;
+
+
+FUNCTION Check_Dop_Information___ (
+   order_no_         IN VARCHAR2,
+   line_no_          IN VARCHAR2,
+   rel_no_           IN VARCHAR2,
+   line_item_no_     IN NUMBER,
+   part_no_          IN VARCHAR2,
+   configuration_id_ IN VARCHAR2) RETURN VARCHAR2
+IS
+BEGIN
+   $IF Component_Dop_SYS.INSTALLED $THEN
+      Dop_Demand_Cust_Ord_API.Check_Dop_Supply_Mult_Oe(order_no_, line_no_, rel_no_, line_item_no_);
+   $END
+   
+   $IF Component_Cfgchr_SYS.INSTALLED $THEN
+      RETURN Configuration_Spec_API.Get_Objstate(part_no_, configuration_id_);
+   $END
+   
+   RETURN NULL;
+END Check_Dop_Information___;
+
+FUNCTION Get_Edit_Config_Info___ (
+   order_no_     IN VARCHAR2,
+   line_no_      IN VARCHAR2,
+   rel_no_       IN VARCHAR2,
+   line_item_no_ IN NUMBER,
+   supply_code_  IN VARCHAR2) RETURN Config_Info_Structure_Rec
+IS
+   rec_     Config_Info_Structure_Rec;
+BEGIN
+	Order_Config_Util_API.Get_Edit_Config_Info(rec_.internal_co_no, 
+                                            rec_.internal_co_line_state, 
+                                            rec_.po_line_state, 
+                                            rec_.transfer_config, 
+                                            rec_.internal_config_id, 
+                                            order_no_, 
+                                            line_no_, 
+                                            rel_no_, 
+                                            line_item_no_, 
+                                            supply_code_);
+   
+   RETURN rec_;
+END Get_Edit_Config_Info___;
+
+FUNCTION Get_Characteristics___(
+   selection_   IN VARCHAR2) RETURN Characteristic_Structure_Rec
+IS
+   ptr_                 NUMBER;
+   value_               VARCHAR2(20000);  
+   characteristic_ids_  VARCHAR2(20000) := NULL;
+   configuration_ids_   VARCHAR2(20000) := NULL;
+   part_nos_            VARCHAR2(20000) := NULL;
+   configuration_id_    Order_Quotation_Line_tab.configuration_id%TYPE;
+   part_no_             VARCHAR2(100) := NULL;
+   wanted_del_date_     DATE;
+   rec_  Characteristic_Structure_Rec;
+   order_no_            Customer_Order_Line_tab.order_no%TYPE;
+   line_no_             Customer_Order_Line_tab.line_no%TYPE;
+   rel_no_              Customer_Order_Line_tab.rel_no%TYPE;
+   line_item_no_        Customer_Order_Line_tab.line_item_no%TYPE;
+   attr_                VARCHAR2(20000);
+BEGIN
+   Client_SYS.Clear_Attr(attr_);   
+   WHILE (Get_Next_From_List(selection_, ptr_, value_)) LOOP  
+      order_no_              := Client_SYS.Get_Key_Reference_Value(value_, 'ORDER_NO');
+      line_no_               := Client_SYS.Get_Key_Reference_Value(value_, 'LINE_NO');
+      rel_no_                := Client_SYS.Get_Key_Reference_Value(value_, 'REL_NO');
+      line_item_no_          := Client_SYS.Get_Key_Reference_Value(value_, 'LINE_ITEM_NO');
+      Client_SYS.Add_To_Attr('CONNECTED_ID1', order_no_, attr_);
+      Client_SYS.Add_To_Attr('CONNECTED_ID2', line_no_, attr_);
+      Client_SYS.Add_To_Attr('CONNECTED_ID3', rel_no_, attr_);
+      Client_SYS.Add_To_Attr('CONNECTED_ID4', line_item_no_, attr_);
+      
+      value_ := SUBSTR(value_, INSTR(value_, ';') + 1);
+      part_no_ := SUBSTR(value_, 0, INSTR(value_, ';') - 1);
+      IF part_nos_ IS NULL THEN
+         part_nos_ := part_no_ || ',';
+      ELSIF part_no_ IS NOT NULL AND INSTR(part_nos_, part_no_ || ',') = 0  THEN
+         part_nos_ := part_nos_ || part_no_ || ',';
+      END IF;
+      
+      configuration_id_ := SUBSTR(value_, INSTR(value_, ';')+ 1);
+      IF configuration_ids_ IS NULL THEN
+         configuration_ids_ := configuration_id_ || ',';
+      ELSIF  configuration_id_ IS NOT NULL AND INSTR(configuration_ids_, configuration_id_) = 0 THEN
+         configuration_ids_ := configuration_ids_ || configuration_id_ || ',';
+      END IF;     
+   END LOOP;
+   IF configuration_ids_ IS NOT NULL THEN
+      configuration_ids_ := SUBSTR(configuration_ids_, 1, LENGTH(configuration_ids_) - 1);
+   END IF;
+   $IF Component_Cfgchr_SYS.INSTALLED $THEN
+      Config_Manager_API.Get_Common_Characteristic_Ids(characteristic_ids_, configuration_ids_);
+   $END
+   IF part_nos_ IS NOT NULL THEN
+      rec_.part_nos := SUBSTR(part_nos_, 1, LENGTH(part_nos_) - 1);
+   END IF;
+   rec_.characteristic_ids := characteristic_ids_;
+   rec_.wanted_delivery_date := wanted_del_date_;
+   rec_.connected_id_attr := attr_;
+   RETURN rec_;
+END Get_Characteristics___;
+
+FUNCTION Get_Next_From_List (
+   attr_  IN            VARCHAR2,
+   ptr_   IN OUT NOCOPY NUMBER,
+   value_ IN OUT NOCOPY VARCHAR2 ) RETURN BOOLEAN
+IS
+   from_  NUMBER;
+   to_    NUMBER;
+BEGIN
+   from_ := nvl(ptr_, 1);
+   to_   := instr(attr_, Client_SYS.record_separator_, from_);
+   IF (to_ > 0) THEN
+      value_ := substr(attr_, from_, to_-from_);
+      ptr_   := to_ + 1;
+      RETURN(TRUE);
+   ELSE
+      RETURN(FALSE);
+   END IF;
+END Get_Next_From_List;
+
+PROCEDURE Replace_Char_Value_For_Configs___ (
+   connected_id_attr_    IN  VARCHAR2,
+   characteristic_id_    IN  VARCHAR2,
+   characteristic_value_ IN  VARCHAR2,
+   info$_                OUT VARCHAR2 ) 
+IS 
+BEGIN  
+   $IF Component_Cfgchr_SYS.INSTALLED $THEN
+      Config_Manager_API.Replace_Char_Value_For_Configs(info$_, connected_id_attr_, 'CUSTOMERORDER', characteristic_id_, characteristic_value_);
+   $ELSE
+      NULL;
+   $END
+END Replace_Char_Value_For_Configs___;
+
+FUNCTION Adjust_Configuration_Pricing___ (
+   configured_line_price_id_ IN NUMBER,
+   old_config_id_            IN VARCHAR2,
+   internal_config_id_       IN VARCHAR2) RETURN NUMBER
+IS
+   num_updated_   NUMBER;
+BEGIN
+	Configured_Line_Price_API.Copy_Manual_Pricing(configured_line_price_id_, 
+                                               old_config_id_, 
+                                               internal_config_id_);
+   
+   Configured_Line_Price_API.Zero_Mandatory_Pricing(num_updated_, configured_line_price_id_, internal_config_id_);
+   
+   RETURN num_updated_;
+END Adjust_Configuration_Pricing___;
+
+PROCEDURE Replace_Order_Line___ (
+   order_no_         IN VARCHAR2,
+   line_no_          IN VARCHAR2,
+   rel_no_           IN VARCHAR2,
+   line_item_no_     IN NUMBER,
+   shipment_id_      IN NUMBER,
+   contract_         IN VARCHAR2,
+   catalog_no_       IN VARCHAR2,
+   revised_qty_due_  IN NUMBER,
+   required_date_    IN DATE,
+   make_reservation_ IN VARCHAR2,
+   info$_ OUT VARCHAR2 ) 
+IS
+   
+BEGIN   
+   IF shipment_id_ IS NOT NULL AND shipment_id_ != 0 THEN
+      Shipment_Initial_Check___(shipment_id_);
+   END IF;
+   Order_Config_Util_API.Replace_Order_Line(info$_, order_no_, line_no_, rel_no_, line_item_no_, shipment_id_, contract_, catalog_no_, revised_qty_due_, required_date_, make_reservation_);
+END Replace_Order_Line___;
+
+PROCEDURE Set_Config_Id___ (
+   order_no_                 IN VARCHAR2,
+   line_no_                  IN VARCHAR2,
+   rel_no_                   IN VARCHAR2,
+   line_item_no_             IN NUMBER,
+   revised_qty_due_          IN NUMBER,
+   configured_line_price_id_ IN NUMBER,
+   config_id_                IN VARCHAR2,
+   make_reservation_         IN VARCHAR2,
+   supply_code_              IN VARCHAR2 ) 
+IS
+   reserved_qty_             NUMBER;
+BEGIN
+   Configured_Line_Price_Initial_Check___(configured_line_price_id_);
+   
+   Configured_Line_Price_API.Update_Parent_Config_Id(configured_line_price_id_, config_id_, 'TRUE');
+   Configured_Line_Price_API.Create_Pricing (configured_line_price_id_);
+   Configured_Line_Price_API.Update_Prices_For_Date (configured_line_price_id_, SYSDATE);
+   
+   IF UPPER(make_reservation_) = 'TRUE' THEN
+      reserved_qty_ := 0;
+
+      Customer_Order_Line_Initial_Check___(order_no_, line_no_, rel_no_, line_item_no_);
+      
+      IF supply_code_ != 'IO' THEN
+         Customer_Order_Line_API.Modify_Acquisition_Type__(order_no_, line_no_, rel_no_, line_item_no_, 'IO' );       
+      END IF;
+         Reserve_Customer_Order_API.Reserve_Order_Line__(reserved_qty_, order_no_, line_no_, rel_no_, line_item_no_, revised_qty_due_, 0);
+   END IF;  
+
+END Set_Config_Id___;
+
+FUNCTION Create_Rma_From_Customer_Order_Lines___ (
+   selection_        IN VARCHAR2,
+   reason_           IN VARCHAR2,
+   add_charge_lines_ IN BOOLEAN) RETURN Get_Rma_Co_Lines_Output_Struct_Rec
+IS
+   array_ json_array_t := json_array_t.parse(selection_);  
+   struct_values_ Get_Rma_Co_Lines_Output_Struct_Rec;
+   invoices_              NUMBER;
+   rma_                   NUMBER;
+   attr_                  VARCHAR2(2000);
+   customer_no_           VARCHAR2(20);
+   contract_              VARCHAR2(5);
+   add_charge_lines_val_  VARCHAR2(5);
+   order_no_              VARCHAR2(12);
+   line_no_               VARCHAR2(4);
+   rel_no_                VARCHAR2(4);
+   line_item_no_          NUMBER;
+BEGIN
+   FOR indx IN 0 .. array_.get_size - 1
+   LOOP    
+      customer_no_     := Client_SYS.Get_Key_Reference_Value(array_.get_String(indx), 'CUSTOMER_NO');
+      contract_        := Client_SYS.Get_Key_Reference_Value(array_.get_String(indx), 'CONTRACT');
+      order_no_        := Client_SYS.Get_Key_Reference_Value(array_.get_String(indx), 'ORDER_NO');
+      line_no_         := Client_SYS.Get_Key_Reference_Value(array_.get_String(indx), 'LINE_NO');
+      rel_no_          := Client_SYS.Get_Key_Reference_Value(array_.get_String(indx), 'REL_NO');
+      line_item_no_    := Client_SYS.Get_Key_Reference_Value(array_.get_String(indx), 'LINE_ITEM_NO');
+      Client_SYS.Add_To_Attr('ORDER_NO', order_no_, attr_);
+      Client_SYS.Add_To_Attr('LINE_NO',line_no_,attr_);
+      Client_SYS.Add_To_Attr('REL_NO',rel_no_,attr_); 
+      Client_SYS.Add_To_Attr('LINE_ITEM_NO', line_item_no_, attr_);
+
+      Customer_Order_Line_Initial_Check___(order_no_, line_no_, rel_no_, line_item_no_);   
+      struct_values_.promo_exists := Customer_Order_Charge_Util_API.Chk_Conn_Freight_Or_Prom_Exist(order_no_, line_no_, rel_no_, line_item_no_);  
+   END LOOP;  
+   IF (add_charge_lines_) THEN 
+      add_charge_lines_val_ := 'TRUE';
+   ELSE
+      add_charge_lines_val_ := 'FALSE';
+   END IF;
+   Customer_Order_Flow_API.Create_Rma_From_Co_Lines(invoices_, rma_, customer_no_, contract_, reason_, add_charge_lines_val_, attr_);  
+   struct_values_.invoice :=invoices_; 
+   RETURN struct_values_;
+END Create_Rma_From_Customer_Order_Lines___;
+
+FUNCTION Get_Supply_Site_Part_No_Var___ (
+	selection_ IN VARCHAR2) RETURN VARCHAR2
+IS
+   records_                 json_array_t := json_array_t.parse(selection_);
+   current_selection_       VARCHAR2(32000);
+   part_no_list_            VARCHAR2(32000);
+   supply_site_             VARCHAR2(5);
+   contract_                VARCHAR2(5);
+   catalog_no_              VARCHAR2(25);
+   vendor_no_               VARCHAR2(25);
+   part_no_                 VARCHAR2(25);
+   purchase_part_no_        VARCHAR2(25);
+   configuration_id_        VARCHAR2(50);
+   project_id_              VARCHAR2(10);
+   supply_code_             VARCHAR2(5);
+   supply_site_part_no_     VARCHAR2(25);
+BEGIN
+   FOR i_ IN 0 .. records_.get_size - 1 LOOP 
+      current_selection_   := records_.get_string(i_);
+      supply_site_         := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SUPPLY_SITE');
+      contract_            := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT');
+      catalog_no_          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CATALOG_NO');
+      vendor_no_           := Client_SYS.Get_Key_Reference_Value(current_selection_, 'VENDOR_NO');
+      part_no_             := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PART_NO');
+      purchase_part_no_    := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PURCHASE_PART_NO');
+      configuration_id_    := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONFIGURATION_ID');
+      project_id_          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'PROJECT_ID');
+      supply_code_         := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SUPPLY_CODE');
+      supply_site_part_no_ := Sales_Part_API.Get_Supply_Site_Part_No__(supply_site_, contract_, catalog_no_, vendor_no_ );
+      
+      IF supply_code_ NOT IN ('PI', 'PJD', 'DOP', 'PT', 'SO', 'PD') THEN
+         project_id_ := '*';
+      END IF;
+      
+      IF supply_code_ IN ('IPT', 'IPD') THEN
+         contract_ := supply_site_;
+         IF part_no_ IS NULL THEN 
+            part_no_ := purchase_part_no_;
+         END IF;
+      END IF;
+      
+      part_no_list_ := part_no_list_ || '(PartNo eq ''' || NVL(supply_site_part_no_, part_no_) || ''' and Contract eq '''|| contract_ || ''' and ConfigurationId eq '''|| configuration_id_ || ''' and ProjectId eq '''|| NVL(project_id_, '*') || ''' ) or ';
+   END LOOP;
+   RETURN SUBSTR(part_no_list_, 0, LENGTH(part_no_list_)-4);
+END Get_Supply_Site_Part_No_Var___;
+
+PROCEDURE Unpeg___ (
+	order_no_ IN VARCHAR2,
+	line_no_ IN VARCHAR2,
+	rel_no_ IN VARCHAR2,
+	line_item_no_ IN NUMBER,
+	info$_ OUT VARCHAR2)
+IS
+BEGIN
+   Customer_Order_Line_API.Unpeg__(info$_, order_no_, line_no_, rel_no_, line_item_no_);
+END Unpeg___;
+
+FUNCTION Check_Source_Exists___ (
+	order_no_     IN VARCHAR2,
+	line_no_      IN VARCHAR2,
+	rel_no_       IN VARCHAR2,
+	line_item_no_ IN NUMBER) RETURN BOOLEAN
+IS
+BEGIN
+   RETURN Cust_Order_Line_Source_Set_API.Exist_Any_Source_Set(order_no_, line_no_, rel_no_, line_item_no_) = 1;
+END Check_Source_Exists___;
+
+
+FUNCTION Unreserve_Cust_Order_Lines___ (
+   selection_ IN VARCHAR2,
+   info$_    OUT VARCHAR2) RETURN BOOLEAN 
+IS
+   records_                       json_array_t := json_array_t.parse(selection_);
+   current_selection_             VARCHAR2(32000);
+   order_no_                      customer_order_line_tab.order_no%TYPE;
+   line_no_                       customer_order_line_tab.line_no%TYPE;
+   rel_no_                        customer_order_line_tab.rel_no%TYPE;
+   line_item_no_                  customer_order_line_tab.line_item_no%TYPE;
+   supply_code_                   customer_order_line_tab.supply_code%TYPE;
+   qty_assigned_                  customer_order_line_tab.qty_assigned%TYPE;
+   qty_on_pick_list_              NUMBER;
+   qty_unreservable_              NUMBER;
+   info_                          VARCHAR2(32000);
+   warnings_exist_                BOOLEAN := FALSE;
+   count_                         NUMBER := 0;
+BEGIN
+   FOR i_ IN 0 .. records_.get_size - 1 LOOP      
+      current_selection_ := records_.get_string(i_);
+      line_item_no_     := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_ITEM_NO');
+      supply_code_      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SUPPLY_CODE');
+      qty_assigned_     := Client_SYS.Get_Key_Reference_Value(current_selection_, 'QTY_ASSIGNED');     
+      qty_unreservable_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'QTY_UNRESERVABLE');
+      qty_on_pick_list_ := qty_assigned_ - qty_unreservable_;
+      
+      IF NOT (line_item_no_ != -1 AND qty_assigned_ > 0 AND (qty_on_pick_list_ = 0)) THEN
+         IF count_ = 0 THEN
+            Client_SYS.Add_Info(lu_name_, 'UNRES_LINES: One or more lines could not be unreserved.'); 
+            info$_ := info$_ || Client_SYS.Get_All_Info;
+            count_ := count_ + 1;
+         END IF;
+      ELSIF (supply_code_ NOT IN('IO','PD', 'IPD', 'PI', 'PJD', 'PS', 'PMRP', 'MRP')) THEN
+         warnings_exist_ := TRUE;
+      ELSIF qty_assigned_ > 0 THEN 
+         order_no_         := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');
+         line_no_          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_NO');
+         rel_no_           := Client_SYS.Get_Key_Reference_Value(current_selection_, 'REL_NO');
+
+         Customer_Order_Line_Initial_Check___(order_no_, line_no_, rel_no_, line_item_no_);
+         
+         Reserve_Customer_Order_API.Unreserve_Cust_Order_Lines__(info_, order_no_, line_no_, rel_no_, line_item_no_, 0);
+      END IF;
+   END LOOP;      
+   info$_ := info$_ || info_;
+   RETURN warnings_exist_;
+END Unreserve_Cust_Order_Lines___;
+
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Unreserve_Order_Line_Virtual_Rec )
+IS
+   key_              Unreserve_Order_Line_Virtual_Key;
+   message_rec_      Unreserve_Order_Line_Message_Virtual_Rec;  
+   records_          json_array_t := json_array_t.parse(rec_.order_selection);
+   order_no_         customer_order_line_tab.order_no%TYPE;
+   line_no_          customer_order_line_tab.line_no%TYPE;
+   rel_no_           customer_order_line_tab.rel_no%TYPE;
+   line_item_no_     customer_order_line_tab.line_item_no%TYPE;
+   supply_code_      customer_order_line_tab.supply_code%TYPE;
+   qty_assigned_     customer_order_line_tab.qty_assigned%TYPE;
+   qty_unreservable_ NUMBER;
+   qty_on_pick_list_ NUMBER;
+   current_selection_         VARCHAR2(32000);
+BEGIN
+   super(rec_);
+   key_.objkey := rec_.objkey;
+      
+   FOR i_ IN 0 .. records_.get_size - 1 LOOP      
+      current_selection_ := records_.get_string(i_);
+      order_no_         := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');
+      line_no_          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_NO');
+      rel_no_           := Client_SYS.Get_Key_Reference_Value(current_selection_, 'REL_NO');
+      line_item_no_     := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_ITEM_NO');
+      supply_code_      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'SUPPLY_CODE');
+      qty_assigned_     := Client_SYS.Get_Key_Reference_Value(current_selection_, 'QTY_ASSIGNED');
+      qty_unreservable_ := Client_SYS.Get_Key_Reference_Value(current_selection_, 'QTY_UNRESERVABLE');
+      qty_on_pick_list_ := qty_assigned_ - qty_unreservable_;
+      
+      IF (line_item_no_ != -1 AND qty_assigned_ > 0 AND (qty_on_pick_list_ = 0)) AND (supply_code_ NOT IN('IO','PD', 'IPD', 'PI', 'PJD', 'PS', 'PMRP', 'MRP')) THEN
+         message_rec_.parent_objkey := key_.objkey;
+         message_rec_.objkey := sys_guid();
+         message_rec_.order_no := order_no_;
+         message_rec_.line_no := line_no_;
+         message_rec_.release_no := rel_no_;         
+         IF line_item_no_ IS NOT NULL THEN 
+            message_rec_.line_item_no := line_item_no_;
+         END IF;
+         message_rec_.qty_assigned := qty_assigned_;    
+         message_rec_.supply_code := supply_code_;    
+         message_rec_.qty_on_pick_list := qty_on_pick_list_;    
+         message_rec_.answer := Gen_Yes_No_API.DB_NO;    
+         IF line_item_no_ > 0 THEN 
+            message_rec_.message := 'The supply code for the component line '|| line_item_no_ ||' is not Inventory Order. Do you still want to unreserve the order line?';
+         ELSE            
+         message_rec_.message := 'The supply code for the Order No '||order_no_ ||' Line no '||line_no_ ||' Del no '||rel_no_ ||' is not Inventory Order. Do you still want to unreserve the order line?';
+         END IF;
+         CRUD_Create___(message_rec_);
+      END IF;
+   END LOOP;   
+END CRUD_Create___;
+
+
+PROCEDURE Process_Unreserve___ (
+   key_  IN Unreserve_Order_Line_Virtual_Key,
+   info$_ OUT VARCHAR2)
+IS
+   info_       VARCHAR2(32000);
+BEGIN
+   FOR rec_ IN Get_Message_Array___(key_) LOOP
+      IF rec_.answer = Gen_Yes_No_API.DB_YES THEN 
+         Customer_Order_Line_Initial_Check___(rec_.order_no, rec_.line_no, rec_.release_no, rec_.line_item_no);
+         Reserve_Customer_Order_API.Unreserve_Cust_Order_Lines__(info_, rec_.order_no, rec_.line_no, rec_.release_no, rec_.line_item_no, 0);
+      ELSE
+         info_ := info_ || 'One or more lines could not be reserved'; 
+      END IF;
+   END LOOP;   
+   info$_ := info_;
+END Process_Unreserve___;
+
+FUNCTION Create_Or_Get_Find_And_Connect___ (
+   selection_ IN VARCHAR2) RETURN VARCHAR2
+IS
+   records_                       json_array_t := json_array_t.parse(selection_);
+   current_selection_             VARCHAR2(32000);
+   order_no_                      customer_order_line_tab.order_no%TYPE;
+   line_no_                       customer_order_line_tab.line_no%TYPE;
+   rel_no_                        customer_order_line_tab.rel_no%TYPE;
+   line_item_no_                  customer_order_line_tab.line_item_no%TYPE;
+   licensed_order_type_           VARCHAR2(200);
+   transfer_explic_find_id_       NUMBER;
+   transfer_explic_find_id_list_  VARCHAR2(32000);
+   demand_code_db_                VARCHAR2(20);
+   demand_order_ref1_             VARCHAR2(15);
+   demand_order_ref2_             VARCHAR2(10);
+   demand_order_ref3_             VARCHAR2(4);
+BEGIN
+   FOR i_ IN 0 .. records_.get_size - 1 LOOP      
+      current_selection_ := records_.get_string(i_);
+      order_no_      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');
+      line_no_        := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_NO');
+      rel_no_        := Client_SYS.Get_Key_Reference_Value(current_selection_, 'REL_NO');
+      line_item_no_  := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_ITEM_NO');      
+      demand_code_db_      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'DEMAND_CODE_DB');
+      demand_order_ref1_   := Client_SYS.Get_Key_Reference_Value(current_selection_, 'DEMAND_ORDER_REF1');
+      demand_order_ref2_   := Client_SYS.Get_Key_Reference_Value(current_selection_, 'DEMAND_ORDER_REF2');
+      demand_order_ref3_   := Client_SYS.Get_Key_Reference_Value(current_selection_, 'DEMAND_ORDER_REF3');      
+      licensed_order_type_ := Customer_Order_Line_API.Get_Expctr_License_Order_Type(demand_code_db_, demand_order_ref1_, demand_order_ref2_, demand_order_ref3_);
+      $IF Component_Expctr_SYS.INSTALLED $THEN
+         Customer_Order_Line_Initial_Check___(order_no_, line_no_, rel_no_, line_item_no_);
+         Exp_License_Connect_Util_API.Create_Or_Get_Find_And_Conn(transfer_explic_find_id_, licensed_order_type_, order_no_, line_no_, rel_no_, line_item_no_);
+         transfer_explic_find_id_list_ := transfer_explic_find_id_list_ || '(ExpLicenseConnectId eq ' || transfer_explic_find_id_ || ' ) or ';
+      $ELSE
+         NULL;  
+      $END      
+   END LOOP; 
+   RETURN SUBSTR(transfer_explic_find_id_list_, 0, LENGTH(transfer_explic_find_id_list_)-4);  
+END Create_Or_Get_Find_And_Connect___;
+
+FUNCTION Check_Enable_For_Inv_Part_Avail_Plan___ (
+   supply_site_      IN VARCHAR2,
+   contract_         IN VARCHAR2,
+   catalog_no_       IN VARCHAR2,
+   vendor_no_        IN VARCHAR2,
+   part_no_          IN VARCHAR2,
+   purchase_part_no_ IN VARCHAR2,
+   demand_code_      IN VARCHAR2) RETURN BOOLEAN
+IS 
+   supply_site_part_no_ VARCHAR2(25);
+BEGIN
+   IF demand_code_= 'FSM' THEN
+      RETURN FALSE;
+   ELSE
+      IF supply_site_ IS NOT NULL THEN
+         supply_site_part_no_ := Sales_Part_API.Get_Supply_Site_Part_No__(supply_site_,contract_, catalog_no_, vendor_no_); 
+         IF (supply_site_part_no_ IS NOT NULL) THEN
+            RETURN TRUE;
+         ELSE
+            RETURN (Inventory_Part_API.Check_Exist(supply_site_, NVL(part_no_, purchase_part_no_)));
+         END IF;
+      ELSE
+         RETURN (part_no_ IS NOT NULL);
+      END IF;  
+   END IF;   
+END Check_Enable_For_Inv_Part_Avail_Plan___;
+
+PROCEDURE Refresh_Cust_Order_Line_After_Crud___
+IS
+BEGIN
+	-- Dummy method to refresh CustomerOrderLine
+   NULL;
+END Refresh_Cust_Order_Line_After_Crud___;
+
+FUNCTION Sourcing_Release_Source_Line_Enable___ (
+   supply_code_     IN VARCHAR2,
+   order_state_     IN VARCHAR2,
+   order_no_        IN VARCHAR2,
+   line_no_         IN VARCHAR2,
+   rel_no_          IN VARCHAR2,
+   line_item_no_    IN NUMBER,
+   revised_qty_due_ IN NUMBER) RETURN BOOLEAN
+IS
+   total_sourced_qty_   NUMBER;
+BEGIN
+   total_sourced_qty_ := Sourced_Cust_Order_Line_API.Get_Total_Sourced_Qty(order_no_, line_no_, rel_no_, line_item_no_);
+   RETURN (supply_code_ = 'ND' AND NOT(order_state_ in('Planned', 'Cancelled', 'Delivered', 'Invoiced')) and not(order_state_ in('Cancelled', 'Invoiced')) and total_sourced_qty_ = revised_qty_due_);
+END Sourcing_Release_Source_Line_Enable___;
+
+FUNCTION Reserve_Serial_Numbers_Enable___ (
+   supply_code_ IN VARCHAR2,
+   order_state_ IN VARCHAR2,
+   part_no_     IN VARCHAR2) RETURN BOOLEAN
+IS
+   serial_tracking_db_  VARCHAR2(25);
+BEGIN
+   serial_tracking_db_:= Part_Catalog_API.Get_Rcpt_Issue_Serial_Track_Db(part_no_); 
+   RETURN (serial_tracking_db_ = 'TRUE' AND order_state_ = 'Planned' AND (supply_code_ = 'SO' OR supply_code_ = 'DOP' ));
+END Reserve_Serial_Numbers_Enable___;
+
+
+FUNCTION Generate_Serial_Numbers_Enable___ (
+   supply_code_  IN VARCHAR2,
+   order_state_  IN VARCHAR2,
+   part_no_      IN VARCHAR2,
+   order_no_     IN VARCHAR2,
+   line_no_      IN VARCHAR2,
+   release_no_   IN VARCHAR2,
+   line_item_no_ IN NUMBER,
+   quantity_     IN NUMBER) RETURN BOOLEAN
+IS
+   serial_tracking_db_  VARCHAR2(25);
+   serial_rule_         VARCHAR2(9);
+   reservation_count_   NUMBER;
+   count_check_         BOOLEAN;
+BEGIN
+   serial_rule_ := Part_Serial_Rule_API.Encode(Part_Catalog_API.Get_Serial_Rule(part_no_));
+   reservation_count_ := Serial_No_Reservation_API.Get_Count_Reservation(order_no_, line_no_, release_no_, line_item_no_, 'CUSTOMER ORDER', part_no_);
+   serial_tracking_db_:= Part_Catalog_API.Get_Rcpt_Issue_Serial_Track_Db(part_no_); 
+   RETURN (serial_tracking_db_ = 'TRUE' AND order_state_ = 'Planned' AND (supply_code_ = 'SO' OR supply_code_ = 'DOP' ) AND serial_rule_ = 'AUTOMATIC' AND (reservation_count_ < quantity_));
+END Generate_Serial_Numbers_Enable___;
+
+
+FUNCTION Find_And_Connect_Expt_Enable___ (
+   order_no_        IN VARCHAR2,
+   line_no_         IN VARCHAR2,
+   rel_no_          IN VARCHAR2,
+   line_item_no_    IN NUMBER,
+   part_no_         IN VARCHAR2,
+   catalog_no_      IN VARCHAR2) RETURN BOOLEAN
+IS
+   export_controlled_db_    VARCHAR2(5) := 'FALSE';
+   export_license_enabled_  VARCHAR2(5) := 'FALSE';
+BEGIN
+   $IF Component_Expctr_SYS.INSTALLED $THEN
+   export_controlled_db_ := Exp_License_Connect_Util_API.Get_Export_Controlled(NVL(part_no_,catalog_no_), order_no_, line_no_, rel_no_, line_item_no_, 'CUSTOMER_ORDER');
+   $END
+   export_license_enabled_ :=Customer_Order_Flow_API.Get_License_Enabled(order_no_,'INTERACT_CUST_ORD');   
+   RETURN (export_controlled_db_ = 'TRUE' AND export_license_enabled_ = 'TRUE');
+END Find_And_Connect_Expt_Enable___;
+
+FUNCTION Handle_Rma_View_Edit_Enable___ (
+   order_no_        IN VARCHAR2,
+   line_no_         IN VARCHAR2,
+   rel_no_          IN VARCHAR2,
+   line_item_no_    IN NUMBER,
+   supply_code_     IN VARCHAR2) RETURN BOOLEAN
+IS
+BEGIN
+   RETURN (supply_code_ != 'SEO' AND Return_Material_Line_API.Check_Exist_Rma_For_Order_Line(order_no_, line_no_, rel_no_, line_item_no_) = 'TRUE');
+END Handle_Rma_View_Edit_Enable___;
+
+FUNCTION Handle_Rma_View_Create_Enable___ (
+   order_no_    IN VARCHAR2,
+   line_no_     IN VARCHAR2,
+   rel_no_      IN VARCHAR2,
+   line_item_no_ IN NUMBER,
+   supply_code_ IN VARCHAR2) RETURN BOOLEAN
+IS
+BEGIN
+   RETURN (supply_code_ != 'SEO' AND Customer_Order_Flow_API.Check_Co_Lines_To_Return(order_no_, line_no_, rel_no_, line_item_no_) != 0);
+END Handle_Rma_View_Create_Enable___;
+
+
+FUNCTION Exist_Charge_On_Order_Line___ (
+	selection_    IN VARCHAR2) RETURN BOOLEAN
+IS
+   records_                 json_array_t := json_array_t.parse(selection_);
+   current_selection_       VARCHAR2(32000);
+   order_no_                VARCHAR2(12);
+   line_no_                 VARCHAR2(4);
+   rel_no_                  VARCHAR2(4);
+   line_item_no_            NUMBER;
+BEGIN
+   FOR i_ IN 0 .. records_.get_size - 1 LOOP      
+      current_selection_ := records_.get_string(i_);
+      order_no_          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');
+      line_no_           := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_NO');
+      rel_no_            := Client_SYS.Get_Key_Reference_Value(current_selection_, 'REL_NO');
+      line_item_no_      := Client_SYS.Get_Key_Reference_Value(current_selection_, 'LINE_ITEM_NO');
+      IF Customer_Order_Charge_API.Exist_Charge_On_Order_Line( order_no_, line_no_, rel_no_, line_item_no_) = 1 THEN
+         RETURN TRUE;
+      END IF;
+   END LOOP;
+   RETURN FALSE;
+END Exist_Charge_On_Order_Line___;
+
+
+FUNCTION Uses_Shipment_Inventory___ (
+	order_no_     IN VARCHAR2,
+	line_no_      IN VARCHAR2,
+	rel_no_       IN VARCHAR2,
+	line_item_no_ IN NUMBER) RETURN NUMBER
+IS
+BEGIN
+	RETURN Customer_Order_Line_API.Uses_Shipment_Inventory(order_no_, line_no_, rel_no_, line_item_no_);
+END Uses_Shipment_Inventory___;
+
+FUNCTION Get_Un_Confirm_Deliveries___ (
+	order_no_ IN VARCHAR2) RETURN BOOLEAN
+IS
+BEGIN
+	IF Customer_Order_API.Get_Confirm_Deliveries_Db(order_no_) = 'TRUE' THEN
+      RETURN FALSE;
+   ELSE
+      RETURN TRUE;
+   END IF;
+END Get_Un_Confirm_Deliveries___;
+
+
+FUNCTION Check_Pick_Reserve_Allowed___ (
+   order_no_     IN VARCHAR2,
+   line_no_      IN VARCHAR2,
+   rel_no_       IN VARCHAR2,
+   line_item_no_ IN NUMBER) RETURN BOOLEAN
+IS
+BEGIN
+   RETURN (Pick_Customer_Order_API.Reserved_As_Picked_Allowed__(order_no_,line_no_,rel_no_,line_item_no_) = 'TRUE');
+END Check_Pick_Reserve_Allowed___;
+
+FUNCTION Any_Source_Set_Exist___ (
+	order_no_ IN VARCHAR2,
+	line_no_ IN VARCHAR2,
+	rel_no_ IN VARCHAR2,
+	line_item_no_ IN NUMBER) RETURN BOOLEAN
+IS
+BEGIN
+	RETURN (Cust_Order_Line_Source_Set_API.Exist_Any_Source_Set(order_no_,line_no_,rel_no_,line_item_no_) = 1);
+END Any_Source_Set_Exist___;
+
+
+

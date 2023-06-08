@@ -1,0 +1,489 @@
+-------------------------------------------------------------------------------------------------------
+--  Date        Sign    History
+--  ----------  ------  --------------------------------------------------------------------------------
+--  2022-02-02  NiDalk  SC21R2-7473, Added validation for SupplyCode.
+--  2022-01-27  ChBnlk  SC21R2-7346, Modified ValidateCustomerNoCommand to set CurrencyCode and OrderId to null when changed.
+--  2021-11-15  ChBnlk  SC21R2-5075, Added implementation related to QuickCustOrdAddFromOrderAssistant.
+--  2021-10-22  ChBnlk  SC21R2-1083, Created.
+--  ----------  ------  --------------------------------------------------------------------------------
+client QuickCustomerOrderRegistration;
+component ORDER;
+layer Core;
+projection QuickCustomerOrderRegistration;
+description "This client is used for the Quick Customer Order Registration main assistant.";
+
+--------------------------------- FRAGMENTS ---------------------------------
+include fragment OrderCoordinatorLovSelector;
+include fragment CustOrdCust6Selector;
+include fragment CustOrdCust7Selector;
+include fragment UserAllowedSiteLovSelector;
+include fragment CustAddressShipLovSelector;
+@DynamicComponentDependency PURCH
+include fragment PurchasePartSupplierLovSelector;
+include fragment SalesPartActiveLovSelector;
+include fragment QuickCustOrdAddMultiplePartsAssistant;
+include fragment QuickCustOrdAddFromTemplateAssistant;
+include fragment QuickCustOrdAddFromOrderAssistant;
+include fragment LimitToAssortSalesPartLovSelector;
+
+
+warningsenabled = CreateOrderInternal;
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+navigator {
+   entry QuickCustOrderRegisterNavEntry parent OrderNavigator.SalesOrder at index 310 {
+      label = "Quick Customer Order Registration";
+      assistant QuickCustomerOrderRegistrationAssistant;
+   }
+
+}
+
+-------------------------------- ASSISTANTS ---------------------------------
+
+assistant QuickCustomerOrderRegistrationAssistant using CreateCustomerOrderSet {
+   label = "Quick Customer Order Registration";
+   savemode = OnLostFocus;
+   input(Source);
+   output(OrderNo);
+   init command {
+      variable UserDefaultVar Structure(UserDefaultStructure);
+      execute {
+         call GetUserDefaults() into UserDefaultVar;
+         copy UserDefaultVar into this;
+      }
+   }
+   steps {
+      step OrderDetails {
+         label = "Order Registration";
+         group OrderDetailsGroup;
+         next command {
+            enabled = [(component.QuickCustomerOrderRegistrationAssistant.IsActiveStepValid) and
+            CustomerNo != null and Contract != null and OrderId != null and WantedDeliveryDate != null and CurrencyCode != null
+            and ShipAddrNo != null and AuthorizeCode != null];
+         }
+      }
+      step PartLines {
+         label = "Part Lines";
+         group OrderDetailsGroup;
+         list CustomerOrderLinesList(CustomerOrderLines);
+         next command {
+            enabled = [(component.QuickCustomerOrderRegistrationAssistant.IsActiveStepValid) and
+            (component.CustomerOrderLinesList.RowCount > 0)];
+            execute {
+               call ResetReleaseOrderCreation(Objkey, ReleasedOrderCreation) into ReleasedOrderCreation;
+            }
+         }
+      }
+      step OrderProcessingPrams
+         {
+         label = "Order Processing Parameters";
+         group OrderParametersGroup;
+      }
+      final step {
+
+      }
+      cancelled step {
+
+      }
+   }
+   finish command {
+      visible = [true];
+      enabled = [component.QuickCustomerOrderRegistrationAssistant.ActiveStepByName != "OrderDetails" and
+      (component.CustomerOrderLinesList.RowCount > 0)];
+      execute {
+
+         call CreateOrderInternal(Objkey, ReleasedOrderCreation, PrintOrderConfirmation, EmailOrderConfirmation, EmailAddress) into OrderNo {
+
+            when SUCCESS {
+               if [Source = null] {
+                  messagebox("", question, "Customer order ${OrderNo} has been created. Do you want to view the created order?") {
+                     when "Yes" {
+                        navigate "page/CustomerOrder/Form?$filter=OrderNo eq $[OrderNo]";
+                     }
+                     when "No" {
+                        exit OK;
+                     }
+                  }
+               }
+               else {
+                  exit OK;
+               }
+            }
+         }
+      }
+   }
+   cancel command {
+      execute {
+         if [Source = null] {
+            exit OK;
+         }
+         else {
+            exit CANCEL;
+         }
+      }
+   }
+   restart command {
+      visible = [true];
+   }
+}
+
+-------------------------------- MAIN PAGES ---------------------------------
+
+
+--------------------------------- COMMANDS ----------------------------------
+
+command ValidateDefaultValuesCommand for CreateCustomerOrderSet {
+
+   variable DefaultsVar {
+      type = Structure(CustomerDefaultsStructure);
+   }
+   variable WantedDeliveryDateVar Timestamp;
+
+   execute {
+      if [CustomerNo != original.CustomerNo or ShipAddrNo != original.ShipAddrNo or Contract != original.Contract] {
+
+         if [CustomerNo = null] {
+            set ShipAddrNo = null;
+            set BillAddrNo = null;
+            exit;
+         }
+         if[WantedDeliveryDateChanged = "TRUE"] {
+            set WantedDeliveryDateVar = WantedDeliveryDate;
+         }
+         else {
+            set WantedDeliveryDateVar = null;
+         }
+         call GetCustomerDefaults(CustomerNo, Contract, WantedDeliveryDateVar, CurrencyCode, OrderId, ShipAddrNo) into DefaultsVar;
+         copy DefaultsVar into this;
+
+
+      }
+   }
+}
+
+command ValidateWantedDeliveryDateCommand for CreateCustomerOrderSet {
+   execute {
+      if [WantedDeliveryDate != original.WantedDeliveryDate] {
+         set WantedDeliveryDateChanged = "TRUE";
+      }
+   }
+}
+
+command ValidateCustomerNoCommand for CreateCustomerOrderSet clone ValidateDefaultValuesCommand {
+   execute {
+      set ShipAddrNo = null;
+      set OrderId = null;
+      set CurrencyCode = null;
+      super;
+   }
+}
+
+command ValidateShipAddressNoCommand for CreateCustomerOrderSet clone ValidateDefaultValuesCommand {
+   execute {
+      super;
+   }
+}
+
+command ValidateContractCommand for CreateCustomerOrderSet clone ValidateDefaultValuesCommand {
+   execute {
+      call FetchCompany(Contract) into Company;
+      super;
+   }
+}
+
+command ValidateCatalogNoOrderLineCommand for CreateCustomerOrderLinesVirtual {
+   variable LineDefaultsVar {
+      type = Structure(CatalogNoDefautlsStructure);
+   }
+
+   execute {
+      copy this into LineDefaultsVar;
+      call GetCatalogNoDefaults(CatalogNo, parent.Contract, parent.LanguageCode, parent.CustomerNo) into LineDefaultsVar;
+      copy LineDefaultsVar into this;
+   }
+}
+
+command ValidateVendorNoOrderLineCommand for CreateCustomerOrderLinesVirtual {
+
+   execute {
+      call GetSupplySite(VendorNo) into SupplySite;
+   }
+
+}
+
+command ValidateSupplyCodeCommand for CreateCustomerOrderLinesVirtual {
+   variable ValidationRecVar Structure(CustOrdLineValidationStructure);
+   variable ReturnValidationRecVar Structure(CustOrdLineValidationStructure);
+
+   execute {
+      copy this into ValidationRecVar;
+      set ValidationRecVar.VendorNo = null;
+      call ValidateSupplyCode(ValidationRecVar) into ReturnValidationRecVar {
+         when SUCCESS {
+            copy ReturnValidationRecVar into this;
+         }
+      }
+   }
+}
+
+
+command AddMultiplePartsCommand for CreateCustomerOrderVirtual {
+   label = "Add Multiple Parts";
+   mode = Global;
+   enabled = [CustomerNo != null and Contract != null];
+   variable PartObjkeyVar Text;
+   execute {
+      assistant AddMultiplePartsAssistant(Contract, CustomerNo) into(PartObjkeyVar) {
+         when CANCEL {
+            exit CANCEL;
+         }
+         when OK {
+            call AddQuickCustOrdLine(Objkey, PartObjkeyVar, LanguageCode, CustomerNo, "PARTS");
+            exit OK;
+         }
+         when "CLOSE" {
+            call AddQuickCustOrdLine(Objkey, PartObjkeyVar, LanguageCode, CustomerNo, "PARTS");
+            exit OK;
+         }
+      }
+
+   }
+}
+
+command AddFromTemplateCommand for CreateCustomerOrderVirtual {
+   label = "Add from Template";
+   mode = Global;
+   enabled = [CustomerNo != null and Contract != null];
+   variable TemplateObjkeyVar Text;
+   execute {
+      assistant AddFromTemplateAssistant(Contract, CustomerNo) into(TemplateObjkeyVar) {
+         when CANCEL {
+            exit CANCEL;
+         }
+         when OK {
+            call AddQuickCustOrdLine(Objkey, TemplateObjkeyVar, LanguageCode, CustomerNo, "TEMPLATE");
+            exit OK;
+         }
+      }
+   }
+}
+
+command AddFromOrderPartCommand for CreateCustomerOrderVirtual {
+   label = "Add from Order";
+   mode = Global;
+   enabled = [CustomerNo != null and Contract != null];
+   variable CustOrderObjkeyVar Text;
+
+   execute {
+      assistant AddFromOrderAssistant(Contract, CustomerNo) into(CustOrderObjkeyVar) {
+         when CANCEL {
+            exit CANCEL;
+         }
+         when OK {
+            call AddQuickCustOrdLine(Objkey, CustOrderObjkeyVar, LanguageCode, CustomerNo, "ORDER");
+            exit OK;
+         }
+      }
+   }
+}
+
+
+--------------------------------- SELECTORS ---------------------------------
+
+
+---------------------------------- GROUPS -----------------------------------
+group OrderDetailsGroup for CreateCustomerOrderVirtual {
+   label = "Order Details";
+
+   lov CustomerNoWithoutCompanyRef with ReferenceCustOrdCust7Selector {
+      editable = [(component.QuickCustomerOrderRegistrationAssistant.ActiveStepByName = "OrderDetails") and
+      (component.CustomerOrderLinesList.RowCount = 0)];
+      contactwidget {
+         enabled = [CustomerNo != null];
+         source = Customer;
+      }
+      visible = [Company = null];
+
+      description = CustomerName;
+      details = "page/Customer/Form?$filter=CustomerId eq $[CustomerNo]";
+      search = CustomerNo, Name;
+      searchable = true;
+      initialfocus = [true];
+      validate command ValidateCustomerNoCommand;
+   }
+
+   lov CustomerNoRef with ReferenceCustOrdCust6Selector {
+      editable = [(component.QuickCustomerOrderRegistrationAssistant.ActiveStepByName = "OrderDetails") and
+      (component.CustomerOrderLinesList.RowCount = 0)];
+      contactwidget {
+         enabled = [CustomerNo != null];
+         source = Customer;
+      }
+      visible = [Company != null];
+      description = CustomerName;
+      details = "page/Customer/Form?$filter=CustomerId eq $[CustomerNo]";
+      search = CustomerNo, Name;
+      searchable = true;
+      initialfocus = [true];
+      validate command ValidateCustomerNoCommand;
+   }
+
+   lov AuthorizeCodeRef with ReferenceOrderCoordinatorLovSelector {
+      description = AuthorizeCodeRef.Name;
+      editable = [(component.QuickCustomerOrderRegistrationAssistant.ActiveStepByName = "OrderDetails")];
+      contactwidget {
+         enabled = [AuthorizeCode != null];
+         source = Person;
+      }
+   }
+
+   field OrderIdRef {
+      editable = [(component.QuickCustomerOrderRegistrationAssistant.ActiveStepByName = "OrderDetails") and
+      (component.CustomerOrderLinesList.RowCount = 0)];
+      size = Small;
+   }
+   field WantedDeliveryDate {
+      editable = [(component.QuickCustomerOrderRegistrationAssistant.ActiveStepByName = "OrderDetails")];
+      size = Small;
+      validate command ValidateWantedDeliveryDateCommand;
+   }
+
+   lov ContractRef with ReferenceUserAllowedSiteLovSelector {
+      editable = [(component.QuickCustomerOrderRegistrationAssistant.ActiveStepByName = "OrderDetails") and
+      (component.CustomerOrderLinesList.RowCount = 0)];
+      size = Small;
+      validate command ValidateContractCommand;
+
+   }
+
+   field CurrencyCodeRef {
+      editable = [(component.QuickCustomerOrderRegistrationAssistant.ActiveStepByName = "OrderDetails") and
+      (component.CustomerOrderLinesList.RowCount = 0)];
+      size = Small;
+   }
+
+   lov ShipAddrNoRef with ReferenceCustAddressShipLovSelector {
+      editable = [(component.QuickCustomerOrderRegistrationAssistant.ActiveStepByName = "OrderDetails")];
+      size = Small;
+      preview = CustAddressShipLovCard;
+      description = DelAddrName;
+      validate command ValidateShipAddressNoCommand;
+   }
+   field LanguageCode {
+      visible = [false];
+   }
+
+}
+
+group OrderParametersGroup for CreateCustomerOrderVirtual {
+   field OrderIdRef {
+      editable = [false];
+   }
+   field ReleasedOrderCreation;
+   field PrintOrderConfirmation;
+   field EmailOrderConfirmation;
+   field EmailAddress {
+      visible = [EmailOrderConfirmation = true];
+
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+
+list CustomerOrderLinesList for CreateCustomerOrderLinesVirtual {
+   label = "Part Lines";
+   crudactions {
+      new {
+         enabled = [parent.CustomerNo != null and parent.Contract != null and parent.OrderId != null and parent.WantedDeliveryDate != null and parent.CurrencyCode != null and parent.AuthorizeCode != null];
+      }
+   }
+
+   field CatalogNo {
+      label = "Sales Part No";
+      lovswitch {
+         when [parent.LimitSalesToAssortExist] {
+            lov CatalogNoAssortmentRef with ReferenceLimitToAssortSalesPartLovSelector;
+         }
+         when [not(parent.LimitSalesToAssortExist)] {
+            lov CatalogNoRef with ReferenceSalesPartActiveLovSelector;
+         }
+      }
+      initialfocus = [true];
+      validate command ValidateCatalogNoOrderLineCommand;
+   }
+
+   field CatalogDescription;
+
+   lov ConditionCodeRef with ReferenceConditionCodeSelector {
+      label = "Condition Code";
+      description = ConditionCodeRef.Description;
+   }
+
+   field BuyQtyDue {
+      validate command {
+         execute {
+            if [BuyQtyDue <= 0] {
+               error("Quantity must be greater than 0!");
+            }
+         }
+      }
+   }
+
+   field SalesUnitMeas;
+
+   field SupplyCode {
+      validate command ValidateSupplyCodeCommand;
+   }
+
+   @DynamicComponentDependency PURCH
+   lov VendorNoRef with ReferencePurchasePartSupplierLovSelector using GetSupplierNo(SupplyCode, PurchasePartNo) {
+      size = Small;
+      validate command ValidateVendorNoOrderLineCommand;
+   }
+
+   field SupplySite;
+
+   field PurchasePartNo {
+      columnexclude = [true];
+   }
+
+   field Configurable;
+
+   field BlockedForInvoicing {
+      label = "Invoice Blocked";
+   }
+
+   fieldranking CatalogNo, CatalogDescription, ConditionCodeRef, BuyQtyDue, SalesUnitMeas, SupplyCode, VendorNoRef, SupplySite, PurchasePartNo, Configurable, BlockedForInvoicing;
+   fieldorder = CatalogNo, CatalogDescription, ConditionCodeRef, BuyQtyDue, SalesUnitMeas, SupplyCode, VendorNoRef, SupplySite, PurchasePartNo, Configurable, BlockedForInvoicing;
+
+   commandgroup CustomerOrderPartLinesCmdGroup {
+      command AddMultiplePartsCommand;
+      command AddFromTemplateCommand;
+      command AddFromOrderPartCommand;
+   }
+}
+
+---------------------------------- DIALOGS ----------------------------------
+
+
+-------------------------------- SINGLETONS ---------------------------------
+
+
+---------------------------------- CHARTS -----------------------------------
+
+
+--------------------------------- CALENDERS ---------------------------------
+
+
+---------------------------------- SHEETS -----------------------------------
+
+
+----------------------------- STATE INDICATORS ------------------------------
+
+
+----------------------------------- TREES -----------------------------------
+
+
+---------------------------------- PLUGINS ----------------------------------
+
+
+------------------------------- IMAGE VIEWERS -------------------------------

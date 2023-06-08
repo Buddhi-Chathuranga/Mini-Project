@@ -1,0 +1,742 @@
+-----------------------------------------------------------------------------------------------------------------------------
+--
+--  Fragment:     CustomerOrderChargeTab
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign     History
+--  ------     ------   ----------------------------------------------------------------------------------------------------------
+-- 2022-01-31  NiDalk   SC21R2-7307, Modified CRUD_Default_Copy___ to fetch tax_liability and tax_liability_type.
+-- 2021-01-29  Skanlk   SCZ-13274, Modified Calculate_Line_Prices___() and Calculate_Total_Charge_Amounts___() by adding a condition
+-- 2021-01-29           to check whether the sales charge type is taxable when the tax_calc_method_ is NOT_USED before setting the source references.
+-- 2021-01-21  MaEelk   SC2020R1-12007, Renamed intrastat_exempt_db and unit_charge_db as intrastat_exempt and unit_charge in Get_Charge_Defaults_Structure_Rec
+-- 2020-11-12  Maeelk   SC2020R1-11302, print_charge_type and print_collect_charge were handled as enumerations.
+-- 2020-03-12  Ravdlk   SCXTEND-2237, Overridden the CRUD_Default_Copy method
+-- 2019-10-29  MaRalk   SCXTEND-1128, Renamed Validate_Prices_And_Amounts_Structure_Rec as Prices_And_Amounts_Structure_Rec.
+-- 2019-10-29           Modified method Calculate_Total_Charge_Amounts___ to return Prices_And_Amounts_Structure_Rec instead of 
+-- 2019-10-29           Calculate_Total_Charge_Amounts_Structure_Rec. Modified method Calculate_Line_Prices___ to return Prices_And_Amounts_Structure_Rec 
+-- 2019-10-29           instead of Calculate_Line_Prices_Structure_Rec.
+-- 2019-01-20  HaPulk   SCUXXW4-769, Required logic for the convertion of tbwCustomerOrderCharge using MTG Version: 1.34
+------------------------------------------------------------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Get_Tax_Liability_Type_Db___(
+   order_no_      IN VARCHAR2,
+   sequence_no_   IN NUMBER,
+   tax_liability_ IN VARCHAR2 )  RETURN VARCHAR2
+IS
+   delivery_country_db_  VARCHAR2(2);
+BEGIN
+   delivery_country_db_ := Customer_Order_Charge_API.Get_Connected_Deliv_Country(order_no_, sequence_no_);
+   RETURN Tax_Liability_API.Get_Tax_Liability_Type_Db(tax_liability_, delivery_country_db_);
+END Get_Tax_Liability_Type_Db___;
+
+FUNCTION Get_Tax_Code_Description___(
+   company_  IN VARCHAR2,
+   tax_code_ IN VARCHAR2 )  RETURN VARCHAR2
+IS   
+BEGIN
+   RETURN Statutory_Fee_API.Get_Description(company_, tax_code_);
+END Get_Tax_Code_Description___;
+
+
+FUNCTION Validate_Base_Sale_Unit_Price___(
+   order_no_                  IN VARCHAR2,
+   base_charge_amount_        IN NUMBER,
+   base_charge_amt_incl_tax_  IN NUMBER,
+   contract_                  IN VARCHAR2,
+   use_price_incl_tax_parent_ IN BOOLEAN,
+   currency_code_parent_      IN VARCHAR2 )  RETURN Validate_Base_Sale_Unit_Price_Structure_Rec
+IS
+   identity_                                    customer_order_tab.customer_no%TYPE; 
+   customer_order_rec_                          Customer_Order_API.Public_Rec;
+   validate_base_sale_unit_price_structure_rec_ Validate_Base_Sale_Unit_Price_Structure_Rec;
+BEGIN
+   customer_order_rec_ := Customer_Order_API.Get(order_no_);
+   identity_ := NVL(customer_order_rec_.customer_no_pay, customer_order_rec_.customer_no);
+    
+   IF use_price_incl_tax_parent_ THEN
+      Customer_Order_Pricing_API.Get_Sales_Price_In_Currency(validate_base_sale_unit_price_structure_rec_.charge_amount_incl_tax,
+                                                             validate_base_sale_unit_price_structure_rec_.currency_rate, 
+                                                             identity_, contract_, 
+                                                             currency_code_parent_, base_charge_amt_incl_tax_, customer_order_rec_.currency_rate_type);
+   ELSE
+      Customer_Order_Pricing_API.Get_Sales_Price_In_Currency(validate_base_sale_unit_price_structure_rec_.charge_amount,
+                                                             validate_base_sale_unit_price_structure_rec_.currency_rate, 
+                                                             identity_, contract_, 
+                                                             currency_code_parent_, base_charge_amount_, customer_order_rec_.currency_rate_type);
+   END IF;
+   
+   RETURN validate_base_sale_unit_price_structure_rec_;
+END Validate_Base_Sale_Unit_Price___;
+
+FUNCTION Get_Currency_Rate___(
+   order_no_      IN VARCHAR2,
+   company_       IN VARCHAR2,
+   currency_code_ IN VARCHAR2,
+   contract_      IN VARCHAR2 )  RETURN NUMBER
+IS
+   conv_factor_        NUMBER;
+   rate_	              NUMBER;
+   curr_type_          VARCHAR2(10);
+   identity_           customer_order_tab.customer_no%TYPE;
+   customer_order_rec_ Customer_Order_API.Public_Rec;
+BEGIN
+   customer_order_rec_ := Customer_Order_API.Get(order_no_);
+   identity_ := NVL(customer_order_rec_.customer_no_pay, customer_order_rec_.customer_no);
+   
+   curr_type_ := customer_order_rec_.currency_rate_type;
+   Invoice_Library_API.Get_Currency_Rate_Defaults(curr_type_, conv_factor_, rate_,
+                                                  company_, currency_code_, Site_API.Get_Site_Date(contract_),
+                							              'CUSTOMER',  identity_);
+   RETURN NVL(rate_ / conv_factor_, 1);
+END Get_Currency_Rate___;
+
+FUNCTION Get_Charge_Defaults___(
+   contract_                  IN VARCHAR2,
+   order_no_                  IN VARCHAR2,
+   sequence_no_               IN NUMBER,
+   charge_type_               IN VARCHAR2,
+   tax_code_                  IN VARCHAR2,
+   currency_code_parent_      IN VARCHAR2,
+   use_price_incl_tax_parent_ IN BOOLEAN )  RETURN Get_Charge_Defaults_Structure_Rec
+IS
+   sales_charge_type_rec_    Sales_Charge_Type_API.Public_Rec;
+   customer_order_rec_       customer_order_API.Public_Rec;    
+   identity_                 customer_order_tab.customer_no%TYPE;
+   curr_rate_type_           customer_order_tab.currency_rate_type%TYPE;
+   ship_addr_no_             customer_order_line_tab.ship_addr_no%TYPE;
+   tax_code_temp_            customer_order_charge_tab.tax_code%TYPE;
+   get_charge_defaults_structure_rec_ Get_Charge_Defaults_Structure_Rec;
+   base_charge_amount_       NUMBER;
+   base_charge_amt_incl_tax_ NUMBER;
+   charge_amount_            NUMBER;
+   charge_amount_incl_tax_   NUMBER;   
+BEGIN
+   Sales_Charge_Type_API.Exist(contract_, charge_type_); 
+   sales_charge_type_rec_ := Sales_Charge_Type_API.Get(contract_, charge_type_);
+   tax_code_temp_ :=  NVL(tax_code_, sales_charge_type_rec_.tax_code);
+   base_charge_amount_ := NVL(sales_charge_type_rec_.charge_amount, 0);
+   base_charge_amt_incl_tax_ := NVL(sales_charge_type_rec_.charge_amount_incl_tax, 0);
+   
+   customer_order_rec_ := Customer_Order_API.Get(order_no_);
+   identity_ := NVL(customer_order_rec_.customer_no_pay, customer_order_rec_.customer_no);
+   curr_rate_type_ := customer_order_rec_.currency_rate_type;                  
+                                  
+   Customer_Order_Pricing_API.Get_Sales_Price_In_Currency(charge_amount_, get_charge_defaults_structure_rec_.currency_rate, identity_, contract_, currency_code_parent_, base_charge_amount_, curr_rate_type_);
+   Customer_Order_Pricing_API.Get_Sales_Price_In_Currency(charge_amount_incl_tax_ , get_charge_defaults_structure_rec_.currency_rate, identity_, contract_, currency_code_parent_, base_charge_amt_incl_tax_, curr_rate_type_); 
+   
+   ship_addr_no_ := Customer_Order_Charge_API.Get_Connected_Address_Id(order_no_, sequence_no_);
+   
+   get_charge_defaults_structure_rec_.sales_unit_meas := sales_charge_type_rec_.sales_unit_meas;
+   
+   get_charge_defaults_structure_rec_.print_charge_type := sales_charge_type_rec_.print_charge_type;
+      
+   get_charge_defaults_structure_rec_.print_collect_charge := sales_charge_type_rec_.print_collect_charge;
+
+   IF sales_charge_type_rec_.intrastat_exempt = 'TRUE' THEN
+      get_charge_defaults_structure_rec_.intrastat_exempt := TRUE;
+   ELSE
+      get_charge_defaults_structure_rec_.intrastat_exempt := FALSE;
+   END IF;
+   IF sales_charge_type_rec_.unit_charge = 'TRUE' THEN
+      get_charge_defaults_structure_rec_.unit_charge := TRUE;
+   ELSE
+      get_charge_defaults_structure_rec_.unit_charge := FALSE;
+   END IF;
+   get_charge_defaults_structure_rec_.charge_cost := sales_charge_type_rec_.charge_cost;
+   get_charge_defaults_structure_rec_.charge := sales_charge_type_rec_.charge;
+   get_charge_defaults_structure_rec_.charge_cost_percent := sales_charge_type_rec_.charge_cost_percent;   
+-- if (!(bLineDuplicated || bLinePaste))
+  
+   get_charge_defaults_structure_rec_.company := Site_API.Get_Company(contract_);
+   get_charge_defaults_structure_rec_.tax_code_description := Statutory_Fee_API.Get_Description(get_charge_defaults_structure_rec_.company, tax_code_temp_);
+   get_charge_defaults_structure_rec_.delivery_address := ship_addr_no_;
+   
+   IF (((base_charge_amount_ = 0) OR (base_charge_amt_incl_tax_ = 0)) AND (sales_charge_type_rec_.charge IS NOT NULL)) THEN
+      get_charge_defaults_structure_rec_.base_charge_amount := null;
+      get_charge_defaults_structure_rec_.base_charge_amt_incl_tax := null;
+      get_charge_defaults_structure_rec_.charge_amount := null;
+      get_charge_defaults_structure_rec_.charge_amount_incl_tax := null;
+   ELSIF use_price_incl_tax_parent_ THEN
+      get_charge_defaults_structure_rec_.base_charge_amt_incl_tax := base_charge_amt_incl_tax_;
+      get_charge_defaults_structure_rec_.charge_amount_incl_tax := charge_amount_incl_tax_;
+   ELSE
+      get_charge_defaults_structure_rec_.base_charge_amount := base_charge_amount_;
+      get_charge_defaults_structure_rec_.charge_amount := charge_amount_;
+   END IF;
+   
+   get_charge_defaults_structure_rec_.delivery_type := sales_charge_type_rec_.delivery_type;         
+   RETURN get_charge_defaults_structure_rec_;
+END Get_Charge_Defaults___;
+
+
+FUNCTION Get_Tax_Lines___(
+   company_      IN VARCHAR2,
+   contract_     IN VARCHAR2,
+   order_no_     IN VARCHAR2,
+   line_no_      IN VARCHAR2,
+   rel_no_       IN VARCHAR2,
+   line_item_no_ IN NUMBER,
+   sequence_no_  IN NUMBER,
+   charge_type_  IN VARCHAR2 )  RETURN Get_Tax_Lines_Structure_Rec
+IS
+   get_tax_lines_structure_rec_ Get_Tax_Lines_Structure_Rec;
+   multiple_tax_lines_str_ VARCHAR2(5);
+BEGIN
+   multiple_tax_lines_str_ := Source_Tax_Item_API.Multiple_Tax_Items_Exist(company_, 'CUSTOMER_ORDER_CHARGE', order_no_, sequence_no_, '*', '*', '*');
+   IF (multiple_tax_lines_str_ = 'TRUE') THEN
+      get_tax_lines_structure_rec_.multiple_tax_lines := TRUE;
+   ELSE
+      get_tax_lines_structure_rec_.multiple_tax_lines := FALSE;
+   END IF;
+   get_tax_lines_structure_rec_.taxable := Sales_Charge_Type_API.Get_Taxable_Db(contract_, charge_type_);
+   get_tax_lines_structure_rec_.tax_liability := Customer_Order_Charge_API.Get_Connected_Tax_Liability(order_no_, sequence_no_);     
+   get_tax_lines_structure_rec_.tax_liability_type := Customer_Order_Charge_API.Get_Conn_Tax_Liability_Type_Db(order_no_, line_no_, rel_no_, line_item_no_, 
+                                                                                                               get_tax_lines_structure_rec_.tax_liability, NULL);     
+   
+   RETURN get_tax_lines_structure_rec_;
+END Get_Tax_Lines___;
+
+-- Calculate_Total_Charge_Amounts___ + Calculate_Line_Prices___
+FUNCTION Validate_Prices_And_Amounts___(
+   order_no_                    IN VARCHAR2,
+   sequence_no_                 IN NUMBER,
+   line_no_                     IN VARCHAR2,
+   rel_no_                      IN VARCHAR2,
+   line_item_no_                IN NUMBER,
+   contract_                    IN VARCHAR2,
+   customer_no_parent_          IN VARCHAR2,
+   currency_code_parent_        IN VARCHAR2,
+   currency_rate_               IN NUMBER,
+   tax_liability_               IN VARCHAR2,
+   tax_liability_type_          IN VARCHAR2,
+   tax_code_                    IN VARCHAR2,
+   tax_calc_structure_id_       IN VARCHAR2,
+   tax_code_flag_               IN BOOLEAN,
+   tax_from_defaults_           IN VARCHAR2,
+   supply_country_db_parent_    IN VARCHAR2,
+   delivery_type_               IN VARCHAR2,
+   charge_                      IN NUMBER,
+   charge_amount_incl_tax_      IN NUMBER,
+   charge_amount_               IN NUMBER,
+   charge_type_                 IN VARCHAR2,
+   use_price_incl_tax_parent_   IN BOOLEAN,
+   wanted_delivery_date_parent_ IN DATE,
+   net_amt_curr_                IN NUMBER,
+   gross_amt_curr_              IN NUMBER,
+   charged_qty_                 IN NUMBER,
+   multiple_tax_lines_          IN BOOLEAN,
+   tax_class_id_                IN VARCHAR2,
+   ifs_curr_rounding_           IN NUMBER,
+   new_line_                    IN BOOLEAN )  RETURN Prices_And_Amounts_Structure_Rec
+IS
+   calculate_line_prices_structure_rec_          Prices_And_Amounts_Structure_Rec;
+   calculate_total_charge_amounts_structure_rec_ Prices_And_Amounts_Structure_Rec;   
+   prices_and_amounts_structure_rec_             Prices_And_Amounts_Structure_Rec;
+BEGIN
+   calculate_line_prices_structure_rec_ := Calculate_Line_Prices___ (order_no_, sequence_no_, charge_amount_, charge_, charge_amount_incl_tax_, multiple_tax_lines_, tax_code_, tax_calc_structure_id_, tax_class_id_, tax_code_flag_, tax_from_defaults_, contract_, customer_no_parent_, supply_country_db_parent_, delivery_type_, charge_type_, use_price_incl_tax_parent_, currency_code_parent_, currency_rate_, tax_liability_, tax_liability_type_, line_no_, rel_no_, line_item_no_ , wanted_delivery_date_parent_, ifs_curr_rounding_, new_line_);
+   calculate_total_charge_amounts_structure_rec_ := Calculate_Total_Charge_Amounts___ (order_no_, sequence_no_, line_no_, rel_no_, line_item_no_, contract_, customer_no_parent_, currency_code_parent_, currency_rate_, tax_liability_, tax_liability_type_, supply_country_db_parent_, delivery_type_, charge_type_, charge_, charge_amount_, charge_amount_incl_tax_, net_amt_curr_, gross_amt_curr_, charged_qty_, use_price_incl_tax_parent_, tax_calc_structure_id_, tax_code_, tax_code_flag_, tax_from_defaults_, wanted_delivery_date_parent_, new_line_);
+   
+   prices_and_amounts_structure_rec_.base_charge_amount := calculate_line_prices_structure_rec_.base_charge_amount;
+   prices_and_amounts_structure_rec_.base_charge_amt_incl_tax := calculate_line_prices_structure_rec_.base_charge_amt_incl_tax;
+   prices_and_amounts_structure_rec_.charge_amount := calculate_line_prices_structure_rec_.charge_amount;
+   prices_and_amounts_structure_rec_.charge_amount_incl_tax := calculate_line_prices_structure_rec_.charge_amount_incl_tax;
+   prices_and_amounts_structure_rec_.multiple_tax_lines := calculate_line_prices_structure_rec_.multiple_tax_lines;
+   prices_and_amounts_structure_rec_.tax_code := calculate_line_prices_structure_rec_.tax_code;
+   prices_and_amounts_structure_rec_.tax_class_id := calculate_line_prices_structure_rec_.tax_class_id;
+   
+   prices_and_amounts_structure_rec_.net_amt_curr := calculate_total_charge_amounts_structure_rec_.net_amt_curr;
+   prices_and_amounts_structure_rec_.gross_amt_curr := calculate_total_charge_amounts_structure_rec_.gross_amt_curr;
+   prices_and_amounts_structure_rec_.tax_amount_base := calculate_total_charge_amounts_structure_rec_.tax_amount_base;
+   prices_and_amounts_structure_rec_.net_amt_base := calculate_total_charge_amounts_structure_rec_.net_amt_base;
+   prices_and_amounts_structure_rec_.gross_amt_base := calculate_total_charge_amounts_structure_rec_.gross_amt_base;
+   prices_and_amounts_structure_rec_.tax_amount_currency := calculate_total_charge_amounts_structure_rec_.tax_amount_currency;
+   prices_and_amounts_structure_rec_.tax_calc_structure_id := calculate_total_charge_amounts_structure_rec_.tax_calc_structure_id;
+   prices_and_amounts_structure_rec_.old_tax_calc_structure_id := calculate_total_charge_amounts_structure_rec_.old_tax_calc_structure_id;     
+
+   RETURN prices_and_amounts_structure_rec_;
+END Validate_Prices_And_Amounts___;
+
+
+FUNCTION Calculate_Total_Charge_Amounts___(
+   order_no_                    IN VARCHAR2,
+   sequence_no_                 IN NUMBER,
+   line_no_                     IN VARCHAR2,
+   rel_no_                      IN VARCHAR2,
+   line_item_no_                IN NUMBER,
+   contract_                    IN VARCHAR2,
+   customer_no_parent_          IN VARCHAR2,   
+   currency_code_parent_        IN VARCHAR2,
+   currency_rate_               IN NUMBER,
+   tax_liability_               IN VARCHAR2,
+   tax_liability_type_          IN VARCHAR2,   
+   supply_country_db_parent_    IN VARCHAR2,
+   delivery_type_               IN VARCHAR2,
+   charge_type_                 IN VARCHAR2,
+   charge_                      IN NUMBER,
+   charge_amount_               IN NUMBER,
+   charge_amount_incl_tax_      IN NUMBER,
+   net_amt_curr_                IN NUMBER,
+   gross_amt_curr_              IN NUMBER,
+   charged_qty_                 IN NUMBER,
+   use_price_incl_tax_parent_   IN BOOLEAN,   
+   tax_calc_structure_id_       IN VARCHAR2,
+   tax_code_                    IN VARCHAR2,
+   tax_code_flag_               IN BOOLEAN,
+   tax_from_defaults_           IN VARCHAR2,
+   wanted_delivery_date_parent_ IN DATE,
+   new_line_                    IN BOOLEAN)  RETURN Prices_And_Amounts_Structure_Rec
+IS
+   calculate_total_charge_amounts_structure_rec_ Prices_And_Amounts_Structure_Rec;
+   tax_calc_method_               company_tax_control_tab.external_tax_cal_method%TYPE;
+   tax_calc_structure_id_temp_    customer_order_charge_tab.tax_calc_structure_id%type;
+   ship_addr_no_                  VARCHAR2(50);
+   attr_                          VARCHAR2(32000);
+   use_price_incl_tax_parent_str_ VARCHAR2(5):='FALSE';
+   fetch_tax_from_defaults_       VARCHAR2(5);
+   order_ref1_                    customer_order_charge_tab.order_no%TYPE;
+   order_ref2_                    customer_order_charge_tab.sequence_no%TYPE;
+   order_ref3_                    VARCHAR2(1);
+   order_ref4_                    VARCHAR2(1);
+   delivery_country_db_           VARCHAR2(2);
+   tax_amount_base_               NUMBER;
+   net_amt_base_                  NUMBER;
+   gross_amt_base_                NUMBER;
+   tax_amount_currency_           NUMBER;
+   net_amt_curr_temp_             NUMBER;
+   gross_amt_curr_temp_           NUMBER;
+   planned_ship_date_             DATE;
+BEGIN   
+   net_amt_curr_temp_ := net_amt_curr_;
+   IF (use_price_incl_tax_parent_ = FALSE) THEN
+      IF (charge_ IS NULL) THEN
+         net_amt_curr_temp_ := charge_amount_ * charged_qty_;
+      ELSE
+         IF (line_no_ IS NULL) THEN
+            net_amt_curr_temp_ := Customer_Order_API.Get_Total_Sale_Price__(order_no_);
+         ELSE
+            IF (Customer_Order_Line_API.Check_Exist(order_no_, line_no_, rel_no_, 0)) THEN  
+               net_amt_curr_temp_ := Customer_Order_Line_API.Get_Sale_Price_Total(order_no_, line_no_, rel_no_, 0); 
+            ELSE  
+               net_amt_curr_temp_ := Customer_Order_Line_API.Get_Sale_Price_Total(order_no_, line_no_, rel_no_, -1); 
+            END IF;
+         END IF;
+         net_amt_curr_temp_ := net_amt_curr_temp_ * charge_ / 100;
+      END IF; 
+      calculate_total_charge_amounts_structure_rec_.net_amt_curr := net_amt_curr_temp_;
+   ELSE
+      gross_amt_curr_temp_ := gross_amt_curr_;
+      IF (charge_ IS NULL) THEN
+         gross_amt_curr_temp_ := charge_amount_incl_tax_ * charged_qty_;
+      ELSE
+         IF (line_no_ IS NULL) THEN
+            gross_amt_curr_temp_ := Customer_Order_API.Get_Tot_Sale_Price_Incl_Tax__(order_no_);
+         ELSE
+            IF (Customer_Order_Line_API.Check_Exist(order_no_, line_no_, rel_no_, 0)) THEN 
+               gross_amt_curr_temp_ := Customer_Order_Line_API.Get_Sale_Price_Incl_Tax_Total(order_no_, line_no_, rel_no_, 0); 
+            ELSE
+               gross_amt_curr_temp_ := Customer_Order_Line_API.Get_Sale_Price_Incl_Tax_Total(order_no_, line_no_, rel_no_, -1);
+            END IF;
+         END IF;
+         gross_amt_curr_temp_ := gross_amt_curr_temp_ * charge_ / 100;
+      END IF;
+      calculate_total_charge_amounts_structure_rec_.gross_amt_curr := gross_amt_curr_temp_;
+   END IF;
+      
+   tax_calc_method_ := Company_Tax_Control_API.Get_External_Tax_Cal_Method_Db(Site_API.Get_Company(contract_));
+   
+   IF ((tax_code_flag_) AND (tax_calc_method_ = 'NOT_USED')) THEN                
+      order_ref1_ := NULL;
+      order_ref2_ := NULL;
+      order_ref3_ := NULL;
+      order_ref4_ := NULL;                
+   ELSE               
+      IF ((Sales_Charge_Type_API.Get_Taxable_Db(contract_, charge_type_) = 'TRUE' AND tax_calc_method_ = 'NOT_USED') OR tax_calc_method_ != 'NOT_USED') THEN
+         order_ref1_ := order_no_;
+         order_ref2_ := NVL(sequence_no_, -1);
+         order_ref3_ := '*';
+         order_ref4_ := '*';
+      END IF;
+   END IF;
+
+   fetch_tax_from_defaults_ := tax_from_defaults_;
+   IF (tax_calc_method_ != 'NOT_USED') THEN                
+      fetch_tax_from_defaults_ := 'FALSE';   
+   ELSIF (tax_from_defaults_ = 'FALSE') THEN                    
+      -- IF ((bNewLine) && (!(bTaxEdited)) && (!(bLineDuplicated)) && (!(bLinePaste))) THEN
+      --    fetch_tax_from_defaults_ = 'TRUE';
+      -- END IF;
+       IF (new_line_) THEN -- && (!(bTaxEdited)) && (!(bLineDuplicated)) && (!(bLinePaste))) THEN
+          fetch_tax_from_defaults_ := 'TRUE';
+       END IF;                 
+   END IF;
+
+   delivery_country_db_ :=  Customer_Order_Charge_API.Get_Connected_Deliv_Country(order_no_, sequence_no_);
+   planned_ship_date_   :=  NVL(Customer_Order_Line_API.Get_Planned_Ship_Date(order_no_, line_no_, rel_no_, line_item_no_), wanted_delivery_date_parent_);
+   ship_addr_no_        :=  Customer_Order_Charge_API.Get_Connected_Address_Id(order_no_, sequence_no_);
+
+   tax_calc_structure_id_temp_ := tax_calc_structure_id_;
+   
+   IF use_price_incl_tax_parent_ THEN
+      use_price_incl_tax_parent_str_ := 'TRUE';
+   ELSE
+      use_price_incl_tax_parent_str_ := 'FALSE';
+   END IF;
+
+   Tax_Handling_Order_Util_API.Get_Amounts(tax_amount_base_,
+                                           net_amt_base_, 
+                                           gross_amt_base_,
+                                           tax_amount_currency_,
+                                           net_amt_curr_temp_,
+                                           gross_amt_curr_temp_,
+                                           tax_calc_structure_id_temp_,
+                                           order_ref1_,
+                                           order_ref2_,
+                                           order_ref3_,
+                                           order_ref4_,
+                                           '*',
+                                           'CUSTOMER_ORDER_CHARGE',
+                                           NULL,                                           
+                                           contract_,
+                                           customer_no_parent_,
+                                           ship_addr_no_,
+                                           planned_ship_date_,
+                                           supply_country_db_parent_,
+                                           delivery_type_,
+                                           charge_type_,
+                                           use_price_incl_tax_parent_str_,
+                                           currency_code_parent_,
+                                           currency_rate_,
+                                           fetch_tax_from_defaults_,
+                                           tax_code_,
+                                           tax_liability_,
+                                           tax_liability_type_,
+                                           delivery_country_db_, 
+                                           NULL, 
+                                           'FALSE',
+                                   		    NULL,
+                                   			 NULL,
+                                           attr_);
+
+   dbms_output.put_line (' ***** net_amt_curr 111 ' || net_amt_curr_temp_);
+   dbms_output.put_line (' ***** net_amt_base 1111 ' || net_amt_base_);
+   
+   
+   calculate_total_charge_amounts_structure_rec_.tax_amount_base := tax_amount_base_;
+   calculate_total_charge_amounts_structure_rec_.net_amt_base := net_amt_base_;
+   calculate_total_charge_amounts_structure_rec_.gross_amt_base := gross_amt_base_;
+   calculate_total_charge_amounts_structure_rec_.tax_amount_currency := tax_amount_currency_;
+   calculate_total_charge_amounts_structure_rec_.net_amt_curr := net_amt_curr_temp_;
+   calculate_total_charge_amounts_structure_rec_.gross_amt_curr := gross_amt_curr_temp_;
+   calculate_total_charge_amounts_structure_rec_.tax_calc_structure_id := tax_calc_structure_id_temp_;
+   
+   IF (tax_calc_method_ = 'NOT_USED') THEN
+      calculate_total_charge_amounts_structure_rec_.old_tax_calc_structure_id := tax_calc_structure_id_temp_;
+   END IF;
+      
+   RETURN calculate_total_charge_amounts_structure_rec_;
+END Calculate_Total_Charge_Amounts___;
+
+
+FUNCTION Calculate_Line_Prices___(
+   order_no_                    IN VARCHAR2,
+   sequence_no_                 IN NUMBER,
+   charge_amount_               IN NUMBER,
+   charge_                      IN NUMBER,
+   charge_amount_incl_tax_      IN NUMBER,
+   multiple_tax_lines_          IN BOOLEAN,
+   tax_code_                    IN VARCHAR2,
+   tax_calc_structure_id_       IN VARCHAR2,
+   tax_class_id_                IN VARCHAR2,
+   tax_code_flag_               IN BOOLEAN,
+   tax_from_defaults_           IN VARCHAR2,
+   contract_                    IN VARCHAR2,
+   customer_no_parent_          IN VARCHAR2,
+   supply_country_db_parent_    IN VARCHAR2,
+   delivery_type_               IN VARCHAR2,
+   charge_type_                 IN VARCHAR2,
+   use_price_incl_tax_parent_   IN BOOLEAN,
+   currency_code_parent_        IN VARCHAR2,
+   currency_rate_               IN NUMBER,
+   tax_liability_               IN VARCHAR2,
+   tax_liability_type_          IN VARCHAR2,
+   line_no_                     IN VARCHAR2,
+   rel_no_                      IN VARCHAR2,
+   line_item_no_                IN NUMBER,
+   wanted_delivery_date_parent_ IN DATE,
+   ifs_curr_rounding_           IN NUMBER,
+   new_line_                    IN BOOLEAN )  RETURN Prices_And_Amounts_Structure_Rec
+IS
+   tax_calc_method_               company_tax_control_tab.external_tax_cal_method%TYPE;
+   tax_code_temp_                 customer_order_charge_tab.tax_code%type;
+   tax_calc_structure_id_temp_    customer_order_charge_tab.tax_calc_structure_id%type;
+   tax_class_id_temp_             customer_order_charge_tab.tax_class_id%type;
+   ship_addr_no_                  VARCHAR2(50);
+   attr_                          VARCHAR2(32000);
+   use_price_incl_tax_parent_str_ VARCHAR2(5):='FALSE';
+   multiple_tax_lines_temp_       VARCHAR2(5);
+   fetch_tax_from_defaults_       VARCHAR2(5);
+   delivery_country_db_           VARCHAR2(2);
+   order_ref1_                    customer_order_charge_tab.order_no%TYPE;
+   order_ref2_                    customer_order_charge_tab.sequence_no%TYPE;
+   order_ref3_                    VARCHAR2(1);
+   order_ref4_                    VARCHAR2(1);
+   calculate_line_prices_structure_rec_ Prices_And_Amounts_Structure_Rec;
+   charge_amount_temp_            NUMBER;
+   charge_amount_incl_tax_temp_   NUMBER;
+   base_charge_amount_            NUMBER;
+   base_charge_amt_incl_tax_      NUMBER;
+   planned_ship_date_             DATE;
+BEGIN
+   tax_calc_method_ := Company_Tax_Control_API.Get_External_Tax_Cal_Method_Db(Site_API.Get_Company(contract_));
+   
+   IF ((tax_code_flag_) AND (tax_calc_method_ = 'NOT_USED')) THEN                
+      order_ref1_ := NULL;
+      order_ref2_ := NULL;
+      order_ref3_ := NULL;
+      order_ref4_ := NULL;                
+   ELSE               
+      IF ((Sales_Charge_Type_API.Get_Taxable_Db(contract_, charge_type_) = 'TRUE' AND tax_calc_method_ = 'NOT_USED') OR tax_calc_method_ != 'NOT_USED') THEN
+         order_ref1_ := order_no_;
+         order_ref2_ := NVL(sequence_no_, -1);
+         order_ref3_ := '*';
+         order_ref4_ := '*';
+      END IF;
+   END IF;
+   
+   fetch_tax_from_defaults_ := tax_from_defaults_;
+   IF (tax_calc_method_ != 'NOT_USED') THEN                
+      fetch_tax_from_defaults_ := 'FALSE';   
+   ELSIF (tax_from_defaults_ = 'FALSE') THEN                    
+      -- IF ((bNewLine) && (!(bTaxEdited)) && (!(bLineDuplicated)) && (!(bLinePaste))) THEN
+         IF (new_line_) THEN -- && (!(bTaxEdited)) && (!(bLineDuplicated)) && (!(bLinePaste))) THEN
+            fetch_tax_from_defaults_ := 'TRUE';
+         END IF; 
+   END IF;
+                                   
+   delivery_country_db_ :=  Customer_Order_Charge_API.Get_Connected_Deliv_Country(order_no_, sequence_no_);
+   planned_ship_date_   :=  NVL(Customer_Order_Line_API.Get_Planned_Ship_Date(order_no_, line_no_, rel_no_, line_item_no_), wanted_delivery_date_parent_);
+   ship_addr_no_        :=  Customer_Order_Charge_API.Get_Connected_Address_Id(order_no_, sequence_no_);
+
+   charge_amount_temp_ := charge_amount_;
+   charge_amount_incl_tax_temp_ := charge_amount_incl_tax_;
+   IF multiple_tax_lines_ THEN
+      multiple_tax_lines_temp_ := 'TRUE';
+   ELSE
+      multiple_tax_lines_temp_ := 'FALSE';
+   END IF;
+                 
+   tax_code_temp_ := tax_code_;                
+   tax_calc_structure_id_temp_ := tax_calc_structure_id_;   
+   tax_class_id_temp_ := tax_class_id_;            
+
+   IF use_price_incl_tax_parent_ THEN
+      use_price_incl_tax_parent_str_ := 'TRUE';
+   ELSE
+      use_price_incl_tax_parent_str_ := 'FALSE';
+   END IF;
+   Tax_Handling_Order_Util_API.Get_Prices(base_charge_amount_,
+                                          base_charge_amt_incl_tax_,
+                                          charge_amount_temp_,
+                                          charge_amount_incl_tax_temp_,
+                                          multiple_tax_lines_temp_,
+                                          tax_code_temp_,
+                                          tax_calc_structure_id_temp_,
+                                          tax_class_id_temp_,
+                                          order_ref1_,
+                                          order_ref2_,
+                                          order_ref3_,
+                                          order_ref4_,
+                                          '*',
+                                          'CUSTOMER_ORDER_CHARGE',
+                                          contract_,
+                                          customer_no_parent_,
+                                          ship_addr_no_,
+                                          planned_ship_date_,            
+                                          supply_country_db_parent_,
+                                          delivery_type_,
+                                          charge_type_,
+                                          use_price_incl_tax_parent_str_,
+                                          currency_code_parent_,
+                                          currency_rate_,
+                                          fetch_tax_from_defaults_,                                                                  
+                                          tax_liability_,
+                                          tax_liability_type_,
+                                          delivery_country_db_,
+                                          ifs_curr_rounding_,                                                                       
+                                          'FALSE', 
+                                          attr_);
+   
+   calculate_line_prices_structure_rec_.base_charge_amount := base_charge_amount_;
+   calculate_line_prices_structure_rec_.base_charge_amt_incl_tax := base_charge_amt_incl_tax_;
+   calculate_line_prices_structure_rec_.charge_amount := charge_amount_temp_;
+   calculate_line_prices_structure_rec_.charge_amount_incl_tax := charge_amount_incl_tax_temp_;
+   
+   IF multiple_tax_lines_temp_ = 'TRUE' THEN
+      calculate_line_prices_structure_rec_.multiple_tax_lines := TRUE;
+   ELSE
+      calculate_line_prices_structure_rec_.multiple_tax_lines := FALSE;
+   END IF;      
+   
+   calculate_line_prices_structure_rec_.tax_code := tax_code_temp_;
+   calculate_line_prices_structure_rec_.tax_calc_structure_id := tax_calc_structure_id_temp_;
+   calculate_line_prices_structure_rec_.tax_class_id := tax_class_id_temp_;
+   
+   IF (charge_ IS NOT NULL) THEN
+      calculate_line_prices_structure_rec_.base_charge_amount := NULL;
+      calculate_line_prices_structure_rec_.base_charge_amt_incl_tax := NULL;
+      calculate_line_prices_structure_rec_.charge_amount := NULL;
+      calculate_line_prices_structure_rec_.charge_amount_incl_tax := NULL;
+   END IF;
+   
+   IF (tax_calc_method_ = 'NOT_USED') THEN
+      calculate_line_prices_structure_rec_.old_tax_calc_structure_id := tax_calc_structure_id_temp_;
+   END IF;
+   
+   IF (tax_liability_type_ = 'EXM') THEN
+      calculate_line_prices_structure_rec_.tax_class_id := NULL;
+   END IF;
+      
+   RETURN calculate_line_prices_structure_rec_;
+END Calculate_Line_Prices___;
+
+FUNCTION Get_Charge_Group_And_Type_Desc___(
+   contract_    IN VARCHAR2,
+   order_no_    IN VARCHAR2,
+   charge_type_ IN VARCHAR2 )  RETURN Charge_Group_And_Type_Desc_Structure_Rec
+IS
+   charge_group_and_type_desc_structure_rec_ Charge_Group_And_Type_Desc_Structure_Rec;
+BEGIN      
+   charge_group_and_type_desc_structure_rec_.charge_group_desc := Customer_Order_Charge_API.Get_Charge_Group_Desc(contract_, order_no_, charge_type_);
+   charge_group_and_type_desc_structure_rec_.charge_type_description := Customer_Order_Charge_API.Get_Charge_Type_Desc(contract_, order_no_, charge_type_);
+   RETURN charge_group_and_type_desc_structure_rec_;
+END Get_Charge_Group_And_Type_Desc___;
+
+@Override
+PROCEDURE CRUD_Default___ (
+   key_      IN Customer_Order_Charge_Key,
+   attr_ IN OUT VARCHAR2,
+   info_    OUT VARCHAR2)
+IS   
+BEGIN
+   super(key_, attr_, info_);
+   Client_SYS.Add_To_Attr('TAX_CODE_FLAG', 'TRUE', attr_);
+   Client_SYS.Add_To_Attr('FETCH_TAX_CODES', 'TRUE', attr_);                  
+END CRUD_Default___;
+
+@Override
+PROCEDURE CRUD_Create___ (
+   etag_   IN OUT VARCHAR2,
+   key_    IN OUT Customer_Order_Charge_Key,
+   attr_   IN OUT VARCHAR2,
+   info_   OUT VARCHAR2,
+   action_ IN  VARCHAR2 )
+IS
+BEGIN
+   Client_SYS.Add_To_Attr('SET_TAX_FROM_ORIGINAL', 'FALSE', attr_);
+   super(etag_, key_, attr_, info_, action_);
+END CRUD_Create___;
+
+@Override
+PROCEDURE CRUD_Update___ (
+   etag_   IN OUT VARCHAR2,
+   key_    IN OUT Customer_Order_Charge_Key,
+   attr_   IN OUT VARCHAR2,
+   info_   OUT VARCHAR2,
+   action_ IN  VARCHAR2 )
+IS
+BEGIN
+   Client_SYS.Add_To_Attr('SET_TAX_FROM_ORIGINAL', 'FALSE', attr_);
+   super(etag_, key_, attr_, info_, action_);
+END CRUD_Update___;
+
+
+-- This function is used just to refresh customer order charge lines in client using ludependencies when needed
+PROCEDURE Refresh_Charge_Lines___
+IS   
+BEGIN
+   NULL;
+END Refresh_Charge_Lines___;
+
+@Override
+PROCEDURE CRUD_Default_Copy___ (
+   rec_  IN OUT Customer_Order_Charge_Rec )
+IS
+   get_charge_defaults_structure_rec_   Get_Charge_Defaults_Structure_Rec;
+   use_price_incl_tax_                  BOOLEAN := FALSE;
+   prices_and_amounts_structure_rec_    Prices_And_Amounts_Structure_Rec;
+   customer_order_rec_                  Customer_Order_API.Public_Rec := Customer_Order_API.Get(rec_.order_no);
+BEGIN
+   super(rec_);
+
+   IF customer_order_rec_.use_price_incl_tax = 'TRUE' THEN
+      use_price_incl_tax_ := TRUE;
+   END IF;
+   get_charge_defaults_structure_rec_ := Get_Charge_Defaults___(
+                                                               rec_.contract, 
+                                                               rec_.order_no, 
+                                                               rec_.sequence_no, 
+                                                               rec_.charge_type, 
+                                                               rec_.tax_code, 
+                                                               customer_order_rec_.currency_code, 
+                                                               use_price_incl_tax_);
+                                                               
+   rec_.sales_unit_meas          := get_charge_defaults_structure_rec_.sales_unit_meas;                                                             
+   rec_.print_charge_type        := get_charge_defaults_structure_rec_.print_charge_type;   
+   rec_.print_collect_charge     := get_charge_defaults_structure_rec_.print_collect_charge;
+   rec_.intrastat_exempt         := get_charge_defaults_structure_rec_.intrastat_exempt;
+   rec_.unit_charge              := get_charge_defaults_structure_rec_.unit_charge;
+   rec_.charge_cost              := get_charge_defaults_structure_rec_.charge_cost ;
+   rec_.charge                   := get_charge_defaults_structure_rec_.charge;
+   rec_.charge_cost_percent      := get_charge_defaults_structure_rec_.charge_cost_percent;  
+   rec_.company                  := get_charge_defaults_structure_rec_.company;
+   rec_.tax_code_description     := get_charge_defaults_structure_rec_.tax_code_description;
+   rec_.delivery_address         := get_charge_defaults_structure_rec_.delivery_address;
+   rec_.base_charge_amount       := get_charge_defaults_structure_rec_.base_charge_amount;
+   rec_.base_charge_amt_incl_tax := get_charge_defaults_structure_rec_.base_charge_amt_incl_tax;
+   rec_.charge_amount            := get_charge_defaults_structure_rec_.charge_amount;
+   rec_.charge_amount_incl_tax   := get_charge_defaults_structure_rec_.charge_amount_incl_tax;
+   rec_.currency_rate            := get_charge_defaults_structure_rec_.currency_rate;
+
+   prices_and_amounts_structure_rec_ := Calculate_Total_Charge_Amounts___(
+                                     rec_.order_no, 
+                                     rec_.sequence_no,
+                                     rec_.line_no,
+                                     rec_.rel_no,
+                                     rec_.line_item_no,
+                                     rec_.contract,
+                                     customer_order_rec_.customer_no,
+                                     customer_order_rec_.currency_code,
+                                     get_charge_defaults_structure_rec_.currency_rate,
+                                     rec_.tax_liability,
+                                     rec_.tax_liability_type,
+                                     customer_order_rec_.supply_country,
+                                     rec_.delivery_type,
+                                     rec_.charge_type,
+                                     rec_.charge,
+                                     rec_.charge_amount,
+                                     rec_.charge_amount_incl_tax,
+                                     rec_.net_amt_curr,
+                                     rec_.gross_amt_curr,
+                                     rec_.charged_qty,
+                                     use_price_incl_tax_,
+                                     rec_.tax_calc_structure_id,
+                                     rec_.tax_code,
+                                     FALSE,
+                                     'FALSE',
+                                     Customer_Order_API.Get_Wanted_Delivery_Date(rec_.order_no),
+                                     FALSE);
+   rec_.net_amt_curr              := prices_and_amounts_structure_rec_.net_amt_curr;
+   rec_.gross_amt_curr            := prices_and_amounts_structure_rec_.gross_amt_curr;
+   rec_.net_amt_base              := prices_and_amounts_structure_rec_.net_amt_base;
+   rec_.gross_amt_base            := prices_and_amounts_structure_rec_.gross_amt_base;
+   rec_.tax_amount_currency       := prices_and_amounts_structure_rec_.tax_amount_currency;
+   rec_.tax_calc_structure_id     := prices_and_amounts_structure_rec_.tax_calc_structure_id;
+   rec_.old_tax_calc_structure_id := prices_and_amounts_structure_rec_.old_tax_calc_structure_id; 
+   rec_.tax_liability             := Customer_Order_Charge_API.Get_Connected_Tax_Liability__(rec_.order_no, rec_.line_no, rec_.rel_no, rec_.line_item_no);
+   rec_.tax_liability_type        := Customer_Order_Charge_API.Get_Conn_Tax_Liability_Type_Db(rec_.order_no, rec_.line_no, rec_.rel_no, rec_.line_item_no, NULL, NULL);
+   rec_.duplicated_line := 'TRUE';
+END CRUD_Default_Copy___;

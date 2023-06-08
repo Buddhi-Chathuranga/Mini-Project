@@ -1,0 +1,399 @@
+-----------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  ------------------------------------------------------
+-- 2021-10-13  SBalLK  SC21R2-3223, Modified section PartCatalogList by making Description field as multiline field.
+-- 2021-05-13  DiJwlk  SCZ-14887, Modified PartCatalogList.LotQuantityRule, swapped enumeration true/false values
+-- 2020-11-16  Aabalk  SC2020R1-9294, Handled true false values for enumeration fields.
+-- 2020-10-23  WaSalk  SC2020R1-10677, Enabled the duplicate functionality.
+-- 2020-10-22  UdGnlk  SC2020R1-10679, Rename the attribute PartDescriptionInSelectedLanguage to LanguageDescription as its lenghth longer than 30.
+-- 2019-11-04  NiAslk  SCXTEND-1218, Added startup mode as search.
+-- 2019-10-31  NISMLK  MFSPRING20-88, Added TechnicalDrawingNo to list.
+-- 2019-05-22  fgusse  SCUXXW4-13103, Added Translatable in DocumentTextCommand.
+-- 2019-04-02  DaZase  SCUXXW4-13103, Added BeforeSaveChecks as before command to simulate the checks that happened in DataRecordExecuteModify.
+-- 2019-03-28  DaZase  SCUXXW4-13070, Changed the UoM refs to become LOV and use the new functions for filtering.
+-- 2018-09-10  DaZase  SCUXXW4-1819, Converted from tbwPartCatalog using MTG Version: 1.26
+-----------------------------------------------------------------------------
+client Parts;
+component PARTCA;
+layer Core;
+projection PartsHandling;
+include fragment InputUomGroupLovSelector;
+@DynamicComponentDependency MPCCOM
+include fragment DocumentText;
+@DynamicComponentDependency MPCCOM
+include fragment OutputTypeLovSelector;
+@DynamicComponentDependency MPCCOM
+include fragment MpccomPhraseTextLovSelector;
+@DynamicComponentDependency INVENT
+include fragment ConnectPartsToAssortmentNodesAssistant;
+warningsenabled = PartCatalog;
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+navigator {
+   entry PartsNavEntry parent PartcaNavigator.PartMasterDataMasterPart at index 200 {
+      label = "Parts";
+      page List;
+   }
+}
+
+-------------------------------- MAIN PAGES ---------------------------------
+page List using PartCatalogSet {
+   label = "Parts";
+   startupmode = search;
+   list PartCatalogList {
+      // instead of a PartCommand
+      details = "page/Part/Form?$filter= PartNo eq $[PartNo]";
+   }
+}
+
+-------------------------------- ASSISTANTS ---------------------------------
+
+--------------------------------- COMMANDS ----------------------------------
+command StandardNamesperLanguageCommand for PartCatalog {
+   label = "Standard Names per Language";
+   mode = SelectedRecords;
+   enabled = [StdNameId != null and not isDirty];
+   bulkexecute {
+      bulknavigate "page/PartStandardName/Form?$filter=StdNameId eq $[StdNameId]";
+   }
+}
+command DocumentTextCommand for PartCatalog {
+   label = "Document Text";
+   mode = SingleRecord;
+   enabled = [DocumentTextNoteId != null and not isDirty];
+   variable SessionLanguageStr;
+   variable LabelStr;
+   execute {
+      call GetSessionLanguage() into SessionLanguageStr;
+      set LabelStr = " for Part  - ${PartNo} ${SessionLanguageStr}" {
+         translatable = true;
+      }
+      @DynamicComponentDependency MPCCOM
+      assistant DocumentText(DocumentTextNoteId, LabelStr) {
+         when NO {
+            exit CANCEL;
+         }
+      }
+      //navigate "assistant/DocumentText/Assistant?$action=InitNoteId{NoteIdNum: $[DocumentTextNoteId],LabelText: ' for Part  - ${PartNo} ${SessionLanguageStr}'}";
+   }
+}
+command ConnectToAssortmentNodesCommand for PartCatalog {
+   label = "Connect Parts to Assortment Nodes";
+   mode = SelectedRecords;
+   enabled = [true];
+   bulkexecute {
+      //navigate "assistant/ConnectPartsToAssortmentNodes/ConnectPartsToAssortmentNodes?$action=InitAssistant{PartsParam:$[Selection]}";
+      @DynamicComponentDependency INVENT
+      assistant ConnectPartsToAssortmentNodes(Selection) {
+         when NO {
+            exit CANCEL;
+         }
+      }
+   }
+}
+
+command BeforeSaveChecks for PartCatalog {
+   execute {
+      // NOTE: that Manufacturing team decided to remove the check and warning (that it can take time) if ConfigurableDb was changed here in Aurena.
+      // That check and warning still exist in IEE client.
+
+      if [original.UnitCode != null and original.UnitCode != UnitCode] {
+         messagebox("Warning Message", warning, "Changing Unit Code may effect the existing structures. Do you want to continue?") {
+            when "Yes" {
+               call GetIsoUnitDescription(UnitCode) into UomDescription;
+            }
+            when "No" {
+               set UnitCode = original.UnitCode;
+               call GetIsoUnitDescription(UnitCode) into UomDescription;
+               exit CANCEL;
+            }
+         }
+      }
+
+      if [original.MultilevelTracking != null and original.MultilevelTracking != MultilevelTracking] {
+
+         if [original.MultilevelTracking = "TrackingOn"] {
+            messagebox("Warning Message", warning, "Disabling multilevel tracking will remove some restrictions for processing shop orders for this part and you will not be allowed to re-enable it while open orders for this part have receipts. Do you want to continue?") {
+               when "Yes" {
+                  // return true (continue with save)
+                  exit;
+               }
+               when "No" {
+                  // return false (no save)
+                  exit CANCEL;
+               }
+            }
+         }
+
+         if [original.MultilevelTracking = "TrackingOff"] {
+            if [ReceiptIssueSerialTrackDb = true or SerialTrackingCode = "SerialTracking" or LotTrackingCode != "NotLotTracking"] {
+               messagebox("Warning Message", warning, "Enabling multilevel tracking will introduce restrictions for processing shop orders for this part. Do you want to continue?") {
+                  when "Yes" {
+                     // return true (continue with save)
+                     exit;
+                  }
+                  when "No" {
+                     // return false (no save)
+                     exit CANCEL;
+                  }
+               }
+            }
+         }
+      }
+   }
+}
+--------------------------------- SELECTORS ---------------------------------
+
+---------------------------------- GROUPS -----------------------------------
+
+----------------------------------- LISTS -----------------------------------
+
+list PartCatalogList for PartCatalog {
+   crudactions {
+      before command BeforeSaveChecks;
+   }
+
+   field PartNo;
+   field Description {
+      multiline = true;
+      size = Large;
+   }
+   field LanguageDescription;
+   field UnitCodeRef {
+      size = Small;
+      validate command {
+         execute {
+            call GetIsoUnitDescription(UnitCode) into UomDescription;
+         }
+      }
+   }
+   field UomDescription;
+   @DynamicComponentDependency MFGSTD
+   lov TechnicalDrawingNoRef with ReferenceTechnicalDrawingSelector {
+      description = TechnicalDrawingNoRef.Description;
+   }
+   field LotTrackingCode {
+      // Validate copied and reworked from IEE colsLotTrackingCode_OnSAM_AnyEdit
+      validate command {
+         execute {
+            // Using the enumeration identifier for this check instead of client constant used in IEE
+            if [LotTrackingCode != "NotLotTracking"] {
+               set AllowAsNotConsumedDb = false;
+            }
+            // This is SetMultiLevelTracking function in IEE client (we dont have any pure client functions yet in Aurena so this is copied in several places)
+            if [ReceiptIssueSerialTrackDb = true or SerialTrackingCode = "SerialTracking" or LotTrackingCode != "NotLotTracking"] {
+               set MultilevelTracking = "TrackingOn";
+            }
+            else {
+               set MultilevelTracking = "TrackingOff";
+            }
+         }
+      }
+   }
+   field ReceiptIssueSerialTrackDb {
+      size = Small;
+      // Validate copied and reworked from IEE colcReceiptIssueSerialTracking_OnSAM_AnyEdit
+      validate command {
+         execute {
+            // This is SetMultiLevelTracking function in IEE client (we dont have any pure client functions yet in Aurena so this is copied in several places)
+            if [ReceiptIssueSerialTrackDb = true or SerialTrackingCode = "SerialTracking" or LotTrackingCode != "NotLotTracking"] {
+               set MultilevelTracking = "TrackingOn";
+            }
+            else {
+               set MultilevelTracking = "TrackingOff";
+            }
+            if [ReceiptIssueSerialTrackDb = true] {
+               set AllowAsNotConsumedDb = false;
+               set EngSerialTrackingCode = "SerialTracking";
+               set StopArrivalIssuedSerialDb = true;
+               set StopNewSerialInRmaDb = true;
+            }
+         }
+      }
+   }
+   field SerialTrackingCode {
+      size = Small;
+      enumerationtrue = "SerialTracking";
+      enumerationfalse = "NotSerialTracking";
+      truelabel = "Yes";
+      falselabel = "No";
+
+      // Validate copied and reworked from IEE colcSerialTrackingCode_OnSAM_Click
+      validate command {
+         execute {
+            // Using the boolean true value instead of the db value "SERIAL TRACKING" that IEE used
+            if [SerialTrackingCode = "SerialTracking"] {
+               set AllowAsNotConsumedDb = false;
+               set ReceiptIssueSerialTrackDb = true;
+               set EngSerialTrackingCode = "SerialTracking";
+               set StopArrivalIssuedSerialDb = true;
+               set StopNewSerialInRmaDb = true;
+            }
+            // This is SetMultiLevelTracking function in IEE client (we dont have any pure client functions yet in Aurena so this is copied in several places)
+            if [ReceiptIssueSerialTrackDb = true or SerialTrackingCode = "SerialTracking" or LotTrackingCode != "NotLotTracking"] {
+               set MultilevelTracking = "TrackingOn";
+            }
+            else {
+               set MultilevelTracking = "TrackingOff";
+            }
+         }
+      }
+   }
+   field SerialRule {
+      size = Small;
+      enumerationtrue = "Automatic";
+      enumerationfalse = "Manual";
+      truelabel = "Yes";
+      falselabel = "No";
+   }
+   field EngSerialTrackingCode {
+      size = Small;
+      enumerationtrue = "SerialTracking";
+      enumerationfalse = "NotSerialTracking";
+      truelabel = "Yes";
+      falselabel = "No";
+      // Validate copied and reworked from IEE colcEngSerialTrackingCode_OnSAM_Click
+      validate command {
+         execute {
+            if [EngSerialTrackingCode = "SerialTracking"] {
+               set AllowAsNotConsumedDb = false;
+            }
+         }
+      }
+   }
+   field StopArrivalIssuedSerialDb {
+      size = Small;
+   }
+   field StopNewSerialInRmaDb {
+      size = Small;
+   }
+   field CatchUnitEnabledDb {
+      size = Small;
+   }
+   lov InputUnitMeasGroupIdRef with ReferenceInputUomGroupLovSelector {
+      size = Small;
+   }
+   field StdNameIdRef {
+      validate command {
+         execute {
+            call GetStdName(StdNameId) into StandardName;
+         }
+      }
+   }
+   field StandardName {
+      size = Small;
+   }
+   field Configurable {
+      size = Small;
+      enumerationtrue = "Configured";
+      enumerationfalse = "NotConfigured";
+      truelabel = "Yes";
+      falselabel = "No";
+   }
+   field ConditionCodeUsage {
+      size = Small;
+      enumerationtrue = "AllowConditionCode";
+      enumerationfalse = "NotAllowConditionCode";
+      truelabel = "Yes";
+      falselabel = "No";
+   }
+   field InfoText;
+   field LotQuantityRule {
+      size = Small;
+      enumerationtrue = "ManyLotsPerShopOrder";
+      enumerationfalse = "OneLotPerShopOrder";
+      truelabel = "Yes";
+      falselabel = "No";
+      //editable = [LotTrackingCode = "LotTracking"];
+   }
+   field SubLotRule {
+      size = Small;
+      enumerationtrue = "SubLotsAllowed";
+      enumerationfalse = "NoSubLotsAllowed";
+      truelabel = "Yes";
+      falselabel = "No";
+      //editable = [LotTrackingCode = "LotTracking"];
+   }
+   field ComponentLotRule {
+      size = Small;
+      enumerationtrue = "ManyLotsAllowed";
+      enumerationfalse = "OneLotAllowed";
+      truelabel = "Yes";
+      falselabel = "No";
+      //editable = [LotTrackingCode = "LotTracking"];
+   }
+   field PartMainGroupRef {
+      size = Small;
+      validate command {
+         execute {
+            call GetEngPartMainDesc(PartMainGroup) into PartMainGroupDescription;
+         }
+      }
+   }
+   field PartMainGroupDescription;
+   field MultilevelTracking {
+      size = Small;
+      enumerationtrue = "TrackingOn";
+      enumerationfalse = "TrackingOff";
+      truelabel = "Yes";
+      falselabel = "No";
+   }
+   field AllowAsNotConsumedDb {
+      size = Small;
+   }
+   @DynamicComponentDependency MPCCOM
+   field DocumentText {
+      size = Small;
+   }
+   field MediaItemConnected {
+      size = Small;
+   }
+   field GTIN {
+      size = Small;
+   }
+   field GTINSeries {
+      size = Small;
+   }
+   field WeightNet;
+   lov UomForWeightNetRef with ReferenceIsoUnitSelector using SetLovUserWhereForUomForWeightNet {
+      size = Small;
+   }
+   field VolumeNet;
+   lov UomForVolumeNetRef with ReferenceIsoUnitSelector using SetLovUserWhereForUomForVolumeNet {
+      size = Small;
+   }
+   field FreightFactor;
+
+   fieldranking PartNo, Description, UnitCodeRef, LotTrackingCode, ReceiptIssueSerialTrackDb, SerialTrackingCode, SerialRule, EngSerialTrackingCode, StopArrivalIssuedSerialDb, StopNewSerialInRmaDb;
+
+   commandgroup CommandGroupCmdGroup {
+
+      command StandardNamesperLanguageCommand;
+      command DocumentTextCommand;
+      command ConnectToAssortmentNodesCommand;
+   }
+}
+
+----------------------------------- CARDS -----------------------------------
+
+---------------------------------- DIALOGS ----------------------------------
+
+---------------------------------- CHARTS -----------------------------------
+
+--------------------------------- CALENDARS ---------------------------------
+
+---------------------------------- SHEETS -----------------------------------
+
+----------------------------- STATE INDICATORS ------------------------------
+
+----------------------------------- TREES -----------------------------------
+
+---------------------------------- PLUGINS ----------------------------------
+
+------------------------------- IMAGE VIEWERS -------------------------------
+
+
+
+
+
+

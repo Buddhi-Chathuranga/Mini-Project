@@ -1,0 +1,503 @@
+-----------------------------------------------------------------------------
+--
+--  Fragment:     DefineCostStructureAssistant
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  210810  JaThlk  SC21R2-2233, Modified Save_Cost_Detail_Structure___ to check whether the record exist when validating defined cost structure.
+--  210709  Asawlk  Bug 159948(SCZ-15412), Modified Save_Cost_Detail_Structure___ to validate the defined cost structure by calling
+--  210709          Temporary_Part_Cost_Detail_API.Validate_Cost_Structure__
+--  201008  OsAllk  SC2020R1-10267, Replaced Transaction_SYS.Logical_Unit_Is_Installed with Logical_Unit_Is_Active 
+--                  to check component ACTIVE/INACTIVE instead of installability.
+--  190223  JaThlk  SCUXXW4-5491, Created.
+--  190318  RaKalk  MFUXXW4-14942, Ranamed Get_Initial_Values___ to Get_Define_Cost_Structure_Initial_Values___ to avoid conflicts.
+--                  Extracted logic from CRUD_Create___ into Initialize_New_Rec___ for reusability.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Get_Define_Cost_Structure_Initial_Values___(
+   contract_           IN VARCHAR2,
+   part_no_            IN VARCHAR2, 
+   serial_no_          IN VARCHAR2,
+   condition_code_     IN VARCHAR2,
+   calling_process_    IN VARCHAR2,
+   cost_detail_id_     IN NUMBER )  RETURN Define_Cost_Structure_Initial_Values_Structure_Rec
+IS
+   rec_                      Define_Cost_Structure_Initial_Values_Structure_Rec;
+   default_condition_code_   VARCHAR2(10);
+   serial_label_             VARCHAR2(14) := 'Serial Number';
+   shop_order_receipt_       BOOLEAN := FALSE;
+   generate_manually_        VARCHAR2(20);
+   gen_cost_detail_id_       NUMBER;
+   cost_                     NUMBER;
+BEGIN
+   serial_label_ := Prepare_Shop_Order___(calling_process_, serial_no_, shop_order_receipt_);
+   rec_.shop_order_receipt := shop_order_receipt_;
+   rec_.serial_label       := serial_label_;
+   
+   IF condition_code_ IS NULL THEN
+      IF (Inventory_Part_API.Get_Invent_Part_Cost_Level_Db(contract_, part_no_) = 'COST PER CONDITION') THEN 
+         default_condition_code_           := Condition_Code_API.Get_Default_Condition_Code;  
+         rec_.condition_code               := default_condition_code_;
+         rec_.condition_code_description   := Condition_Code_API.Get_Description(default_condition_code_); 
+      END IF;  
+   ELSE
+      rec_.condition_code               := condition_code_;
+      rec_.condition_code_description   := Condition_Code_API.Get_Description(condition_code_);
+   END IF;
+   
+   IF shop_order_receipt_ THEN
+      generate_manually_ := NULL;
+      rec_.cost_detail_id := cost_detail_id_;
+   ELSE   
+      gen_cost_detail_id_ := Temporary_Part_Cost_Detail_API.Get_Next_Cost_Detail_Id;
+      rec_.cost_detail_id := gen_cost_detail_id_;
+      generate_manually_  := Site_Invent_Info_API.Get_Cost_Defaults_Manually_Db(contract_);
+   END IF;    
+   
+   rec_.part_description  := Inventory_Part_API.Get_Description(contract_, part_no_);
+   rec_.company           := Site_API.Get_Company(contract_); 
+   cost_ := 0;
+   
+   IF Transaction_SYS.Logical_Unit_Is_Active_Num('CostBucket') = 1 THEN
+      rec_.cost_module_installed := TRUE;
+   ELSE
+      rec_.cost_module_installed := FALSE;            
+   END IF; 
+   IF shop_order_receipt_ THEN
+      rec_.populate_with_cost_detail_id := 'TRUE';
+   ELSIF generate_manually_ = 'FALSE' THEN
+      rec_.generate_automatically := 'TRUE';
+   ELSIF NOT rec_.cost_module_installed THEN    
+      rec_.create_new_line := 'TRUE';
+   END IF;
+   
+   RETURN rec_;
+END Get_Define_Cost_Structure_Initial_Values___;
+
+   
+FUNCTION Prepare_Shop_Order___(
+   calling_process_    IN   VARCHAR2,
+   serial_no_          IN   VARCHAR2,
+   shop_order_receipt_ OUT  BOOLEAN) RETURN VARCHAR2
+IS
+   serial_label_   VARCHAR2(14) := 'Serial Number';
+BEGIN
+   IF calling_process_ = 'SHOP ORDER RECEIPT' THEN
+      IF serial_no_ != '*'  THEN
+         serial_label_ := 'Serial Numbers';
+      END IF;
+      shop_order_receipt_  := TRUE; 
+   ELSE
+      shop_order_receipt_  := FALSE; 
+   END IF;
+   
+   RETURN serial_label_;
+END Prepare_Shop_Order___;
+
+
+PROCEDURE Generate_Details_From_Total___ (
+   objkey_           IN VARCHAR2,
+   contract_         IN VARCHAR2,
+   part_no_          IN VARCHAR2,
+   configuration_id_ IN VARCHAR2,
+   total_unit_cost_  IN NUMBER,
+   cost_detail_id_   IN NUMBER ) 
+IS
+
+BEGIN   
+   Remove_Existing_Records___(objkey_);
+   
+   Temporary_Part_Cost_Detail_API.Generate_Details_From_Total( contract_, 
+                                                               part_no_, 
+                                                               configuration_id_, 
+                                                               total_unit_cost_, 
+                                                               cost_detail_id_ );
+   
+   Generate_Cost_Detail_Lines___(objkey_, cost_detail_id_);  
+
+END Generate_Details_From_Total___;
+
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Define_Cost_Structure_Virtual_Rec )
+IS
+   new_rec_         Define_Cost_Structure_Virtual_Rec;
+   generated_cost_  NUMBER;
+BEGIN   
+   new_rec_ := rec_;
+   Initialize_New_Rec___(new_rec_);
+   super(new_rec_);
+   
+END CRUD_Create___;
+
+
+PROCEDURE Initialize_New_Rec___(
+   new_rec_ IN OUT Define_Cost_Structure_Virtual_Rec )
+IS   
+   generated_cost_  NUMBER;
+BEGIN
+   IF new_rec_.populate_with_cost_detail_id = 'TRUE' AND new_rec_.cost_module_installed THEN
+      Generate_Cost_Detail_Lines___(new_rec_.objkey, new_rec_.cost_detail_id);  
+   ELSIF new_rec_.populate_with_cost_detail_id = 'TRUE' AND NOT new_rec_.cost_module_installed THEN
+      Generate_Line_Without_Costing___(new_rec_.objkey, new_rec_.contract, new_rec_.part_no, new_rec_.company, new_rec_.cost_detail_id, generated_cost_);
+      new_rec_.cost := generated_cost_;
+   END IF;
+   
+   IF new_rec_.generate_automatically = 'TRUE' AND new_rec_.cost_detail_id IS NOT NULL THEN    
+      Generate_Default_Details___( new_rec_.contract, 
+                                   new_rec_.part_no, 
+                                   new_rec_.configuration_id, 
+                                   new_rec_.lot_batch_no, 
+                                   new_rec_.serial_no, 
+                                   new_rec_.condition_code, 
+                                   new_rec_.cost_detail_id, 
+                                   new_rec_.calling_process);
+      IF new_rec_.cost_module_installed THEN                            
+         Generate_Cost_Detail_Lines___(new_rec_.objkey, new_rec_.cost_detail_id);     
+      ELSE
+         Generate_Line_Without_Costing___(new_rec_.objkey, new_rec_.contract, new_rec_.part_no, new_rec_.company, new_rec_.cost_detail_id, generated_cost_);
+         new_rec_.cost := generated_cost_;
+      END IF;
+   END IF;
+   
+   IF new_rec_.create_new_line = 'TRUE' THEN
+      Create_New_Line___( new_rec_.objkey,
+                          new_rec_.contract, 
+                          new_rec_.part_no, 
+                          new_rec_.company, 
+                          new_rec_.cost_detail_id );
+   END IF;      
+   
+END Initialize_New_Rec___;
+
+
+PROCEDURE Create_New_Line___ (
+   parent_objkey_  IN VARCHAR2,
+   contract_       IN VARCHAR2,
+   part_no_        IN VARCHAR2,
+   company_        IN VARCHAR2,
+   cost_detail_id_ IN NUMBER )
+IS
+   line_rec_   Temporary_Part_Cost_Detail_Virtual_Rec;
+BEGIN
+   line_rec_.objkey                := sys_guid();
+   line_rec_.parent_objkey         := parent_objkey_;
+   line_rec_.generated             := 'FALSE';
+   line_rec_.cost_module_installed := FALSE;
+   line_rec_.cost_bucket_id        := '*';
+   line_rec_.cost_source_id        := '*';
+   line_rec_.accounting_year       := Temporary_Part_Cost_Detail_API.Get_Default_Accounting_Year(company_, contract_, part_no_, '*');
+   line_rec_.unit_cost             := NULL;
+   line_rec_.cost_detail_id        := cost_detail_id_;
+   line_rec_.contract              := contract_;
+   line_rec_.part_no               := part_no_;
+   line_rec_.company               := company_;
+   CRUD_Create___(line_rec_);
+   
+END Create_New_Line___;
+
+
+PROCEDURE Generate_Line_Without_Costing___ (
+   parent_objkey_    IN VARCHAR2,
+   contract_         IN VARCHAR2,
+   part_no_          IN VARCHAR2,
+   company_          IN VARCHAR2,
+   cost_detail_id_   IN NUMBER,
+   unit_cost_       OUT NUMBER )
+IS
+   CURSOR cost_detail_line IS
+   SELECT cost_bucket_id, cost_source_id, accounting_year, unit_cost, cost_detail_id, cost_detail_seq, contract, part_no, company
+   FROM temporary_part_cost_detail
+   WHERE cost_detail_id = cost_detail_id_; 
+   line_rec_   Temporary_Part_Cost_Detail_Virtual_Rec;
+BEGIN
+	OPEN cost_detail_line;
+      LOOP
+         FETCH cost_detail_line INTO line_rec_.cost_bucket_id, line_rec_.cost_source_id, line_rec_.accounting_year, line_rec_.unit_cost, line_rec_.cost_detail_id, line_rec_.cost_detail_seq, line_rec_.contract, line_rec_.part_no, line_rec_.company;
+         EXIT WHEN cost_detail_line%NOTFOUND;
+         line_rec_.objkey         := sys_guid();
+         line_rec_.parent_objkey  := parent_objkey_;
+         line_rec_.generated      := 'TRUE';
+         unit_cost_               := line_rec_.unit_cost;
+            CRUD_Create___(line_rec_);
+      END LOOP;
+      IF line_rec_.cost_bucket_id IS NULL THEN
+         Create_New_Line___(  parent_objkey_,
+                              contract_, 
+                              part_no_, 
+                              company_, 
+                              cost_detail_id_ ); 
+      END IF;                  
+   CLOSE cost_detail_line; 
+END Generate_Line_Without_Costing___;
+
+
+PROCEDURE Generate_Default_Details___(
+   contract_           IN VARCHAR2, 
+   part_no_            IN VARCHAR2,
+   configuration_id_   IN VARCHAR2, 
+   lot_batch_no_       IN VARCHAR2, 
+   serial_no_          IN VARCHAR2, 
+   condition_code_     IN VARCHAR2, 
+   cost_detail_id_     IN NUMBER,
+   calling_process_    IN VARCHAR2)
+IS
+BEGIN
+
+   Temporary_Part_Cost_Detail_API.Generate_Default_Details( contract_, 
+                                                            part_no_,
+                                                            configuration_id_, 
+                                                            lot_batch_no_, 
+                                                            serial_no_, 
+                                                            condition_code_, 
+                                                            cost_detail_id_,
+                                                            calling_process_ );
+
+END Generate_Default_Details___;
+
+
+PROCEDURE Generate_Default___(
+   objkey_             IN VARCHAR2, 
+   contract_           IN VARCHAR2, 
+   part_no_            IN VARCHAR2,
+   configuration_id_   IN VARCHAR2, 
+   lot_batch_no_       IN VARCHAR2, 
+   serial_no_          IN VARCHAR2, 
+   condition_code_     IN VARCHAR2, 
+   cost_detail_id_     IN NUMBER,
+   calling_process_    IN VARCHAR2)
+IS
+
+BEGIN
+   Remove_Existing_Records___(objkey_);
+   
+   Generate_Default_Details___( contract_, 
+                                part_no_, 
+                                configuration_id_, 
+                                lot_batch_no_, 
+                                serial_no_, 
+                                condition_code_, 
+                                cost_detail_id_, 
+                                calling_process_ );
+                                
+   Generate_Cost_Detail_Lines___(objkey_, cost_detail_id_);                             
+                             
+END Generate_Default___;
+
+
+PROCEDURE Remove_Existing_Records___(
+   parent_objkey_   IN VARCHAR2 )
+IS
+   parent_key_          Define_Cost_Structure_Virtual_Key;
+   child_key_           Temporary_Part_Cost_Detail_Virtual_Key;
+   child_rec_           Temporary_Part_Cost_Detail_Virtual_Rec;
+BEGIN
+   parent_key_.objkey := parent_objkey_;
+   FOR line_rec_ IN Get_Cost_Detail_Array___(parent_key_) LOOP
+      child_key_.objkey := line_rec_.objkey;
+      child_rec_ := Get_Record___(child_key_);
+      CRUD_Delete___(child_rec_);
+   END LOOP;
+END Remove_Existing_Records___;
+
+
+PROCEDURE Generate_Cost_Detail_Lines___(
+   parent_objkey_    IN VARCHAR2,
+   cost_detail_id_   IN NUMBER )
+IS
+   CURSOR cost_detail_line IS
+      SELECT cost_bucket_id, cost_source_id, accounting_year, unit_cost, cost_detail_id, cost_detail_seq, contract, part_no, company
+      FROM temporary_part_cost_detail
+      WHERE cost_detail_id = cost_detail_id_; 
+   line_rec_   Temporary_Part_Cost_Detail_Virtual_Rec;
+BEGIN
+   OPEN cost_detail_line;
+      LOOP
+         FETCH cost_detail_line INTO line_rec_.cost_bucket_id, line_rec_.cost_source_id, line_rec_.accounting_year, line_rec_.unit_cost, line_rec_.cost_detail_id, line_rec_.cost_detail_seq, line_rec_.contract, line_rec_.part_no, line_rec_.company;
+         EXIT WHEN cost_detail_line%NOTFOUND;
+         line_rec_.objkey         := sys_guid();
+         line_rec_.parent_objkey  := parent_objkey_;
+         line_rec_.generated      := 'TRUE';
+         IF line_rec_.cost_bucket_id IS NOT NULL THEN
+            CRUD_Create___(line_rec_);
+         END IF;   
+      END LOOP;
+   CLOSE cost_detail_line; 
+END Generate_Cost_Detail_Lines___;
+
+
+PROCEDURE Save_Cost_Detail_Structure___ (
+   parent_objkey_         IN VARCHAR2,
+   cost_                  IN NUMBER,
+   cost_module_installed_ IN BOOLEAN )
+IS
+   parent_key_          Define_Cost_Structure_Virtual_Key;
+   child_key_           Temporary_Part_Cost_Detail_Virtual_Key;
+   child_rec_           Temporary_Part_Cost_Detail_Virtual_Rec;
+   record_exist_        BOOLEAN := FALSE;
+BEGIN   
+   parent_key_.objkey := parent_objkey_;
+   FOR line_rec_ IN Get_Cost_Detail_Array___(parent_key_) LOOP
+      IF line_rec_.generated = 'TRUE' THEN
+         child_key_.objkey := line_rec_.objkey;
+         child_rec_ := Get_Record___(child_key_);
+         IF NOT cost_module_installed_ THEN
+            child_rec_.unit_cost := cost_; 
+         END IF;  
+         Modify_Cost_Detail_Line(child_rec_);
+         record_exist_ := TRUE; 
+      ELSE
+         child_key_.objkey := line_rec_.objkey;
+         child_rec_ := Get_Record___(child_key_);
+         IF NOT cost_module_installed_ THEN
+            child_rec_.unit_cost := cost_;
+         END IF;   
+         Create_Cost_Detail_Line(child_rec_);
+      END IF;
+   END LOOP;
+   IF (NOT record_exist_) AND Temporary_Part_Cost_Detail_API.Validate_Cost_Structure__(child_rec_.cost_detail_id) = 'FALSE' THEN
+      Error_SYS.Record_General(lu_name_, 'ERROR_COST_STRUCTURE: A material, labor or subcontracting cost bucket must be added.');
+   END IF;
+END Save_Cost_Detail_Structure___;
+
+
+PROCEDURE Modify_Cost_Detail_Line(
+ line_rec_  Temporary_Part_Cost_Detail_Virtual_Rec )
+IS
+   info_              VARCHAR2(32000);
+   objid_             VARCHAR2(32000);
+   objversion_        VARCHAR2(32000);
+   attr_              VARCHAR2(32000);  
+   cost_bucket_id_    VARCHAR2(5);
+   cost_source_id_    VARCHAR2(20);
+   accounting_year_   VARCHAR2(4); 
+   unit_cost_         NUMBER;
+   CURSOR get_cost_detail_line IS
+      SELECT objid, objversion, cost_bucket_id, cost_source_id, accounting_year, unit_cost
+      FROM  TEMPORARY_PART_COST_DETAIL
+      WHERE cost_detail_id = line_rec_.cost_detail_id
+      AND   cost_detail_seq = line_rec_.cost_detail_seq;
+BEGIN
+   
+   OPEN get_cost_detail_line;
+      FETCH get_cost_detail_line INTO objid_, objversion_, cost_bucket_id_, cost_source_id_, accounting_year_, unit_cost_;
+   CLOSE get_cost_detail_line; 
+   
+   Client_SYS.Clear_Attr(attr_);
+   IF nvl(cost_bucket_id_, 'NULL') != nvl(line_rec_.cost_bucket_id, 'NULL') THEN
+      Client_SYS.Add_To_Attr('COST_BUCKET_ID', line_rec_.cost_bucket_id, attr_);
+   END IF;
+   IF nvl(cost_source_id_, 'NULL') != nvl(line_rec_.cost_source_id, 'NULL') THEN
+      Client_SYS.Add_To_Attr('COST_SOURCE_ID', line_rec_.COST_SOURCE_ID, attr_);
+   END IF;
+   IF nvl(accounting_year_, 'NULL') != nvl(line_rec_.accounting_year, 'NULL') THEN
+      Client_SYS.Add_To_Attr('ACCOUNTING_YEAR', line_rec_.ACCOUNTING_YEAR, attr_);
+   END IF;
+   IF nvl(TO_CHAR(unit_cost_), 'NULL') != nvl(TO_CHAR(line_rec_.unit_cost), 'NULL') THEN
+      Client_SYS.Add_To_Attr('UNIT_COST', line_rec_.UNIT_COST, attr_);
+   END IF;
+
+   Client_SYS.Add_To_Attr('CLIENT_NAME', 'DEFINE', attr_);
+
+   Temporary_Part_Cost_Detail_API.Modify__(info_, objid_, objversion_, attr_, 'DO');
+   
+END Modify_Cost_Detail_Line;
+
+
+PROCEDURE Create_Cost_Detail_Line(
+   line_rec_  Temporary_Part_Cost_Detail_Virtual_Rec )
+IS
+   info_              VARCHAR2(32000);
+   objid_             VARCHAR2(32000);
+   objversion_        VARCHAR2(32000);
+   attr_              VARCHAR2(32000);
+BEGIN
+   Client_SYS.Clear_Attr(attr_);
+   Client_SYS.Add_To_Attr('COST_BUCKET_ID', line_rec_.cost_bucket_id, attr_);
+   Client_SYS.Add_To_Attr('COST_SOURCE_ID', line_rec_.cost_source_id, attr_);
+   Client_SYS.Add_To_Attr('ACCOUNTING_YEAR', line_rec_.accounting_year, attr_);
+   Client_SYS.Add_To_Attr('UNIT_COST', line_rec_.unit_cost, attr_);
+   Client_SYS.Add_To_Attr('COST_DETAIL_ID', line_rec_.cost_detail_id, attr_);
+   Client_SYS.Add_To_Attr('CONTRACT', line_rec_.contract, attr_);
+   Client_SYS.Add_To_Attr('PART_NO', line_rec_.part_no, attr_);
+   Client_SYS.Add_To_Attr('COMPANY', line_rec_.company, attr_);
+   Client_SYS.Add_To_Attr('CLIENT_NAME', 'DEFINE', attr_);
+   -- Security
+   User_Allowed_Site_API.Is_Authorized(line_rec_.contract);
+   
+   Temporary_Part_Cost_Detail_API.New__(info_, objid_, objversion_, attr_, 'DO');
+END Create_Cost_Detail_Line;
+
+
+PROCEDURE Remove_Details___ (
+	cost_detail_id_ IN NUMBER)
+IS
+   CURSOR get_details IS
+      SELECT cost_detail_seq
+      FROM  TEMPORARY_PART_COST_DETAIL
+      WHERE cost_detail_id = cost_detail_id_;   
+   
+BEGIN
+   -- Security
+   FOR rec_ IN get_details LOOP
+      Temporary_Part_Cost_Detail_Initial_Check___(cost_detail_id_, rec_.cost_detail_seq);
+   END LOOP;
+  
+	Temporary_Part_Cost_Detail_API.Remove_Details(cost_detail_id_);
+END Remove_Details___;
+
+
+FUNCTION Get_Default_Acc_Year___ (
+	company_        IN VARCHAR2,
+	contract_       IN VARCHAR2,
+	part_no_        IN VARCHAR2,
+	cost_bucket_id_ IN VARCHAR2) RETURN VARCHAR2
+IS
+   default_accounting_year_  VARCHAR2(4);
+BEGIN
+	default_accounting_year_ := Temporary_Part_Cost_Detail_API.Get_Default_Accounting_Year(company_, contract_, part_no_, cost_bucket_id_);
+   IF default_accounting_year_ IS NULL THEN
+      default_accounting_year_ := '*';
+   END IF;   
+   RETURN default_accounting_year_;
+END Get_Default_Acc_Year___;
+
+
+@Override
+PROCEDURE CRUD_Delete___(
+   rec_ IN Temporary_Part_Cost_Detail_Virtual_Rec )
+IS
+   info_              VARCHAR2(32000);
+   objid_             VARCHAR2(32000);
+   objversion_        VARCHAR2(32000);
+   CURSOR get_objid_objversion IS
+      SELECT objid, objversion
+      FROM  TEMPORARY_PART_COST_DETAIL
+      WHERE cost_detail_id = rec_.cost_detail_id
+      AND   cost_detail_seq = rec_.cost_detail_seq;
+BEGIN
+   IF rec_.generated = 'TRUE' THEN
+      OPEN get_objid_objversion;
+      FETCH get_objid_objversion INTO objid_, objversion_;
+      CLOSE get_objid_objversion; 
+      Temporary_Part_Cost_Detail_API.Remove__(info_, objid_, objversion_, 'DO');
+   END IF;
+   Super(rec_);
+END CRUD_Delete___;
+
+
+@Override
+PROCEDURE CRUD_Default___ (
+   rec_  IN OUT Temporary_Part_Cost_Detail_Virtual_Rec )
+IS
+
+BEGIN
+   Super(rec_);
+   rec_.cost_source_id := '*';
+END CRUD_Default___;

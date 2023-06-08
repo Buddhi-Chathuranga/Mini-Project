@@ -1,0 +1,841 @@
+-------------------------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  --------------------------------------------------------------------------------
+-- 2021-02-08  DiJwlk  SC2020R1-12415, Modified TransferToProjectInventoryGroup, changed reference from ProjectProgramGlobal to ProjectProgram.
+-- 2021-01-22  DiJwlk  SC2020R1-11785, Removed field references to optimize performance.
+-- 2021-01-25  UdGnlk  SCZ-13307, Renamed function GetProgramIds to GetProgrmIds to avoid duplicate functions exposed in projections.
+-- 2020-01-03  NISMLK  MFSPRING20-812, Added field Ownership Transfer Reason to TransferToProjectInventoryAssistant.
+-- 2019-08-28  ChFolk  SCUXXW4-23117, Used Enumeration for FreezeFlag instead of Boolean.
+-- 2019-05-23  fgusse  SCUXXW4-21039, Added ID for all labels for Warehouse
+-- 2019-05-21  DaZase  SCUXXW4-19703, Added initialcheck to all unbounded actions.
+-- 2019-04-08  ChFolk  SCUXXW4-18708, Removed command TransferStockToProjInitCommand and added Init command in the assistant.
+-- 2018-03-14  ChFolk  SCUXXW4-17204, Added dynamic dependency where necessary.
+-- 2018-12-18  Chfolk  SCUXXW4-5876, Included frgamnet ProjectLovSelector.
+-- 2018-10-17  ChFolk  SCUXXW4-5876, Created the fragment to dlgTransferToProjectInventory.
+-------------------------------------------------------------------------------------------------------
+fragment TransferInventoryPartInStockToProjectInventoryAssistant;
+component INVENT;
+layer Core;
+description "Assistant to transfer the parts to project inventory. Can transfer the parts from the standard inventory or from one project inventory to another.
+             Also can transfer the parts between activies of the same project.";
+
+@DynamicComponentDependency PROJ
+include fragment ProjectLovSelector;
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+-------------------------------- ASSISTANTS ---------------------------------
+
+assistant TransferToProjectInventoryAssistant using TransferToProjectInventorySet {
+   label = "Transfer to Project Inventory";
+   savemode = OnLostFocus;
+   input(Company, ObjidListArr);
+   init command {
+      execute {
+         set ReportEarnedValues = true;
+      }
+   }
+
+   steps {
+      step {
+         group TransferToProjectInventoryGroup;
+         group TransferInformationGroup;
+         list PartsToTransferList(PartInStockToTransferArray);
+      }
+      final step {
+
+      }
+      cancelled step {
+
+      }
+   }
+   finish command {
+      enabled = [ProjectId != null and SubProjectId != null and ActivitySeq != null];
+      variable ParamValueStr {
+         type = Text;
+      }
+      variable ProceedTransferBool {
+         type = Boolean;
+      }
+      variable ActivityOkBool {
+         type = Boolean;
+      }
+      variable ContractListStr {
+         type = Text;
+      }
+      variable OwningCustomerInfoListStr {
+         type = Text;
+      }
+      variable OwingCustomerDetailsVar {
+         type = Structure(OwningCustomerDetailStructure);
+      }
+      variable DiffOwningCustOkToProceedBool {
+         type = Boolean;
+      }
+      variable BarcodeLabelsVar;
+      execute {
+         call CheckSysParameters() into ParamValueStr;
+         if [ParamValueStr = null or ParamValueStr = "Y"] {
+            set ProceedTransferBool = true;
+         }
+         if [ParamValueStr = "N"] {
+            confirm("Note that inventory transactions and accounting will not be created.
+                     See System Parameter Transactions for project transfers. This parameter should only be set to No during an upgrade, when manually transferring project-acquired parts to project inventory.?") {
+
+               when OK {
+                  set ProceedTransferBool = true;
+               }
+               when CANCEL {
+                  set ProceedTransferBool = false;
+               }
+            }
+         }
+         if [ProceedTransferBool] {
+            stringify(PartsToTransferList, "${OwningCustomerNo};${PartNo};${LocationNo}") into OwningCustomerInfoListStr;
+            @DynamicComponentDependency PROJ
+            call CheckOwningCustomer(OwningCustomerInfoListStr, ProjectCustomer) into OwingCustomerDetailsVar;
+            if [OwingCustomerDetailsVar.OwningCustomer != null] {
+               confirm("Part ${OwingCustomerDetailsVar.PartNo} on location ${OwingCustomerDetailsVar.LocationNo} is owned by customer ${OwingCustomerDetailsVar.OwningCustomer}.
+                       Do you want to transfer to project ${ProjectId} which is connected to customer ${ProjectCustomer}?") {
+                  when OK {
+                     set DiffOwningCustOkToProceedBool = true;
+                  }
+                  when CANCEL {
+                     set DiffOwningCustOkToProceedBool = false;
+                  }
+               }
+            }
+            else {
+               set DiffOwningCustOkToProceedBool = true;
+            }
+            if [DiffOwningCustOkToProceedBool] {
+               stringify(PartsToTransferList, "${Contract}") into ContractListStr;
+               call CheckActivityDays(ContractListStr, ActivitySeq) into ActivityOkBool;
+               if [not ActivityOkBool] {
+                  alert("The transaction date is not within the date interval of the connected project activity. Please review the dates.");
+               }
+               call ExecuteMovingStocksToProjectInventory(Objkey);
+               if [PrintBarCodes] {
+                  stringify(PartsToTransferList, "CONTRACT=${Contract}^PART_NO=${PartNo}^LOT_BATCH_NO=${LotBatchNo}^SERIAL_NO=${SerialNo}^ENG_CHG_LEVEL=${EngChgLevel}^WAIV_DEV_REJ_NO=${WaivDevRejNo}^CONFIGURATION_ID=${ConfigurationId}^QTY=${QtyToTransfer}^PACK_SIZE=1^ACTIVITY_SEQ=${ActivitySeq}^", JSON) into BarcodeLabelsVar;
+                  assistant PrintBarcodeLabelsAssistant(BarcodeLabelsVar) {
+                     when OK {
+                        exit OK;
+                     }
+                     when CANCEL {
+                        exit;
+                     }
+                  }
+               }
+            }
+         }
+         exit OK;
+      }
+   }
+   cancel command {
+      execute {
+         exit CANCEL;
+      }
+   }
+   restart command {
+      visible = [false];
+   }
+}
+
+--------------------------------- COMMANDS ----------------------------------
+
+--------------------------------- SELECTORS ---------------------------------
+@Override
+selector ReferenceOwnershipTransferReasonSelector for OwnershipTransferReason {
+   label = "";
+   badge Objstate {
+      style = TextOnly;
+      label = "Validity";
+      showlabel = false;
+      emphasis ValidityHidden = [Objstate = "Hidden"];
+      emphasis ValidityBlocked = [Objstate = "Blocked"];
+      emphasis ValidityActive = [Objstate = "Active"];
+   }
+}
+---------------------------------- GROUPS -----------------------------------
+group TransferToProjectInventoryGroup for TransToProjInvVirtual {
+   label = "Transfer To";
+   @DynamicComponentDependency PROJ
+   lov ProjectProgramIdRef with ReferenceProjectProgramSelector using GetProgrmIds(Company) {
+      label = "Program";
+      description = ProjectProgramGlobalDescription;
+      editable = [true];
+   }
+   @DynamicComponentDependency PROJ
+   lov ProjectIdRef with ReferenceProjectLovSelector using GetProjects(Company, ProgramId) {
+      label = "Project";
+      description = ProjectName;
+      validate command {
+         variable DummyNumber {
+            type = Number;
+         }
+         execute {
+            call GetProgramId(ProjectId) into ProgramId;
+
+            if [SubProjectId != null] {
+               set SubProjectId = null;
+            }
+            if [ActivitySeq != null] {
+               set ActivitySeq = DummyNumber;
+            }
+            if [ActivityNo != null] {
+               set ActivityNo = null;
+            }
+         }
+      }
+   }
+
+   @DynamicComponentDependency PROJ
+   lov SubProjectIdRef with ReferenceSubProjectSelector using GetSubProject(ProjectId) {
+      label = "Sub Project";
+      description = SubProjectDescription;
+      validate command {
+         variable DummyNumber {
+            type = Number;
+         }
+         execute {
+            set ProjectId = SubProjectIdRef.ProjectId;
+            if [ActivitySeq != null] {
+               set ActivitySeq = DummyNumber;
+            }
+         }
+      }
+   }
+   @DynamicComponentDependency PROJ
+   lov ActivityNoRef with ReferenceActivitySelector using GetActivityNo(ProjectId, SubProjectId) {
+      label = "Activity";
+      description = ActivityDescription;
+      validate command {
+         variable DummyNumber {
+            type = Number;
+         }
+         execute {
+            if [ActivityNo = null] {
+               set ActivitySeq = DummyNumber;
+            }
+            else {
+               call GetProgramId(ActivityNoRef.ProjectId) into ProgramId;
+               set ProjectId = ActivityNoRef.ProjectId;
+               set SubProjectId = ActivityNoRef.SubProjectId;
+               set ActivitySeq = ActivityNoRef.ActivitySeq;
+               set ActivityNo = ActivityNoRef.ActivityNo;
+            }
+
+         }
+      }
+   }
+   @DynamicComponentDependency PROJ
+   lov ActivitySeqRef with ReferenceActivitySelector using GetActivitySeq(ProjectId, SubProjectId, ActivityNo) {
+      label = "Activity Sequence";
+      description = ActivityDescription;
+      validate command {
+         execute {
+            if [ActivitySeq = null] {
+               set ActivityNo = null;
+            }
+            else {
+               call GetProgramId(ActivitySeqRef.ProjectId) into ProgramId;
+               set ProjectId = ActivitySeqRef.ProjectId;
+               set SubProjectId = ActivitySeqRef.SubProjectId;
+               set ActivityNo = ActivitySeqRef.ActivityNo;
+            }
+
+         }
+      }
+   }
+}
+
+group TransferInformationGroup for TransToProjInvVirtual {
+   label = "Transfer Information";
+   field Notes;
+   field PrintBarCodes;
+   field ReportEarnedValues;
+   lov OwnershipTransferReasonRef with ReferenceOwnershipTransferReasonSelector {
+      description = OwnershipTransferReasonRef.Description;
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+list PartsToTransferList for StocksToProjVirtual {
+   label = "";
+   editmode = SingleRowEdit;
+   field Contract {
+      size = Small;
+   }
+   lov InventoryPartRef with ReferenceInventoryPartSelector {
+      label = "Part";
+      description = InventoryPartRef.DescriptionInUse;
+   }
+   field QtyOnhand;
+   field QtyToTransfer {
+      validate command {
+         execute {
+            if [QtyToTransfer = QtyOnhand and CatchQtyEnabled] {
+               // if fulll qty is moved no need to specify catch qty
+               set CatchQtyEnabled = false;
+            }
+         }
+      }
+   }
+   field CatchQty {
+      editable = [CatchQtyEnabled];
+   }
+   field CatchQtyEnabled {
+      size = Small;
+   }
+   field ConfigurationId {
+      size = Small;
+   }
+   field LocationNo {
+      size = Small;
+   }
+   field HandlingUnitId;
+   lov HandlingUnitTypeIdRef with ReferenceHandlingUnitTypeSelector {
+      label = "Handling Unit Type";
+      description = HandlingUnitTypeIdRef.Description;
+      editable = [false];
+   }
+   field HandlingUnitIdRef.Sscc {
+      size = Small;
+      label = "SSCC";
+   }
+   field HandlingUnitIdRef.AltHandlingUnitLabelId {
+      size = Small;
+      label = "Alt Handling Unit Label ID";
+   }
+   field LotBatchNo {
+      size = Small;
+   }
+   field SerialNo {
+      size = Small;
+   }
+   field EngChgLevel {
+      size = Small;
+   }
+   field WaivDevRejNo {
+      size = Small;
+   }
+   @DynamicComponentDependency PROJ
+   field ActivitySeq;
+   @DynamicComponentDependency PROJ
+   lov ProjectIdRef with ReferenceProjectSelector {
+      label = "Project";
+      description = ProjectName;
+   }
+   @DynamicComponentDependency PROJ
+   lov SubProjectIdRef with ReferenceSubProjectSelector {
+      label = "Sub Project";
+      description = SubProjectDescription;
+   }
+   @DynamicComponentDependency PROJ
+   lov ActivityNoRef with ReferenceActivitySelector {
+      label = "Activity";
+      description = ActivityDescription;
+   }
+   @DynamicComponentDependency PROJ
+   lov ProgramIdRef with ReferenceProjectProgramGlobalSelector {
+      label = "Program";
+      description = ProgramDescription;
+   }
+   field Warehouse {
+      size = Small;
+   }
+   field BayNo {
+      size = Small;
+   }
+   field RowNo {
+      size = Small;
+   }
+   field TierNo {
+      size = Small;
+   }
+   field BinNo {
+      size = Small;
+   }
+   field TopParentHuId;
+   field TopParentHuTypeId {
+      size = Small;
+   }
+   field TopParentHuTypeDesc {
+      size = Small;
+   }
+   field TopParentSscc {
+      size = Small;
+   }
+   field AltHandlingUnitLabelId {
+      size = Small;
+   }
+   field QtyReserved;
+   field QtyInTransit;
+//   field FreezeFlagDb {
+//      size = Small;
+//   }
+   field FreezeFlag {
+      size = Small;
+      enumerationtrue = "Yes";
+ 	   enumerationfalse = "No";
+   }
+   field LastActivityDate;
+   field LastCountDate;
+   field LocationType {
+      size = Small;
+   }
+   field ExpirationDate;
+   field ReceiptDate;
+   field AvailabilityControlId {
+      size = Small;
+   }
+
+}
+
+----------------------------------- CARDS -----------------------------------
+
+---------------------------------- DIALOGS ----------------------------------
+
+---------------------------------- CHARTS -----------------------------------
+
+--------------------------------- CALENDARS ---------------------------------
+
+---------------------------------- SHEETS -----------------------------------
+
+----------------------------- STATE INDICATORS ------------------------------
+
+----------------------------------- TREES -----------------------------------
+
+---------------------------------- PLUGINS ----------------------------------
+
+------------------------------- IMAGE VIEWERS -------------------------------
+
+--------------------------------- CHECKLIST ---------------------------------
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+
+----------------------------- MAIN ENTRY POINTS -----------------------------
+entityset TransferToProjectInventorySet for TransToProjInvVirtual;
+
+------------------------------ ENTITY DETAILS -------------------------------
+
+------------------------------- ENUMERATIONS --------------------------------
+
+---------------------------------- QUERIES ----------------------------------
+
+---------------------------------- ACTIONS ----------------------------------
+action ExecuteMovingStocksToProjectInventory {
+   initialcheck implementation;
+   parameter ParentObjkey Text;
+
+   ludependencies = InventoryPartInStock;
+}
+
+--------------------------------- FUNCTIONS ---------------------------------
+@DynamicComponentDependency PROJ
+function GetProgramId Text {
+   parameter ProjectId Text;
+}
+@DynamicComponentDependency PROJ
+function GetProgrmIds List < Entity(ProjectProgram) > {
+   parameter Company Text;
+   where = "(COMPANY = :Company OR :Company IS NULL)";
+}
+
+@DynamicComponentDependency PROJ
+function GetProjects List < Entity(ProjectLov) > {
+   parameter Company Text;
+   parameter ProgramId Text;
+   where = "(PROGRAM_ID = :ProgramId OR :ProgramId IS NULL)
+      AND   (COMPANY = :Company OR :Company IS NULL)
+      AND   (OBJSTATE IN ('Approved','Started'))";
+
+}
+
+@DynamicComponentDependency PROJ
+function GetSubProject List < Entity(SubProject) > {
+   parameter ProjectId Text;
+   where = "(PROJECT_ID = :ProjectId OR :ProjectId IS NULL)";
+}
+
+@DynamicComponentDependency PROJ
+function GetActivitySeq List < Entity(Activity) > {
+   parameter ProjectId Text;
+   parameter SubProjectId Text;
+   parameter ActivityNo Text;
+   where = "(PROJECT_ID = :ProjectId OR :ProjectId IS NULL)
+      AND   (SUB_PROJECT_ID = :SubProjectId OR :SubProjectId IS NULL)
+      AND   (ACTIVITY_NO = :ActivityNo OR :ActivityNo IS NULL)
+      AND   (OBJSTATE = 'Released')";
+}
+
+@DynamicComponentDependency PROJ
+function GetActivityNo List < Entity(Activity) > {
+   parameter ProjectId Text;
+   parameter SubProjectId Text;
+   where = "(PROJECT_ID = :ProjectId OR :ProjectId IS NULL)
+      AND   (SUB_PROJECT_ID = :SubProjectId OR :SubProjectId IS NULL)
+      AND   (OBJSTATE = 'Released')";
+}
+function CheckSysParameters Text;
+
+function CheckActivityDays Boolean {
+   parameter ContractList Text;
+   parameter ActivitySeq Number;
+}
+@DynamicComponentDependency PROJ
+function CheckOwningCustomer Structure(OwningCustomerDetailStructure) {
+   parameter OwningCustomerInfo Text;
+   parameter ProjectCustomer Text;
+}
+
+-------------------------------- STRUCTURES ---------------------------------
+structure OwningCustomerDetailStructure {
+   attribute OwningCustomer Text;
+   attribute PartNo Text;
+   attribute LocationNo Text;
+}
+--------------------------------- VIRTUALS ----------------------------------
+
+virtual TransToProjInvVirtual {
+   attribute ProgramId Text {
+      label = "Program ID";
+      maxlength = 2000;
+      format = uppercase;
+   }
+   attribute ProjectId Text {
+      label = "Project ID ";
+      maxlength = 10;
+      format = uppercase;
+      required = [true];
+   }
+   attribute SubProjectId Text {
+      label = "Sub Project ID ";
+      maxlength = 10;
+      format = uppercase;
+      required = [true];
+   }
+   attribute ActivityNo Text {
+      label = "Activity ID ";
+      maxlength = 10;
+      format = uppercase;
+      required = [true];
+   }
+   attribute ActivitySeq Number {
+      label = "Activity Sequence ";
+      required = [true];
+   }
+   attribute Notes Text {
+      label = "Notes";
+      maxlength = 25;
+   }
+   attribute PrintBarCodes Boolean("TRUE", "FALSE") {
+      label = "Print Barcodes";
+      required = [true];
+   }
+   attribute ReportEarnedValues Boolean("TRUE", "FALSE") {
+      label = "Report Earned Value";
+      required = [true];
+   }
+   attribute ObjidListArr Text {
+      label = "";
+      maxlength = 2000;
+   }
+   attribute Company Text {
+      label = "Company";
+      maxlength = 20;
+   }
+   @DynamicComponentDependency PROJ
+   attribute ProjectCustomer Text {
+      label = "";
+      fetch = "Project_API.Get_Customer_Id(PROJECT_ID)";
+   }
+   attribute OwnershipTransferReasonId Text {
+      format = uppercase;
+      maxlength = 50;
+   }
+   @DynamicComponentDependency PROJ
+   attribute ProjectName Text {
+      fetch = "Project_API.Get_Name(PROJECT_ID)";
+   }
+   @DynamicComponentDependency PROJ
+   attribute SubProjectDescription Text {
+      fetch = "Sub_Project_API.Get_Description(PROJECT_ID, SUB_PROJECT_ID)";
+   }
+   @DynamicComponentDependency PROJ
+   attribute ActivityDescription Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Description(ACTIVITY_SEQ))";
+   }
+   @DynamicComponentDependency PROJ
+   attribute ProjectProgramGlobalDescription Text {
+      fetch = "Project_Program_Global_API.Get_Description(PROGRAM_ID)";
+   }
+
+   array PartInStockToTransferArray() to StocksToProjVirtual();
+
+   @DynamicComponentDependency PROJ
+   reference ProjectProgramIdRef(ProgramId) to ProjectProgram(ProgramId);
+   @DynamicComponentDependency PROJ
+   reference ProjectIdRef(ProjectId) to ProjectLov(ProjectId);
+   @DynamicComponentDependency PROJ
+   reference SubProjectIdRef(ProjectId, SubProjectId) to SubProject(ProjectId, SubProjectId);
+   @DynamicComponentDependency PROJ
+   reference ActivitySeqRef(ActivitySeq) to Activity(ActivitySeq);
+   @DynamicComponentDependency PROJ
+   reference ActivityNoRef(ActivitySeq, ActivityNo) to Activity(ActivitySeq, ActivityNo);
+   reference OwnershipTransferReasonRef(OwnershipTransferReasonId) to OwnershipTransferReason(TransferReasonId) {
+      label = "Part Ownership Transfer Reason";
+   }
+}
+
+virtual StocksToProjVirtual {
+   crud = Read, Update;
+   attribute Contract Text {
+      maxlength = 5;
+      required = [true];
+      editable = [false];
+      format = uppercase;
+   }
+   attribute PartNo Text {
+      maxlength = 25;
+      required = [true];
+      editable = [false];
+      format = uppercase;
+   }
+   attribute QtyOnhand Number {
+      label = "On Hand Qty";
+      required = [true];
+      editable = [false];
+   }
+   attribute QtyToTransfer Number {
+      label = "Qty to Transfer";
+      required = [true];
+      editable = [true];
+   }
+   attribute CatchQty Number {
+      label = "Catch Qty";
+      editable = [false];
+   }
+   attribute CatchQtyEnabled Boolean("TRUE", "FALSE") {
+      label = "Catch Qty Required";
+      fetch = "Part_Catalog_API.Get_Catch_Unit_Enabled_Db(PART_NO)";
+      required = [true];
+      editable = [false];
+   }
+   attribute ConfigurationId Text {
+      label = "Configuration ID";
+      maxlength = 50;
+      required = [true];
+      editable = [false];
+      format = uppercase;
+   }
+   attribute LocationNo Text {
+      label = "Location No";
+      maxlength = 35;
+      required = [true];
+      editable = [false];
+      format = uppercase;
+   }
+   attribute HandlingUnitId Number {
+      label = "Handling Unit ID";
+      required = [true];
+      editable = [false];
+   }
+   attribute LotBatchNo Text {
+      label = "Lot/Batch No";
+      maxlength = 20;
+      required = [true];
+      editable = [false];
+   }
+   attribute SerialNo Text {
+      label = "Serial No";
+      maxlength = 50;
+      required = [true];
+      editable = [false];
+   }
+   attribute EngChgLevel Text {
+      label = "Revision No";
+      maxlength = 6;
+      required = [true];
+      editable = [false];
+   }
+   attribute WaivDevRejNo Text {
+      label = "W/D/R No";
+      maxlength = 15;
+      required = [true];
+      editable = [false];
+   }
+   attribute ActivitySeq Number {
+      label = "Activity Seq";
+      maxlength = 10;
+      required = [true];
+      editable = [false];
+   }
+   attribute ProjectId Text {
+      label = "Project ID";
+      maxlength = 10;
+      editable = [false];
+      format = uppercase;
+   }
+   attribute ProgramId Text {
+      label = "Program ID";
+      maxlength = 2000;
+      editable = [false];
+      format = uppercase;
+   }
+   attribute SubProjectId Text {
+      label = "Sub Project ID ";
+      maxlength = 10;
+      format = uppercase;
+      editable = [false];
+      required = [false];
+   }
+   attribute ActivityNo Text {
+      label = "Activity ID ";
+      maxlength = 10;
+      format = uppercase;
+      editable = [false];
+      required = [false];
+   }
+   attribute Warehouse Text {
+      label = "Warehouse ID";
+      maxlength = 15;
+      editable = [false];
+   }
+   attribute BayNo Text {
+      label = "Bay ID";
+      maxlength = 5;
+      editable = [false];
+   }
+   attribute RowNo Text {
+      label = "Row ID";
+      maxlength = 5;
+      editable = [false];
+   }
+   attribute TierNo Text {
+      label = "Tier ID";
+      maxlength = 5;
+      editable = [false];
+   }
+   attribute BinNo Text {
+      label = "Bin ID";
+      maxlength = 5;
+      editable = [false];
+   }
+   attribute TopParentHuId Number {
+      fetch = "Handling_Unit_API.Get_Top_Parent_Handl_Unit_Id(handling_unit_id)";
+      label = "Top Parent Handling Unit ID";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TopParentHuTypeId Text {
+      fetch = "Handling_Unit_API.Get_Top_Parent_Hu_Type_Id(handling_unit_id)";
+      label = "Top Parent Handling Unit Type ID";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TopParentHuTypeDesc Text {
+      fetch = "Handling_Unit_Type_API.Get_Description(Handling_Unit_API.Get_Top_Parent_Hu_Type_Id(handling_unit_id))";
+      label = "Top Parent Handling Unit Type Desc";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute TopParentSscc Text {
+      fetch = "Handling_Unit_API.Get_Top_Parent_Sscc(handling_unit_id)";
+      label = "Top Parent SSCC";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute AltHandlingUnitLabelId Text {
+      fetch = "Handling_Unit_API.Get_Top_Parent_Alt_Hu_Label_Id(handling_unit_id)";
+      label = "Alt handling Unit Label ID";
+      maxlength = 2000;
+      editable = [false];
+   }
+   attribute QtyReserved Number {
+      label = "Reserved Qty";
+      required = [true];
+      editable = [false];
+   }
+   attribute QtyInTransit Number {
+      label = "In Transit Qty";
+      required = [true];
+      editable = [false];
+   }
+   attribute FreezeFlagDb Text;
+   attribute FreezeFlag Enumeration(GenYesNo) {
+      fetch = "freeze_flag_db";
+      label = "Frozen";
+      required = [true];
+      editable = [false];
+   }
+   attribute LastActivityDate Timestamp {
+      label = "Last Activity Date";
+      editable = [false];
+   }
+   attribute LastCountDate Timestamp {
+      label = "Latest Count";
+      editable = [false];
+   }
+   attribute LocationType Enumeration(InventoryLocationType) {
+      label = "Location Type";
+      required = [true];
+      editable = [false];
+   }
+   attribute ExpirationDate Timestamp {
+      label = "Expiration Date";
+   }
+   attribute ReceiptDate Timestamp {
+      label = "Receipt Date";
+      editable = [false];
+   }
+   attribute AvailabilityControlId Text {
+      label = "Availability Control ID";
+      maxlength = 25;
+      editable = [false];
+      format = uppercase;
+   }
+   attribute OwningCustomerNo Text {
+      label = "";
+      maxlength = 100;
+      editable = [false];
+   }
+   attribute HandlingUnitTypeId Text {
+      fetch = "Handling_Unit_API.Get_Handling_Unit_Type_Id(HANDLING_UNIT_ID)";
+   }
+   @DynamicComponentDependency PROJ
+   attribute ProgramDescription Text {
+      fetch = "Project_Program_Global_API.Get_Description(PROGRAM_ID)";
+   }
+   @DynamicComponentDependency PROJ
+   attribute ProjectName Text {
+      fetch = "Project_API.Get_Name(PROJECT_ID)";
+   }
+   @DynamicComponentDependency PROJ
+   attribute SubProjectDescription Text {
+      fetch = "Sub_Project_API.Get_Description(PROJECT_ID, SUB_PROJECT_ID)";
+   }
+   @DynamicComponentDependency PROJ
+   attribute ActivityDescription Text {
+      fetch = "DECODE(ACTIVITY_SEQ, 0, NULL, Activity_API.Get_Description(ACTIVITY_SEQ))";
+   }
+
+   reference InventoryPartRef(Contract, PartNo) to InventoryPart(Contract, PartNo);
+   reference HandlingUnitIdRef(HandlingUnitId) to HandlingUnit(HandlingUnitId);
+   reference HandlingUnitTypeIdRef(HandlingUnitTypeId) to HandlingUnitType(HandlingUnitTypeId);
+   @DynamicComponentDependency PROJ
+   reference ProgramIdRef(ProgramId) to ProjectProgramGlobal(ProgramId);
+   @DynamicComponentDependency PROJ
+   reference ProjectIdRef(ProjectId) to Project(ProjectId);
+   @DynamicComponentDependency PROJ
+   reference SubProjectIdRef(ProjectId, SubProjectId) to SubProject(ProjectId, SubProjectId);
+   @DynamicComponentDependency PROJ
+   reference ActivitySeqRef(ActivitySeq) to Activity(ActivitySeq);
+   @DynamicComponentDependency PROJ
+   reference ActivityNoRef(ActivitySeq, ActivityNo) to Activity(ActivitySeq, ActivityNo);
+}
+--------------------------------- SUMMARIES ---------------------------------
+
+-------------------------------- SINGLETONS ---------------------------------
+
+--------------------------------- CHECKLIST ---------------------------------
+

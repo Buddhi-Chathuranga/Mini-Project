@@ -1,0 +1,238 @@
+------------------------------------------------------------------------------------------------------------
+-- Date        Sign       History
+-- ----------  ------   ------------------------------------------------------------------------------------
+-- 2019-08-21  JeLise   SCUXXW4-8717, Included ReplicateOrderChangesDialog and added it in command Ok to handle the replication functionality.
+-- 2019-08-17  MalLlk  SCUXXW4-22978, Rename the client HandleCancelCustomerOrderAssistant to CancelCustomerOrder.
+-- 2019-08-16  MalLlk  SCUXXW4-22978, Supporting to move fragment CancelCustomerOrderAssistant to a seperate projection.
+-- 2018-11-22  MalLlk  SCUXXW4-8177, Handled "Cancel" operation of Customer Order Line.
+-- 2018-11-11  HaPulk  SCUXXW4-8170, Use for "Cancel" operation of Customer Order.
+-----------------------------------------------------------------------------------------------------------
+
+client CancelCustomerOrder;
+component ORDER;
+layer Core;
+projection CancelCustomerOrderHandling;
+
+--------------------------------- FRAGMENTS ---------------------------------
+include fragment OrderCancelReasonLovSelector;
+include fragment CustomerOrderLineInitialCheck;
+include fragment CustomerOrderInitialCheck;
+include fragment ReplicateOrderChangesDialog;
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+
+-------------------------------- ASSISTANTS ---------------------------------
+assistant CancelCustomerOrderAssistant using CancelCustomerOrderSet {
+   label = "${AssistantTitle}";
+   savemode = OnLostFocus;
+
+   input(OrderSelection, EntityCode, Source, AssistantTitle, UnpegIpdFlag);
+   init command {
+      execute {
+         set UsedByEntity = "%^${EntityCode}^%";
+      }
+   }
+   singlestep {
+      label = "Cancellation Reason";
+      list ErrorList(ErrorsArray) {
+         visible = [Exist and State = "Error"];
+      }
+      list WarningList(ErrorsArray) {
+         visible = [Exist and State in("Warning", "Info/Warning")];
+      }
+      list InformationList(ErrorsArray) {
+         visible = [Exist and State in("Information", "Info/Warning")];
+      }
+      group CancelReasonGroup;
+   }
+   command Ok;
+   -- either one of below command will be shown
+   command Cancel;
+   command Close;
+}
+
+----------------------------------- LISTS -----------------------------------
+list WarningList for CancelOrderMessageVirtual {
+   label = "Warnings";
+   editmode = SingleCellEdit;
+   preselect = [false];
+
+   defaultfilter = [MessageType = "Warning"];
+   preselect = [false];
+   crudactions {
+      new {
+         enabled = [false];
+      }
+   }
+   badge MessageType {
+      style = IconOnly;
+      icon = "information";
+      emphasis Warning = [true];
+      size = Small;
+   }
+   field OrderNo {
+      size = Small;
+   }
+   field LineNo {
+      size = Small;
+      columnexclude = [parent.Source != "COL"];
+   }
+   field RelNo {
+      size = Small;
+      columnexclude = [parent.Source != "COL"];
+   }
+   field Message {
+      size = Large;
+      multiline = true;
+   }
+   field Answer {
+      size = Medium;
+   }
+
+   command YestToAllCommand;
+   command NoToAllCommand;
+}
+
+list ErrorList for CancelOrderMessageVirtual {
+   label = "Errors";
+   defaultfilter = [MessageType = "Error"];
+   preselect = [false];
+   multiselect = [false];
+
+   crudactions {
+      new {
+         enabled = [false];
+      }
+      edit {
+         enabled = [false];
+      }
+   }
+   badge MessageType {
+      style = IconOnly;
+      icon = "information";
+      emphasis Error = [true];
+      size = Small;
+   }
+   field OrderNo {
+      size = Small;
+   }
+   field LineNo {
+      size = Small;
+      columnexclude = [parent.Source != "COL"];
+   }
+   field RelNo {
+      size = Small;
+      columnexclude = [parent.Source != "COL"];
+   }
+   field Message {
+      size = Large;
+      multiline = true;
+   }
+}
+
+list InformationList for CancelOrderMessageVirtual {
+   label = "Information";
+   defaultfilter = [MessageType = "Information"];
+   preselect = [false];
+   multiselect = [false];
+
+   crudactions {
+      new {
+         enabled = [false];
+      }
+      edit {
+         enabled = [false];
+      }
+   }
+   badge MessageType {
+      style = IconOnly;
+      icon = "information";
+      emphasis Info = [true];
+      size = Small;
+   }
+   field OrderNo {
+      size = Small;
+   }
+   field LineNo {
+      size = Small;
+      columnexclude = [parent.Source != "COL"];
+   }
+   field RelNo {
+      size = Small;
+      columnexclude = [parent.Source != "COL"];
+   }
+   field Message {
+      size = Large;
+      multiline = true;
+   }
+}
+
+---------------------------------- GROUPS -----------------------------------
+group CancelReasonGroup for CancelOrderVirtual {
+   label = "";
+   visible = [State != "Error"];
+   lov CancellationReasonRef with ReferenceOrderCancelReasonLovSelector using ValidCancellationReasons(UsedByEntity) {
+      description = CancellationReasonRef.ReasonDescription;
+      validate command {
+         execute {
+            call CheckCancellationReasonExist(CancelReason, EntityCode);
+         }
+      }
+   }
+}
+--------------------------------- COMMANDS ----------------------------------
+command Ok for CancelOrderVirtual {
+   label = "Proceed";
+   visible = [State != "Error"];
+   variable CancelReplicationInfoVar Structure(CancelReplicationInfoStructure);
+   variable SendChangeRequestVar     Text;
+   variable ReplicateChangesVar      Text;
+   execute {
+      call GetCancelReplicationInfo(OrderSelection) into CancelReplicationInfoVar;
+      if [CancelReplicationInfoVar.ReplicateFlag = "TRUE"] {
+         dialog ReplicateOrderChangesDialog(CancelReplicationInfoVar.SendChangeRequest, CancelReplicationInfoVar.SendChangeRequest) into(SendChangeRequestVar, ReplicateChangesVar) {
+            when CANCEL {
+               exit CANCEL;
+            }
+         }
+      }
+
+      call ProcessCancelOrder(OrderSelection, CancelReason, UnpegIpdFlag, Source, ReplicateChangesVar, SendChangeRequestVar);
+      exit OK;
+   }
+}
+
+command Cancel for CancelOrderVirtual {
+   label = "Discard";
+   visible = [State != "Error"];
+   execute {
+      exit CANCEL;
+   }
+}
+
+command Close for CancelOrderVirtual {
+   label = "Close";
+   visible = [State = "Error"];
+   execute {
+      exit CANCEL;
+   }
+}
+
+command YestToAllCommand for CancelOrderMessageVirtual {
+   label = "Yes to All";
+   visible = [component.WarningList.RowCount > 1];
+
+   execute {
+      call AnswerAll(parent.Objkey, 1);
+   }
+}
+
+command NoToAllCommand for CancelOrderMessageVirtual {
+   label = "No to All";
+   visible = [component.WarningList.RowCount > 1];
+
+   execute {
+      call AnswerAll(parent.Objkey, 0);
+   }
+}
+

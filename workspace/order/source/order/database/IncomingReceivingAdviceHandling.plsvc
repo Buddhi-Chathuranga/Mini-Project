@@ -1,0 +1,241 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: IncomingReceivingAdviceHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  210720  NiDalk  SC21R2-200, Modified Execute_Ok___ to match records that are marked as match.
+--  171207  SeJalk  Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Match_Receiving_Advice_Virtual_Rec )
+IS
+   line_rec_ Deliver_Unconfirmed_Customer_Order_Virtual_Rec;
+   new_rec_  Match_Receiving_Advice_Virtual_Rec;
+   count_    NUMBER := 0;
+   
+   CURSOR get_unconfirmed_orders(cust_no_ IN VARCHAR2) IS
+      SELECT * 
+      FROM deliv_unconfirm_cust_order
+      WHERE customer_no = cust_no_ 
+      AND  (contract = rec_.internal_supp_contract OR rec_.internal_supp_contract IS NULL) 
+      AND  (customer_part_no = rec_.customer_part_no OR ((customer_part_no IS NULL) AND (catalog_no  = rec_.sales_part_no))) 
+      AND  (catalog_no = rec_.sales_part_no OR rec_.sales_part_no IS NULL) 
+      AND   DECODE(rec_.receiving_advice_type, 'ARRIVED_GOODS', nvl(qty_confirmed_arrived, 0), 0) = 0;
+BEGIN
+   super(rec_);
+   new_rec_ := rec_;
+   FOR record_ IN get_unconfirmed_orders(rec_.customer_no) LOOP
+      line_rec_.objkey        := sys_guid();
+      line_rec_.parent_objkey := rec_.objkey;    
+      IF (Ext_Receiving_Advice_Line_API.Check_Manual_Match__(rec_.receiving_message_id, 
+                                                             rec_.receiving_message_line, 
+                                                             record_.delnote_no, 
+                                                             record_.customer_po_no, 
+                                                             record_.customer_po_line_no, 
+                                                             record_.customer_po_rel_no, 
+                                                             record_.ref_id) = 'TRUE') THEN
+         line_rec_.match := TRUE;
+      ELSE
+         line_rec_.match := FALSE;
+      END IF;
+      line_rec_.message_id             := rec_.receiving_message_id;
+      line_rec_.message_line           := rec_.receiving_message_line;
+      line_rec_.receiving_advice_type  := rec_.receiving_advice_type;
+      line_rec_.customer_no            := record_.customer_no;
+      line_rec_.customer_part_no       := record_.customer_part_no;
+      line_rec_.contract               := record_.contract;
+      line_rec_.delnote_no             := record_.delnote_no;
+      line_rec_.order_no               := record_.order_no;
+      line_rec_.line_no                := record_.line_no;
+      line_rec_.rel_no                 := record_.rel_no;
+      line_rec_.ref_id                 := record_.ref_id;
+      line_rec_.customer_po_no         := record_.customer_po_no;
+      line_rec_.customer_po_line_no    := record_.customer_po_line_no;
+      line_rec_.customer_po_rel_no     := record_.customer_po_rel_no;
+      line_rec_.qty_shipped            := record_.qty_shipped;
+      line_rec_.qty_delivered          := record_.qty_delivered;
+      line_rec_.qty_confirmed_arrived  := NVL(record_.qty_confirmed_arrived, 0);
+      line_rec_.qty_to_invoice         := NVL(record_.qty_to_invoice, 0);
+      line_rec_.date_delivered         := record_.date_delivered;
+      line_rec_.deliv_no               := record_.deliv_no;
+      line_rec_.catalog_no             := record_.catalog_no;
+      line_rec_.confirmed_arrived_qty  := nvl(record_.qty_confirmed_arrived, 0);
+      line_rec_.confirmed_approved_qty := nvl(record_.qty_to_invoice, 0);
+      line_rec_.line_item_no           := record_.line_item_no;
+      line_rec_.conv_factor            := record_.conv_factor;
+      line_rec_.inverted_conv_factor   := record_.inverted_conv_factor; 
+      
+      IF (line_rec_.match = TRUE) THEN
+         IF (rec_.receiving_advice_type = 'APPROVED_GOODS') THEN
+            line_rec_.confirmed_arrived_qty  := (line_rec_.qty_shipped / line_rec_.conv_factor * line_rec_.inverted_conv_factor);
+            new_rec_.conf_arrived_match      := new_rec_.conf_arrived_match + line_rec_.confirmed_arrived_qty;
+            
+            line_rec_.confirmed_approved_qty := line_rec_.qty_to_invoice + (line_rec_.qty_shipped / line_rec_.conv_factor * line_rec_.inverted_conv_factor);
+            new_rec_.conf_approved_match     := new_rec_.conf_approved_match + (line_rec_.confirmed_approved_qty - line_rec_.qty_to_invoice);
+         ELSE
+            line_rec_.confirmed_arrived_qty := line_rec_.qty_confirmed_arrived + (line_rec_.qty_shipped / line_rec_.conv_factor * line_rec_.inverted_conv_factor);
+            new_rec_.conf_arrived_match     := new_rec_.conf_arrived_match + (line_rec_.confirmed_arrived_qty - line_rec_.qty_confirmed_arrived);
+         END IF;
+      END IF;        
+      CRUD_Create___(line_rec_);
+      count_ := count_ + 1;
+   END LOOP; 
+   new_rec_.line_count := count_;
+   CRUD_Update___(rec_, new_rec_);
+END CRUD_Create___;
+
+
+PROCEDURE Match_All___ (
+   selection_ IN VARCHAR2 ) 
+IS
+    line_rec_         Deliver_Unconfirmed_Customer_Order_Virtual_Rec;
+    new_rec_          Deliver_Unconfirmed_Customer_Order_Virtual_Rec;
+    child_key_        Deliver_Unconfirmed_Customer_Order_Virtual_Key;
+    ptr_                 NUMBER; 
+    value_               VARCHAR2(2000);   
+BEGIN
+   WHILE (Get_Next_From_List(selection_, ptr_, value_)) LOOP
+      child_key_.objkey := value_;
+      line_rec_         := Get_Record___(child_key_);
+      new_rec_          := line_rec_;
+      new_rec_.match    := TRUE;
+      CRUD_Update___(line_rec_, new_rec_);
+   END LOOP; 
+END Match_All___;
+
+FUNCTION Get_Next_From_List (
+   attr_  IN     VARCHAR2,
+   ptr_   IN OUT NOCOPY NUMBER,
+   value_ IN OUT NOCOPY VARCHAR2 ) RETURN BOOLEAN
+IS
+   from_  NUMBER;
+   to_    NUMBER;
+   index_ NUMBER;
+BEGIN
+   from_ := nvl(ptr_, 1);
+   to_   := instr(attr_, Client_Sys.record_separator_, from_);
+   IF (to_ > 0) THEN
+      value_ := substr(attr_, from_, to_-from_);
+      ptr_   := to_+1;
+      RETURN(TRUE);
+   ELSE
+      RETURN(FALSE);
+   END IF;
+END Get_Next_From_List;
+
+
+PROCEDURE Execute_Ok___ (
+   parent_key_ IN VARCHAR2 ) 
+IS
+    line_rec_         Deliver_Unconfirmed_Customer_Order_Virtual_Rec;
+    parent_rec_       Match_Receiving_Advice_Virtual_Rec;
+    child_key_        Deliver_Unconfirmed_Customer_Order_Virtual_Key;
+    local_parent_key_ Match_Receiving_Advice_Virtual_Key;
+    msg_              CLOB; 
+BEGIN
+   local_parent_key_.objkey := parent_key_;
+   parent_rec_              := Get_Record___(local_parent_key_);
+   Message_SYS.Add_Attribute(msg_, 'PACK_START', 'TRUE');
+   FOR rec_ IN Get_Deliver_Unconfirmed_Array___(local_parent_key_) LOOP
+      IF (rec_.match = 'TRUE') THEN 
+         child_key_.objkey := rec_.objkey;
+         line_rec_         := Get_Record___(child_key_);
+         Message_SYS.Add_Attribute(msg_, 'DELIV_NO', line_rec_.deliv_no);
+         Message_SYS.Add_Attribute(msg_, 'ORDER_NO', line_rec_.order_no);
+         Message_SYS.Add_Attribute(msg_, 'LINE_NO', line_rec_.line_no);
+         Message_SYS.Add_Attribute(msg_, 'REL_NO', line_rec_.rel_no);
+         Message_SYS.Add_Attribute(msg_, 'LINE_ITEM_NO', line_rec_.line_item_no);
+         Message_SYS.Add_Attribute(msg_, 'QTY_CONFIRMED_ARRIVED', line_rec_.confirmed_arrived_qty);
+         Message_SYS.Add_Attribute(msg_, 'QTY_TO_INVOICE', line_rec_.confirmed_approved_qty);  
+      
+         Customer_Order_Line_Initial_Check___(line_rec_.order_no, line_rec_.line_no, line_rec_.rel_no, line_rec_.line_item_no);
+      END IF;
+   END LOOP;
+   Message_SYS.Add_Attribute(msg_, 'PACK_COMPLETE', 'TRUE');
+   Ext_Receiving_Advice_Line_API.Packed_Deliv_Unconfirm_Cos__(parent_rec_.receiving_message_id, parent_rec_.receiving_message_line, msg_);
+END Execute_Ok___;
+
+
+@Override
+PROCEDURE CRUD_Update___(
+   old_ IN Deliver_Unconfirmed_Customer_Order_Virtual_Rec,
+   new_ IN Deliver_Unconfirmed_Customer_Order_Virtual_Rec )
+IS
+   parent_rec_ Match_Receiving_Advice_Virtual_Rec;
+   parent_key_ Match_Receiving_Advice_Virtual_Key;
+   line_rec_   Deliver_Unconfirmed_Customer_Order_Virtual_Rec;
+BEGIN
+   line_rec_          := new_;
+   parent_key_.objkey := line_rec_.parent_objkey;
+   parent_rec_        := Get_record___(parent_key_);
+   IF (old_.confirmed_arrived_qty <> new_.confirmed_arrived_qty) THEN
+      IF (old_.match = FALSE) THEN
+         line_rec_.match := TRUE;
+      END IF;    
+   END IF;
+   IF (new_.confirmed_arrived_qty >= new_.qty_confirmed_arrived) THEN
+      IF (parent_rec_.receiving_advice_type = 'APPROVED_GOODS') THEN
+         parent_rec_.conf_arrived_match := parent_rec_.conf_arrived_match + (line_rec_.confirmed_arrived_qty - old_.confirmed_arrived_qty);
+      ELSE
+         parent_rec_.conf_arrived_match := parent_rec_.conf_arrived_match + (line_rec_.confirmed_arrived_qty - old_.confirmed_arrived_qty) - new_.qty_confirmed_arrived;
+      END IF;
+   ELSE
+      line_rec_.confirmed_arrived_qty := new_.qty_confirmed_arrived;
+      parent_rec_.conf_arrived_match  := parent_rec_.conf_arrived_match + line_rec_.confirmed_arrived_qty - old_.confirmed_arrived_qty;    
+   END IF;
+   
+   IF (old_.confirmed_approved_qty <> new_.confirmed_approved_qty) THEN
+      IF (old_.match = FALSE) THEN
+         line_rec_.match := TRUE;
+      END IF; 
+   END IF;
+   IF (new_.confirmed_approved_qty >= new_.qty_to_invoice) THEN
+      parent_rec_.conf_approved_match := parent_rec_.conf_approved_match + (line_rec_.confirmed_approved_qty - old_.confirmed_approved_qty) - new_.qty_to_invoice;
+   ELSE
+      line_rec_.confirmed_approved_qty := new_.qty_to_invoice;
+      parent_rec_.conf_approved_match  := parent_rec_.conf_approved_match + line_rec_.confirmed_approved_qty - old_.confirmed_approved_qty;
+   END IF;
+   IF (old_.match <> new_.match AND new_.match = TRUE) THEN
+      IF (parent_rec_.receiving_advice_type = 'APPROVED_GOODS') THEN
+         line_rec_.confirmed_approved_qty := (new_.qty_shipped / new_.conv_factor * new_.inverted_conv_factor);       
+         line_rec_.confirmed_arrived_qty  := new_.qty_to_invoice + (new_.qty_shipped / new_.conv_factor * new_.inverted_conv_factor);
+         parent_rec_.conf_arrived_match   := parent_rec_.conf_arrived_match + line_rec_.confirmed_arrived_qty;
+         parent_rec_.conf_approved_match  := parent_rec_.conf_approved_match + (line_rec_.confirmed_approved_qty - new_.qty_to_invoice);
+      ELSE
+         line_rec_.confirmed_arrived_qty := new_.qty_confirmed_arrived + (new_.qty_shipped / new_.conv_factor * new_.inverted_conv_factor);
+         parent_rec_.conf_arrived_match  := nvl(parent_rec_.conf_arrived_match, 0) + (line_rec_.confirmed_arrived_qty - new_.qty_confirmed_arrived);
+      END IF;
+   ELSIF (old_.match <> new_.match AND new_.match = FALSE) THEN
+      IF (parent_rec_.receiving_advice_type = 'APPROVED_GOODS') THEN
+         parent_rec_.conf_arrived_match   := parent_rec_.conf_arrived_match - (new_.confirmed_arrived_qty - new_.qty_confirmed_arrived);
+         parent_rec_.conf_approved_match  := parent_rec_.conf_approved_match - (new_.confirmed_approved_qty - new_.qty_to_invoice);
+         line_rec_.confirmed_approved_qty := new_.qty_to_invoice;
+         line_rec_.confirmed_arrived_qty  := new_.qty_confirmed_arrived;
+      ELSE
+         parent_rec_.conf_arrived_match := parent_rec_.conf_arrived_match - (new_.confirmed_arrived_qty - new_.qty_confirmed_arrived);
+      END IF;               
+   END IF; 
+   CRUD_Update___(parent_rec_, parent_rec_);
+   super(old_, line_rec_);
+END CRUD_Update___;
+
+FUNCTION Validate_Before_Manual_Match___ (
+	key_ IN Incoming_Receiving_Advice_Line_Key) RETURN Validate_Structure_Rec
+IS
+   customer_no_   ext_receiving_advice_tab.customer_no%TYPE;
+   error_message_ VARCHAR2(20);
+   rec_           Validate_Structure_Rec;
+BEGIN
+	Ext_Receiving_Advice_Line_API.Validate_Before_Manual_Match__(customer_no_, error_message_, key_.message_id, key_.message_line);
+   rec_.customer_no := customer_no_;
+   rec_.error_msg   := error_message_;
+   RETURN rec_;
+END Validate_Before_Manual_Match___;

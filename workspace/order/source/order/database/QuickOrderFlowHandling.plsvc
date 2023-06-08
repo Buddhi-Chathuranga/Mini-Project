@@ -1,0 +1,409 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: QuickOrderFlowHandling
+--  Component:    ORDER
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date       Sign    History
+--  ------     ------  ---------------------------------------------------------
+-- 2021-12-06  ThKrlk  Bug 160468(SC21R2-6166), Modified Print_Order_Confirmation_Report___() by appending PDF parameters to parameter_attr_.
+-- 2019-01-09  RasDlk  SCUXXW4-13341, Handled the dialog dlgShipmentLocation in 'Report Reserved Quantities as Picked' RMB.
+-- 2018-08-30  SeJalk  SCUXXW4-8487,Created. 
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Validate_Attributes___(
+   selection_ IN VARCHAR2 ) RETURN Validate_Attr_Structure_Rec
+IS
+   selection_in_        VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_   VARCHAR2(32000);
+   min_sales_amount_    NUMBER;
+   rec_                 Validate_Attr_Structure_Rec;
+   display_info_type_   NUMBER;
+   order_no_           customer_order_tab.order_no%TYPE;
+BEGIN
+   rec_.min_sales_amount_exceed := TRUE;
+   rec_.rental_transaction_exist := FALSE;
+   rec_.all_lines_connected := 0;
+   rec_.dist_orders_exist := FALSE;
+   WHILE (INSTR(selection_in_, ';') > 0) LOOP
+      current_selection_     := substr(selection_in_, 0, INSTR(selection_in_, ';'));
+      order_no_              := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');  
+      min_sales_amount_      := Cust_Ord_Customer_API.Get_Min_Sales_Amount(Customer_Order_API.Get_Customer_No(order_no_));
+      $IF Component_Rental_SYS.INSTALLED $THEN 
+         IF Rental_Transaction_Manager_API.Due_Trans_Exist(order_no_, NULL, NULL, NULL, 'CUST ORDER') = 1 THEN
+            rec_.rental_transaction_exist := TRUE;
+         END IF;
+      $END
+      IF( min_sales_amount_  IS NOT NULL AND min_sales_amount_> Customer_Order_API.Get_Total_Base_Price(order_no_)) THEN
+         rec_.min_sales_amount_exceed := FALSE;
+      END IF; 
+      Customer_Order_Flow_API.Check_All_License_Connected(display_info_type_, order_no_);
+      IF(display_info_type_ = 1) THEN
+         rec_.all_lines_connected := 1;
+      ELSIF (display_info_type_ = 2 AND rec_.all_lines_connected != 1) THEN
+         rec_.all_lines_connected := 2;
+      ELSIF (display_info_type_ = 3 AND (rec_.all_lines_connected != 1 OR rec_.all_lines_connected != 2) ) THEN
+         rec_.all_lines_connected := 3;
+      END IF;
+      
+      IF Order_Supply_Type_API.Encode(Customer_Order_Line_API.Get_Demand_Code(order_no_,'1','1',0)) = 'DO' THEN
+         rec_.dist_orders_exist := TRUE;
+      END IF;
+      
+      selection_in_          := substr(selection_in_, INSTR(selection_in_, ';')+1);
+   END LOOP;  
+   RETURN rec_;
+END Validate_Attributes___;
+
+
+PROCEDURE Process_Orders___ (
+   selection_           IN VARCHAR2,
+   start_event_         IN NUMBER,
+   create_rental_trans_ IN VARCHAR2 ) 
+IS
+   attr_  VARCHAR2(32000);
+   selection_in_        VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_   VARCHAR2(32000);
+   order_no_           customer_order_tab.order_no%TYPE;
+BEGIN
+   Client_SYS.Clear_Attr(attr_);
+   WHILE (INSTR(selection_in_, ';') > 0) LOOP
+      current_selection_     := substr(selection_in_, 0, INSTR(selection_in_, ';'));  
+      order_no_              := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');  
+      
+      Customer_Order_Initial_Check___(order_no_);
+      Client_SYS.Add_To_Attr('START_EVENT', start_event_, attr_);
+      Client_SYS.Add_To_Attr('ORDER_NO', order_no_, attr_);
+      IF start_event_ = 40 THEN
+         Client_SYS.Add_To_Attr('PRINT', 'TRUE', attr_);
+      END IF; 
+      $IF Component_Rental_SYS.INSTALLED $THEN    
+         IF start_event_ = 500 AND create_rental_trans_ = 'TRUE' AND Rental_Transaction_Manager_API.Due_Trans_Exist(order_no_, NULL, NULL, NULL, 'CUST ORDER') = 1 THEN
+            Client_SYS.Add_To_Attr('CREATE_RENTAL_TRANS', 'TRUE', attr_);
+         END IF;
+      $END
+      Client_SYS.Add_To_Attr('END', '', attr_);
+      selection_in_          := substr(selection_in_, INSTR(selection_in_, ';')+1);
+   END LOOP; 
+   IF start_event_ = 20 THEN
+      Customer_Order_Flow_API.Start_Release_Order__(attr_);
+   ELSIF start_event_ = 70 THEN
+      Customer_Order_Flow_API.Start_Create_Pick_List__(attr_);
+   ELSIF start_event_ = 90 THEN
+      Customer_Order_Flow_API.Start_Deliver__(attr_);
+   ELSIF start_event_ = 100 THEN
+      Customer_Order_Flow_API.Start_Deliver__(attr_);
+   ELSIF start_event_ = 500 THEN
+      Customer_Order_Flow_API.Start_Create_Invoice__(attr_);
+   END IF;
+   
+END Process_Orders___;
+
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Selected_Orders_Virtual_Rec )
+IS  
+   selection_            VARCHAR2(4000);
+   current_selection_    VARCHAR2(200);
+   order_no_             customer_order_tab.order_no%TYPE;
+   customer_no_          customer_order_tab.customer_no%TYPE;
+   curr_code_            VARCHAR2(5);
+   min_sales_amount_     NUMBER;
+   new_rec_              Message_List_Virtual_Rec;
+BEGIN  
+   selection_  := CONCAT(rec_.selection, ';');
+   super(rec_);
+   WHILE (INSTR(selection_, ';') > 0) LOOP
+      current_selection_  := substr(selection_, 0, INSTR(selection_, ';'));
+      order_no_           := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');
+      customer_no_        := Customer_Order_API.Get_Customer_no(order_no_);
+      
+      IF rec_.operation = 'RELEASE' THEN
+         min_sales_amount_   := Cust_Ord_Customer_API.Get_Min_Sales_Amount(Customer_Order_API.Get_Customer_No(order_no_));
+         curr_code_          := Company_Finance_API.Get_Currency_Code( Site_API.Get_Company(Customer_Order_API.Get_Contract(order_no_)));
+         IF( min_sales_amount_  IS NOT NULL AND min_sales_amount_ > Customer_Order_API.Get_Total_Base_Price(order_no_)) THEN
+            new_rec_.objkey := sys_guid();
+            new_rec_.parent_objkey := rec_.objkey;
+            new_rec_.order_no  := order_no_;
+            new_rec_.customer_no  := customer_no_;
+            min_sales_amount_ := ROUND(min_sales_amount_,Customer_Order_API.Get_Order_Currency_Rounding(order_no_));
+            new_rec_.Message := Language_SYS.Translate_Constant(lu_name_, 'CUSTMINSALESNOTEXCEED: The minimum sales amount for customer :P1 is :P2 :P3.', NULL, customer_no_, min_sales_amount_, curr_code_);
+            CRUD_Create___(new_rec_); 
+         END IF; 
+      ELSIF  rec_.operation = 'PRINT' THEN 
+         IF Customer_Order_API.Get_Order_Conf_Db(order_no_) = 'Y' THEN
+            new_rec_.objkey := sys_guid();
+            new_rec_.parent_objkey := rec_.objkey;
+            new_rec_.order_no  := order_no_;
+            new_rec_.customer_no  := customer_no_;
+            new_rec_.Message := Language_SYS.Translate_Constant(lu_name_, 'PRINTEDORDERCONFIRAMTION: This acknowledgement for order :P1 has already been printed. Select to re print.', NULL, order_no_);
+            CRUD_Create___(new_rec_);   
+         END IF;
+      END IF;
+      selection_ := substr(selection_, INSTR(selection_, ';')+1);      
+   END LOOP;
+END CRUD_Create___;
+
+FUNCTION Finish___ (
+   key_       IN Selected_Orders_Virtual_Key,
+   selection_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   parent_selection_  VARCHAR2(2000) := '';
+   rec_       Selected_Orders_Virtual_Rec;
+BEGIN
+   rec_ :=Get_Record___(key_);
+   parent_selection_ := rec_.selection;
+   -- Remove the unselected order numbers
+   FOR rec_ IN Get_Message_List_Array___(key_) LOOP     
+      IF INSTR(selection_, rec_.objkey) = 0 OR selection_ IS NULL THEN        
+         parent_selection_ := REPLACE(parent_selection_, 'ORDER_NO=' || rec_.order_no || '^;', '');
+         parent_selection_ := REPLACE(parent_selection_, 'ORDER_NO=' || rec_.order_no || '^', '');
+      END IF;
+   END LOOP;
+   IF SUBSTR(parent_selection_, -1) = ';' THEN
+      parent_selection_ := SUBSTR(parent_selection_,1,LENGTH(parent_selection_)-1);    
+   END IF;
+   
+   RETURN parent_selection_;
+END Finish___;
+
+FUNCTION Print_Order_Confirmation_Report___ (
+   full_selection_ IN VARCHAR2 ) RETURN Report_Key_List_Structure_Rec
+IS
+   selection_           VARCHAR2(32000) := CONCAT(full_selection_, ';');
+   order_no_           customer_order_tab.order_no%TYPE;
+   current_selection_   VARCHAR2(32000);
+   parameter_attr_      VARCHAR2(32000);
+   report_attr_         VARCHAR2(1000);
+   result_key_          NUMBER;
+   rec_                 Report_Key_List_Structure_Rec;
+   order_rec_           Customer_Order_API.Public_Rec;
+   pdf_param_           VARCHAR2(32000);
+BEGIN
+   
+   WHILE (INSTR(selection_, ';') > 0) LOOP  
+      current_selection_ := SUBSTR(selection_, 0, INSTR(selection_, ';'));
+      order_no_          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO'); 
+      order_rec_         := Customer_Order_API.Get(order_no_);    
+      Client_SYS.Clear_Attr(report_attr_);   
+      
+      Customer_Order_Initial_Check___(order_no_);
+      Client_SYS.Add_To_Attr('REPORT_ID', 'CUSTOMER_ORDER_CONF_REP', report_attr_);
+      Client_SYS.Add_To_Attr('LU_NAME', 'CustomerOrder', report_attr_);
+      Client_SYS.Clear_Attr(parameter_attr_);
+      Client_SYS.Add_To_Attr('ORDER_NO', order_no_, parameter_attr_); 
+      Customer_Order_Flow_API.Create_Report_Settings (pdf_param_, order_no_, '', order_rec_.contract, '', order_rec_.customer_no, 'CUSTOMER_ORDER_CONF_REP');
+      Client_SYS.Add_To_Attr('SETTINGS', pdf_param_, parameter_attr_);    
+      result_key_ := Report_Format_API.Create_New_Report(report_attr_, parameter_attr_, Fnd_Session_API.Get_Fnd_User);
+      
+      IF (rec_.order_conf_rep_key IS NULL) THEN
+         rec_.order_conf_rep_key := result_key_;
+      ELSE 
+         rec_.order_conf_rep_key := rec_.order_conf_rep_key || ',' || result_key_;      
+      END IF;
+      
+      IF Order_Line_Staged_Billing_API.Order_Uses_Stage_Billing(order_no_) = 1 THEN
+         Client_SYS.Clear_Attr(report_attr_);
+         Client_SYS.Add_To_Attr('REPORT_ID', 'ORDER_STAGED_BILLING_REPreport_attr_', report_attr_);
+         Client_SYS.Add_To_Attr('LU_NAME', 'CustomerOrder', report_attr_);
+         result_key_ := Report_Format_API.Create_New_Report(report_attr_, parameter_attr_, Fnd_Session_API.Get_Fnd_User);
+         
+         IF (rec_.stage_billing_rep_key IS NULL) THEN
+            rec_.stage_billing_rep_key := result_key_;
+         ELSE 
+            rec_.stage_billing_rep_key := rec_.stage_billing_rep_key || ',' || result_key_;      
+         END IF;
+      ELSE
+         rec_.stage_billing_rep_key := NULL;
+      END IF;     
+      selection_ := substr(selection_, INSTR(selection_, ';')+1); 
+   END LOOP;  
+   
+   RETURN rec_;
+END Print_Order_Confirmation_Report___;
+
+FUNCTION Get_Not_Printed_Order_List___(
+   full_selection_   IN VARCHAR2) RETURN VARCHAR2
+IS
+   selection_           VARCHAR2(32000) := CONCAT(full_selection_, ';');
+   order_no_           customer_order_tab.order_no%TYPE;
+   current_selection_   VARCHAR2(32000);
+   order_printed_       VARCHAR2(5);
+   not_printed_list_    VARCHAR2(32000);
+   CURSOR order_already_printed IS
+ SELECT order_conf FROM customer_order_tab 
+ WHERE order_no = order_no_;
+BEGIN
+   not_printed_list_ := full_selection_;
+	WHILE (INSTR(selection_, ';') > 0) LOOP  
+      current_selection_ := SUBSTR(selection_, 0, INSTR(selection_, ';'));
+      order_no_              := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO'); 
+      OPEN order_already_printed;
+      FETCH order_already_printed INTO order_printed_;
+      CLOSE order_already_printed;
+      IF order_printed_ = 'Y' THEN
+         -- Remove the printed orders
+         not_printed_list_ := REPLACE(not_printed_list_, 'ORDER_NO=' || order_no_ || '^;', '');
+         not_printed_list_ := REPLACE(not_printed_list_, 'ORDER_NO=' || order_no_|| '^', '');
+      END IF;
+      selection_ := substr(selection_, INSTR(selection_, ';')+1); 
+   END LOOP;
+   RETURN not_printed_list_;
+END Get_Not_Printed_Order_List___;
+
+FUNCTION Proceed_After_Print_Conf___ (
+   full_selection_ IN VARCHAR2 ) RETURN BOOLEAN
+IS
+   selection_           VARCHAR2(32000) := CONCAT(full_selection_, ';');
+   order_no_            customer_order_tab.order_no%TYPE;
+   current_selection_   VARCHAR2(32000);
+BEGIN
+   WHILE (INSTR(selection_, ';') > 0) LOOP  
+      current_selection_ := SUBSTR(selection_, 0, INSTR(selection_, ';'));
+      order_no_          := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO'); 
+      Customer_Order_Initial_Check___(order_no_);
+      Customer_Order_Flow_API.Proceed_After_Print_Conf__(order_no_);
+      selection_ := substr(selection_, INSTR(selection_, ';')+1); 
+   END LOOP;
+   RETURN TRUE;
+EXCEPTION
+   WHEN OTHERS THEN
+      RETURN FALSE;
+      
+END Proceed_After_Print_Conf___;
+
+FUNCTION Check_Use_Shipment_Inventory___(
+   selection_   IN VARCHAR2) RETURN Report_Pick_Structure_Rec
+IS
+   current_selection_   VARCHAR2(32000);
+   rec_                 Report_Pick_Structure_Rec;
+   display_info_type_   NUMBER;
+   order_no_            customer_order_tab.order_no%TYPE;
+   orders_              json_array_t := json_array_t.parse(selection_);    
+BEGIN
+   rec_.all_lines_connected := 0;
+   rec_.shipment_lines_exist := FALSE;
+   
+   FOR order_ IN 0 .. orders_.get_size - 1 LOOP 
+      current_selection_ := orders_.get_string(order_);
+            
+      order_no_   := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');
+      
+      IF (rec_.order_no IS NULL) THEN
+         rec_.order_no  := order_no_;
+      END IF;
+      
+      IF (rec_.contract IS NULL) THEN
+         rec_.contract  := Client_SYS.Get_Key_Reference_Value(current_selection_, 'CONTRACT');
+      END IF;
+      
+      Customer_Order_Flow_API.Check_All_License_Connected(display_info_type_, order_no_);
+      IF(display_info_type_ = 1) THEN
+         rec_.all_lines_connected := 1;
+      ELSIF (display_info_type_ = 2 AND rec_.all_lines_connected != 1) THEN
+         rec_.all_lines_connected := 2;
+      ELSIF (display_info_type_ = 3 AND (rec_.all_lines_connected != 1 OR rec_.all_lines_connected != 2) ) THEN
+         rec_.all_lines_connected := 3;
+      END IF;
+      
+      IF Customer_Order_API.Uses_Shipment_Inventory(order_no_) = 1 THEN
+         rec_.shipment_lines_exist := TRUE;
+      END IF;
+   END LOOP;  
+   RETURN rec_;
+END Check_Use_Shipment_Inventory___;
+
+
+FUNCTION Check_All_Lines_Conected___ (
+   selection_ IN VARCHAR2 ) RETURN NUMBER
+IS
+   selection_in_        VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_   VARCHAR2(32000);
+   all_lines_connected_ NUMBER;
+   display_info_type_   NUMBER;
+   order_no_           customer_order_tab.order_no%TYPE;
+BEGIN
+   WHILE (INSTR(selection_in_, ';') > 0) LOOP
+      current_selection_     := substr(selection_in_, 0, INSTR(selection_in_, ';'));
+      order_no_              := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');  
+      Customer_Order_Initial_Check___(order_no_);
+      Customer_Order_Flow_API.Check_All_License_Connected(display_info_type_, order_no_);
+      IF(display_info_type_ = 1) THEN
+         all_lines_connected_ := 1;
+      ELSIF (display_info_type_ = 2 AND all_lines_connected_ != 1) THEN
+         all_lines_connected_ := 2;
+      ELSIF (display_info_type_ = 3 AND (all_lines_connected_ != 1 OR all_lines_connected_ != 2) ) THEN
+         all_lines_connected_ := 3;
+      END IF;     
+      selection_in_          := substr(selection_in_, INSTR(selection_in_, ';')+1);
+   END LOOP;  
+   RETURN all_lines_connected_;
+END Check_All_Lines_Conected___;
+
+PROCEDURE Report_Reserved_As_Picked___ (
+   selection_   IN VARCHAR2,
+   location_no_ IN VARCHAR2 ) 
+IS
+   selection_in_        VARCHAR2(32000) := CONCAT(selection_, ';');
+   current_selection_   VARCHAR2(32000);
+   order_no_           customer_order_tab.order_no%TYPE;
+BEGIN
+   WHILE (INSTR(selection_in_, ';') > 0) LOOP
+      current_selection_     := substr(selection_in_, 0, INSTR(selection_in_, ';'));
+      order_no_              := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');  
+      Customer_Order_Initial_Check___(order_no_);
+      Customer_Order_Flow_API.Report_Reserved_As_Picked__(order_no_, location_no_);      
+      selection_in_          := substr(selection_in_, INSTR(selection_in_, ';')+1);
+   END LOOP;  
+   
+END Report_Reserved_As_Picked___;
+
+-- Code related to Email order confirmation
+@Override
+PROCEDURE CRUD_Create___(
+   rec_ IN Order_Conf_Email_Virtual_Rec )
+IS
+   selection_            VARCHAR2(4000);
+   current_selection_    VARCHAR2(200);
+   order_no_             customer_order_tab.order_no%TYPE;
+   order_rec_            Customer_Order_API.Public_Rec;
+   
+   new_rec_              Customer_Orders_Virtual_Rec;
+BEGIN  
+   selection_  := CONCAT(rec_.selection, ';');
+   super(rec_);
+   WHILE (INSTR(selection_, ';') > 0) LOOP
+      current_selection_  := substr(selection_, 0, INSTR(selection_, ';'));
+      order_no_           := Client_SYS.Get_Key_Reference_Value(current_selection_, 'ORDER_NO');
+      IF SUBSTR(Customer_Order_Flow_API.Get_Allowed_Operations__(order_no_), 16, 1) != '*' THEN
+         order_rec_          :=Customer_Order_API.Get(order_no_);
+         new_rec_.objkey := sys_guid();
+         new_rec_.parent_objkey := rec_.objkey;
+         new_rec_.order_no   := order_rec_.order_no;
+         new_rec_.customer_no := order_rec_.customer_no;
+         IF order_rec_.INTERNAL_REF IS NULL THEN
+            new_rec_.customer_contact   := order_rec_.cust_ref;
+            new_rec_.e_mail   := Cust_Ord_Customer_Address_API.Get_Email(order_rec_.customer_no, order_rec_.cust_ref, order_rec_.bill_addr_no);
+         ELSE
+            new_rec_.customer_contact   := order_rec_.INTERNAL_REF;
+            new_rec_.e_mail   := Customer_Order_Flow_API.Get_Email_Address__(order_no_);
+         END IF;
+         new_rec_.contract   := order_rec_.contract;
+         CRUD_Create___(new_rec_);
+      END IF;
+      selection_ := substr(selection_, INSTR(selection_, ';')+1);      
+   END LOOP;
+END CRUD_Create___;
+
+PROCEDURE Email_Order_Report___ (
+   key_ IN Order_Conf_Email_Virtual_Key ) 
+IS
+   
+BEGIN
+   FOR rec_ IN Get_Email_Confirmation_Array___(key_) LOOP
+      Customer_Order_Flow_API.Email_Order_Report__(rec_.order_no, rec_.customer_contact, rec_.contract, rec_.e_mail, rec_.customer_no, 'CUSTOMER_ORDER_CONF_REP');
+   END LOOP;
+END Email_Order_Report___;

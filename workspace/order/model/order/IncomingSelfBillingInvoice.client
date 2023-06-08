@@ -1,0 +1,335 @@
+-----------------------------------------------------------------------------------------------------
+-- Date        Sign     History
+-- ----------  ------   -----------------------------------------------------------------------------
+-- 2019-11-07  Satglk   SCXTEND-893, Added Received Date.
+-- 2018-11-29  KHVESE   SCUXXW4-9215, Implemented commands Match;Cancel Unmatch.
+-- 2018-11-27  KHVESE   SCUXXW4-919, Implemented commands Unmatch and manula match. Also implemented dynamic lov and field validations.
+-- 2018-11-23  KHVESE   SCUXXW4-919, Added search context for Radio buttons and modified IncomingSelfBillingLines list to populate using radio buttons.
+-- 2018-11-21  HPETSE   SCUXXW4-919, Converted from tbwIncSbiLines using MTG Version: 1.33
+-- 2018-11-20  HPETSE   SCUXXW4-914, Converted from tbwIncSbiDelNotes using MTG Version: 1.33
+-- 2018-11-20  HPETSE   SCUXXW4-9215, Converted from frmIncSbInvoice using MTG Version: 1.33
+-----------------------------------------------------------------------------------------------------
+
+client IncomingSelfBillingInvoice;
+component ORDER;
+layer Core;
+projection IncomingSelfBillingInvoiceHandling;
+include fragment CustomerInfoCustcategoryPubSelector;
+include fragment CoChargeJoinSelector;
+include fragment NonRentalSalesPartLovSelector;
+include fragment MatchSelfBillingLineAndDeliveryAssistant;
+warningsenabled = ExtIncSbiHead;
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+navigator {
+   entry IncomingSelfBillingInvoiceNavEntry parent OrderNavigator.InvoicingSelfBilling at index 300 {
+      label = "Incoming Self-Billing Invoice";
+      page Form;
+   }
+}
+
+------------------------------ SEARCH CONTEXT -------------------------------
+
+searchcontext IncomingSelfBillingLinesSearchContext for SearchContextStructure {
+   label = "";
+   radiogroup FilterKey;
+}
+
+-------------------------------- MAIN PAGES ---------------------------------
+page Form using ExtIncSbiHeadSet {
+   label = "Incoming Self-Billing Invoice";
+   startupmode = search;
+   stateindicator ExtIncSbiHeadStateIndicator;
+   selector ExtIncSbiHeadSelector;
+   group IncSbInvoiceGroup {
+      label = "";
+   }
+   group InvoiceGroup {
+      label = "Invoice";
+   }
+   tabs {
+      tab {
+         label = "Lines";
+         list IncomingSelfBillingLines using GetIncomingSelfBillingLines(MessageId, searchcontext.IncomingSelfBillingLinesSearchContext.FilterKey, CustomerNo) {
+            searchcontext IncomingSelfBillingLinesSearchContext {
+               defaults = GetDefaultSearchContext();
+            }
+         }
+      }
+      tab {
+         label = "Delivery Notes";
+         list IncomingSelfBillingDeliveryNotes(IncomingSelfBillingDeliveryInfoArray);
+      }
+   }
+
+   commandgroup CommandGroupCmdGroup {
+
+      command Match;
+      command Cancel;
+      command Unmatch;
+   }
+
+   commandgroup CommandGroup2CmdGroup {
+
+      command CustomerSelfBillingInvoiceCommand;
+   }
+}
+
+--------------------------------- COMMANDS ----------------------------------
+
+@Override
+command Match for ExtIncSbiHead {
+   enabled = [Objstate in("Received", "UnMatched", "PartiallyMatched", "Stopped", "Changed")];
+   execute {
+      confirm("The matching process will start.") {
+         when CANCEL {
+            exit;
+         }
+         when OK {
+            call Match();
+            refresh;
+         }
+      }
+   }
+}
+
+@Override
+command Cancel for ExtIncSbiHead {
+   enabled = [Objstate in("Received", "UnMatched", "Stopped", "Changed")];
+   execute {
+      confirm("This will cancel the message with lines.") {
+         when CANCEL {
+            exit;
+         }
+         when OK {
+            call Cancel();
+            refresh;
+         }
+      }
+   }
+}
+
+@Override
+command Unmatch for ExtIncSbiHead {
+   enabled = [(Objstate = "Matched") and(PreliminarySbiNo != null) and(InvoicedSbiNo = null)];
+   execute {
+      confirm("This will unmatch the message with lines.") {
+         when CANCEL {
+            exit;
+         }
+         when OK {
+            call Unmatch();
+            refresh;
+         }
+      }
+   }
+}
+
+command CustomerSelfBillingInvoiceCommand for ExtIncSbiHead {
+   label = "Customer Self-Billing Invoice";
+   enabled = [Objstate in("Matched", "PartiallyMatched") and MatchedItemsExist = "TRUE"];
+   execute {
+      navigate "page/CustomerSelfBillingInvoice/Form?$filter=MessageId eq $[MessageId]";
+   }
+}
+
+
+command ManualMatchingCommand for ExtIncSbiItem {
+   label = "Manual Matching";
+   mode = SingleRecord;
+   enabled = [Objstate in("Received", "Changed", "Stopped", "UnMatched")];
+   execute {
+      call ValidateBeforeManualMatch(MessageId, MessageLine) into ErrorMessageVar;
+      if [ErrorMessageVar != null] {
+         alert("${ErrorMessageVar}");
+         exit;
+      }
+      assistant MatchSBILineDeliveryAssistant(MessageId, MessageLine, CustomerNo, CustomerPartNo, CustomerPartDesc, DelnoteNo, ReferenceId,
+      CustomerPoNo, CustomerPoLineNo, CustomerPoRelNo, ApprovalDate, InvQty, SalesUnitPrice) {
+         when OK {
+            call RefreshPage();
+            exit OK;
+         }
+      }
+   }
+}
+
+--------------------------------- SELECTORS ---------------------------------
+
+@Override
+selector ExtIncSbiHeadSelector for ExtIncSbiHead {
+   label = "${MessageId} - ${Objstate} - ${CustomerNo} - ${CustomerNoRef.Name} - ${SenderMessageId}";
+   static MessageId;
+   badge Objstate {
+      emphasis Progress1 = [Objstate = "Received"];
+      emphasis Progress3 = [Objstate = "UnMatched"];
+      emphasis Progress5 = [Objstate = "PartiallyMatched"];
+      emphasis Progress7 = [Objstate = "Matched"];
+      emphasis StateStopped = [Objstate = "Stopped"];
+      emphasis StateChanged = [Objstate = "Changed"];
+      emphasis StateCancelled = [Objstate = "Cancelled"];
+      style = TextOnly;
+   }
+   static CustomerNo;
+   static CustomerNoRef.Name {
+      label = "Customer Name";
+   }
+   static SenderMessageId;
+}
+
+---------------------------------- GROUPS -----------------------------------
+
+group IncSbInvoiceGroup for ExtIncSbiHead {
+   field MessageId;
+   field InMessageRef.ClassId {
+      label = "Message Type";
+   }
+   lov CustomerNoRef with ReferenceCustomerInfoCustcategoryPubSelector {
+      label = "Customer";
+      contactwidget {
+         enabled = [CustomerNo != null];
+         source = Customer;
+      }
+      description = CustomerNoRef.Name;
+   }
+   field SenderMessageId;
+   field ReceivedDate;
+   field CreateDate;
+}
+
+group InvoiceGroup for ExtIncSbiHead {
+   field InvoiceNo;
+   field InvoiceDate;
+   field PaymentDate;
+   field TotInvNetAmount;
+   field TotalTaxAmount;
+   field TotInvGrossAmount;
+   field Currency;
+   field CustomerReference {
+      contactwidget {
+         enabled = [CustomerReference != null];
+         source = Person;
+      }
+   }
+   field ErrorMessage {
+      visible = [ErrorMessage != NULL];
+      multiline = true;
+      height = small;
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+
+list IncomingSelfBillingDeliveryNotes for IncomingSelfBillingDeliveryInfo {
+   field MessageLine;
+   field DelnoteNo;
+   field CustomerPlant;
+   field CustomerOrderNo;
+   field UnloadingPlace;
+   field ContactPerson;
+   field DeliveryDate;
+   field ReceiptDate;
+   fieldranking MessageLine, DelnoteNo, CustomerPlant, CustomerOrderNo, UnloadingPlace, ContactPerson, DeliveryDate, ReceiptDate;
+}
+
+list IncomingSelfBillingLines for ExtIncSbiItem {
+   field MessageLine;
+   field DelnoteNo;
+   lov CatalogNoRef with ReferenceSalesPartCrossReferenceSelector using GetSalesPartCrossReferences(CustomerNo, CustomerPartNo);
+   field CustomerPartNo;
+   field GtinNo {
+      size = Small;
+   }
+   field SalesUnitMeas {
+      size = Small;
+   }
+   field SalesUnitPrice {
+      validate command {
+         execute {
+            set NetAmount = "#{(SalesUnitPrice / PriceConvFactor) * InvQty}";
+         }
+      }
+   }
+   field PriceUnitMeas {
+      size = Small;
+   }
+   field InvQty {
+      validate command {
+         execute {
+            set NetAmount = "#{(SalesUnitPrice / PriceConvFactor) * InvQty}";
+         }
+      }
+   }
+   field NetAmount;
+   field TaxAmount;
+   field GrossAmount;
+   field OrderNoRef;
+   field AdditionalCost;
+   field Discount;
+   badge Objstate {
+      label = "Status";
+      emphasis Progress1 = [Objstate = "Received"];
+      emphasis Progress3 = [Objstate = "UnMatched"];
+      emphasis Progress7 = [Objstate = "Matched"];
+      emphasis StateStopped = [Objstate = "Stopped"];
+      emphasis StateChanged = [Objstate = "Changed"];
+      emphasis StateCancelled = [Objstate = "Cancelled"];
+      style = TextOnly;
+   }
+   field PriceInformation;
+   field ReferenceId;
+   field CustomerPoNo;
+   field CustomerPoLineNo {
+      size = Small;
+   }
+   field CustomerPoRelNo {
+      size = Small;
+   }
+   field ApprovalDate;
+   field GoodsReceiptDate;
+   field ErrorMessage {
+      multiline = true;
+   }
+   field PriceConvFactor;
+
+   fieldranking MessageLine, DelnoteNo, CatalogNoRef, CustomerPartNo, GtinNo, SalesUnitMeas, SalesUnitPrice, PriceUnitMeas, InvQty, NetAmount;
+
+   commandgroup CommandGroupCmdGroup {
+      command ManualMatchingCommand;
+      command BulkUnmatch;
+   }
+}
+
+----------------------------- STATE INDICATORS ------------------------------
+
+@Override
+stateindicator ExtIncSbiHeadStateIndicator for ExtIncSbiHead {
+   state "Received" {
+      completed = 8%;
+      emphasis Progress1 = [Objstate = "Received"];
+   }
+   state "UnMatched" {
+      completed = 25%;
+      emphasis Progress3 = [Objstate = "UnMatched"];
+   }
+   state "PartiallyMatched" {
+      completed = 42%;
+      emphasis Progress5 = [Objstate = "PartiallyMatched"];
+   }
+   state "Matched" {
+      completed = 58%;
+      emphasis Progress7 = [Objstate = "Matched"];
+   }
+   state "Stopped" {
+      completed = 75%;
+      emphasis StateStopped = [Objstate = "Stopped"];
+   }
+   state "Changed" {
+      completed = 83%;
+      emphasis StateChanged = [Objstate = "Changed"];
+   }
+   state "Cancelled" {
+      completed = 100%;
+      emphasis StateCancelled = [Objstate = "Cancelled"];
+   }
+}

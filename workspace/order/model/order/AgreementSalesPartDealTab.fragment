@@ -1,0 +1,987 @@
+-- Date        Sign    History
+-- ----------  ------  ---------------------------------------------------------------
+-- 2021-01-21  RavDlk  SC2020R1-12041, Fixing the issue in OK Command in Agreement Sales Part Deal History assistant
+-- 2021-01-05  MaEelk  SC2020R1-11939, Removed the reference SalesPartRef and added attribute UoM fetching a value from the GET Method.
+-- 2020-04-01  Erlise  SCXTEND-4084, Replaced lovswitch for CatalogNo with one new lov view.
+-- 2020-02-25  RaVdlk  SCXTEND-2232, Enabled Duplicate functionality and modified some Boolean type attributes
+-- 2019-04-02  MaEelk  SCUXXW4-18068, Added SalesPriceGroupId to reference CatalogNoRef in AgreementSalesPartDeal
+-- 2018-10-24  IzShlk  SCUXXW4-9622, Converted from tbwAgreementSalesPartDeal using MTG Version: 1.32
+--------------------------------------------------------------------------------------
+
+fragment AgreementSalesPartDealTab;
+component ORDER;
+layer Core;
+description "Use this API to enter information on a deal-per-sales part that is connected to the customer agreement.";
+include fragment CreateSalesPartCrossReferenceAssistant;
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+
+--------------------------------- COMMANDS ----------------------------------
+
+command DealperPartDiscountCommand for AgreementSalesPartDeal {
+   label = "Deal per Part Discount";
+   enabled = [true];
+   mode = SingleRecord;
+   variable UpdAllowedVar {
+      type = Boolean;
+   }
+   execute {
+      if [parent.Objstate != "Closed"] {
+         set UpdAllowedVar = true;
+      }
+      else {
+         set UpdAllowedVar = false;
+      }
+      navigate "assistant/CustomerAgreementDealPerPartDiscount/CustomerAgreementDealPerPartDiscountAssistant?$action=SetupSourceInfo{CatalogNoVar:$[CatalogNo], CatalogNoDescVar:$[SalesPartDescription],AgreementIdVar:$[AgreementId], MinQuantityVar:$[MinQuantity], ValidFromVar:$[ValidFromDate], DealPriceVar:$[DealPrice], DealPriceInclTaxVar:$[DealPriceInclTax], ValidToVar:$[ValidToDate], CurrencyCodeVar:$[parent.CurrencyCode], BasePriceSiteVar:$[BasePriceSite], UpdAllowedVar:$[UpdAllowedVar]}";
+   }
+}
+
+command PartTabChangeValidToDateCommand for AgreementSalesPartDeal {
+   label = "Change Valid to Date";
+   mode = SelectedRecords;
+   enabled = [true];
+
+   bulkexecute {
+      dialog SetValidToDateDialog(Selection, "Agreement_Sales_Part_Deal") {
+         when CANCEL {
+            exit CANCEL;
+         }
+      }
+   }
+}
+
+command AgreementSalesPartDealHistoCommand for AgreementSalesPartDeal {
+   label = "Agreement Sales Part Deal History";
+   enabled = [true];
+   execute {
+      assistant AgreementSalesPartHistAssistant(AgreementId, MinQuantity, ValidFromDate, ValidToDate, CatalogNo) {
+         when CANCEL {
+            exit CANCEL;
+         }
+      }
+   }
+}
+
+command CreateSalesPartCrossReferenCommand for AgreementSalesPartDeal {
+   label = "Create Sales Part Cross Reference";
+   enabled = [true];
+   execute {
+      assistant CreateSalesPartCrossReferenceAssistant(CustomerNo, BasePriceSite, CatalogNo, CatalogNo) {
+         when CANCEL {
+            exit CANCEL;
+         }
+      }
+   }
+}
+
+command CopyPartLinestoAgreementCommand for AgreementSalesPartDeal {
+   label = "Copy Part Lines to Agreement";
+   mode = SelectedRecords;
+   enabled = [true];
+   variable UsePriceInclTax;
+
+   bulkexecute {
+      if [UsePriceInclTaxDb] {
+         set UsePriceInclTax = "TRUE";
+      }
+      else {
+         set UsePriceInclTax = "FALSE";
+      }
+      dialog CopyCustomerAgreementLinesDialog(Selection, "Agreement_Sales_Part_Deal") {
+         when OK {
+            exit OK;
+         }
+
+         when CANCEL {
+            exit CANCEL;
+         }
+      }
+   }
+}
+----------------------------------- LISTS -----------------------------------
+
+list AgreementSalesPartDealList for AgreementSalesPartDeal {
+   orderby = CatalogNo, MinQuantity, ValidFromDate;
+
+   lov CatalogNoRef with ReferenceSalesPartBasePricePartLovSelector {
+      size = Small;
+
+      validate command {
+         variable TaxInfoStructureVar {
+            type = Structure(TaxInfoStructure);
+         }
+         variable DealPriceStructureVar {
+            type = Structure(DealPriceStructure);
+         }
+         variable BasePriceStructureVar {
+            type = Structure(PriceStructure);
+         }
+         variable CalcPriceStructureVar {
+            type = Structure(CalculatePriceStructure);
+         }
+         variable CatalogInfoVar {
+            type = Structure(CatalogInfoStruct);
+         }
+
+         execute {
+            set BasePriceSite = CatalogNoRef.BasePriceSite;
+
+            call CatalogInfo(BasePriceSite, CatalogNo) into CatalogInfoVar;
+            set SalesPartDescription = CatalogInfoVar.CatalogDesc;
+            set CatalogGroupId = CatalogInfoVar.CatalogGroup;
+            set UoM = CatalogInfoVar.UnitMeas;
+
+            -- Fetch Base Price
+            if [CatalogNo = null] {
+               set BasePrice = null;
+               set BasePriceInclTax = null;
+            }
+            else {
+               call FetchBasePrice(AgreementId, BasePriceSite, CatalogNo, SalesPriceType, MinQuantity) into BasePriceStructureVar;
+               set PriceBreakTemplateId = BasePriceStructureVar.PriceBreakTemplateId;
+
+               if [BasePriceStructureVar.UsePriceInclTax] {
+                  set BasePriceInclTax = BasePriceStructureVar.Price;
+               }
+               else {
+                  set BasePrice = BasePriceStructureVar.Price;
+               }
+            }
+
+            -- Get Tax Info
+            call TaxInfo(BasePriceSite, CatalogNo) into TaxInfoStructureVar;
+            set TaxCode = TaxInfoStructureVar.TaxCode;
+            set Taxable = TaxInfoStructureVar.Taxable;
+
+            -- Validate Offset
+            call ValidateOffsets(AgreementId, BasePriceInclTax, BasePrice, AmountOffset, PercentageOffset, Rounding) into DealPriceStructureVar;
+
+            if [DealPriceStructureVar.InvalidFlag = "INVALID"] {
+               error("Negative net effect of percentage offset and amount offset cannot be greater than base price.");
+               exit;
+            }
+            else {
+               set CalcSalesPrice = DealPriceStructureVar.DealPrice;
+               if [DealPriceStructureVar.UsePriceInclTax] {
+                  set DealPriceInclTax = DealPriceStructureVar.DealPrice;
+               }
+               else {
+                  set DealPrice = DealPriceStructureVar.DealPrice;
+               }
+            }
+
+            -- Calculate Prices
+            call CalculatePrices(AgreementId, "FORWARD", BasePriceInclTax, BasePrice, DealPriceInclTax, DealPrice, Taxable, TaxCode, Rounding, AmountOffset, PercentageOffset, BasePriceSite, CatalogNo) into CalcPriceStructureVar;
+            set BasePrice = CalcPriceStructureVar.BasePrice;
+            set BasePriceInclTax = CalcPriceStructureVar.BasePriceInclTax;
+            set DealPrice = CalcPriceStructureVar.DealPrice;
+            set DealPriceInclTax = CalcPriceStructureVar.DealPriceInclTax;
+         }
+      }
+   }
+
+   field SalesPartDescription;
+
+   lov SalesGroupRef with ReferenceSalesGroupSelector {
+      label = "Sales Group";
+      description = SalesGroupRef.Description;
+      editable = [false];
+   }
+
+   lov BasePriceSiteRef with ReferenceSalesPartBasePriceSiteLovSelector {
+      size = Small;
+
+      validate command {
+         variable PriceStructureVar {
+            type = Structure(PriceStructure);
+         }
+         variable TaxInfoStructureVar {
+            type = Structure(TaxInfoStructure);
+         }
+         variable DealPriceStructureVar {
+            type = Structure(DealPriceStructure);
+         }
+         variable CalcPriceStructureVar {
+            type = Structure(CalculatePriceStructure);
+         }
+         variable CatalogInfoVar {
+            type = Structure(CatalogInfoStruct);
+         }
+
+         execute {
+            -- Fetch FetchSalesPartInfo
+            call CatalogInfo(BasePriceSite, CatalogNo) into CatalogInfoVar;
+            set SalesPartDescription = CatalogInfoVar.CatalogDesc;
+            set SalesPriceGroupId = CatalogInfoVar.CatalogGroup;
+
+            -- Fetch Base Price
+            if [CatalogNo = null or BasePriceSite = null] {
+               set BasePrice = null;
+               set BasePriceInclTax = null;
+            }
+            else {
+               call FetchBasePrice(AgreementId, BasePriceSite, CatalogNo, SalesPriceType, MinQuantity) into PriceStructureVar;
+               set PriceBreakTemplateId = PriceStructureVar.PriceBreakTemplateId;
+
+               if [PriceStructureVar.UsePriceInclTax] {
+                  set BasePriceInclTax = PriceStructureVar.Price;
+               }
+               else {
+                  set BasePrice = PriceStructureVar.Price;
+               }
+            }
+            -- Get Tax Info
+            call TaxInfo(BasePriceSite, CatalogNo) into TaxInfoStructureVar;
+            set TaxCode = TaxInfoStructureVar.TaxCode;
+            set Taxable = TaxInfoStructureVar.Taxable;
+
+            -- Validate Offset
+            call ValidateOffsets(AgreementId, BasePriceInclTax, BasePrice, AmountOffset, PercentageOffset, Rounding) into DealPriceStructureVar;
+
+            if [DealPriceStructureVar.InvalidFlag = "INVALID"] {
+               error("Negative net effect of percentage offset and amount offset cannot be greater than base price.");
+               exit;
+            }
+            else {
+               set CalcSalesPrice = DealPriceStructureVar.DealPrice;
+               if [DealPriceStructureVar.UsePriceInclTax] {
+                  set DealPriceInclTax = DealPriceStructureVar.DealPrice;
+               }
+               else {
+                  set DealPrice = DealPriceStructureVar.DealPrice;
+               }
+            }
+
+            -- Calculate Prices
+            call CalculatePrices(AgreementId, "FORWARD", BasePriceInclTax, BasePrice, DealPriceInclTax, DealPrice, Taxable, TaxCode, Rounding, AmountOffset, PercentageOffset, BasePriceSite, CatalogNo) into CalcPriceStructureVar;
+            set BasePrice = CalcPriceStructureVar.BasePrice;
+            set BasePriceInclTax = CalcPriceStructureVar.BasePriceInclTax;
+            set DealPrice = CalcPriceStructureVar.DealPrice;
+            set DealPriceInclTax = CalcPriceStructureVar.DealPriceInclTax;
+         }
+      }
+   }
+   field BasePrice {
+      preserveprecision = [true];
+   }
+   field BasePriceInclTax {
+      preserveprecision = [true];
+   }
+   field MinQuantity {
+      searchable = false;
+      validate command {
+         variable PriceStructureVar {
+            type = Structure(PriceStructure);
+         }
+         variable TaxInfoStructureVar {
+            type = Structure(TaxInfoStructure);
+         }
+         variable DealPriceStructureVar {
+            type = Structure(DealPriceStructure);
+         }
+         variable CalcPriceStructureVar {
+            type = Structure(CalculatePriceStructure);
+         }
+
+         execute {
+            -- Fetch Base Price
+            if [CatalogNo = null or BasePriceSite = null] {
+               set BasePrice = null;
+               set BasePriceInclTax = null;
+            }
+            else {
+               call FetchBasePrice(AgreementId, BasePriceSite, CatalogNo, SalesPriceType, MinQuantity) into PriceStructureVar;
+               set PriceBreakTemplateId = PriceStructureVar.PriceBreakTemplateId;
+
+               if [PriceStructureVar.UsePriceInclTax] {
+                  set BasePriceInclTax = PriceStructureVar.Price;
+               }
+               else {
+                  set BasePrice = PriceStructureVar.Price;
+               }
+            }
+
+            -- Get Tax Info
+            call TaxInfo(BasePriceSite, CatalogNo) into TaxInfoStructureVar;
+            set TaxCode = TaxInfoStructureVar.TaxCode;
+            set Taxable = TaxInfoStructureVar.Taxable;
+
+            -- Validate Offset
+            call ValidateOffsets(AgreementId, BasePriceInclTax, BasePrice, AmountOffset, PercentageOffset, Rounding) into DealPriceStructureVar;
+
+            if [DealPriceStructureVar.InvalidFlag = "INVALID"] {
+               error("Negative net effect of percentage offset and amount offset cannot be greater than base price.");
+               exit;
+            }
+            else {
+               set CalcSalesPrice = DealPriceStructureVar.DealPrice;
+               if [PriceBreakTemplateId != null] {
+                  if [DealPriceStructureVar.UsePriceInclTax] {
+                     set DealPriceInclTax = DealPriceStructureVar.DealPrice;
+                  }
+                  else {
+                     set DealPrice = DealPriceStructureVar.DealPrice;
+                  }
+               }
+            }
+
+            -- Calculate Prices
+            call CalculatePrices(AgreementId, "FORWARD", BasePriceInclTax, BasePrice, DealPriceInclTax, DealPrice, Taxable, TaxCode, Rounding, AmountOffset, PercentageOffset, BasePriceSite, CatalogNo) into CalcPriceStructureVar;
+            set BasePrice = CalcPriceStructureVar.BasePrice;
+            set BasePriceInclTax = CalcPriceStructureVar.BasePriceInclTax;
+            set DealPrice = CalcPriceStructureVar.DealPrice;
+            set DealPriceInclTax = CalcPriceStructureVar.DealPriceInclTax;
+         }
+      }
+   }
+   field UoM {
+      size = Small;
+      label = "UoM";
+   }
+   field ValidFromDate;
+   field ValidToDate;
+   field PercentageOffset {
+      preserveprecision = [true];
+      validate command {
+         variable TaxInfoStructureVar {
+            type = Structure(TaxInfoStructure);
+         }
+         variable DealPriceStructureVar {
+            type = Structure(DealPriceStructure);
+         }
+         variable CalcPriceStructureVar {
+            type = Structure(CalculatePriceStructure);
+         }
+         variable PercentageOffsetConstVar {
+            type = Number;
+         }
+
+         execute {
+            set PercentageOffsetConstVar = -100;
+
+            if [PercentageOffset < PercentageOffsetConstVar] {
+               error("Negative percentage value cannot be greater than 100.");
+               exit;
+            }
+            else {
+               -- Get Tax Info
+               call TaxInfo(BasePriceSite, CatalogNo) into TaxInfoStructureVar;
+               set TaxCode = TaxInfoStructureVar.TaxCode;
+               set Taxable = TaxInfoStructureVar.Taxable;
+
+               -- Validate Offset
+               call ValidateOffsets(AgreementId, BasePriceInclTax, BasePrice, AmountOffset, PercentageOffset, Rounding) into DealPriceStructureVar;
+
+               if [DealPriceStructureVar.InvalidFlag = "INVALID"] {
+                  error("Negative net effect of percentage offset and amount offset cannot be greater than base price.");
+                  exit;
+               }
+               else {
+                  set CalcSalesPrice = DealPriceStructureVar.DealPrice;
+                  if [DealPriceStructureVar.UsePriceInclTax] {
+                     set DealPriceInclTax = DealPriceStructureVar.DealPrice;
+                  }
+                  else {
+                     set DealPrice = DealPriceStructureVar.DealPrice;
+                  }
+               }
+
+               -- Calculate Prices
+               call CalculatePrices(AgreementId, "FORWARD", BasePriceInclTax, BasePrice, DealPriceInclTax, DealPrice, Taxable, TaxCode, Rounding, AmountOffset, PercentageOffset, BasePriceSite, CatalogNo) into CalcPriceStructureVar;
+               set BasePrice = CalcPriceStructureVar.BasePrice;
+               set BasePriceInclTax = CalcPriceStructureVar.BasePriceInclTax;
+               set DealPrice = CalcPriceStructureVar.DealPrice;
+               set DealPriceInclTax = CalcPriceStructureVar.DealPriceInclTax;
+            }
+         }
+      }
+   }
+   field AmountOffset {
+      preserveprecision = [true];
+      validate command {
+         variable TaxInfoStructureVar {
+            type = Structure(TaxInfoStructure);
+         }
+         variable DealPriceStructureVar {
+            type = Structure(DealPriceStructure);
+         }
+         variable CalcPriceStructureVar {
+            type = Structure(CalculatePriceStructure);
+         }
+
+         execute {
+            -- Get Tax Info
+            call TaxInfo(BasePriceSite, CatalogNo) into TaxInfoStructureVar;
+            set TaxCode = TaxInfoStructureVar.TaxCode;
+            set Taxable = TaxInfoStructureVar.Taxable;
+
+            -- Validate Offset
+            call ValidateOffsets(AgreementId, BasePriceInclTax, BasePrice, AmountOffset, PercentageOffset, Rounding) into DealPriceStructureVar;
+
+            if [DealPriceStructureVar.InvalidFlag = "INVALID"] {
+               error("Negative net effect of percentage offset and amount offset cannot be greater than base price.");
+               exit;
+            }
+            else {
+               set CalcSalesPrice = DealPriceStructureVar.DealPrice;
+               if [DealPriceStructureVar.UsePriceInclTax] {
+                  set DealPriceInclTax = DealPriceStructureVar.DealPrice;
+               }
+               else {
+                  set DealPrice = DealPriceStructureVar.DealPrice;
+               }
+            }
+
+            -- Calculate Prices
+            call CalculatePrices(AgreementId, "FORWARD", BasePriceInclTax, BasePrice, DealPriceInclTax, DealPrice, Taxable, TaxCode, Rounding, AmountOffset, PercentageOffset, BasePriceSite, CatalogNo) into CalcPriceStructureVar;
+            set BasePrice = CalcPriceStructureVar.BasePrice;
+            set BasePriceInclTax = CalcPriceStructureVar.BasePriceInclTax;
+            set DealPrice = CalcPriceStructureVar.DealPrice;
+            set DealPriceInclTax = CalcPriceStructureVar.DealPriceInclTax;
+         }
+      }
+   }
+   field CalcSalesPrice {
+      searchable = false;
+   }
+   field DealPrice {
+      editable = [not(UsePriceInclTaxDb)];
+      preserveprecision = [true];
+
+      validate command {
+         variable TaxInfoStructureVar {
+            type = Structure(TaxInfoStructure);
+         }
+         variable CalcPriceStructureVar {
+            type = Structure(CalculatePriceStructure);
+         }
+         execute {
+            -- Get Tax Info
+            call TaxInfo(BasePriceSite, CatalogNo) into TaxInfoStructureVar;
+            set TaxCode = TaxInfoStructureVar.TaxCode;
+            set Taxable = TaxInfoStructureVar.Taxable;
+
+            -- Calculate Prices
+            call CalculatePrices(AgreementId, "NO_CALC", BasePriceInclTax, BasePrice, DealPriceInclTax, DealPrice, Taxable, TaxCode, Rounding, AmountOffset, PercentageOffset, BasePriceSite, CatalogNo) into CalcPriceStructureVar;
+            set BasePrice = CalcPriceStructureVar.BasePrice;
+            set BasePriceInclTax = CalcPriceStructureVar.BasePriceInclTax;
+            set DealPrice = CalcPriceStructureVar.DealPrice;
+            set DealPriceInclTax = CalcPriceStructureVar.DealPriceInclTax;
+         }
+      }
+   }
+   field DealPriceInclTax {
+      editable = [UsePriceInclTaxDb];
+      preserveprecision = [true];
+
+      validate command {
+         variable TaxInfoStructureVar {
+            type = Structure(TaxInfoStructure);
+         }
+         variable CalcPriceStructureVar {
+            type = Structure(CalculatePriceStructure);
+         }
+         execute {
+            -- Get Tax Info
+            call TaxInfo(BasePriceSite, CatalogNo) into TaxInfoStructureVar;
+            set TaxCode = TaxInfoStructureVar.TaxCode;
+            set Taxable = TaxInfoStructureVar.Taxable;
+
+            -- Calculate Prices
+            call CalculatePrices(AgreementId, "NO_CALC", BasePriceInclTax, BasePrice, DealPriceInclTax, DealPrice, Taxable, TaxCode, Rounding, AmountOffset, PercentageOffset, BasePriceSite, CatalogNo) into CalcPriceStructureVar;
+            set BasePrice = CalcPriceStructureVar.BasePrice;
+            set BasePriceInclTax = CalcPriceStructureVar.BasePriceInclTax;
+            set DealPrice = CalcPriceStructureVar.DealPrice;
+            set DealPriceInclTax = CalcPriceStructureVar.DealPriceInclTax;
+         }
+      }
+   }
+   field DiscountTypeRef {
+      size = Small;
+      editable = [not((DiscountLineCount > 1) or  NetPriceDb or(DiscountAmountsExist and DealPrice = null))];
+
+      validate command {
+         execute {
+            set Discount = DiscountTypeRef.Discount;
+         }
+      }
+   }
+   field Discount {
+      editable = [not(DiscountLineCount > 1 and NetPriceDb)];
+      searchable = false;
+   }
+   field Rounding;
+   field NetPriceDb {
+      validate command {
+         variable DiscountStructureVar {
+            type = Structure(DiscountStructure);
+         }
+         execute {
+            if [(DiscountType != null or Discount != null) and NetPriceDb] {
+               set DiscountType = null;
+               set Discount = null;
+            }
+
+            if [DiscountLineCount != null and not(NetPriceDb)] {
+               call GetDiscountInfo(AgreementId, MinQuantity, ValidFromDate, CatalogNo) into DiscountStructureVar;
+               set DiscountType = DiscountStructureVar.DiscountType;
+               set Discount = DiscountStructureVar.Discount;
+            }
+         }
+      }
+   }
+   field ProvisionalPriceDb {
+      searchable = false;
+   }
+   field LastUpdated;
+   field TaxCode {
+      label = "Tax Code";
+      size = Small;
+      editable = [false];
+   }
+   field Taxable {
+      label = "Taxable";
+      editable = [false];
+   }
+   lov PriceBreakTemplateIdRef with ReferencePriceBreakTemplateSelector using PriceBreakTemplateFilter(UoM) {
+      size = Small;
+      searchable = false;
+   }
+   field DiscountAmountsExist;
+   field NoteText {
+      searchable = false;
+      multiline = true;
+   }
+
+   commandgroup CommandGroup2CmdGroup {
+
+      command AgreementSalesPartDealHistoCommand;
+      command CreateSalesPartCrossReferenCommand;
+      command DealperPartDiscountCommand;
+      command CopyPartLinestoAgreementCommand;
+      command PartTabChangeValidToDateCommand;
+   }
+}
+
+list PartHistList for AgreementSalesPartHist {
+   label = "";
+
+   field ChangeDate;
+   field RetrospectiveReportDate;
+   field OldDealPrice {
+      preserveprecision = [true];
+   }
+   field DealPrice {
+      preserveprecision = [true];
+   }
+   field ProvisionalPrice;
+   field RetrospectiveQty;
+   field RetrospectiveAmount;
+   field UserCode {
+      size = Small;
+      contactwidget {
+         enabled = [UserCode != null];
+         source = Person;
+      }
+   }
+   field PrintedBy {
+      size = Small;
+      contactwidget {
+         enabled = [PrintedBy != null];
+         source = Person;
+      }
+   }
+}
+
+---------------------------------- GROUPS -----------------------------------
+group AgreementSalesPartHistGroup for AgreementSalesPartHistVirtual {
+   label = "";
+
+   field AgreementId {
+      size = Small;
+   }
+   field MinQuantity;
+   daterangefield {
+      startdate ValidFromDate;
+      enddate ValidToDate;
+      label = "Validity Period";
+   }
+   field CatalogNo {
+      size = Small;
+   }
+}
+
+-------------------------------- ASSISTANTS ---------------------------------
+assistant AgreementSalesPartHistAssistant using AgreementSalesPartHistSet {
+   label = "Agreement Sales Part Deal History";
+
+   input(AgreementId, MinQuantity, ValidFromDate, ValidToDate, CatalogNo);
+   init command {
+      execute {
+         set AgreementId = AgreementId;
+         set MinQuantity = MinQuantity;
+         set ValidFromDate = ValidFromDate;
+         set ValidToDate = ValidToDate;
+         set CatalogNo = CatalogNo;
+         set ChangeNo = 0;
+      }
+   }
+
+   steps {
+      step {
+         group AgreementSalesPartHistGroup;
+         list PartHistList(PartHistArray);
+      }
+      final step {
+      }
+      cancelled step {
+      }
+   }
+   finish command {
+      execute {
+         exit OK;
+      }
+   }
+   cancel command {
+      enabled = [true];
+   }
+   restart command {
+      visible = [false];
+   }
+}
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+
+----------------------------- MAIN ENTRY POINTS -----------------------------
+entityset AgreementSalesPartHistSet for AgreementSalesPartHistVirtual;
+
+------------------------------ ENTITY DETAILS -------------------------------
+@Override
+entity AgreementSalesPartDeal {
+   ludependencies = CustomerAgreement, AgreementPartDiscount, AgreementSalesPartDeal;
+   from = "agreement_sales_part_deal main";
+   keys = AgreementId, CatalogNo, MinQuantity, ValidFromDate {
+      where = "AGREEMENT_ID = :AgreementId and CATALOG_NO = :CatalogNo and MIN_QUANTITY = :MinQuantity and VALID_FROM_DATE = :ValidFromDate";
+   }
+
+   use attributes = BasePriceSite, BasePrice, BasePriceInclTax, ValidToDate, PercentageOffset, AmountOffset, DealPrice, DealPriceInclTax, DiscountType, Discount, Rounding, LastUpdated, PriceBreakTemplateId, NoteText;
+
+   attribute CatalogNo Text {
+      label = "Sales Part No";
+   }
+   attribute SalesPartDescription Text {
+      fetch = "Sales_Part_API.Get_Catalog_Desc(base_price_site, catalog_no)";
+      label = "Sales Part Description";
+      maxlength = 200;
+      editable = [false];
+   }
+   attribute CustomerNo Text {
+      fetch = "Customer_Agreement_API.Get_Customer_No(agreement_id)";
+      label = "Customer No";
+      editable = [ETag = null];
+      format = uppercase;
+   }
+   attribute BasePrice Number {
+      label = "Base Price/Curr";
+      editable = [false];
+      format = ifscurrency;
+   }
+   attribute BasePriceInclTax Number {
+      label = "Base Price Incl Tax/Curr";
+      editable = [false];
+      format = ifscurrency;
+   }
+   attribute MinQuantity Number {
+      label = "Min Qty";
+   }
+   attribute ValidFromDate Date {
+      label = "Valid From";
+   }
+   attribute ValidToDate Date {
+      label = "Valid To";
+   }
+   attribute AmountOffset Number {
+      format = ifscurrency;
+   }
+   attribute CalcSalesPrice Number {
+      fetch = "Agreement_Sales_Part_Deal_API.Get_Calculated_sales_price(agreement_id, catalog_no, min_quantity, valid_from_date)";
+      label = "Calc Sales Price";
+      editable = [false];
+      updatable = [true];
+      format = ifscurrency;
+   }
+   attribute DealPrice Number {
+      label = "Price/Curr";
+      format = ifscurrency;
+   }
+   attribute DealPriceInclTax Number {
+      label = "Price Incl Tax/Curr";
+      format = ifscurrency;
+   }
+   attribute DiscountType Text {
+      format = uppercase;
+   }
+   attribute Discount Number {
+      label = "Discount (%)";
+   }
+   attribute NetPriceDb Boolean("TRUE", "FALSE") {
+      label = "Net Price";
+      required = [true];
+   }
+   attribute ProvisionalPriceDb Boolean("TRUE", "FALSE") {
+      label = "Provisional Price";
+      required = [true];
+   }
+   attribute PriceBreakTemplateId Text {
+      editable = [ETag = null];
+   }
+   attribute NoteText Text {
+      label = "Notes";
+   }
+   attribute DiscountLineCount Number {
+      fetch = "Agreement_Sales_Part_Deal_API.Get_Disc_Line_Count_Per_Deal__(agreement_id, min_quantity, valid_from_date, catalog_no)";
+      label = "Discount Line Count";
+      editable = [false];
+   }
+   attribute DiscountAmountsExist Boolean("TRUE", "FALSE") {
+      fetch = "Agreement_Sales_Part_Deal_API.Discount_Amount_Exist(agreement_id,min_quantity,valid_from_date,catalog_no)";
+      label = "Discount Amounts Exist";
+      editable = [false];
+   }
+   attribute SalesPriceType Enumeration(SalesPriceType) {
+      fetch = "sales_price_type_db";
+      label = "Sales Price Type";
+      maxlength = 20;
+      editable = [false];
+   }
+   attribute TaxCode Text {
+      label = "Tax Code";
+      editable = [true];
+      fetch = "Sales_Part_API.Get_Tax_Code(BASE_PRICE_SITE, CATALOG_NO)";
+   }
+   attribute Taxable Boolean {
+      editable = [true];
+      fetch = "Sales_Part_API.Get_Taxable_Db(BASE_PRICE_SITE, CATALOG_NO)";
+   }
+   attribute CatalogGroupId Text {
+      fetch = "Sales_Part_API.Get_Catalog_Group(BASE_PRICE_SITE, CATALOG_NO)";
+   }
+   attribute SalesPriceGroupId Text {
+      fetch = "Sales_Part_API.Get_Catalog_Group(BASE_PRICE_SITE, CATALOG_NO)";
+   }
+   attribute UoM Text {
+      fetch = "Sales_Part_API.Get_Price_Unit_Meas(BASE_PRICE_SITE, CATALOG_NO)";
+   }
+
+   attribute UsePriceInclTaxDb Boolean("TRUE", "FALSE") {
+      fetch = "Customer_Agreement_API.Get_Use_Price_Incl_Tax_Db(agreement_id)";
+      required = [true];
+   }
+
+   reference SalesGroupRef(CatalogGroupId) to SalesGroup(CatalogGroup);
+   reference CustomerAgreementRef(AgreementId) to CustomerAgreement(AgreementId);
+   reference CatalogNoRef(BasePriceSite, CatalogNo) to SalesPartBasePricePartLov(BasePriceSite, CatalogNo) {
+      label = "Sales Part No";
+   }
+   reference BasePriceSiteRef(CatalogNo, BasePriceSite) to SalesPartBasePriceSiteLov(CatalogNo, BasePriceSite) {
+      label = "Base Price Site";
+   }
+   reference DiscountTypeRef(DiscountType) to SalesDiscountType(DiscountType) {
+      label = "Discount Type";
+   }
+   reference PriceBreakTemplateIdRef(PriceBreakTemplateId) to PriceBreakTemplate(TemplateId) {
+      label = "Price Break Template ID";
+   }
+}
+
+@Override
+virtual AgreementSalesPartHistVirtual {
+   crud = Create, Read;
+   ludependencies = AgreementSalesPartHistVirtual;
+
+   attribute AgreementId Text {
+      label = "Agreement ID";
+   }
+   attribute MinQuantity Number {
+      label = "Min Sales Qty";
+   }
+   attribute ValidFromDate Date {
+      label = "Valid From";
+   }
+   attribute ValidToDate Date {
+      label = "Valid To";
+   }
+   attribute CatalogNo Text {
+      label = "Sales Part No";
+      format = uppercase;
+   }
+   attribute ChangeNo Number {
+      label = "Change No";
+   }
+   array PartHistArray(AgreementId, MinQuantity, ValidFromDate, CatalogNo) to AgreementSalesPartHist(AgreementId, MinQuantity, ValidFromDate, CatalogNo);
+}
+
+@Override
+entity AgreementSalesPartHist {
+   crud = Read;
+   from = "agreement_sales_part_hist";
+   exec = "AGREEMENT_SALES_PART_HIST_API";
+   keys = AgreementId, MinQuantity, ValidFromDate, CatalogNo, ChangeNo {
+      where = "AGREEMENT_ID = :AgreementId and MIN_QUANTITY = :MinQuantity and VALID_FROM_DATE = :ValidFromDate and CATALOG_NO = :CatalogNo and CHANGE_NO = :ChangeNo";
+   }
+   attribute AgreementId Text {
+      fetch = "AGREEMENT_ID";
+      label = "Agreement ID";
+   }
+   attribute MinQuantity Number {
+      fetch = "MIN_QUANTITY";
+      label = "Min Sales Qty";
+   }
+   attribute ValidFromDate Timestamp {
+      fetch = "VALID_FROM_DATE";
+      label = "Valid From";
+   }
+   attribute CatalogNo Text {
+      fetch = "CATALOG_NO";
+      label = "Sales Part No";
+      format = uppercase;
+   }
+   attribute ChangeNo Number {
+      fetch = "CHANGE_NO";
+      label = "Change No";
+   }
+   attribute ChangeDate Timestamp {
+      fetch = "CHANGE_DATE";
+      label = "Modified";
+   }
+   attribute RetrospectiveReportDate Timestamp {
+      fetch = "RETROSPECTIVE_REPORT_DATE";
+      label = "Printed";
+   }
+   attribute OldDealPrice Number {
+      fetch = "OLD_DEAL_PRICE";
+      label = "Old Price";
+      format = ifscurrency;
+   }
+   attribute DealPrice Number {
+      fetch = "DEAL_PRICE";
+      label = "New Price";
+      format = ifscurrency;
+   }
+   attribute RetrospectiveQty Number {
+      fetch = "RETROSPECTIVE_QTY";
+      label = "Quantity";
+   }
+   attribute RetrospectiveAmount Number {
+      fetch = "RETROSPECTIVE_AMOUNT";
+      label = "Diff Net Amount/Curr";
+      format = ifscurrency;
+   }
+   attribute UserCode Text {
+      fetch = "USER_CODE";
+      label = "Modified By";
+   }
+   attribute PrintedBy Text {
+      fetch = "PRINTED_BY";
+      label = "Printed By";
+   }
+   reference AgreementIdRef(MinQuantity, ValidFromDate, CatalogNo, AgreementId) to AgreementSalesPartDeal(MinQuantity, ValidFromDate, CatalogNo, AgreementId) {
+      label = "Agreement ID";
+   }
+}
+
+--------------------------------- FUNCTIONS ---------------------------------
+function CatalogInfo Structure(CatalogInfoStruct) {
+   parameter BasePriceSite Text;
+   parameter CatalogNo Text;
+}
+
+function TaxInfo Structure(TaxInfoStructure) {
+   parameter BasePriceSite Text;
+   parameter CatalogNo Text;
+}
+
+function ValidateOffsets Structure(DealPriceStructure) {
+   parameter AgreementId Text;
+   parameter BasePriceInclTax Number;
+   parameter BasePrice Number;
+   parameter AmountOffset Number;
+   parameter PercentageOffset Number;
+   parameter Rounding Number;
+}
+
+function CalculatePrices Structure(CalculatePriceStructure) {
+   parameter AgreementId Text;
+   parameter Direction Text;
+   parameter BasePriceInclTax Number;
+   parameter BasePrice Number;
+   parameter DealPriceInclTax Number;
+   parameter DealPrice Number;
+   parameter Taxable Boolean;
+   parameter TaxCode Text;
+   parameter Rounding Number;
+   parameter AmountOffset Number;
+   parameter PercentageOffset Number;
+   parameter BasePriceSite Text;
+   parameter CatalogNo Text;
+}
+
+function FetchBasePrice Structure(PriceStructure) {
+   parameter AgreementId Text;
+   parameter BasePriceSite Text;
+   parameter CatalogNo Text;
+   parameter SalesPriceType Enumeration(SalesPriceType);
+   parameter MinQuantity Number;
+}
+
+function PriceBreakTemplateFilter List < Entity(PriceBreakTemplate) > {
+   parameter PriceUnitMeas Text;
+   where = "OBJSTATE = 'Active' and SALES_PRICE_TYPE_DB != 'RENTAL PRICES' and PRICE_UNIT_MEAS = :PriceUnitMeas";
+}
+
+function GetDiscountInfo Structure(DiscountStructure) {
+   parameter AgreementId Text;
+   parameter MinQuantity Number;
+   parameter ValidFrom Date;
+   parameter CatalogNo Text;
+}
+
+-------------------------------- STRUCTURES ---------------------------------
+structure TaxInfoStructure {
+   attribute TaxCode Text;
+   attribute Taxable Boolean;
+}
+
+structure DealPriceStructure {
+   attribute InvalidFlag Text;
+   attribute DealPrice Number;
+   attribute UsePriceInclTax Boolean;
+}
+
+structure PriceStructure {
+   attribute PriceBreakTemplateId Text;
+   attribute Price Number;
+   attribute UsePriceInclTax Boolean;
+}
+
+
+structure CalculatePriceStructure {
+   attribute BasePrice Number;
+   attribute BasePriceInclTax Number;
+   attribute DealPrice Number;
+   attribute DealPriceInclTax Number;
+}
+
+structure DiscountStructure {
+   attribute DiscountType Text;
+   attribute Discount Number;
+}
+
+structure CatalogInfoStruct {
+   attribute CatalogDesc Text;
+   attribute CatalogGroup Text;
+   attribute UnitMeas Text;
+}
+
+
+

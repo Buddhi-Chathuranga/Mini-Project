@@ -1,0 +1,311 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: MoveWithTransportTaskHandling
+--  Component:    INVENT
+--
+--  IFS Developer Studio Template Version 3.0
+--
+-- Date        Sign    History
+-- ----------  ------  ------------------------------------------------------
+-- 2021-10-28  SeJalk  SC21R2-5234, Replace CRUD_Create___ with CRUD_Upload and moved the logic to handle clob value for objids.
+-- 2020-10-07  JaThlk  SC2020R1-6774, Modified CRUD_Create___ to set default Qty to Move to 1 if it is a serialized part.
+-- 2020-05-05  JaThlk  SCXTEND-4323, Modified CRUD_Create___ to add dynamic dependencies for DISCOM.
+-- 2020-04-01  DiJwlk  SCXTEND-4135, Fixed calculating available_qtyto_move based on connected_source
+-- 2020-01-23  PamPlk  Bug 151796 (SCZ-8367), Modified CRUD_Create___() in order to get the correct value to the AvailableQtytoMove field and removed the method which fetches data to QtyToMove field.
+-- 2019-03-31  ChFolk  SCUXXW4-15162, Added INVENT to the connected_source list to create child records.
+-- 2018-06-07  MaAuse  SCUXXW4-5604, Created. CRUD_Create___, Check_Rows_Correct_Modified___ and Move_With_Transport_Task___ added.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+-- CRUD_Upload___
+--   The middle tier does a CRUD_Create and executes a CRUD_Upload for clob attribute(record_selection) support.
+--   Therefore lines creation should be handled in CRUD_Upload.
+@Override
+PROCEDURE CRUD_Upload___ (
+   objkey_ IN VARCHAR2,
+   obj_ids##    IN     CLOB,
+   move_part_with_transport_task_virtual## IN VARCHAR2)
+IS
+   line_rec_      Inventory_Part_In_Stock_Virtual_Rec;
+   TYPE invpart_record IS RECORD (
+      part_no                VARCHAR2(25), 
+      configuration_id       VARCHAR2(50), 
+      contract               VARCHAR2(5), 
+      location_no            VARCHAR2(35), 
+      handling_unit_id       NUMBER, 
+      qty_onhand             NUMBER,
+      lot_batch_no           VARCHAR2(20), 
+      serial_no              VARCHAR2(50), 
+      eng_chg_level          VARCHAR2(6), 
+      waiv_dev_rej_no        VARCHAR2(15),
+      catch_qty_onhand       NUMBER, 
+      activity_seq           NUMBER, 
+      source_ref1            VARCHAR2(50), 
+      source_ref2            VARCHAR2(50),
+      source_ref3            VARCHAR2(50),
+      source_ref4            VARCHAR2(50),
+      receipt_no             NUMBER,
+      source_ref_type        VARCHAR2(20),
+      qty_reserved           NUMBER);
+   TYPE Inv_Part_Stock_Tab IS TABLE OF invpart_record INDEX BY PLS_INTEGER;
+   inv_part_stock_tab_       Inv_Part_Stock_Tab;
+   source_ref_type_db_       VARCHAR2(200) := NULL;
+   obj_ids_                  CLOB;
+   pos_                      NUMBER;
+   id_list_                  VARCHAR2(4000);
+   parent_rec_               Move_Part_With_Transport_Task_Virtual_Rec;
+   parent_key_               Move_Part_With_Transport_Task_Virtual_Key;
+   
+   $IF Component_Rceipt_SYS.INSTALLED $THEN
+      CURSOR get_receipt_inv_loc IS
+         SELECT part_no,configuration_id, contract,location_no,handling_unit_id,qty_onhand,lot_batch_no,serial_no,eng_chg_level,waiv_dev_rej_no,
+                catch_qty_onhand,activity_seq,source_ref1,source_ref2,source_ref3,source_ref4,receipt_no,source_ref_type, qty_reserved
+         FROM   receipt_inv_location_hu
+         WHERE objid IN (SELECT REGEXP_SUBSTR(id_list_,'[^,]+', 1, LEVEL) 
+                         FROM dual
+                         CONNECT BY REGEXP_SUBSTR(id_list_, '[^,]+', 1, LEVEL) IS NOT NULL);
+   $END                      
+   CURSOR get_invpart_stock_loc IS
+      SELECT part_no,configuration_id, contract,location_no,handling_unit_id,qty_onhand,lot_batch_no,serial_no,eng_chg_level,waiv_dev_rej_no,
+             catch_qty_onhand,activity_seq,source_ref1,source_ref2,source_ref3,source_ref4,receipt_no,source_ref_type, qty_reserved
+      FROM   inventory_part_in_stock_uiv
+      WHERE objid IN (SELECT REGEXP_SUBSTR(id_list_,'[^,]+', 1, LEVEL) 
+                      FROM dual
+                      CONNECT BY REGEXP_SUBSTR(id_list_, '[^,]+', 1, LEVEL) IS NOT NULL);
+BEGIN
+   super(objkey_, obj_ids##, move_part_with_transport_task_virtual##);
+   parent_key_.objkey   := objkey_; 
+   parent_rec_ := Get_Record___(parent_key_);
+   obj_ids_ := obj_ids##;
+   -- obj_ids## is a clob and cannot pass to the query as a full block. So need to chunck for smaller blocks.
+   WHILE LENGTH(obj_ids_) >= 0 LOOP
+      IF LENGTH(obj_ids_) >= 4000 THEN
+         obj_ids_ := SUBSTR(obj_ids_, 1, 4000);
+         pos_ := instr( obj_ids_, ',', -1 );
+         id_list_ := SUBSTR(obj_ids_, 1, pos_);
+         obj_ids_ := SUBSTR(obj_ids##, pos_+1);
+      ELSE
+         id_list_ := obj_ids_;
+         obj_ids_ := NULL;
+      END IF;
+      IF (parent_rec_.connected_source  IN ('RECEIPT_STOCK', 'RECEIPT')) THEN
+      $IF Component_Rceipt_SYS.INSTALLED $THEN
+         OPEN  get_receipt_inv_loc;
+         FETCH get_receipt_inv_loc BULK COLLECT INTO inv_part_stock_tab_;
+         CLOSE get_receipt_inv_loc;
+      $ELSE
+         NULL;
+      $END
+      ELSE    
+         OPEN  get_invpart_stock_loc;
+         FETCH get_invpart_stock_loc BULK COLLECT INTO inv_part_stock_tab_;
+         CLOSE get_invpart_stock_loc;
+      END IF;
+      IF (inv_part_stock_tab_.COUNT > 0 AND parent_rec_.connected_source  IN ('RECEIPT_STOCK', 'RECEIPT', 'INVENT')) THEN
+
+         FOR index_ IN inv_part_stock_tab_.FIRST..inv_part_stock_tab_.LAST LOOP
+            line_rec_.objkey             := sys_guid();
+            line_rec_.parent_objkey      := objkey_;
+            line_rec_.part_no            := inv_part_stock_tab_(index_).part_no;
+            line_rec_.configuration_id   := inv_part_stock_tab_(index_).configuration_id;
+            line_rec_.contract           := inv_part_stock_tab_(index_).contract;
+            line_rec_.location_no        := inv_part_stock_tab_(index_).location_no;
+            line_rec_.handling_unit_id   := inv_part_stock_tab_(index_).handling_unit_id;
+            line_rec_.qty_onhand         := inv_part_stock_tab_(index_).qty_onhand;
+            line_rec_.lot_batch_no       := inv_part_stock_tab_(index_).lot_batch_no;
+            line_rec_.serial_no          := inv_part_stock_tab_(index_).serial_no;
+            line_rec_.eng_chg_level      := inv_part_stock_tab_(index_).eng_chg_level;
+            line_rec_.waiv_dev_rej_no    := inv_part_stock_tab_(index_).waiv_dev_rej_no;
+            line_rec_.catch_qty_onhand   := inv_part_stock_tab_(index_).catch_qty_onhand;
+            line_rec_.activity_seq       := inv_part_stock_tab_(index_).activity_seq;
+            line_rec_.source_ref1        := inv_part_stock_tab_(index_).source_ref1;
+            line_rec_.source_ref2        := inv_part_stock_tab_(index_).source_ref2;
+            line_rec_.source_ref3        := inv_part_stock_tab_(index_).source_ref3;
+            line_rec_.source_ref4        := inv_part_stock_tab_(index_).source_ref4;
+            line_rec_.receipt_no         := inv_part_stock_tab_(index_).receipt_no;
+            line_rec_.source_ref_type    := inv_part_stock_tab_(index_).source_ref_type;
+            line_rec_.qty_reserved       := inv_part_stock_tab_(index_).qty_reserved;
+            line_rec_.available_qty      := line_rec_.qty_onhand - line_rec_.qty_reserved;
+
+            $IF Component_Discom_SYS.INSTALLED $THEN
+               IF (Logistics_Source_Ref_Type_API.Encode(line_rec_.source_ref_type) = 'PURCHASE_ORDER') THEN
+                  source_ref_type_db_ := Order_Type_API.DB_PURCHASE_ORDER;
+               END IF;
+            $ELSE
+               NULL;
+            $END
+
+            line_rec_.duefor_transport   := Transport_Task_API.Get_Qty_Outbound( line_rec_.contract, 
+                                                                                 line_rec_.part_no, 
+                                                                                 line_rec_.configuration_id, 
+                                                                                 line_rec_.location_no, 
+                                                                                 line_rec_.lot_batch_no, 
+                                                                                 line_rec_.serial_no, 
+                                                                                 line_rec_.eng_chg_level, 
+                                                                                 line_rec_.waiv_dev_rej_no, 
+                                                                                 line_rec_.activity_seq, 
+                                                                                 line_rec_.handling_unit_id, 
+                                                                                 line_rec_.source_ref1, 
+                                                                                 line_rec_.source_ref2, 
+                                                                                 line_rec_.source_ref3, 
+                                                                                 line_rec_.receipt_no,
+                                                                                 NULL, 
+                                                                                 NULL, 
+                                                                                 source_ref_type_db_, 
+                                                                                 'FALSE');
+
+            IF (parent_rec_.connected_source IN ('RECEIPT_STOCK', 'RECEIPT')) THEN
+               line_rec_.available_qtyto_move := line_rec_.available_qty - line_rec_.duefor_transport;
+            ELSE
+               line_rec_.available_qtyto_move := Inv_Part_Stock_Reservation_API.Get_Available_Qty_To_Move(  line_rec_.contract, 
+                                                                                                            line_rec_.part_no, 
+                                                                                                            line_rec_.configuration_id, 
+                                                                                                            line_rec_.location_no, 
+                                                                                                            line_rec_.lot_batch_no, 
+                                                                                                            line_rec_.serial_no, 
+                                                                                                            line_rec_.eng_chg_level, 
+                                                                                                            line_rec_.waiv_dev_rej_no, 
+                                                                                                            line_rec_.activity_seq, 
+                                                                                                            line_rec_.handling_unit_id, 
+                                                                                                            line_rec_.qty_onhand, 
+                                                                                                            line_rec_.qty_reserved);
+            END IF;
+
+            IF (line_rec_.available_qtyto_move = 1 AND line_rec_.serial_no != '*') THEN
+               line_rec_.qty_to_move := line_rec_.available_qtyto_move;   
+            END IF;
+
+            CRUD_Create___(line_rec_);                                 
+         END LOOP;
+      END IF;
+   END LOOP;    
+END CRUD_Upload___;
+
+@Override
+PROCEDURE CRUD_Update___(
+   old_ IN Move_Part_With_Transport_Task_Virtual_Rec,
+   new_ IN Move_Part_With_Transport_Task_Virtual_Rec )
+IS   
+BEGIN
+   Site_API.Exist(new_.contract);
+   Inventory_Location_API.Exist(new_.contract, new_.location_no);
+   super(old_,new_);
+END CRUD_Update___;
+
+PROCEDURE Check_Rows_Correct_Modified___ (
+   parent_objkey_ IN VARCHAR2 )
+IS 
+   parent_key_             Move_Part_With_Transport_Task_Virtual_Key;
+   parent_rec_             Move_Part_With_Transport_Task_Virtual_Rec;
+   child_key_              Inventory_Part_In_Stock_Virtual_Key;
+   child_rec_              Inventory_Part_In_Stock_Virtual_Rec;
+   total_quantity_to_move_ NUMBER DEFAULT 0;
+BEGIN 
+   parent_key_.objkey  := parent_objkey_;
+   parent_rec_ := Get_Record___(parent_key_);   
+   
+   FOR rec_ IN Get_Parts_To_Move_Array___(parent_key_) LOOP
+      child_key_.objkey := rec_.objkey;
+      child_rec_ := Get_Record___(child_key_);
+   
+      IF (child_rec_.qty_to_move IS NULL) THEN
+         Error_SYS.Record_General(lu_name_, 'QTY_TO_MOVE_IS_NULL: One or more records needs a value in Qty To Move.');
+      END IF;
+      total_quantity_to_move_ := total_quantity_to_move_ + child_rec_.qty_to_move;
+   END LOOP;
+   
+   IF (total_quantity_to_move_ = 0) THEN
+      Error_SYS.Record_General(lu_name_, 'QTY_TO_MOVE_IS_ZERO: At least one record must have a value in Qty To Move');
+   END IF;
+   
+END Check_Rows_Correct_Modified___;
+
+FUNCTION Move_With_Transport_Task___ (
+   parent_objkey_ IN VARCHAR2,
+	contract_ IN VARCHAR2,
+	location_no_ IN VARCHAR2,
+	destination_ IN VARCHAR2,
+	info$_ OUT VARCHAR2) RETURN Move_With_Transport_Task_Structure_Rec
+IS
+   inventory_event_id_     NUMBER;
+   rec_                    Move_With_Transport_Task_Structure_Rec;
+   moved_quantity_         NUMBER;
+   total_quantity_to_move_ NUMBER DEFAULT 0;
+   parent_key_             Move_Part_With_Transport_Task_Virtual_Key;
+   child_key_              Inventory_Part_In_Stock_Virtual_Key;
+   child_rec_              Inventory_Part_In_Stock_Virtual_Rec;
+   to_destination_         VARCHAR2(20);
+   available_qtyto_move_   NUMBER;
+   quantity_               NUMBER;
+BEGIN
+   -- Security
+   User_Allowed_Site_API.Is_Authorized(contract_); 
+   
+   Check_Rows_Correct_Modified___(parent_objkey_);   
+   inventory_event_id_ := Inventory_Event_Manager_API.Get_Next_Inventory_Event_Id;
+   parent_key_.objkey := parent_objkey_;
+   
+   IF (destination_ = 'MoveToInventory') THEN
+      to_destination_ := Inventory_Part_Destination_API.Decode(Inventory_Part_Destination_API.DB_MOVE_TO_INVENTORY);
+   ELSE
+      to_destination_ := Inventory_Part_Destination_API.Decode(Inventory_Part_Destination_API.DB_MOVE_TO_TRANSIT);
+   END IF;
+   
+   FOR rec_ IN Get_Parts_To_Move_Array___(parent_key_) LOOP
+      child_key_.objkey := rec_.objkey;
+      child_rec_ := Get_Record___(child_key_);
+      total_quantity_to_move_ := total_quantity_to_move_ + child_rec_.qty_to_move;
+      
+      available_qtyto_move_ := Inv_Part_Stock_Reservation_API.Get_Available_Qty_To_Move(child_rec_.contract,
+                                                                                        child_rec_.part_no,
+                                                                                        child_rec_.configuration_id,
+                                                                                        child_rec_.location_no,
+                                                                                        child_rec_.lot_batch_no,
+                                                                                        child_rec_.serial_no,
+                                                                                        child_rec_.eng_chg_level,
+                                                                                        child_rec_.waiv_dev_rej_no,
+                                                                                        child_rec_.activity_seq,
+                                                                                        child_rec_.handling_unit_id,
+                                                                                        child_rec_.qty_onhand,
+                                                                                        child_rec_.qty_reserved );
+      IF (child_rec_.qty_to_move > available_qtyto_move_) THEN
+         quantity_ := available_qtyto_move_;
+      ELSE 
+         quantity_ := child_rec_.qty_to_move;
+      END IF;      
+      
+      IF (child_rec_.qty_to_move != 0) THEN
+         -- Security
+         User_Allowed_Site_API.Is_Authorized(child_rec_.contract);          
+         Inventory_Event_Manager_API.Set_Session_Id(inventory_event_id_);
+         Inventory_Part_In_Stock_API.Move_Part_With_Transport_Task(moved_quantity_,
+                                                                   child_rec_.contract,
+                                                                   child_rec_.part_no,
+                                                                   child_rec_.configuration_id,
+                                                                   child_rec_.location_no,
+                                                                   child_rec_.lot_batch_no,
+                                                                   child_rec_.serial_no,
+                                                                   child_rec_.eng_chg_level,
+                                                                   child_rec_.waiv_dev_rej_no,
+                                                                   child_rec_.activity_seq,
+                                                                   child_rec_.handling_unit_id,
+                                                                   child_rec_.source_ref1,
+                                                                   child_rec_.source_ref2,
+                                                                   child_rec_.source_ref3,
+                                                                   child_rec_.receipt_no,
+                                                                   child_rec_.source_ref_type,
+                                                                   quantity_,
+                                                                   contract_,
+                                                                   location_no_,
+                                                                   to_destination_);
+         IF (child_rec_.qty_to_move > moved_quantity_) THEN
+            Client_SYS.Add_Info(lu_name_, 'QTY_TO_MOVE_INCREASED: Quantity requested to move exceeds the movable quantity. Transport Task lines created only for the movable quantity.');
+         END IF;                                                          
+      END IF;
+   END LOOP;
+   Inventory_Event_Manager_API.Finish(inventory_event_id_);   
+   rec_.qty_moved := moved_quantity_;
+   info$_ := Client_SYS.Get_All_Info;
+   RETURN rec_;
+END Move_With_Transport_Task___;

@@ -1,0 +1,614 @@
+-------------------------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  --------------------------------------------------------------------------------
+-- 2021-11-11  DigPlk  SC21R2-5149, Replaced the functionality of IdentifySerialsInLocAssistant with IdentifySerialsInLocRepeatAssistant.
+-- 2020-03-11  ErRalk  SCSPRING20-1287, Modified fetch in InvTransSourceRefTypeDb attribute to support Shipment Order.
+-- 2019-12-20  Hadolk  MFSPRING20-77, Added the fields EngRevision, DrawingNo and DrawingRevisionNo and the reference to Part Revision.
+-- 2019-06-28  JaThlk  SCUXXW4-18248, Removed 'Record.' from GetSerialsCommand.
+-- 2019-05-17  DaZase  SCUXXW4-19602, Added initialcheck to all unbounded actions.
+-- 2019-04-04  milise  SCUXXW4-18022, Replacing of label = "" with showlabel = false
+-- 2019-03-12  JaThlk  SCUXXW4-17128, Added SessionId as an in parameter in IdentifySerialsInLocationAssistant.
+-- 2018-12-18  ChFolk  SCUXXW4-5346, Included fragment HandlingUnitNoShipmentLovSelector.
+-- 2018-10-10  ChFolk  SCUXXW4-5346, Renamed the virtuals to avoid lengthy names.
+-- 2018-09-18  ChFolk  SCUXXW4-5346, Added GetSerialsCommand to support Identify serials dialog.
+-- 2018-09-12  ChFolk  SCUXXW4-5346, Created the fragment to dlgConnectInvPartsToNewOrExistingHU.
+-------------------------------------------------------------------------------------------------------
+fragment AttachPartsToHandlingUnitAssistant;
+component INVENT;
+layer Core;
+description "Assistant to attach inventory part in stock records to handling units.
+             Only part records that hasn't already been packed into handling units that are available to attach";
+
+include fragment HandlingUnitNoShipmentLovSelector;
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+-------------------------------- ASSISTANTS ---------------------------------
+assistant AttachPartsToHandlingUnitAssistant using AttachPartsToHandlingUnitSet {
+   label = "Attach Parts to Handling Unit";
+
+   savemode = OnLostFocus;
+   input(ConnectedSource, ObjidListArr);
+
+   init command {
+      execute {
+         set CreateOption = "CreateNew";
+      }
+   }
+   steps {
+      step {
+         group ConnectInventoryPartsToNewHandlingUnitGroup {
+            visible = [CreateOption = "CreateNew"];
+         }
+         group ConnectInventoryPartsToExistingHandlingUnitGroup {
+            visible = [CreateOption = "AddToExisting"];
+         }
+         list PartsToAddList(PartsToAddArray);
+      }
+      final step {
+
+      }
+      cancelled step {
+
+      }
+   }
+   finish command {
+      enabled = [HandlingUnitTypeId != null or HandlingUnitId != null];
+
+      variable NewHandlingUnitIdNum {
+         type = Number;
+      }
+      variable AttachToHandlingUnitInfoVar {
+         type = Structure(AttachToHandlingUnitInfoStructure);
+      }
+      variable ResultKeysStr {
+         type = Text;
+      }
+      execute {
+         call ExecuteAttachToHandlingUnit(Objkey) into AttachToHandlingUnitInfoVar;
+
+         if [AttachToHandlingUnitInfoVar.NewHandlingUnitId != null] {
+            alert("A Handling Unit with ID ${AttachToHandlingUnitInfoVar.NewHandlingUnitId} was created.");
+         }
+         if [AttachToHandlingUnitInfoVar.ResultKeyList != null] {
+            set ResultKeysStr = AttachToHandlingUnitInfoVar.ResultKeyList;
+            printdialog ResultKeysStr;
+         }
+//         if [AttachToHandlingUnitInfoVar.CapacityExceedInfo != null] {
+//           -- need to handle when F1 support for return info
+//            }
+         exit OK;
+      }
+   }
+   cancel command {
+      execute {
+         exit CANCEL;
+      }
+   }
+   restart command {
+      visible = [false];
+   }
+}
+
+---------------------------------- GROUPS -----------------------------------
+group ConnectInventoryPartsToNewHandlingUnitGroup for AttachPartsToHandlingUnitVirtual {
+   label = "";
+   radiogroup CreateOption {
+      showlabel = false;
+      size = FullWidth;
+      validate command {
+         execute {
+            if [CreateOption = "CreateNew"] {
+               set HandlingUnitTypeId = null;
+               set HandlingUnitCapacity = null;
+               set PrintLabel = false;
+               set GenerateSscc = false;
+               set PrintHUContentLabel = false;
+            }
+         }
+      }
+   }
+   lov HandlingUnitTypeIdRef with ReferenceHandlingUnitTypeSelector {
+      description = HandlingUnitTypeIdRef.Description;
+
+      validate command {
+         variable HandlingUnitTypeInfoVar {
+            type = Structure(HandlingUnitTypeInfoStructure);
+         }
+         execute {
+            call GetHandlingUnitTypeInfo(HandlingUnitTypeId, Objkey) into HandlingUnitTypeInfoVar;
+            set HandlingUnitCapacity = HandlingUnitTypeInfoVar.Capacity;
+
+            if [HandlingUnitTypeInfoVar.PrintLabelDb = "TRUE"] {
+               set PrintLabel = true;
+               set NoOfLabels = HandlingUnitTypeInfoVar.NoOfHandlingUnitlabels;
+            }
+            if [HandlingUnitTypeInfoVar.PrintContentLabelDb = "TRUE"] {
+               set PrintHUContentLabel = true;
+               set NoOfContentLabels = HandlingUnitTypeInfoVar.NoOfContentLabels;
+            }
+            if [HandlingUnitTypeInfoVar.GenerateSsccNoDb = "TRUE"] {
+               set GenerateSscc = true;
+            }
+         }
+      }
+   }
+   field HandlingUnitCapacity {
+      editable = [false];
+   }
+   field PrintLabel {
+      size = Small;
+      required = [true];
+   }
+   field GenerateSscc {
+      size = Small;
+      required = [true];
+   }
+   field PrintHUContentLabel {
+      size = Small;
+      required = [true];
+   }
+}
+group ConnectInventoryPartsToExistingHandlingUnitGroup for AttachPartsToHandlingUnitVirtual {
+   label = "";
+   radiogroup CreateOption {
+      showlabel = false;
+      size = FullWidth;
+      validate command {
+         execute {
+            if [CreateOption = "AddToExisting"] {
+               set HandlingUnitId = null;
+               set AltHandlingUnitLabel = null;
+               set HandlingUnitTypeId = null;
+               set HandlingUnitCapacity = null;
+               set Sscc = null;
+            }
+         }
+      }
+   }
+
+   lov HandlingUnitIdRef with ReferenceHandlingUnitNoShipmentLovSelector using GetHandlingUnitIds(Objkey) {
+      validate command {
+         variable HandlingUnitIdInfoVar {
+            type = Structure(HandlingUnitIdInfoStructure);
+         }
+         execute {
+            call GetHandlingUnitIdInfo(HandlingUnitId, Objkey) into HandlingUnitIdInfoVar;
+            set HandlingUnitTypeId = HandlingUnitIdInfoVar.HandlingUnitTypeId;
+            set HandlingUnitCapacity = HandlingUnitIdInfoVar.Capacity;
+            set Sscc = HandlingUnitIdInfoVar.SsccNo;
+            set AltHandlingUnitLabel = HandlingUnitIdInfoVar.AltHandlingUnitLabelId;
+         }
+      }
+   }
+   lov AltHandlingUnitLabelRef with ReferenceHandlingUnitNoShipmentLovSelector using GetAltHandlingUnitLabels(Objkey) {
+      validate command {
+         variable AltHandlingUnitLabelInfoVar {
+            type = Structure(AltHandlingUnitLabelInfoStructure);
+         }
+         execute {
+            call GetAltHandlingUnitLabelInfo(AltHandlingUnitLabel, Objkey) into AltHandlingUnitLabelInfoVar;
+            set HandlingUnitId = AltHandlingUnitLabelInfoVar.HandlingUnitId;
+            set HandlingUnitTypeId = AltHandlingUnitLabelInfoVar.HandlingUnitTypeId;
+            set HandlingUnitCapacity = AltHandlingUnitLabelInfoVar.Capacity;
+            set Sscc = AltHandlingUnitLabelInfoVar.SsccNo;
+         }
+      }
+   }
+   lov SsccRef with ReferenceHandlingUnitNoShipmentLovSelector using GetSsccs(Objkey) {
+      validate command {
+         variable SsccInfoVar {
+            type = Structure(SsccInfoStructure);
+         }
+         execute {
+            call GetSsccInfo(Sscc, Objkey) into SsccInfoVar;
+            set HandlingUnitId = SsccInfoVar.HandlingUnitId;
+            set HandlingUnitTypeId = SsccInfoVar.HandlingUnitTypeId;
+            set AltHandlingUnitLabel = SsccInfoVar.AltHandlingUnitLabelId;
+            set HandlingUnitCapacity = SsccInfoVar.Capacity;
+         }
+      }
+   }
+   field HandlingUnitCapacity {
+      editable = [false];
+   }
+   lov HandlingUnitTypeIdRef with ReferenceHandlingUnitTypeSelector {
+      description = HandlingUnitTypeIdRef.Description;
+      editable = [false];
+   }
+}
+----------------------------------- LISTS -----------------------------------
+list PartsToAddList for PartInStockToAttachHuVirtual {
+   editmode = SingleRowEdit;
+   label = "";
+   crudactions {
+      before command GetSerialsCommand;
+
+   }
+   field QtyToAttach {
+      size = Small;
+   }
+
+   field CatchQtyToAttach {
+      size = Small;
+      editable = [CatchUom != null];
+   }
+   field Contract {
+      size = Small;
+   }
+   lov InventoryPartRef with ReferenceInventoryPartSelector {
+      label = "Inventory Part";
+      description = InventoryPartRef.DescriptionInUse;
+      editable = [false];
+   }
+   field ConfigurationId {
+      size = Small;
+   }
+   field LocationNo {
+      size = Small;
+   }
+   field LotBatchNo {
+      size = Small;
+   }
+   field SerialNo {
+      size = Small;
+   }
+   field EngChgLevel {
+      size = Small;
+   }
+   field WaivDevRejNo {
+      size = Small;
+   }
+   field ActivitySeq;
+   field QtyOnhand;
+   field QtyReserved;
+   field AvailableQty;
+   field CatchQtyOnhand;
+   field CatchUom {
+      size = Small;
+   }
+   field PartTrackingSessionId {
+      columnvisible = [false];
+   }
+   field ReceiptIssueSerialTrackDb {
+      columnvisible = [false];
+   }
+   @DynamicComponentDependency MFGSTD
+   field PartRevisionRef.EngRevision {
+      label = "Engineering Revision No";
+      editable = [false];
+      columnvisible = [false];
+   }
+   @DynamicComponentDependency MFGSTD
+   field PartRevisionRef.TechnicalDrawingNo {
+      label = "Drawing No";
+      editable = [false];
+      columnvisible = [false];
+   }
+   @DynamicComponentDependency MFGSTD
+   field PartRevisionRef.TechDrawingRevisionNo {
+      label = "Drawing Revision No";
+      editable = [false];
+      columnvisible = [false];
+   }
+}
+
+--------------------------------- COMMANDS ----------------------------------
+command GetSerialsCommand for PartInStockToAttachHuVirtual {
+   variable SessionSelection {
+      type = Text;
+   }
+   variable PartTrackingSessionIdNum {
+      type = Number;
+   }
+   variable ReceiptSerialTrackingDbStr {
+      type = Text;
+   }
+   variable SerialNoStr {
+      type = Text;
+   }
+   variable SourceRef1Str {
+      type = Text;
+   }
+   variable HandlingUnitIdNum {
+      type = Number;
+   }
+   execute {
+      set ReceiptSerialTrackingDbStr = "${ReceiptIssueSerialTrackDb}";
+      set SerialNoStr = "${SerialNo}";
+      set SourceRef1Str = "${SourceRef1}";
+      set HandlingUnitIdNum = HandlingUnitId;
+
+      if [ReceiptSerialTrackingDbStr = "TRUE" and SerialNoStr = "*" and not SourceRef1Str] {
+         if [not HandlingUnitIdNum] {
+            set HandlingUnitIdNum = 0;
+         }
+         call GetRecordsWithSessionId(Contract, PartNo, ConfigurationId, LocationNo, LotBatchNo, EngChgLevel, WaivDevRejNo, ActivitySeq, HandlingUnitIdNum, QtyToAttach, CatchQtyToAttach, NULL, NULL, NULL) into IdentifySerialsRecStructure;
+         assistant IdentifySerialsInLocRepeatAssistant(IdentifySerialsRecStructure.RemainingSelection, IdentifySerialsRecStructure.Total, null, null) into(SessionSelection) {
+            when OK {
+               bulkset PartTrackingSessionId = IdentifySerialsRecStructure.SessionId;
+               exit;
+            }
+         }
+      }
+   }
+}
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+----------------------------- MAIN ENTRY POINTS -----------------------------
+entityset AttachPartsToHandlingUnitSet for AttachPartsToHandlingUnitVirtual;
+
+---------------------------------- ACTIONS ----------------------------------
+action ExecuteAttachToHandlingUnit Structure(AttachToHandlingUnitInfoStructure) {
+   initialcheck implementation;
+   supportwarnings = [true];
+   parameter ParentObjkey Text;
+   ludependencies = InventoryPartInStock, ReceiptInvLocation;
+   ludependencies = ConnectInvPartsToNewOrExistingHandlingUnitVirtual;
+}
+
+--------------------------------- FUNCTIONS ---------------------------------
+function GetHandlingUnitIds List < Entity(HandlingUnitNoShipmentLov) > {
+   parameter ParentObjkey Text;
+}
+function GetAltHandlingUnitLabels List < Entity(HandlingUnitNoShipmentLov) > {
+   parameter ParentObjkey Text;
+}
+function GetSsccs List < Entity(HandlingUnitNoShipmentLov) > {
+   parameter ParentObjkey Text;
+}
+function GetHandlingUnitTypeInfo Structure(HandlingUnitTypeInfoStructure) {
+   parameter HandlingUnitTypeId Text;
+   parameter ParentObjkey Text;
+}
+function GetHandlingUnitIdInfo Structure(HandlingUnitIdInfoStructure) {
+   parameter HandlingUnitId Number;
+   parameter ParentObjkey Text;
+}
+function GetAltHandlingUnitLabelInfo Structure(AltHandlingUnitLabelInfoStructure) {
+   parameter AltHandlingUnitLabel Text;
+   parameter ParentObjkey Text;
+}
+function GetSsccInfo Structure(SsccInfoStructure) {
+   parameter Sscc Text;
+   parameter ParentObjkey Text;
+}
+
+-------------------------------- STRUCTURES ---------------------------------
+structure HandlingUnitTypeInfoStructure {
+   attribute Capacity Number;
+   attribute PrintLabelDb Text;
+   attribute NoOfHandlingUnitLabels Number;
+   attribute PrintContentLabelDb Text;
+   attribute NoOfContentLabels Number;
+   attribute GenerateSsccNoDb Text;
+}
+
+structure HandlingUnitIdInfoStructure {
+   attribute HandlingUnitTypeId Text;
+   attribute AltHandlingUnitLabelId Text;
+   attribute Capacity Number;
+   attribute SsccNo Text;
+}
+
+structure AltHandlingUnitLabelInfoStructure {
+   attribute HandlingUnitId Number;
+   attribute HandlingUnitTypeId Text;
+   attribute Capacity Number;
+   attribute SsccNo Text;
+}
+
+structure SsccInfoStructure {
+   attribute HandlingUnitId Number;
+   attribute HandlingUnitTypeId Text;
+   attribute AltHandlingUnitLabelId Text;
+   attribute Capacity Number;
+}
+
+structure AttachToHandlingUnitInfoStructure {
+   attribute NewHandlingUnitId Number;
+
+   attribute ResultKeyList Text;
+}
+
+------------------------------- ENUMERATIONS --------------------------------
+
+enumeration CreateOptionEnum {
+   value = "CREATE_NEW" {
+      identifier = "CreateNew";
+      label = "Create New";
+   }
+   value = "ADD_TO_EXISTING" {
+      identifier = "AddToExisting";
+      label = "Add to Existing";
+   }
+}
+
+--------------------------------- VIRTUALS ----------------------------------
+
+virtual AttachPartsToHandlingUnitVirtual {
+   attribute CreateOption Enumeration(CreateOptionEnum);
+   attribute HandlingUnitTypeId Text {
+      label = "Handling Unit Type ID";
+      maxlength = 100;
+      format = uppercase;
+   }
+   attribute HandlingUnitTypeDescription Text {
+      label = "Handling Unit Type Description";
+      maxlength = 200;
+   }
+   attribute HandlingUnitId Number {
+      label = "Handling Unit ID";
+   }
+   attribute PrintLabel Boolean("TRUE", "FALSE") {
+      label = "Print Label";
+   }
+   attribute GenerateSscc Boolean("TRUE", "FALSE") {
+      label = "Generate SSCC";
+   }
+   attribute HandlingUnitCapacity Number {
+      label = "Handling Unit Capacity";
+   }
+   attribute AltHandlingUnitLabel Text {
+      label = "Alt Handling Unit Label ID";
+      maxlength = 2000;
+   }
+   attribute Sscc Text {
+      label = "SSCC";
+      maxlength = 2000;
+   }
+   attribute PrintHUContentLabel Boolean("TRUE", "FALSE") {
+      label = "Print Content Label";
+   }
+   attribute NoOfLabels Number;
+   attribute NoOfContentLabels Number;
+   attribute ObjidListArr Text {
+      label = " ";
+      maxlength = 2000;
+   }
+   attribute ConnectedSource Text {
+      label = " ";
+      maxlength = 100;
+   }
+   array PartsToAddArray() to PartInStockToAttachHuVirtual();
+   reference HandlingUnitTypeIdRef(HandlingUnitTypeId) to HandlingUnitType(HandlingUnitTypeId) {
+      label = "Handling Unit Type ID";
+   }
+   reference HandlingUnitIdRef(HandlingUnitId) to HandlingUnitNoShipmentLov(HandlingUnitId) {
+      label = "Handling Unit ID";
+   }
+   reference AltHandlingUnitLabelRef(AltHandlingUnitLabel) to HandlingUnitNoShipmentLov(AltHandlingUnitLabelId) {
+      label = "Alt Handling Unit Label ID";
+   }
+   reference SsccRef(Sscc) to HandlingUnitNoShipmentLov(Sscc) {
+      label = "SSCC";
+   }
+}
+
+virtual PartInStockToAttachHuVirtual {
+   crud = Read, Update, Delete;
+   ludependencies = ConnectInvPartsToNewOrExistingHandlingUnitVirtual;
+   attribute QtyToAttach Number {
+      label = "Qty to Attach";
+      editable = [true];
+   }
+   attribute CatchQtyToAttach Number {
+      label = "Catch Qty to Attach";
+   }
+   attribute Contract Text {
+      label = "Site";
+      maxlength = 5;
+      required = [true];
+      editable = [false];
+      format = uppercase;
+   }
+   attribute PartNo Text {
+      label = "Part No";
+      maxlength = 25;
+      required = [true];
+      editable = [false];
+      format = uppercase;
+   }
+   attribute ConfigurationId Text {
+      label = "Configuration ID";
+      maxlength = 50;
+      required = [true];
+      editable = [false];
+      format = uppercase;
+   }
+   attribute LocationNo Text {
+      label = "Location No";
+      maxlength = 35;
+      required = [true];
+      editable = [false];
+      format = uppercase;
+   }
+   attribute HandlingUnitId Number {
+      label = "Handling Unit ID";
+      required = [true];
+      editable = [ETag = null];
+   }
+   attribute LotBatchNo Text {
+      label = "Lot/Batch No";
+      maxlength = 20;
+      required = [true];
+      editable = [false];
+   }
+   attribute SerialNo Text {
+      label = "Serial No";
+      maxlength = 50;
+      required = [true];
+      editable = [false];
+   }
+   attribute EngChgLevel Text {
+      label = "Revision No";
+      maxlength = 6;
+      required = [true];
+      editable = [false];
+   }
+   attribute WaivDevRejNo Text {
+      label = "W/D/R No";
+      maxlength = 15;
+      required = [true];
+      editable = [false];
+   }
+   attribute ActivitySeq Number {
+      label = "Activity Sequence";
+      editable = [false];
+   }
+   attribute QtyOnhand Number {
+      label = "Qty on Hand";
+      editable = [false];
+   }
+   attribute QtyReserved Number {
+      label = "Qty Reserved";
+      editable = [false];
+   }
+   attribute AvailableQty Number {
+      label = "Available Qty";
+      editable = [false];
+   }
+   attribute CatchQtyOnhand Number {
+      label = "On Hand Catch Qty";
+      editable = [false];
+   }
+   attribute CatchUom Text {
+      label = "Catch UoM";
+      maxlength = 20;
+      editable = [false];
+   }
+   attribute SourceRef1 Text {
+      label = "Source Ref 1";
+      maxlength = 50;
+      editable = [false];
+   }
+   attribute SourceRef2 Text {
+      label = "Source Ref 2";
+      maxlength = 50;
+      editable = [false];
+   }
+   attribute SourceRef3 Text {
+      label = "Source Ref 3";
+      maxlength = 50;
+      editable = [false];
+   }
+   attribute ReceiptNo Number {
+      label = "Receipt No";
+      editable = [false];
+   }
+   attribute InvTransSourceRefTypeDb Text {
+      fetch = "DECODE(INV_TRANS_SOURCE_REF_TYPE_DB, 'PURCHASE_ORDER', 'pur order', 'SHIPMENT_ORDER', 'SHIPMENT_ORDER', null)";
+      label = "Inv Trans Source Ref Type";
+      maxlength = 20;
+      editable = [false];
+   }
+   attribute ReceiptIssueSerialTrackDb Text {
+      label = "At Receipt and Issue";
+      editable = [false];
+   }
+   attribute PartTrackingSessionId Number;
+
+   reference InventoryPartRef(Contract, PartNo) to InventoryPart(Contract, PartNo);
+   @DynamicComponentDependency MFGSTD
+   reference PartRevisionRef(Contract, PartNo, EngChgLevel) to PartRevision(Contract, PartNo, EngChgLevel);
+}
+
+

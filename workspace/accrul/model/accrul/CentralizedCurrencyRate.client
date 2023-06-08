@@ -1,0 +1,289 @@
+client CentralizedCurrencyRate;
+component ACCRUL;
+layer Core;
+projection CentralizedCurrencyRateHandling;
+include fragment ScheduledTasksCommon;
+warningsenabled = SourceCompCurrRateType, TargetCompCurrRateType;
+
+--------------------------------- FRAGMENTS ---------------------------------
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+navigator {
+   entry CurrencyTypesNavEntry parent AccrulNavigator.CurrencyMenu at index 600 {
+      label = "Centralized Currency Rate Handling";
+      page Form;
+   }
+}
+
+
+-------------------------------- MAIN PAGES ---------------------------------
+page Form using SourceCompCurrRateTypeSet {
+   label = "Centralized Currency Rate Handling";
+   stateindicator SourceCompCurrRateTypeStateIndicator;
+   selector SourceCompCurrRateTypeLocalSelector;
+   initcontext PageInitContext;
+
+   group SourceCompCurrRateTypeGroup bind SourceCompCurrRateTypeLocalSelector;
+   list TargetCompCurrRateTypeList(TargetCompCurrRateTypeArray) bind SourceCompCurrRateTypeLocalSelector;
+
+   command SetPlannedCommand;
+   command SetActiveCommand;
+   command CurrencyUpdateWorkflowCommand;
+}
+
+--------------------------------- COMMANDS ----------------------------------
+command SetPlannedCommand  for SourceCompCurrRateType {
+   label = "Set Planned";
+   enabled = [Objstate = "Active"];
+
+   execute {
+      call Plan();
+   }
+}
+
+command SetActiveCommand  for SourceCompCurrRateType {
+   label = "Set Active";
+   enabled = [Objstate = "Planned" and TargetCompanyExist];
+
+   execute {
+      call Activate();
+   }
+}
+
+
+initcontext PageInitContext {
+   parameter WorkflowEnabled Boolean;
+   init command {
+      execute {
+         call InitWorkflowEnabled() into WorkflowEnabled;
+      }
+   }
+}
+
+command CurrencyUpdateWorkflowCommand for SourceCompCurrRateType {
+   label = "Update Currency Rates";
+
+   visible = [TargetCompanyExist and Objstate = "Active"];
+   execute {
+      if [not initcontext.WorkflowEnabled] {
+         call ValidateWorkFlowEnabled();
+      }
+      else {
+         assistant ScheduleCurrencyRateUpdateAssistant(SourceCompany, SourceCurrRateType) {
+            when YES {
+               exit OK;
+            }
+            when NO {
+               exit CANCEL;
+            }
+         }
+      }
+   }
+}
+
+--------------------------------- SELECTORS ---------------------------------
+selector SourceCompCurrRateTypeLocalSelector for SourceCompCurrRateType {
+   orderby = SourceCompany;
+   label = "${SourceCompany} - ${SourceCurrRateType}";
+
+   static SourceCompany;
+   static SourceCurrRateType;
+   badge Objstate {
+      label = "Status";
+      showlabel = false;
+      style = TextOnly;
+      emphasis StatePlanned = [Objstate = "Planned"];
+      emphasis StateReleased = [Objstate = "Active"];
+   }
+}
+
+
+---------------------------------- GROUPS -----------------------------------
+group SourceCompCurrRateTypeGroup for SourceCompCurrRateType {
+   label = "Source Company Information";
+
+   lov SourceCompanyRef with ReferenceCompanyFinanceSelector {
+      search = Company, Description;
+      description = SourceCompanyRef.Description;
+   }
+   lov SourceCurrRateTypeRef with ReferenceCurrencyType3QuerySelector {
+      search = CurrencyType, Description;
+      description = SourceCurrRateTypeRef.Description;
+      advancedview CurrencyType3QueryLovList;
+   }
+   field SourceCurrRateTypeRef.RefCurrencyCode {
+      editable = [false];
+   }
+   field LastUpdated {
+      visible = [initcontext.WorkflowEnabled];
+   }
+}
+
+
+group ExecutionOption for TaskVirtual {
+   label = "";
+   radiogroup UpdateOptions {
+      required = [true];
+   }
+}
+
+
+----------------------------------- LISTS -----------------------------------
+list TargetCompCurrRateTypeList for TargetCompCurrRateType {
+   label = "Target Company Information";
+
+   crudactions {
+      new {
+         enabled = [parent.Objstate = "Planned"];
+      }
+      edit {
+         enabled = [false];
+      }
+      delete {
+         enabled = [parent.Objstate = "Planned"];
+      }
+   }
+
+   lov TargetCompanyRef with ReferenceCompanyFinanceSelector {
+      search = Company, Description;
+      description = TargetCompanyRef.Name;
+   }
+   lov TargetCurrRateTypeRef with ReferenceCurrencyType3QuerySelector {
+      search = CurrencyType, Description;
+      description = TargetCurrRateTypeRef.Description;
+      advancedview CurrencyType3QueryLovList;
+   }
+   field TargetCurrRateTypeRef.RefCurrencyCode;
+   field LastUpdated {
+      size = Large;
+      columnvisible = [parent.LastUpdated != null];
+   }
+}
+
+@Override
+list CurrencyType3QueryLovList for CurrencyType3Query {
+   field Company {
+      columnexclude = [true];
+   }
+}
+
+
+-------------------------------- ASSISTANTS ---------------------------------
+assistant ScheduleCurrencyRateUpdateAssistant using TaskVirtualSet {
+   label = "Update Currency Rates";
+   savemode = OnLostFocus;
+   input(SourceCompany, SourceCurrencyRateType);
+
+   init command {
+      variable ParametersStructVar {
+         type = Structure(ParametersStructure);
+      }
+
+      execute {
+         call DefaultScheduleCurrUpdateParameters() into ParametersStructVar;
+         set ScheduleMethodId = ParametersStructVar.ScheduleMethodId;
+         set ScheduleName = ParametersStructVar.Description;
+         set UpdateOptions = "Now";
+      }
+   }
+
+   steps {
+      step {
+         label = "Set Currency Update Parameters";
+         group ExecutionOption;
+      }
+      step {
+         label = "Schedule";
+
+         visible = [SourceCompany != null and SourceCurrencyRateType != null and UpdateOptions = "Schedule"];
+         enabled = [SourceCompany != null and SourceCurrencyRateType != null];
+
+         group SchedulingParametersGroup;
+         group SchedulingStartAndStopDateGroup;
+      }
+      step {
+         label = "Schedule Options";
+
+         visible = [SourceCompany != null and SourceCurrencyRateType != null and UpdateOptions = "Schedule"];
+         enabled = [SourceCompany != null and SourceCurrencyRateType != null];
+
+         group ScheduledTasksAssistantAdvOpGroup;
+         group ScheduledTasksAssistantStreamsGroup;
+      }
+
+      final step {
+         description = "${UpdateStatus}";
+         command NavigateToScheduledTask {
+            enabled = [UpdateOptions = "Schedule"];
+         }
+      }
+
+      cancelled step {
+         description = "Task was cancelled";
+      }
+   }
+   finish command {
+      label = "OK";
+      enabled = [SourceCompany != null and SourceCurrencyRateType != null];
+
+      execute {
+         if [UpdateOptions = "Now"] {
+            call UpdateCurrencyRatesFromWorkFlow(SourceCompany, SourceCurrencyRateType);
+            navigate back;
+         }
+         else {
+            call ScheduleTask() into ScheduleTaskVar;
+            set ScheduleId = ScheduleTaskVar.ScheduleId;
+            set UpdateStatus = "Task '${ScheduleName}', assigned with the Id '${ScheduleId}', was successfully scheduled to start ${ScheduleTaskVar.ScheduledDate} at ${ScheduleTaskVar.ScheduledTime}.";
+
+            if [UpdateOptions = "Viewschedule"] {
+               navigate back;
+            }
+         }
+      }
+   }
+   cancel command {
+      enabled = [true];
+   }
+   restart command {
+      visible = [true];
+   }
+}
+
+
+---------------------------------- DIALOGS ----------------------------------
+
+
+-------------------------------- SINGLETONS ---------------------------------
+
+
+---------------------------------- CHARTS -----------------------------------
+
+
+--------------------------------- CALENDERS ---------------------------------
+
+
+---------------------------------- SHEETS -----------------------------------
+
+
+----------------------------- STATE INDICATORS ------------------------------
+@Override
+stateindicator SourceCompCurrRateTypeStateIndicator for SourceCompCurrRateType {
+   state "Planned" {
+      completed = 50%;
+      emphasis StatePlanned = [Objstate = "Planned"];
+   }
+   state "Active" {
+      completed = 100%;
+      emphasis StateReleased = [Objstate = "Active"];
+   }
+}
+
+
+----------------------------------- TREES -----------------------------------
+
+
+---------------------------------- PLUGINS ----------------------------------
+
+
+------------------------------- IMAGE VIEWERS -------------------------------

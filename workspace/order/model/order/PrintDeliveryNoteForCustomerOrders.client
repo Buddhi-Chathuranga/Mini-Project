@@ -1,0 +1,216 @@
+
+--------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  ---------------------------------------------------------------
+-- 2020-11-09  RavDlk  SC2020R1-11228, Handled enumeration 'DispatchAdviceSent'
+-- 2019-10-31  Hairlk  SCXTEND-1320, Set the startupmode to search.
+-- 2019-09-09  YasMlk  SCFALL19-225, Added get method for DelivertoCustomerName in SendDispatchAdviceMessageCommand and CustomerName in SendDirectDeliveryMessageCommand.
+-- 2019-06-15  RoJalk  SCUXXW4-21908, called RefreshPage method in SendDispatchAdviceMessageCommand.
+-- 2019-06-13  fgusse  SCUXXW4-22185, Changed field CustomerOrderStatus to badge
+-- 2019-06-06  ErRalk  SCUXXW4-21905, Modified PrintDeliveryNoteList by concatenating Customer No and Customer Name
+-- 2019-05-16  SBalLK  SCUXXW4-19318, Added success message when background job creates for Customer Order Pro Forma Invoice to print.
+-- 2018-11-07  RaVdlk  SCUXXW4-1244, Added the fragment for RMB Send Dispatch Advice and Send Direct Delivery message and modified the Print
+-- 2018-11-07                        Delivery Note command
+-- 2018-07-25  RaVdlk  SCUXXW4-1244, Implemented Print Delivery Note Command
+-- 2018-07-16  RaVdlk  SCUXXW4-1244, Implemented the DeliveryNoteAnalysisCommand and PrintCustomerOrderProFormaCommand
+-- 2018-07-11  RaVdlk  SCUXXW4-1244, Converted from tbwPrintDeliveryNote using MTG Version: 1.23
+--------------------------------------------------------------------------------------
+
+client PrintDeliveryNoteForCustomerOrders;
+component ORDER;
+layer Core;
+projection PrintDeliveryNoteForCustomerOrders;
+
+include fragment CustomerTemplateLovSelector;
+-- Command "Send Order"
+include fragment CustomerOrderMessageHandlerDialog;
+
+----------------------------- NAVIGATOR ENTRIES -----------------------------
+navigator {
+   entry PrintDeliveryNoteNavEntry parent OrderNavigator.ShippingOrderDelivery at index 100 {
+      label = "Print Delivery Note for Customer Orders";
+      page List;
+   }
+}
+
+-------------------------------- MAIN PAGES ---------------------------------
+page List using DeliveryNoteSet {
+   label = "Print Delivery Note for Customer Orders";
+   startupmode = search;
+   list PrintDeliveryNoteList;
+}
+
+-------------------------------- ASSISTANTS ---------------------------------
+
+--------------------------------- COMMANDS ----------------------------------
+command PrintDeliveryNoteCommand for DeliveryNote {
+   label = "Print";
+   mode = SelectedRecords;
+   enabled = [true];
+   bulkexecute {
+      call GetReportResultKeys(Selection) into ResultKeysStr;
+      printdialog ResultKeysStr;
+      bulkcall ProceedAfterPrint(OrderNo) {
+         continueonerror = [true];
+         when FAIL {
+            error("${error.Message}");
+            info(" The rest of the order flow could not be successfully carried out after printing the delivery note. Please proceed manually");
+         }
+      }
+   }
+}
+command DeliveryNoteAnalysisCommand for DeliveryNote {
+   label = "Delivery Note Analysis";
+   mode = SelectedRecords;
+   enabled = [true];
+   bulkexecute {
+      bulknavigate "page/CustomerOrderDeliveryNoteAnalysis/Form?$filter=DelnoteNo eq $[DelnoteNo]";
+   }
+}
+command PrintCustomerOrderProFormaCommand for DeliveryNote {
+   label = "Print Customer Order Pro Forma Invoice";
+   mode = SelectedRecords;
+   enabled = [true];
+   bulkexecute {
+      confirm("Customer Order Pro Forma Invoice will be printed.") {
+         when CANCEL {
+            exit;
+         }
+         when OK {
+            call StartPrintProformaInvoice(Selection) {
+               when SUCCESS {
+                  // Toast message for background job(18-06-29 Functional meeting).
+                  success("This action will run as a background job.");
+               }
+            }
+         }
+      }
+   }
+}
+command SendDispatchAdviceMessageCommand for DeliveryNote {
+   label = "Send Dispatch Advice Message";
+   enabled = [MediaCode != null];
+
+   execute {
+      call GetDelivertoCustomerName(DeliverToCustomerNo) into DelivertoCustomerNameVar;
+      dialog CustomerOrderTransferMessageDialog(OrderNo, DeliverToCustomerNo, DelivertoCustomerNameVar, DelnoteNo, "MSGTYPE_DispAdv")
+         {
+         when OK {
+            call RefreshPage();
+            exit;
+         }
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+command SendDirectDeliveryMessageCommand for DeliveryNote {
+   label = "Send Direct Delivery Message";
+   mode = SingleRecord;
+   enabled = [AllowedToSend = 1];
+   execute {
+      call GetCustomerName(CustomerNo) into CustomerNameVar;
+      dialog CustomerOrderTransferMessageDialog(OrderNo, CustomerNo, CustomerNameVar, DelnoteNo, "MSGTYPE_DelNote")
+         {
+         when OK {
+            exit;
+         }
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+
+list PrintDeliveryNoteList for DeliveryNote {
+   field OrderNo;
+   field CustomerOrderRef.OrderId {
+      label = "Order Type";
+   }
+
+   badge CustomerOrderStatus {
+      label = "Customer Order Status";
+
+      emphasis Progress1 = [CustomerOrderStatus = "Planned"];
+      emphasis Progress3 = [CustomerOrderStatus = "Released"];
+      emphasis Progress5 = [CustomerOrderStatus = "Reserved"];
+      emphasis Progress7 = [CustomerOrderStatus = "Picked"];
+      emphasis Progress8 = [CustomerOrderStatus = "Partially Delivered"];
+      emphasis Progress10 = [CustomerOrderStatus = "Delivered"];
+      emphasis Progress12 = [CustomerOrderStatus = "Invoiced/Closed"];
+      emphasis StateCancelled = [CustomerOrderStatus = "Cancelled"];
+      emphasis StateBlocked = [CustomerOrderStatus = "Blocked"];
+
+      style = TextOnly;
+   }
+
+   lov CustOrdCustomerRef with ReferenceCustOrdCustomerSelector {
+      size = Large;
+      description = CustOrdCustomerRef.Name;
+      contactwidget {
+         enabled = [true];
+         source = Customer;
+      }
+   }
+   lov DeliverToCustomerNoRef with ReferenceCustomerTemplateLovSelector {
+
+      contactwidget {
+         enabled = [true];
+         source = Customer;
+      }
+   }
+   field DelnoteNo;
+   badge State {
+      emphasis Progress6 = [State = "Created"];
+      emphasis Progress12 = [State = "Printed"];
+      emphasis StateCancelled = [State = "Invalid"];
+
+      style = TextOnly;
+   }
+   field AltDelnoteNo;
+   field CreateDate;
+   lov RouteIdRef with ReferenceDeliveryRouteSelector {
+      label = "Route";
+      description = RouteIdRef.Description;
+   }
+   field DispatchAdviceSent {
+      enumerationtrue = "DispatchAdviceSent";
+      enumerationfalse = "DispatchAdviceNotSent";
+      truelabel = "Yes";
+      falselabel = "No";
+   }
+
+   commandgroup DeliveryCmdGroup {
+      command PrintDeliveryNoteCommand;
+      command PrintCustomerOrderProFormaCommand;
+      command DeliveryNoteAnalysisCommand;
+
+   }
+
+   commandgroup SendCmdGroup {
+      command SendDispatchAdviceMessageCommand;
+      command SendDirectDeliveryMessageCommand;
+   }
+}
+
+----------------------------------- CARDS -----------------------------------
+
+---------------------------------- DIALOGS ----------------------------------
+
+---------------------------------- CHARTS -----------------------------------
+
+--------------------------------- CALENDARS ---------------------------------
+
+---------------------------------- SHEETS -----------------------------------
+
+----------------------------- STATE INDICATORS ------------------------------
+
+----------------------------------- TREES -----------------------------------
+
+---------------------------------- PLUGINS ----------------------------------
+
+------------------------------- IMAGE VIEWERS -------------------------------
+

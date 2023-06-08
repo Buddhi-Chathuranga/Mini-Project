@@ -1,0 +1,410 @@
+--------------------------------------------------------------------------------------
+-- Date        Sign    History
+-- ----------  ------  ---------------------------------------------------------------
+-- 2021-11-12  KiSalk  Bug 161030(SC21R2-5473), Passed identifier value "CustomerAgreement" to RemoveInvalidPricesDialog and RemoveBasePrices.
+-- 2020-11-11  Maeelk  SC2020R1-11302, AgreementSent and UseExplicit were set to be enumerations.
+-- 2019-04-07  Maeelk  SCUXXW4-18069, Added stringify to RemoveInvalidPricesCommand.
+-- 2019-03-21  DaZase  SCUXXW4-16379, moved code to fragment.
+-- 2018-09-18  MaEelk  SCUXXW4-12948, Renamed the included fragment to RemoveInvalidPricesDialog.
+-- 2018-07-05  IzShlk  SCUXXW4-1051, Converted from tbwOverviewCustomerAgreement using MTG Version: 1.23
+--------------------------------------------------------------------------------------
+fragment CustomerAgreementList;
+component ORDER;
+layer Core;
+description "Use this fragment to study all customer agreements entered in the system. You can view the currency, status, validity date and freight details.";
+include fragment OrderDeliveryTermLovSelector;
+include fragment OrderCoordinatorLovSelector;
+include fragment CustOrdCust2Selector;
+include fragment TransferAgreementDialog;
+include fragment RemoveInvalidPricesDialog;
+include fragment AdjustAgreementOffsetDialog;
+
+
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+-------------------------------- ASSISTANTS ---------------------------------
+
+--------------------------------- COMMANDS ----------------------------------
+command CustomerAgreementCommand for CustomerAgreement {
+   label = "Details";
+   enabled = [true];
+   mode = SelectedRecords;
+
+   bulkexecute {
+      bulknavigate "page/CustomerAgreement/Form?$filter=AgreementId eq $[AgreementId]";
+   }
+}
+
+@Override
+command BulkActivate for CustomerAgreement {
+   enabled = [AllowActivate = 1 and Objstate in("Planned", "Negotiated", "Closed")];
+}
+
+@Override
+command BulkNegotiate for CustomerAgreement {
+   enabled = [Objstate in("Active", "Closed")];
+}
+
+@Override
+command BulkClose for CustomerAgreement {
+   enabled = [Objstate in("Planned", "Active", "Negotiated")];
+}
+
+command PrintRetrospectiveInvoiceRepCommand for CustomerAgreement {
+   label = "Print Retrospective Invoice Report";
+   enabled = [true];
+
+   variable ResultKeyNum {
+      type = Number;
+   }
+
+   execute {
+      confirm("A Retrospective Invoice Report for Agreement ${AgreementId} will be printed.") {
+         when OK {
+            call GetReportResultKeyList() into ResultKeyNum;
+            printdialog ResultKeyNum;
+         }
+      }
+   }
+}
+command SendAgreementCommand for CustomerAgreement {
+   label = "Send Agreement";
+   enabled = [Objstate = "Active" and PartDeal = 1];
+
+   execute {
+      dialog TransferAgreementDialog(AgreementId, CustomerNo, CustomerNoRef.Name, "", "PRICAT", DefaultMediaCode, CheckAgreementSent) {
+         when CANCEL {
+            exit;
+         }
+      }
+   }
+}
+command RemoveInvalidPricesCommand for CustomerAgreement {
+   label = "Remove Invalid Prices";
+   mode = SelectedRecords;
+   variable KeepFromDt {
+      type = Date;
+   }
+
+   variable RemovedItemsNum {
+      type = Number;
+   }
+   variable AgreementSelectionVar
+      {
+      type = Text;
+   }
+   enabled = [true];
+   bulkexecute {
+      stringify(records, "AGREEMENT_ID=${AgreementId}^", JSON) into AgreementSelectionVar;
+      dialog RemoveInvalidPricesDialog("CustomerAgreement") into(KeepFromDt) {
+         when OK {
+            call RemoveBasePrices(AgreementSelectionVar, KeepFromDt, "CustomerAgreement") into RemovedItemsNum;
+            if [RemovedItemsNum > 0] {
+               alert("${RemovedItemsNum} record(s) removed.");
+            }
+            else
+               {
+               alert("No records were removed.");
+            }
+         }
+      }
+   }
+}
+command AdjustOffsetsCommand for CustomerAgreement {
+   label = "Adjust Offsets";
+
+   variable PercentOffsetVar {
+      type = Number;
+   }
+   variable AmountOffsetVar {
+      type = Number;
+   }
+   variable ValidToDateVar {
+      type = Date;
+   }
+   variable AdjustmentTypeVar {
+      type = Text;
+   }
+   variable IncludeBothDatesVar {
+      type = Boolean;
+   }
+   variable AdjustmentsVar {
+      type = Number;
+   }
+   variable AdjustTypeVar {
+      type = Text;
+   }
+   variable IncludePeriodVar {
+      type = Text;
+   }
+
+   enabled = [true];
+   execute {
+      dialog AdjustAgreementOffsetDialog(AgreementId, CurrencyCode, SiteDate) into(PercentOffsetVar, AmountOffsetVar, ValidToDateVar, AdjustmentTypeVar, IncludeBothDatesVar) {
+         when OK {
+            if [AdjustmentTypeVar = "ADD"] {
+               set AdjustTypeVar = "AddToOffset";
+            }
+            else {
+               if [AdjustmentTypeVar = "ADJUST"] {
+                  set AdjustTypeVar = "AdjustOffset";
+               }
+            }
+
+            if [PercentOffsetVar = null] {
+               set PercentOffsetVar = 0;
+            }
+            if [AmountOffsetVar = null] {
+               set AmountOffsetVar = 0;
+            }
+
+
+            if [IncludeBothDatesVar] {
+               set IncludePeriodVar = "TRUE";
+            }
+            else {
+               set IncludePeriodVar = "FALSE";
+            }
+
+            call AdjustOffsetAgreement(AgreementId, PercentOffsetVar, AmountOffsetVar, ValidToDateVar, AdjustTypeVar, IncludePeriodVar) into AdjustmentsVar;
+
+            if [AdjustmentsVar > 0] {
+               alert("${AdjustmentsVar} Item(s) Adjusted.");
+            }
+            else
+               {
+               alert("No Item Adjusted.");
+            }
+         }
+         when CANCEL {
+            exit CANCEL;
+         }
+      }
+   }
+}
+
+----------------------------------- LISTS -----------------------------------
+
+list CustomerAgreementList for CustomerAgreement {
+   field AgreementId {
+      size = Small;
+   }
+   field Description;
+   lov CustomerNoRef with ReferenceCustOrdCust2Selector {
+      label = "Customer";
+
+      contactwidget {
+         enabled = [true];
+         source = Customer;
+      }
+      description = CustomerNoRef.Name;
+   }
+   lov AuthorizeCodeRef with ReferenceOrderCoordinatorLovSelector {
+      contactwidget {
+         enabled = [AuthorizeCode != null];
+         source = Person;
+      }
+   }
+   field CurrencyCodeRef {
+      size = Small;
+   }
+   badge Objstate {
+      label = "Status";
+      emphasis Progress1 = [Objstate = "Planned"];
+      emphasis Progress4 = [Objstate = "Active"];
+      emphasis Progress8 = [Objstate = "Negotiated"];
+      emphasis Progress12 = [Objstate = "Closed"];
+      style = TextOnly;
+   }
+   daterangefield {
+      startdate ValidFrom;
+      enddate ValidUntil;
+      label = "Validity Period";
+   }
+   field AgreementDate;
+   lov DeliveryTermsRef with ReferenceOrderDeliveryTermLovSelector {
+      description = DeliveryTermsRef.Description;
+      validate command {
+         execute {
+            set DelTermsLocation = null;
+         }
+      }
+
+   }
+   field DelTermsLocation {
+      size = Small;
+      label = "Delivery Terms Location";
+   }
+   lov ShipViaCodeRef with ReferenceMpccomShipViaSelector {
+      description = ShipViaCodeRef.Description;
+      label = "Ship-Via";
+   }
+   lov SupAgreementIdRef with ReferenceCustomerAgreementSelector using SupAgreement(AgreementId) {
+      size = Small;
+      label = "Supersede Agreement";
+   }
+
+   field CustAgreementId {
+      size = Small;
+      label = "Customer's Agreement";
+   }
+   field Comments;
+   field NoteText;
+   field DocumentText {
+      searchable = false;
+   }
+   field AgreementSent {
+      enumerationtrue = "Yes";
+      enumerationfalse = "No";
+      truelabel = "Yes";
+      falselabel = "No";
+   }
+   field UseExplicit {
+      enumerationtrue = "Yes";
+      enumerationfalse = "No";
+      truelabel = "Yes";
+      falselabel = "No";
+   }
+   field RebateBuilderDb;
+   field UsePriceBreakTemplatesDb;
+
+   commandgroup CommandGroupCmdGroup {
+
+      command CustomerAgreementCommand;
+   }
+
+   commandgroup CommandGroup2CmdGroup {
+
+      command BulkActivate;
+      command BulkNegotiate;
+      command BulkClose;
+   }
+
+   commandgroup CommandGroup3CmdGroup {
+
+      command PrintRetrospectiveInvoiceRepCommand;
+      command SendAgreementCommand;
+   }
+
+   commandgroup CommandGroup4CmdGroup {
+
+      command RemoveInvalidPricesCommand;
+      command AdjustOffsetsCommand;
+   }
+}
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+----------------------------- MAIN ENTRY POINTS -----------------------------
+entityset CustomerAgreementSet for CustomerAgreement {
+   context Company(Company);
+}
+
+------------------------------ ENTITY DETAILS -------------------------------
+@Override
+entity CustomerAgreement {
+   crud = Read, Update, Delete;
+   attribute AgreementId Text {
+      required = [true];
+   }
+   attribute Description Text {
+      required = [true];
+   }
+   attribute AuthorizeCode Text {
+      label = "Coordinator";
+   }
+   attribute CurrencyCode Text {
+      label = "Currency";
+   }
+   attribute ValidUntil Date {
+      label = "To Date";
+   }
+   attribute AgreementDate Date {
+      label = "Created";
+   }
+   attribute ShipViaCode Text {
+      label = "Ship-Via Code";
+   }
+   attribute SupAgreementId Text {
+      label = "Supersede Agr";
+   }
+   attribute CustAgreementId Text {
+      label = "Customer's Agr";
+   }
+   attribute NoteText Text {
+      label = "Note";
+   }
+   attribute DocumentText Boolean("TRUE", "FALSE") {
+      fetch = "DECODE(Document_Text_API.Note_Id_Exist(NOTE_ID), '1', 'TRUE', 'FALSE')";
+      label = "Document Text";
+      editable = [false];
+   }
+   attribute AgreementSent Enumeration(GenYesNo) {
+      fetch = "AGREEMENT_SENT_DB";
+      label = "Agreement Sent";
+      editable = [false];
+      required = [true];
+   }
+   attribute UseExplicit Enumeration(GenYesNo) {
+      fetch = "USE_EXPLICIT_DB";
+      label = "Exclude from Auto-pricing";
+      required = [true];
+   }
+   attribute RebateBuilderDb Boolean("TRUE", "FALSE") {
+      fetch = "REBATE_BUILDER_DB";
+      label = "Rebate Builder";
+      editable = [ETag != null];
+      required = [true];
+   }
+   attribute UsePriceBreakTemplatesDb Boolean("TRUE", "FALSE") {
+      fetch = "USE_PRICE_BREAK_TEMPLATES_DB";
+      label = "Use Price Break Templates";
+      editable = [ETag != null];
+      required = [true];
+   }
+   attribute LanguageCode Text;
+   attribute AllowActivate Number {
+      fetch = "Customer_Agreement_API.Activate_Allowed(AGREEMENT_ID)";
+      label = "Allow Activate";
+      editable = [false];
+   }
+   attribute SiteDate Date {
+      fetch = "trunc(SYSDATE)";
+   }
+   attribute PartDeal Number {
+      fetch = "Customer_Agreement_API.Has_Part_Deal(AGREEMENT_ID)";
+   }
+   attribute DefaultMediaCode Text {
+      fetch = "Cust_Ord_Customer_API.Get_Default_Media_Code(CUSTOMER_NO, 'PRICAT')";
+   }
+   attribute CheckAgreementSent Text {
+      fetch = "Customer_Agreement_API.Get_Agreement_Sent_Db(AGREEMENT_ID)";
+   }
+
+   reference CustomerNoRef(CustomerNo) to CustOrdCust2(CustomerNo) {
+      label = "Customer No";
+   }
+   reference AuthorizeCodeRef(AuthorizeCode) to OrderCoordinatorLov(AuthorizeCode) {
+      label = "Coordinator";
+   }
+   reference CurrencyCodeRef(CurrencyCode) to IsoCurrency(CurrencyCode) {
+      label = "Currency";
+   }
+   reference DeliveryTermsRef(DeliveryTerms) to OrderDeliveryTermLov(DeliveryTerms) {
+      label = "Delivery Terms";
+   }
+   reference ShipViaCodeRef(ShipViaCode) to MpccomShipVia(ShipViaCode) {
+      label = "Ship-Via Code";
+   }
+   reference SupAgreementIdRef(SupAgreementId) to CustomerAgreement(AgreementId) {
+      label = "Supersede Agr";
+   }
+
+   action GetReportResultKeyList Number;
+}
+
+--------------------------------- FUNCTIONS ---------------------------------
+function SupAgreement List < Entity(CustomerAgreement) > {
+   parameter AgreementId Text;
+
+   where = "AGREEMENT_ID != :AgreementId";
+}

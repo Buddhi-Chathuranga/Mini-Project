@@ -1,0 +1,2073 @@
+-------------------------------------------------------------------------------------------------------
+--  Date        Sign    History
+--  ----------  ------  --------------------------------------------------------------------------------
+--  2021-12-22  PumJlk  SCZ-17110, Set PriceSourceNetPrice value after caling ValidateBuyQtyDue() in ValidateBuyQtyDueBaseCommand.
+--  2021-08-09  ApWilk  Bug 160357(SCZ-15807), Modified the command ValidateCatalogNoBaseCommand to prompt server validations before exiting when inserting the Catalog No.
+--  2021-06-09  ChFolk  SCZ-15076(Bug 159541), Modified ValidateVendorNoBaseCommand to remove setting of PurchasepartNo to null when Vendor No is set as null.
+--  2021-04-30  cecobr  FI21R2-916, gelr:brazilian_specific_attributes, Add Acquisition Reason to Business Transaction, Sales Part and CO Line
+--  2021-01-29  Skanlk  SCZ-13274, Modified ValidateBuyQtyDueBaseCommand by removing a condition to prevent the TaxCodeFlagVar being set as true when creating a new order line.
+--  2021-01-26  MaRalk  SC2020R1-11958, Renamed attribute OriginalLineItemNo as OriginalItemNo in the CustOrdLineValidation structure
+--  2021-01-26          in order sync with the CustomerOrderLine and CustomerOrderRentalLine entities.
+--  2020-12-08  Erlise  Bug 156667(SCZ-12957), Modified ValidateClassificationPartNoBaseCommand(), added order line key variables Identity1, Identity2, Identity3, Identity4.
+--  2020-10-16  Erlise  Bug 148761(SCZ-11844), Modified ValidateCatalogNoBaseCommand() by calling CalculateAndFetchAvailableQty() to get the AvailableQty.
+--  2020-09-11  MaRalk  SC2020R1-9527, Modified ValidateTargetDateBaseCommand to correctly set values for the PriceEffectivityDate from timestamp fields.
+--  2020-07-13  AwWelk  SCXTEND-4334, Corrected the validate value assigment for PriceListNo in ValidateCatalogNoBaseCommand.
+--  2020-06-04  MaRalk  SCXTEND-4391, ModifiPriceListNoed ValidateCatalogNoBaseCommand to handle null values for the PriceSourceId.
+--  2020-03-20  MaRalk  SCXTEND-4044, Modified ValidateCatalogNoBaseCommand to fetch classification standard related information.
+--  2020-03-16  MaRalk  SCXTEND-2206, Adjusted usages of FreeOfChargeDb with FreeOfCharge when enabling Duplicate functionality.
+--  2020-03-16          Added attribues OriginalOrderNo, OriginalLineNo, OriginalRelNo and OriginalLineItemNo to the structure CustOrdLineValidation.
+--  2019-10-21  MaRalk  SCXTEND-1112, Removed unused structures PriceDetailsStruct, LineTotalsStruct, TaxLiabilityTypeStructure
+--  2019-10-21          unused action ValidateSalesPriceList and unused function GetTruncDate.
+--  2019-08-23  TiRalk  SCUXXW4-23606, Modified ValidateCatalogNoBaseCommand to fetch PackingInstructionId specially null value.
+--  2019-08-01  RuLiLk  SCUXXW4-23130, Added attribute Taxable to CatalogNoDefaultsStruct.
+--  2019-07-15  RasDlk  SCUXXW4-23150, Resolved the issue related to prices not being fetched when an Input Qty is entered for Input UoM enabled part.
+--  ----------  ------  --------------------------------------------------------------------------------
+
+fragment SalesOrderLineCommonValidationCommands;
+component ORDER;
+layer Core;
+description "This fragment will hold the common validations for the CO line and SQ line.";
+
+----------------------------- CLIENT FRAGMENTS ------------------------------
+command ValidateRelNoBaseCommand {
+   variable Identity4Var Number;
+   execute {
+      if [LineNo != null and RelNo != null] {
+         if [LineItemNo > 0] {
+            call ExistLineNo(Identity1, Identity2, Identity3, Identity4, Source);
+         }
+         else {
+            set Identity4Var = null;
+            call ExistLineNo(Identity1, Identity2, Identity3, Identity4Var, Source);
+         }
+      }
+   }
+}
+
+
+command ValidateLineNoBaseCommand clone ValidateRelNoBaseCommand {
+   execute {
+      call GetNextRelNo(Identity1, Identity2, Identity4, Contract, Source) into Identity3;
+      super;
+   }
+}
+
+
+command ValidateCatalogNoBaseCommand {
+
+   variable CatalogNoDefaultsVar {
+      type = Structure(CatalogNoDefaultsStruct);
+   }
+   variable ClassificationDefaultsVar {
+      type = Structure(ClassificationDefaultsStructure);
+   }
+   variable ClassifcationPartEditedVar {
+      type = Boolean;
+   }
+   variable SalesDiscount {
+      type = Number;
+   }
+   variable RentalChargeableDaysVar {
+      type = Number;
+   }
+   variable ValidationRecVar Structure(CustOrdLineValidation);
+   variable ReturnValidationRecVar Structure(CustOrdLineValidation);
+   variable TaxCodeFlagVar Boolean;
+   variable NewLineVar Boolean;
+   variable DuplicateLineVar Boolean;
+   variable TaxEditedVar Boolean;
+   variable RecalcLineDiscVar Boolean;
+   variable TaxFromDefaultsVar Text;
+   variable TempDate Date;
+   variable AvailableQtyVar Number;
+
+   execute {
+      if [TaxCode != original.TaxCode or isNew] {
+         set TaxCodeFlagVar = true;
+      }
+      else {
+         set TaxCodeFlagVar = false;
+      }
+
+      if [isNew] {
+         set NewLineVar = true;
+      }
+      else {
+         set NewLineVar = false;
+      }
+      set DuplicateLineVar = false;
+      set TaxEditedVar = false;
+      set TaxFromDefaultsVar = "TRUE";
+      set RecalcLineDiscVar = true;
+
+      if [Source = "CUSTOMERORDER"] {
+         set SalesDiscount = OrderDiscount;
+      }
+      else {
+         set SalesDiscount = QuotationDiscount;
+      }
+
+      if [RentalDb = "FALSE"] {
+         set RentalChargeableDaysVar = 1;
+      }
+      else {
+         set RentalChargeableDaysVar = ChargeableDays;
+      }
+
+      call ValidateAndFetchCatalogNoDefaults(Source, Identity1, Identity2, Identity3, Identity4,
+      CatalogNo, BuyQtyDue, PriceEffectivityDate, TaxCode,
+      ShipAddrNo, DeliverToCustomerNo, RentalDb,
+      RentalChargeableDaysVar) into CatalogNoDefaultsVar;
+
+      if [not CatalogNoDefaultsVar.Success] {
+         exit;
+      }
+
+      if [CatalogNoDefaultsVar.InactiveCompExist = 1 and Source = "CUSTOMERQUOTE"] {
+         alert("The specified component part is not active for sale.");
+      }
+      copy CatalogNoDefaultsVar into this skip nulls;
+
+      if [CatalogNoDefaultsVar.PriceListNo = null] {
+         set PriceListNo = CatalogNoDefaultsVar.PriceListNo;
+      }
+
+      set PackingInstructionId = CatalogNoDefaultsVar.PackingInstructionId;
+      -- As 'copy CatalogNoDefaultsVar into this skip nulls' has used above, previous Price Source Id is not getting cleared
+      if [PriceSourceId != null and CatalogNoDefaultsVar.PriceSourceId = null] {
+         set PriceSourceId = CatalogNoDefaultsVar.PriceSourceId;
+      }
+      if [CatalogNo != null] {
+         copy this into ValidationRecVar;
+         call CalculateAndFetchAvailableQty(ValidationRecVar) into AvailableQtyVar {
+            when SUCCESS {
+               set AvailableQty = AvailableQtyVar;
+            }
+         }
+      }
+      if [CustomerNo = null] {
+         set CustomerNo = parent.CustomerNo;
+      }
+      if [BuyQtyDue != null] {
+         copy this into ValidationRecVar;
+         call CalculateAndFetchSalesLinePrices(ValidationRecVar, TaxFromDefaultsVar, parent.CurrencyCode, parent.UsePriceInclTax, TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar) into ReturnValidationRecVar {
+            when SUCCESS {
+               copy ReturnValidationRecVar into this;
+            }
+         }
+         copy this into ValidationRecVar;
+         call CalculateAndFetchSalesLineTotal(ValidationRecVar, TaxFromDefaultsVar, parent.CurrencyCode, parent.UsePriceInclTax,
+         TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar, RecalcLineDiscVar, FreeOfCharge) into ReturnValidationRecVar {
+            when SUCCESS {
+               copy ReturnValidationRecVar into this;
+            }
+         }
+      }
+      else {
+         if [NewLineVar] {
+            copy this into ValidationRecVar;
+            call CalculateAndFetchSalesLineTotal(ValidationRecVar, TaxFromDefaultsVar, parent.CurrencyCode, parent.UsePriceInclTax,
+            TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar, RecalcLineDiscVar, FreeOfCharge) into ReturnValidationRecVar {
+               when SUCCESS {
+                  copy ReturnValidationRecVar into this;
+               }
+            }
+         }
+      }
+      if [FreeOfCharge] {
+         copy this into ValidationRecVar;
+         call SetCalculatedPrices(ValidationRecVar, FreeOfCharge, parent.CustomerNoPay, parent.CurrencyCode, parent.CurrencyRateType, "FALSE",
+         parent.UsePriceInclTax, TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar, RecalcLineDiscVar) into ReturnValidationRecVar;
+         copy ReturnValidationRecVar into this;
+      }
+      call ValidateClassificationDefaults(ClassificationUnitMeas, CatalogNo, ClassificationPartNo, ClassificationStandard, Contract, ClassifcationPartEditedVar) into ClassificationDefaultsVar {
+         when SUCCESS {
+            set ClassificationUnitMeas = ClassificationDefaultsVar.ClassificationUnitMeas;
+            set ClassificationPartNo = ClassificationDefaultsVar.ClassificationPartNo;
+            set ClassificationStandard = ClassificationDefaultsVar.ClassificationStandard;
+         }
+      }
+   }
+}
+
+
+command ValidateCustomerPartNoBaseCommand {
+   variable ValidationRecVar Structure(CustOrdLineValidation);
+   variable TaxCodeFlagVar Boolean;
+   variable NewLineVar Boolean;
+   variable DuplicateLineVar Boolean;
+   variable TaxEditedVar Boolean;
+   variable CurrencyCodeVar Text;
+   variable UsePriceInclTaxVar Boolean;
+
+   execute {
+      set CurrencyCodeVar = parent.CurrencyCode;
+      set UsePriceInclTaxVar = parent.UsePriceInclTax;
+      if [TaxCode != original.TaxCode or TaxCalcStructureId != original.TaxCalcStructureId] {
+         set TaxEditedVar = true;
+      }
+      else {
+         set TaxEditedVar = false;
+      }
+
+      if [TaxCode != original.TaxCode or isNew] {
+         set TaxCodeFlagVar = true;
+      }
+      else {
+         set TaxCodeFlagVar = false;
+      }
+
+      if [isNew] {
+         set NewLineVar = true;
+      }
+      else {
+         set NewLineVar = false;
+      }
+      set DuplicateLineVar = false;
+
+      copy this into ValidationRecVar;
+
+
+      call ValidateAndFetchCustomerPartNoDefaults(ValidationRecVar, CurrencyCodeVar, UsePriceInclTaxVar, TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar, FreeOfCharge) into ValidationRecVar {
+
+         when SUCCESS {
+            copy ValidationRecVar into this;
+         }
+      }
+   }
+}
+
+-- call from CustomerOrderLineTab.
+command ValidateClassificationStandardBaseCommand {
+   variable ClassificationDefaultsVar {
+      type = Structure(ClassificationDefaultsStructure);
+   }
+   variable ClassifcationPartEditedVar Boolean;
+   execute {
+
+      if [ClassificationPartNo != original.ClassificationPartNo] {
+         set ClassifcationPartEditedVar = true;
+      }
+      call ValidateClassificationDefaults(ClassificationUnitMeas, CatalogNo, ClassificationPartNo, ClassificationStandard, Contract, ClassifcationPartEditedVar) into ClassificationDefaultsVar {
+         when SUCCESS {
+            set ClassificationUnitMeas = ClassificationDefaultsVar.ClassificationUnitMeas;
+            set ClassificationPartNo = ClassificationDefaultsVar.ClassificationPartNo;
+         }
+      }
+   }
+}
+
+command ValidateClassificationStandardCommand clone ValidateClassificationStandardBaseCommand {
+   execute {
+      if [CatalogNo != null] {
+         set ClassificationPartNo = null;
+      }
+      super;
+   }
+}
+
+command ValidateClassificationPartNoBaseCommand clone ValidateCatalogNoBaseCommand {
+   execute {
+      set Source = "CUSTOMERORDER";
+      set RentalDb = "FALSE";
+      set Identity1 = OrderNo;
+      set Identity2 = LineNo;
+      set Identity3 = RelNo;
+      set Identity4 = LineItemNo;
+      super;
+   }
+}
+
+command ValidateBuyQtyDueBaseCommand {
+   variable RentalChargeableDaysVar  Number;
+   variable ValidationRecVar Structure(CustOrdLineValidation);
+   variable ReturnValidationRecVar Structure(CustOrdLineValidation);
+   variable TaxFromDefaultsVar Text;
+   variable TaxCodeFlagVar Boolean;
+   variable NewLineVar Boolean;
+   variable DuplicateLineVar Boolean;
+   variable TaxEditedVar Boolean;
+   variable RecalcLineDiscVar Boolean;
+   variable CostVar Number;
+
+   execute {
+      set BasicDataEdited = true;
+
+      if [BuyQtyDue = null] {
+         set BasicDataEdited = false;
+         exit;
+      }
+
+      if [TaxCode != original.TaxCode or TaxCalcStructureId != original.TaxCalcStructureId] {
+         set TaxEditedVar = true;
+      }
+      else {
+         set TaxEditedVar = false;
+      }
+
+      if [TaxCode != original.TaxCode] {
+         set TaxCodeFlagVar = true;
+      }
+      else {
+         set TaxCodeFlagVar = false;
+      }
+
+      if [isNew] {
+         set NewLineVar = true;
+      }
+      else {
+         set NewLineVar = false;
+      }
+
+      set DuplicateLineVar = false;
+      set RecalcLineDiscVar = true;
+      set TaxFromDefaultsVar = "FALSE";
+
+      if [BuyQtyDue != 1 and ExchangeItem = "ExchangedItem"] {
+         alert("The sales qty cannot be different than 1 for exchange customer order lines.");
+         exit;
+      }
+
+      if [RentalDb = "TRUE"] {
+         if [ChargeableDays = null] {
+            exit;
+         }
+      }
+      set RevisedQtyDue = "#{BuyQtyDue*ConvFactor/InvertedConvFactor}";
+
+      if [DesiredQty = null or DesiredQty < 0] {
+         set DesiredQty = BuyQtyDue;
+      }
+
+      if [(PartOwnership = "CompanyOwned") or(PartOwnership = "Consignment") or(PartOwnership = "CompanyRentalAsset") or(PartOwnership = "SupplierRented")] {
+         copy this into ValidationRecVar;
+         call ValidateBuyQtyDue(ValidationRecVar, TaxFromDefaultsVar, parent.UsePriceInclTax,
+         TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar, RecalcLineDiscVar, FreeOfCharge) into ReturnValidationRecVar {
+            when SUCCESS {
+
+               copy ReturnValidationRecVar into this;
+               set PriceSourceNetPrice = ReturnValidationRecVar.PriceSourceNetPriceDb;
+            }
+         }
+      }
+
+      if [PriceFreeze = "Free"] {
+         if [PriceConvFactor != null and original.PriceConvFactor != null and PriceConvFactor != original.PriceConvFactor and not isNew] {
+            alert("Price Conversion Factor has changed from ${original.PriceConvFactor} to ${PriceConvFactor} for part ${CatalogNo}.");
+         }
+         if [original.SalesUnitMeas != null and SalesUnitMeas != original.SalesUnitMeas] {
+            alert("Sales Unit of Measure has changed from ${original.SalesUnitMeas} to ${SalesUnitMeas} for part ${CatalogNo}.");
+         }
+         if [original.PriceUnitMeas != null and PriceUnitMeas != original.PriceUnitMeas] {
+            alert("Price Unit of Measure has changed from ${original.PriceUnitMeas} to ${PriceUnitMeas} for part ${CatalogNo}.");
+         }
+      }
+      set PriceQtyDue = "#{BuyQtyDue * PriceConvFactor}";
+
+      copy this into ValidationRecVar;
+      call CalculateAndFetchSalesLineTotal(ValidationRecVar, TaxFromDefaultsVar, parent.CurrencyCode, parent.UsePriceInclTax,
+      TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar, RecalcLineDiscVar, FreeOfCharge) into ReturnValidationRecVar {
+         when SUCCESS {
+            copy ReturnValidationRecVar into this;
+         }
+      }
+      if [CustomerPartConvFactor = null]
+         {
+         set CustomerPartBuyQty = null;
+
+      }
+      else
+         {
+         if [CustPartInvertConvFact = null] {
+            set CustPartInvertConvFact = 1;
+         }
+         set CustomerPartBuyQty = "#{BuyQtyDue/CustomerPartConvFactor * CustPartInvertConvFact}";
+      }
+      copy this into ValidationRecVar;
+      call CalculateAndFetchCost(ValidationRecVar) into CostVar;
+      set Cost = CostVar;
+
+      if [FreeOfCharge] {
+         copy this into ValidationRecVar;
+         call SetCalculatedPrices(ValidationRecVar, FreeOfCharge, parent.CustomerNoPay, parent.CurrencyCode, parent.CurrencyRateType, "FALSE",
+         parent.UsePriceInclTax, TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar, RecalcLineDiscVar) into ReturnValidationRecVar;
+         copy ReturnValidationRecVar into this;
+      }
+   }
+}
+
+command ValidateConditionCodeBaseCommand {
+   variable ValidationRecVar Structure(CustOrdLineValidation);
+   variable ReturnValidationRecVar Structure(CustOrdLineValidation);
+   variable CostVar Number;
+   variable AvailableQtyVar Number;
+   variable CalculateCostVar Boolean;
+   variable TaxFromDefaultsVar Text;
+   variable TaxCodeFlagVar Boolean;
+   variable NewLineVar Boolean;
+   variable DuplicateLineVar Boolean;
+   variable TaxEditedVar Boolean;
+   variable RecalcLineDiscVar Boolean;
+
+   execute {
+      set BasicDataEdited = true;
+      if [TaxCode != original.TaxCode or TaxCalcStructureId != original.TaxCalcStructureId] {
+         set TaxEditedVar = true;
+      }
+      else {
+         set TaxEditedVar = false;
+      }
+
+      if [TaxCode != original.TaxCode or isNew] {
+         set TaxCodeFlagVar = true;
+      }
+      else {
+         set TaxCodeFlagVar = false;
+      }
+
+      if [isNew] {
+         set NewLineVar = true;
+      }
+      else {
+         set NewLineVar = false;
+      }
+      set DuplicateLineVar = false;
+      set RecalcLineDiscVar = true;
+      set TaxFromDefaultsVar = "FALSE";
+
+      set CalculateCostVar = false;
+      if [BuyQtyDue != null and RentalDb = "FALSE"] {
+         copy this into ValidationRecVar;
+         call GetOrderPrice(ValidationRecVar, TaxFromDefaultsVar, parent.UsePriceInclTax,
+         TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar, RecalcLineDiscVar, FreeOfCharge) into ReturnValidationRecVar {
+            when SUCCESS {
+               copy ReturnValidationRecVar into this;
+            }
+         }
+         set CalculateCostVar = true;
+      }
+      else {
+         set CalculateCostVar = true;
+      }
+      copy this into ValidationRecVar;
+      if [CalculateCostVar and CostLevelDb = "COST PER CONDITION"] {
+         call CalculateAndFetchCost(ValidationRecVar) into CostVar;
+         set Cost = CostVar;
+      }
+      call CalculateAndFetchAvailableQty(ValidationRecVar) into AvailableQtyVar {
+         when SUCCESS {
+            set AvailableQty = AvailableQtyVar;
+         }
+      }
+
+   }
+}
+command ValidateGtinNoBaseCommand clone ValidateCatalogNoBaseCommand {
+   variable ValidationRecVar Structure(CustOrdLineValidation);
+   variable ReturnValidationRecVar Structure(CustOrdLineValidation);
+
+   execute {
+      copy this into ValidationRecVar;
+      call ValidateGtinNo(ValidationRecVar, ClassificationStandard) into ReturnValidationRecVar {
+         when SUCCESS {
+            copy ReturnValidationRecVar into this;
+            super;
+            copy this into ValidationRecVar;
+            call GetInputUomForGtin(ValidationRecVar) into ReturnValidationRecVar;
+            copy ReturnValidationRecVar into this;
+         }
+      }
+   }
+}
+
+command ValidateSupplyCodeBaseCommand {
+   variable ValidationRecVar Structure(CustOrdLineValidation);
+   variable ReturnValidationRecVar Structure(CustOrdLineValidation);
+
+   execute {
+      if[ExchangeItem = "ExchangedItem" and SupplyCode != "InventOrder"] {
+         alert("Acquisition cannot be change for exchange customer order lines");
+         exit;
+      }
+
+      copy this into ValidationRecVar;
+      set ValidationRecVar.VendorNo = null;
+      call ValidateSupplier(ValidationRecVar) into ReturnValidationRecVar {
+         when SUCCESS {
+            copy ReturnValidationRecVar into this;
+         }
+      }
+   }
+}
+
+command ValidateDeliveryTypeBaseCommand {
+
+   variable TaxLiabilityTypeVar Text;
+   variable ValidationRecVar Structure(CustOrdLineValidation);
+   variable ReturnValidationRecVar Structure(CustOrdLineValidation);
+   variable TaxFromDefaultsVar Text;
+   variable TaxCodeFlagVar Boolean;
+   variable NewLineVar Boolean;
+   variable DuplicateLineVar Boolean;
+   variable TaxEditedVar Boolean;
+   variable RecalcLineDiscVar Boolean;
+
+
+   execute {
+      set TaxLiabilityTypeVar = TaxLiabilityType;
+
+      if [TaxCode != original.TaxCode or isNew] {
+         set TaxCodeFlagVar = true;
+      }
+      else {
+         set TaxCodeFlagVar = false;
+      }
+
+      if [isNew] {
+         set NewLineVar = true;
+      }
+      else {
+         set NewLineVar = false;
+      }
+
+      set DuplicateLineVar = false;
+
+      if [TaxCode != original.TaxCode or TaxCalcStructureId != original.TaxCalcStructureId] {
+         set TaxEditedVar = true;
+      }
+      else {
+         set TaxEditedVar = false;
+      }
+
+      if [TaxLiabilityTypeVar = ""] {
+         call GetTaxLiabilityType(OrderNo, TaxLiability) into TaxLiabilityTypeVar;
+      }
+
+      if [TaxLiabilityTypeVar = "EXM"] {
+         copy this into ValidationRecVar;
+         call CalculateAndFetchSalesLinePrices(ValidationRecVar, TaxFromDefaultsVar, parent.CurrencyCode, parent.UsePriceInclTax, TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar) into ReturnValidationRecVar {
+            when SUCCESS {
+               copy ReturnValidationRecVar into this;
+               copy this into ValidationRecVar;
+
+               call CalculateAndFetchSalesLineTotal(ValidationRecVar, TaxFromDefaultsVar, parent.CurrencyCode, parent.UsePriceInclTax,
+               TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar, RecalcLineDiscVar, FreeOfCharge) into ReturnValidationRecVar {
+                  when SUCCESS {
+                     copy ReturnValidationRecVar into this;
+                  }
+               }
+            }
+         }
+      }
+   }
+}
+
+command ValidateShipAddrNoBaseCommand {
+
+   variable ValidationRecVar Structure(CustOrdLineValidation);
+   variable ReturnValidationRecVar Structure(CustOrdLineValidation);
+   variable NewLineVar Boolean;
+   variable DuplicateLineVar Boolean;
+   variable TaxFromDefaultsVar Text;
+   variable TaxEditedVar Boolean;
+   variable TaxCodeFlagVar Boolean;
+   variable RecalcLineDiscVar Boolean;
+
+   execute {
+      if [isNew] {
+         set DefaultAddrFlag = "No";
+         set NewLineVar = true;
+      }
+      set DuplicateLineVar = false;
+      set TaxFromDefaultsVar = "TRUE";
+      if [TaxCode != original.TaxCode or TaxCalcStructureId != original.TaxCalcStructureId] {
+         set TaxEditedVar = true;
+      }
+      else {
+         set TaxEditedVar = false;
+      }
+      if [TaxCode != original.TaxCode or isNew] {
+         set TaxCodeFlagVar = true;
+      }
+      else {
+         set TaxCodeFlagVar = false;
+      }
+      set RecalcLineDiscVar = true;
+      if [ShipAddrNo != null] {
+         set DefaultAddrFlag = "No";
+         copy this into ValidationRecVar;
+         call ValidateLineAddressNo(ValidationRecVar, parent.Company, DemandCodeDb, NewLineVar, false)into ReturnValidationRecVar {
+            when SUCCESS {
+               copy ReturnValidationRecVar into this;
+               copy this into ValidationRecVar;
+               call CalculateAndFetchSalesLinePrices(ValidationRecVar, TaxFromDefaultsVar,
+               parent.CurrencyCode, parent.UsePriceInclTax, TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar) into ReturnValidationRecVar {
+                  when SUCCESS {
+                     copy ReturnValidationRecVar into this;
+                  }
+               }
+            }
+         }
+         copy this into ValidationRecVar;
+         call CalculateAndFetchSalesLineTotal(ValidationRecVar, TaxFromDefaultsVar, parent.CurrencyCode, parent.UsePriceInclTax,
+         TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar, RecalcLineDiscVar, FreeOfCharge) into ReturnValidationRecVar {
+            when SUCCESS {
+               copy ReturnValidationRecVar into this;
+            }
+         }
+      }
+      if [isDirty] {
+         // Replication, start
+         set ChangedAttribNotInPol = null;
+         call CheckReplication(OrderNo, LineNo, RelNo, LineItemNo, BuyQtyDue, PlannedDeliveryDate, PackingInstructionId, DefaultAddrFlag, AddrFlag, ShipAddrNo, DockCode,
+         SubDockCode, LocationNo, PlannedRentalStartDateEditable, PlannedRentalStartTimeEditable, PlannedRentalEndDateEditable, PlannedRentalEndTimeEditable) into CheckReplicationVar;
+         set SendChangeRequest = CheckReplicationVar.SendChangeRequest;
+         set SupplyCodeCheck = CheckReplicationVar.SupplyCodeCheck;
+         set ChangedAttribNotInPol = CheckReplicationVar.ChangedAttribNotInPol;
+         if [ChangedAttribNotInPol != null] {
+            set ReplicateColumnsModified = "TRUE";
+         }
+         // Replication, end
+      }
+   }
+}
+command ValidateDiscountBaseCommand {
+
+   variable ValidationRecVar Structure(CustOrdLineValidation);
+   variable ReturnValidationRecVar Structure(CustOrdLineValidation);
+   variable TaxFromDefaultsVar Text;
+   variable TaxCodeFlagVar Boolean;
+   variable NewLineVar Boolean;
+   variable DuplicateLineVar Boolean;
+   variable TaxEditedVar Boolean;
+   variable RecalcLineDiscVar Boolean;
+
+   execute {
+
+      if [TaxCode != original.TaxCode or isNew] {
+         set TaxCodeFlagVar = true;
+      }
+      else {
+         set TaxCodeFlagVar = false;
+      }
+
+      if [isNew] {
+         set NewLineVar = true;
+      }
+      else {
+         set NewLineVar = false;
+      }
+      set DuplicateLineVar = false;
+
+      if [TaxCode != original.TaxCode or TaxCalcStructureId != original.TaxCalcStructureId] {
+         set TaxEditedVar = true;
+      }
+      else {
+         set TaxEditedVar = false;
+      }
+
+      copy this into ValidationRecVar;
+
+      call CalculateAndFetchSalesLineTotal(ValidationRecVar, TaxFromDefaultsVar, parent.CurrencyCode, parent.UsePriceInclTax,
+      TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar, RecalcLineDiscVar, FreeOfCharge) into ReturnValidationRecVar {
+         when SUCCESS {
+            copy ReturnValidationRecVar into this;
+         }
+      }
+   }
+}
+
+command ValidateTaxLiabilityBaseCommand {
+
+   variable ValidationRecVar Structure(CustOrdLineValidation);
+   variable ReturnValidationRecVar Structure(CustOrdLineValidation);
+   variable TaxFromDefaultsVar Text;
+   variable TaxCodeFlagVar Boolean;
+   variable NewLineVar Boolean;
+   variable DuplicateLineVar Boolean;
+
+   variable TaxEditedVar Boolean;
+   variable RecalcLineDiscVar Boolean;
+
+   execute {
+
+      if [TaxCode != original.TaxCode or isNew] {
+         set TaxCodeFlagVar = true;
+      }
+      else {
+         set TaxCodeFlagVar = false;
+      }
+
+      if [isNew] {
+         set NewLineVar = true;
+      }
+      else {
+         set NewLineVar = false;
+      }
+
+      set DuplicateLineVar = false;
+
+
+      if [TaxCode != original.TaxCode or TaxCalcStructureId != original.TaxCalcStructureId] {
+         set TaxEditedVar = true;
+      }
+      else {
+         set TaxEditedVar = false;
+      }
+
+      copy this into ValidationRecVar;
+      call FetchTaxLiabilityType(ValidationRecVar, NewLineVar) into ReturnValidationRecVar;
+      copy ReturnValidationRecVar into this;
+      copy this into ValidationRecVar;
+
+      if [TaxCode != null] {
+         set TaxCode = null;
+      }
+
+      copy this into ValidationRecVar;
+      call CalculateAndFetchSalesLinePrices(ValidationRecVar, TaxFromDefaultsVar, parent.CurrencyCode, parent.UsePriceInclTax, TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar) into ReturnValidationRecVar {
+         when SUCCESS {
+            copy ReturnValidationRecVar into this;
+            copy this into ValidationRecVar;
+
+            call CalculateAndFetchSalesLineTotal(ValidationRecVar, TaxFromDefaultsVar, parent.CurrencyCode, parent.UsePriceInclTax,
+            TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar, RecalcLineDiscVar, FreeOfCharge) into ReturnValidationRecVar {
+               when SUCCESS {
+                  copy ReturnValidationRecVar into this;
+               }
+            }
+         }
+      }
+      set DefaultAddrFlag = "No";
+
+   }
+}
+
+
+command ValidateTaxCodeBaseCommand {
+   variable ValidationRecVar Structure(CustOrdLineValidation);
+   variable ReturnValidationRecVar Structure(CustOrdLineValidation);
+   variable TaxFromDefaultsVar Text;
+   variable TaxCodeFlagVar Boolean;
+   variable NewLineVar Boolean;
+   variable DuplicateLineVar Boolean;
+   variable TaxEditedVar Boolean;
+   variable RecalcLineDiscVar Boolean;
+
+   execute {
+      if [TaxCode != original.TaxCode or isNew] {
+         set TaxCodeFlagVar = true;
+      }
+      else {
+         set TaxCodeFlagVar = false;
+      }
+
+      if [isNew] {
+         set NewLineVar = true;
+      }
+      else {
+         set NewLineVar = false;
+      }
+
+      set DuplicateLineVar = false;
+
+      if [TaxCode != null] {
+         if [TaxCalcStructureId != null] {
+            messagebox("", warning, "This will overwrite the existing tax calculation structure. Do you want to continue?") {
+               when "Yes" {
+                  set TaxEditedVar = true;
+               }
+               when "No" {
+                  set TaxEditedVar = false;
+                  set TaxCode = original.TaxCode;
+                  exit ABORT;
+               }
+            }
+         }
+         if [MultipleTaxLines = true and TaxCalcStructureId = null] {
+            messagebox("", warning, "This will overwrite the existing multiple tax lines. Do you want to continue?") {
+               when "Yes" {
+                  set TaxEditedVar = true;
+               }
+               when "No" {
+                  set TaxEditedVar = false;
+                  set TaxCode = original.TaxCode;
+                  exit ABORT;
+               }
+            }
+         }
+         set MultipleTaxLines = false;
+      }
+      if [(TaxCode = "") and(MultipleTaxLines = true)] {
+         set MultipleTaxLines = false;
+      }
+      set TaxFromDefaultsVar = "FALSE";
+      if [(TaxCode = "") and(MultipleTaxLines = false)] {
+         set TaxFromDefaultsVar = "DO_NOT_FETCH";
+         set FetchTaxCodes = "FALSE";
+      }
+      if [TaxClassId != null] {
+         set TaxClassId = null;
+         set TaxClassDescription = null;
+      }
+      if [TaxCalcStructureId != null] {
+         set TaxCalcStructureId = null;
+      }
+
+      set TaxEditedVar = true;
+
+
+      copy this into ValidationRecVar;
+      call CalculateAndFetchSalesLinePrices(ValidationRecVar, TaxFromDefaultsVar, CurrencyCode, UsePriceInclTax, TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar) into ReturnValidationRecVar {
+         when SUCCESS {
+            copy ReturnValidationRecVar into this;
+            copy this into ValidationRecVar;
+
+            call CalculateAndFetchSalesLineTotal(ValidationRecVar, TaxFromDefaultsVar, CurrencyCode, UsePriceInclTax,
+            TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar, RecalcLineDiscVar, FreeOfCharge) into ReturnValidationRecVar {
+               when SUCCESS {
+                  copy ReturnValidationRecVar into this;
+               }
+            }
+         }
+      }
+   }
+}
+
+command ValidateTaxCalcStructureIdBaseCommand {
+   variable ValidationRecVar Structure(CustOrdLineValidation);
+   variable ReturnValidationRecVar Structure(CustOrdLineValidation);
+   variable TaxFromDefaultsVar Text;
+   variable TaxCodeFlagVar Boolean;
+   variable NewLineVar Boolean;
+   variable DuplicateLineVar Boolean;
+   variable TaxEditedVar Boolean;
+   variable RecalcLineDiscVar Boolean;
+
+   execute {
+      if [TaxCode != original.TaxCode or isNew] {
+         set TaxCodeFlagVar = true;
+      }
+      else {
+         set TaxCodeFlagVar = false;
+      }
+
+      if [isNew] {
+         set NewLineVar = true;
+      }
+      else {
+         set NewLineVar = false;
+      }
+
+      set DuplicateLineVar = false;
+
+
+      if [TaxCalcStructureId != original.TaxCalcStructureId] {
+         if [TaxCalcStructureId != null] {
+            if [TaxCode != null] {
+               messagebox("", warning, "This will overwrite the existing tax code. Do you want to continue?") {
+                  when "Yes" {
+                     set TaxEditedVar = true;
+
+                  }
+                  when "No" {
+                     set TaxEditedVar = false;
+                     set TaxCalcStructureId = original.TaxCalcStructureId;
+                     exit ABORT;
+                  }
+               }
+               set TaxCode = null;
+            }
+
+            else {
+               if [MultipleTaxLines = true and original.TaxCalcStructureId = null] {
+                  messagebox("", warning, "This will overwrite the existing multiple tax lines. Do you want to continue?") {
+                     when "Yes" {
+                        set TaxEditedVar = true;
+                     }
+                     when  "No" {
+                        set TaxEditedVar = false;
+                        set TaxCalcStructureId = original.TaxCalcStructureId;
+                        exit ABORT;
+                     }
+                  }
+               }
+
+            }
+            if [TaxClassId != null] {
+               set TaxClassId = null;
+
+            }
+         }
+         if [TaxCalcStructureId = null and original.TaxCalcStructureId != null] {
+            set TaxFromDefaultsVar = "DO_NOT_FETCH";
+            set FetchTaxCodes = "FALSE";
+         }
+
+         set TaxEditedVar = true;
+
+         copy this into ValidationRecVar;
+         call CalculateAndFetchSalesLinePrices(ValidationRecVar, TaxFromDefaultsVar, CurrencyCode, UsePriceInclTax, TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar) into ReturnValidationRecVar {
+            when SUCCESS {
+               copy ReturnValidationRecVar into this;
+               copy this into ValidationRecVar;
+
+               call CalculateAndFetchSalesLineTotal(ValidationRecVar, TaxFromDefaultsVar, CurrencyCode, UsePriceInclTax,
+               TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar, RecalcLineDiscVar, FreeOfCharge) into ReturnValidationRecVar {
+                  when SUCCESS {
+                     copy ReturnValidationRecVar into this;
+                  }
+               }
+            }
+         }
+
+      }
+   }
+}
+
+command ValidateSaleUnitPriceBaseCommand {
+   variable ValidationRecVar Structure(CustOrdLineValidation);
+   variable ReturnValidationRecVar Structure(CustOrdLineValidation);
+   variable TaxCodeFlagVar Boolean;
+   variable NewLineVar Boolean;
+   variable DuplicateLineVar Boolean;
+   variable TaxEditedVar Boolean;
+   variable RecalcLineDiscVar Boolean;
+   variable TaxFromDefaultsVar Text;
+
+
+   execute {
+      if [TaxCode != original.TaxCode or isNew] {
+         set TaxCodeFlagVar = true;
+      }
+      else {
+         set TaxCodeFlagVar = false;
+      }
+
+      if [isNew] {
+         set NewLineVar = true;
+      }
+      else {
+         set NewLineVar = false;
+      }
+
+      set DuplicateLineVar = false;
+      set TaxEditedVar = false;
+      set RecalcLineDiscVar = true;
+      set TaxFromDefaultsVar = "FALSE";
+
+      copy this into ValidationRecVar;
+      call ValidateSaleUnitPrice(ValidationRecVar, TaxFromDefaultsVar,
+      TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar, RecalcLineDiscVar, FreeOfCharge) into ReturnValidationRecVar;
+      copy ReturnValidationRecVar into this;
+   }
+}
+
+
+command ValidateSaleUnitPriceInclTaxBaseCommand {
+   variable ValidationRecVar Structure(CustOrdLineValidation);
+   variable ReturnValidationRecVar Structure(CustOrdLineValidation);
+   variable TaxCodeFlagVar Boolean;
+   variable NewLineVar Boolean;
+   variable DuplicateLineVar Boolean;
+   variable TaxEditedVar Boolean;
+   variable RecalcLineDiscVar Boolean;
+   variable TaxFromDefaultsVar Text;
+
+   execute {
+      if [TaxCode != original.TaxCode or isNew] {
+         set TaxCodeFlagVar = true;
+      }
+      else {
+         set TaxCodeFlagVar = false;
+      }
+
+      if [isNew] {
+         set NewLineVar = true;
+      }
+      else {
+         set NewLineVar = false;
+      }
+
+      set DuplicateLineVar = false;
+      set TaxEditedVar = false;
+      set RecalcLineDiscVar = true;
+      set TaxFromDefaultsVar = "FALSE";
+
+      copy this into ValidationRecVar;
+
+      call ValidateSaleUnitPriceInclTax(ValidationRecVar, TaxFromDefaultsVar,
+      TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar, RecalcLineDiscVar, FreeOfCharge) into ReturnValidationRecVar;
+
+      copy ReturnValidationRecVar into this;
+   }
+
+}
+
+command ValidateBaseSaleUnitPriceBaseCommand {
+   variable ValidationRecVar Structure(CustOrdLineValidation);
+   variable ReturnValidationRecVar Structure(CustOrdLineValidation);
+   variable TaxCodeFlagVar Boolean;
+   variable NewLineVar Boolean;
+   variable DuplicateLineVar Boolean;
+   variable TaxEditedVar Boolean;
+   variable RecalcLineDiscVar Boolean;
+   variable TaxFromDefaultsVar Text;
+
+   execute {
+      if [TaxCode != original.TaxCode or isNew] {
+         set TaxCodeFlagVar = true;
+      }
+      else {
+         set TaxCodeFlagVar = false;
+      }
+
+      if [isNew] {
+         set NewLineVar = true;
+      }
+      else {
+         set NewLineVar = false;
+      }
+
+      set DuplicateLineVar = false;
+      set TaxEditedVar = false;
+      set TaxFromDefaultsVar = "FALSE";
+
+      copy this into ValidationRecVar;
+
+      call ValidateLineBaseSaleUnitPrice(ValidationRecVar, TaxFromDefaultsVar,
+      TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar, RecalcLineDiscVar, FreeOfCharge) into ReturnValidationRecVar;
+      copy ReturnValidationRecVar into this;
+   }
+}
+
+
+command ValidateBaseSaleUnitPriceInclTaxBaseCommand {
+   variable ValidationRecVar Structure(CustOrdLineValidation);
+   variable ReturnValidationRecVar Structure(CustOrdLineValidation);
+   variable TaxCodeFlagVar Boolean;
+   variable NewLineVar Boolean;
+   variable DuplicateLineVar Boolean;
+   variable TaxEditedVar Boolean;
+   variable RecalcLineDiscVar Boolean;
+   variable TaxFromDefaultsVar Text;
+
+   execute {
+      if [TaxCode != original.TaxCode or isNew] {
+         set TaxCodeFlagVar = true;
+      }
+      else {
+         set TaxCodeFlagVar = false;
+      }
+
+      if [isNew] {
+         set NewLineVar = true;
+      }
+      else {
+         set NewLineVar = false;
+      }
+
+      set DuplicateLineVar = false;
+      set TaxEditedVar = false;
+      set TaxFromDefaultsVar = "FALSE";
+
+      copy this into ValidationRecVar;
+
+      call ValidateBaseSaleUnitPriceInclTax(ValidationRecVar, TaxFromDefaultsVar,
+      TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar, RecalcLineDiscVar, FreeOfCharge) into ReturnValidationRecVar;
+      copy ReturnValidationRecVar into this;
+   }
+
+}
+
+command UpdateLicenseDateBaseCommand {
+   variable ExpLinesExist Text;
+   variable ConfigurationSpecInfoVar Structure(ConfigurationSpecInfoStructure);
+   variable ConfigurationIdVar Text;
+   execute {
+      // Replication, start
+      set ChangedAttribNotInPol = null;
+      call CheckReplication(OrderNo, LineNo, RelNo, LineItemNo, BuyQtyDue, PlannedDeliveryDate, PackingInstructionId, DefaultAddrFlag, AddrFlag, ShipAddrNo, DockCode,
+      SubDockCode, LocationNo, PlannedRentalStartDateEditable, PlannedRentalStartTimeEditable, PlannedRentalEndDateEditable, PlannedRentalEndTimeEditable) into CheckReplicationVar;
+      set SendChangeRequest = CheckReplicationVar.SendChangeRequest;
+      set SupplyCodeCheck = CheckReplicationVar.SupplyCodeCheck;
+      set ChangedAttribNotInPol = CheckReplicationVar.ChangedAttribNotInPol;
+      if [ChangedAttribNotInPol != null] {
+         set ReplicateColumnsModified = "TRUE";
+      }
+      // Replication, end
+
+      if [ExportControlledDb and RaisedQuestionExpLic = "FALSE"] {
+         call IsExpctrConnected(OrderNo, LineNo, RelNo, LineItemNo) into ExpLinesExist;
+         if [ExpLinesExist = "TRUE"] {
+            inquire("The specified date might not be within the range as given in the connected export license(s).
+         For the date change to be accepted, such export license(s) will be disconnected.
+         Do you wish to proceed?.") {
+               when YES {
+                  set DisconnectExpLic = "TRUE";
+               }
+               when NO {
+                  set DisconnectExpLic = "FALSE";
+               }
+            }
+            set RaisedQuestionExpLic = "TRUE";
+         }
+      }
+
+      if [PlannedDeliveryDate != original.PlannedDeliveryDate and ConfigurationId != "*"] {
+         call GetConfigurationSpecInfo(PartNo, PlannedDeliveryDate, ConfigurationId) into ConfigurationSpecInfoVar;
+         if [ConfigurationSpecInfoVar.SpecRevForDate = null] {
+            // No revision exists
+            info("No valid part configuration revision exists for this date. Current revision will be used.");
+            exit;
+         }
+         if [ConfigurationSpecInfoVar.SpecRevForDate != ConfigurationSpecInfoVar.SpecRevisionNo] {
+            // Revision does not match - check if quantity has been reserved
+            if [QtyAssigned > 0] {
+               info("Another part configuration revision is effective for this date. Current revision will be used for reserved lines.");
+            }
+            else {
+               messagebox("", question, "A new part configuration revision is effective for this date. Do you want to update the configuration to this revision?") {
+                  when "Yes" {
+                     call ConfigurationManualPark(PartNo, ConfigurationId, ConfigurationSpecInfoVar.SpecRevForDate, ConfigurationSpecInfoVar.SpecRevisionNo) into ConfigurationIdVar;
+                     info("The configuration status will be set to Parked. Please edit configuration in order to Complete the configuration.");
+                     set ConfigurationId = ConfigurationIdVar;
+                  }
+                  when "No" {
+                     exit;
+                  }
+               }
+            }
+         }
+      }
+   }
+}
+
+command ValidateVendorNoBaseCommand {
+   variable ValidationRecVar Structure(CustOrdLineValidation);
+   variable ReturnValidationRecVar Structure(CustOrdLineValidation);
+
+   execute {
+      copy this into ValidationRecVar;
+      call ValidateVendorNo(ValidationRecVar) into ReturnValidationRecVar {
+         when SUCCESS {
+            copy ReturnValidationRecVar into this;
+         }
+      }
+   }
+}
+
+command ValidateConfigurationIdBaseCommand {
+   variable ValidationRecVar Structure(CustOrdLineValidation);
+   variable ReturnValidationRecVar Structure(CustOrdLineValidation);
+   execute {
+      copy this into ValidationRecVar;
+      call ValidateLineConfigurationId(ValidationRecVar) into ReturnValidationRecVar {
+         when SUCCESS {
+            copy ReturnValidationRecVar into this;
+            if [QtyAssigned > 0] {
+               alert("Changes are not allowed on this customer order line since some or all quantities are already reserved");
+            }
+         }
+      }
+   }
+}
+
+command ValidateTargetDateBaseCommand clone UpdateLicenseDateBaseCommand {
+   variable COPricingMethod Text;
+   variable UpdatePriceEffectiveDate Text;
+   variable ValidationRecVar Structure(CustOrdLineValidation);
+   variable ReturnValidationRecVar Structure(CustOrdLineValidation);
+   variable TaxCodeFlagVar Boolean;
+   variable NewLineVar Boolean;
+   variable DuplicateLineVar Boolean;
+   variable TaxEditedVar Boolean;
+   variable RecalcLineDiscVar Boolean;
+   variable TaxFromDefaultsVar Text;
+   variable ExportControlledDb Boolean;
+
+   execute {
+      if [TaxCode != original.TaxCode or TaxCalcStructureId != original.TaxCalcStructureId] {
+         set TaxEditedVar = true;
+      }
+      else {
+         set TaxEditedVar = false;
+      }
+
+      if [TaxCode != original.TaxCode or isNew] {
+         set TaxCodeFlagVar = true;
+      }
+      else {
+         set TaxCodeFlagVar = false;
+      }
+
+      if [isNew] {
+         set NewLineVar = true;
+      }
+      else {
+         set NewLineVar = false;
+      }
+
+      set DuplicateLineVar = false;
+      set RecalcLineDiscVar = true;
+      set TaxFromDefaultsVar = "FALSE";
+
+      set PlannedDeliveryDate = TargetDate;
+
+      // UpdatePriceEffectivityDate() - Implemented in this command since its only call from here.
+      if [isNew and ValidatePriceEffectiveDate = "TRUE"] {
+         alert("The Wanted  Delivery Date of a New Unsaved Line has been edited.");
+
+         if [TargetDate != null] {
+            call GetCustOrderPricingMethod(Contract) into COPricingMethod;
+            if [COPricingMethod = "DELIVERY_DATE"] {
+               set PriceEffectivityDate = "#{toDate(TargetDate)}";
+
+               copy this into ValidationRecVar;
+               call ValidatePriceEffectivityDate(ValidationRecVar, parent.CurrencyCode, TaxFromDefaultsVar, parent.UsePriceInclTax,
+               TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar, RecalcLineDiscVar, FreeOfCharge) into ReturnValidationRecVar;
+               copy ReturnValidationRecVar into this;
+            }
+         }
+      }
+
+      if [isDirty and ValidatePriceEffectiveDate = "TRUE"] {
+         if [WantedDeliveryDate != null] {
+            call GetPriceEffectiveDateDb(Contract) into UpdatePriceEffectiveDate;
+
+            if [UpdatePriceEffectiveDate = "TRUE" and parent.Objstate = "Planned"] {
+               set PriceEffDateValidated = "FALSE";
+               set PriceEffectivityDate = "#{toDate(WantedDeliveryDate)}";
+
+               copy this into ValidationRecVar;
+               call ValidatePriceEffectivityDate(ValidationRecVar, parent.CurrencyCode, TaxFromDefaultsVar, parent.UsePriceInclTax,
+               TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar, RecalcLineDiscVar, FreeOfCharge) into ReturnValidationRecVar;
+               copy ReturnValidationRecVar into this;
+            }
+            if [UpdatePriceEffectiveDate = "TRUE" and parent.Objstate != "Planned"] {
+               inquire("Changing the price effective date may result in a new price on the order line(s). Do you want to apply new price ?.") {
+                  when YES {
+                     set PriceEffDateValidated = "FALSE";
+                     set PriceEffectivityDate = "#{toDate(WantedDeliveryDate)}";
+
+                     copy this into ValidationRecVar;
+                     call ValidatePriceEffectivityDate(ValidationRecVar, parent.CurrencyCode, TaxFromDefaultsVar, parent.UsePriceInclTax,
+                     TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar, RecalcLineDiscVar, FreeOfCharge) into ReturnValidationRecVar;
+                     copy ReturnValidationRecVar into this;
+                  }
+                  when NO {
+                     set PriceEffDateValidated = "TRUE";
+                  }
+               }
+            }
+         }
+         set ValidatePriceEffectiveDate = "FALSE";
+      }
+      call GetExportControlledDb(OrderNo, LineNo, RelNo, LineItemNo, PartNo, CatalogNo) into ExportControlledDb;
+
+      super;
+   }
+}
+
+command ValidateWantedDeliveryDateBaseCommand clone ValidateTargetDateBaseCommand {
+   execute {
+      set TargetDate = WantedDeliveryDate;
+      set ValidatePriceEffectiveDate = "TRUE";
+      super;
+   }
+}
+
+command ValidatePriceEffectivityDateBaseCommand {
+   variable ValidationRecVar Structure(CustOrdLineValidation);
+   variable ReturnValidationRecVar Structure(CustOrdLineValidation);
+   variable TaxCodeFlagVar Boolean;
+   variable NewLineVar Boolean;
+   variable DuplicateLineVar Boolean;
+   variable TaxEditedVar Boolean;
+   variable RecalcLineDiscVar Boolean;
+   variable TaxFromDefaultsVar Text;
+
+   execute {
+      if [TaxCode != original.TaxCode or TaxCalcStructureId != original.TaxCalcStructureId] {
+         set TaxEditedVar = true;
+      }
+      else {
+         set TaxEditedVar = false;
+      }
+
+      if [TaxCode != original.TaxCode or isNew] {
+         set TaxCodeFlagVar = true;
+      }
+      else {
+         set TaxCodeFlagVar = false;
+      }
+
+      if [isNew] {
+         set NewLineVar = true;
+      }
+      else {
+         set NewLineVar = false;
+      }
+
+      set DuplicateLineVar = false;
+      set RecalcLineDiscVar = true;
+      set TaxFromDefaultsVar = "FALSE";
+
+      copy this into ValidationRecVar;
+
+      call ValidatePriceEffectivityDate(ValidationRecVar, parent.CurrencyCode, TaxFromDefaultsVar, parent.UsePriceInclTax,
+      TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar, RecalcLineDiscVar, FreeOfCharge) into ReturnValidationRecVar;
+
+      copy ReturnValidationRecVar into this;
+   }
+}
+
+
+command ValidatePartOwnershipBaseCommand {
+   variable ValidationRecVar Structure(CustOrdLineValidation);
+   variable ReturnValidationRecVar Structure(CustOrdLineValidation);
+   variable TaxCodeFlagVar Boolean;
+   variable NewLineVar Boolean;
+   variable DuplicateLineVar Boolean;
+   variable TaxEditedVar Boolean;
+   variable RecalcLineDiscVar Boolean;
+   variable TaxFromDefaultsVar Text;
+
+   execute {
+      if [TaxCode != original.TaxCode or TaxCalcStructureId != original.TaxCalcStructureId] {
+         set TaxEditedVar = true;
+      }
+      else {
+         set TaxEditedVar = false;
+      }
+
+      if [TaxCode != original.TaxCode or isNew] {
+         set TaxCodeFlagVar = true;
+      }
+      else {
+         set TaxCodeFlagVar = false;
+      }
+
+      if [isNew] {
+         set NewLineVar = true;
+      }
+      else {
+         set NewLineVar = false;
+      }
+
+      set DuplicateLineVar = false;
+      set RecalcLineDiscVar = true;
+      set TaxFromDefaultsVar = "FALSE";
+
+      copy this into ValidationRecVar;
+
+      call ValidatePartOwnership(ValidationRecVar, TaxFromDefaultsVar, parent.UsePriceInclTax,
+      TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar, RecalcLineDiscVar, FreeOfCharge) into ReturnValidationRecVar;
+
+      copy ReturnValidationRecVar into this;
+
+      if [PartOwnership = "SupplierLoaned" and Owner = null] {
+         error("The customer must be connected to a supplier in order to return ${PartOwnership} stock.");
+         exit CANCEL;
+      }
+      if [ExchangeItem = "ExchangedItem" and PartOwnership = "CompanyOwned"] {
+         error("Part Ownership cannot be change for exchange customer order lines.");
+         exit CANCEL;
+      }
+
+      if [DemandCodeDb = "CRO" and SupplyCode = "InventOrder" and PartOwnership = "CustomerOwned"] {
+         inquire("Customer order line is created from a component repair order line with ownership Company-Owned. Continue anyway?.") {
+            when NO {
+               exit CANCEL;
+            }
+         }
+      }
+      exit OK;
+   }
+}
+
+// Since RecalculatePriceCurrencyCommand used some common price fetching and calculation functions,
+// it's moved to this file instead of SalesOrderLineCommonCommands.
+//
+command RecalculatePriceCurrencyBaseCommand {
+   label = "Recalculate Price/Currency";
+
+   mode = SelectedRecords;
+   autosave = false;
+
+   variable ValidationRecVar Structure(CustOrdLineValidation);
+   variable ReturnValidationRecVar Structure(CustOrdLineValidation);
+   variable TaxCodeFlagVar Boolean;
+   variable NewLineVar Boolean;
+   variable DuplicateLineVar Boolean;
+   variable TaxEditedVar Boolean;
+   variable RecalcLineDiscVar Boolean;
+   variable TaxFromDefaultsVar Text;
+   variable UsePriceInclTaxVar Boolean;
+   variable CurrencyCodeVar Text;
+
+
+   execute {
+      set Identity1 = OrderNo;
+      set Identity2 = LineNo;
+      set Identity3 = RelNo;
+      set Identity4 = LineItemNo;
+      set Source = "CUSTOMERORDER";
+
+      if [TaxCode != original.TaxCode or isNew] {
+         set TaxCodeFlagVar = true;
+      }
+      else {
+         set TaxCodeFlagVar = false;
+      }
+
+      if [isNew] {
+         set NewLineVar = true;
+      }
+      else {
+         set NewLineVar = false;
+      }
+
+      set DuplicateLineVar = false;
+      set TaxEditedVar = false;
+      set TaxFromDefaultsVar = "TRUE";
+      set RecalcLineDiscVar = true;
+      set BasicDataEdited = true;
+
+      copy this into ValidationRecVar;
+      if [UsePriceInclTaxVar = null] {
+         set UsePriceInclTaxVar = parent.UsePriceInclTax;
+      }
+      if [CurrencyCodeVar = null] {
+         set CurrencyCodeVar = parent.CurrencyCode;
+      }
+
+
+
+      call RecalculateSalesPrice(ValidationRecVar, TaxFromDefaultsVar, CurrencyCodeVar, UsePriceInclTaxVar,
+      TaxCodeFlagVar, NewLineVar, DuplicateLineVar, TaxEditedVar, RecalcLineDiscVar, FreeOfCharge) into ReturnValidationRecVar {
+         when SUCCESS {
+            copy ReturnValidationRecVar into this;
+         }
+      }
+   }
+}
+
+--------------------------- PROJECTION FRAGMENTS ----------------------------
+
+---------------------------------- ACTIONS ----------------------------------
+action ValidateAndFetchCatalogNoDefaults Structure(CatalogNoDefaultsStruct) {
+   initialcheck none;
+   parameter Source    Text;
+   parameter Identity1 Text;
+   parameter Identity2 Text;
+   parameter Identity3 Text;
+   parameter Identity4 Number;
+   parameter CatalogNo Text;
+   parameter BuyQtyDue Number;
+   parameter PriceEffectivityDate Date;
+   parameter TaxCode   Text;
+   parameter ShipAddrNo Text;
+   parameter DeliverToCustomerNo Text;
+   parameter RentalDb    Text;
+   parameter RentalChargableDays Number;
+
+   supportwarnings = [true];
+}
+
+action ValidateAndFetchCustomerPartNoDefaults Structure(CustOrdLineValidation) {
+   initialcheck none;
+   parameter ValidationRec       Structure(CustOrdLineValidation);
+   parameter CurrencyCode        Text;
+   parameter UsePriceInclTax     Boolean;
+   parameter TaxCodeFlag         Boolean;
+   parameter NewLine             Boolean;
+   parameter DuplicateLine       Boolean;
+   parameter TaxEdited           Boolean;
+   parameter FreeOfChargeDb      Boolean;
+   supportwarnings = [true];
+}
+
+-- Below parameters need to be set before calling this method.
+--    Identity1, Identity2, Identity3, Identity4 and Source (in ValidationRec)
+--    TaxFromDefaultsVar
+---------------------------------------------------------
+
+action CalculateAndFetchSalesLinePrices Structure(CustOrdLineValidation) {
+   initialcheck none;
+   parameter ValidationRec       Structure(CustOrdLineValidation);
+   parameter TaxFromDefaults     Text;
+   parameter CurrencyCode        Text;
+   parameter UsePriceInclTax     Boolean;
+   parameter TaxCodeFlag         Boolean;
+   parameter NewLine             Boolean;
+   parameter DuplicateLine       Boolean;
+   parameter TaxEdited           Boolean;
+}
+
+-- Below parameters need to be set before calling this method.
+--    Identity1, Identity2, Identity3, Identity4 and Source (in ValidationRec)
+--    TaxFromDefaults, RecalcLineDiscVar
+---------------------------------------------------------
+
+action CalculateAndFetchSalesLineTotal Structure(CustOrdLineValidation) {
+   initialcheck none;
+   parameter ValidationRec       Structure(CustOrdLineValidation);
+   parameter TaxFromDefaults     Text;
+   parameter CurrencyCode        Text;
+   parameter UsePriceInclTax     Boolean;
+   parameter TaxCodeFlag         Boolean;
+   parameter NewLine             Boolean;
+   parameter DuplicateLine       Boolean;
+   parameter TaxEdited           Boolean;
+   parameter RecalcLineDisc      Boolean;
+   parameter FreeOfChargeDb      Boolean;
+}
+
+action ValidateSaleUnitPrice Structure(CustOrdLineValidation) {
+   initialcheck none;
+   parameter ValidationRec      Structure(CustOrdLineValidation);
+   parameter TaxFromDefaults     Text;
+   parameter TaxCodeFlag         Boolean;
+   parameter NewLine             Boolean;
+   parameter DuplicateLine       Boolean;
+   parameter TaxEdited           Boolean;
+   parameter RecalcLineDisc      Boolean;
+   parameter FreeOfChargeDb      Boolean;
+}
+
+action ValidateSaleUnitPriceInclTax Structure(CustOrdLineValidation) {
+   initialcheck none;
+   parameter ValidationRec      Structure(CustOrdLineValidation);
+   parameter TaxFromDefaults     Text;
+   parameter TaxCodeFlag         Boolean;
+   parameter NewLine             Boolean;
+   parameter DuplicateLine       Boolean;
+   parameter TaxEdited           Boolean;
+   parameter RecalcLineDisc      Boolean;
+   parameter FreeOfChargeDb      Boolean;
+}
+
+action ValidateLineAddressNo Structure(CustOrdLineValidation) {
+   initialcheck none;
+   parameter ValidationRec Structure(CustOrdLineValidation);
+   parameter Company Text;
+   parameter DemandCodeDb Text;
+   parameter NewLine Boolean;
+   parameter DefaultAddrFlagChanged Boolean;
+}
+
+action ValidateSupplier Structure(CustOrdLineValidation) {
+   initialcheck none;
+   parameter ValidationRec    Structure(CustOrdLineValidation);
+}
+
+action ValidateGtinNo Structure(CustOrdLineValidation) {
+   initialcheck none;
+   parameter ValidationRec    Structure(CustOrdLineValidation);
+   parameter ClassificationStandard Text;
+}
+
+action GetInputUomForGtin Structure(CustOrdLineValidation) {
+   initialcheck none;
+   parameter ValidationRec    Structure(CustOrdLineValidation);
+}
+
+action ValidateVendorNo Structure(CustOrdLineValidation) {
+   initialcheck none;
+   parameter ValidationRec    Structure(CustOrdLineValidation);
+}
+
+action ValidateLineConfigurationId Structure(CustOrdLineValidation) {
+   initialcheck none;
+   parameter ValidationRec Structure(CustOrdLineValidation);
+}
+
+action ValidateLineBaseSaleUnitPrice Structure(CustOrdLineValidation) {
+   initialcheck none;
+   parameter ValidationRec      Structure(CustOrdLineValidation);
+   parameter TaxFromDefaults     Text;
+   parameter TaxCodeFlag         Boolean;
+   parameter NewLine             Boolean;
+   parameter DuplicateLine       Boolean;
+   parameter TaxEdited           Boolean;
+   parameter RecalcLineDisc      Boolean;
+   parameter FreeOfChargeDb      Boolean;
+}
+
+action ValidateBaseSaleUnitPriceInclTax Structure(CustOrdLineValidation) {
+   initialcheck none;
+   parameter ValidationRec      Structure(CustOrdLineValidation);
+   parameter TaxFromDefaults     Text;
+   parameter TaxCodeFlag         Boolean;
+   parameter NewLine             Boolean;
+   parameter DuplicateLine       Boolean;
+   parameter TaxEdited           Boolean;
+   parameter RecalcLineDisc      Boolean;
+   parameter FreeOfChargeDb      Boolean;
+}
+
+action ValidateBuyQtyDue Structure(CustOrdLineValidation) {
+   initialcheck none;
+   parameter ValidationRec      Structure(CustOrdLineValidation);
+   parameter TaxFromDefaults     Text;
+   parameter UsePriceInclTax     Boolean;
+   parameter TaxCodeFlag         Boolean;
+   parameter NewLine             Boolean;
+   parameter DuplicateLine       Boolean;
+   parameter TaxEdited           Boolean;
+   parameter RecalcLineDisc      Boolean;
+   parameter FreeOfChargeDb      Boolean;
+}
+
+action GetOrderPrice Structure(CustOrdLineValidation) {
+   initialcheck none;
+   parameter ValidationRec      Structure(CustOrdLineValidation);
+   parameter TaxFromDefaults     Text;
+   parameter UsePriceInclTax     Boolean;
+   parameter TaxCodeFlag         Boolean;
+   parameter NewLine             Boolean;
+   parameter DuplicateLine       Boolean;
+   parameter TaxEdited           Boolean;
+   parameter RecalcLineDisc      Boolean;
+   parameter FreeOfChargeDb      Boolean;
+}
+
+action FetchTaxLiabilityType Structure(CustOrdLineValidation) {
+   initialcheck none;
+   parameter ValidationRec      Structure(CustOrdLineValidation);
+   parameter NewLine             Boolean;
+}
+
+action CalculateAndFetchCost Number {
+   initialcheck none;
+   parameter ValidationRec Structure(CustOrdLineValidation);
+}
+
+action CalculateAndFetchAvailableQty Number {
+   initialcheck none;
+   parameter ValidationRec Structure(CustOrdLineValidation);
+}
+
+action ValidatePriceEffectivityDate Structure(CustOrdLineValidation) {
+   initialcheck none;
+   parameter ValidationRec      Structure(CustOrdLineValidation);
+   parameter CurrencyCode       Text;
+   parameter TaxFromDefaults     Text;
+   parameter UsePriceInclTax     Boolean;
+   parameter TaxCodeFlag         Boolean;
+   parameter NewLine             Boolean;
+   parameter DuplicateLine       Boolean;
+   parameter TaxEdited           Boolean;
+   parameter RecalcLineDisc      Boolean;
+   parameter FreeOfChargeDb      Boolean;
+}
+
+action ValidatePartOwnership Structure(CustOrdLineValidation) {
+   initialcheck none;
+   parameter ValidationRec       Structure(CustOrdLineValidation);
+   parameter TaxFromDefaults     Text;
+   parameter UsePriceInclTax     Boolean;
+   parameter TaxCodeFlag         Boolean;
+   parameter NewLine             Boolean;
+   parameter DuplicateLine       Boolean;
+   parameter TaxEdited           Boolean;
+   parameter RecalcLineDisc      Boolean;
+   parameter FreeOfChargeDb      Boolean;
+}
+
+action ExistLineNo {
+   initialcheck none;
+   parameter Identity1 Text;
+   parameter Identity2 Text;
+   parameter Identity3 Text;
+   parameter Identity4 Number;
+   parameter Source    Text;
+}
+
+action RecalculateSalesPrice Structure(CustOrdLineValidation) {
+   initialcheck none;
+   parameter ValidationRec       Structure(CustOrdLineValidation);
+   parameter TaxFromDefaults     Text;
+   parameter CurrencyCode        Text;
+   parameter UsePriceInclTax     Boolean;
+   parameter TaxCodeFlag         Boolean;
+   parameter NewLine             Boolean;
+   parameter DuplicateLineVar    Boolean;
+   parameter TaxEdited           Boolean;
+   parameter RecalcLineDisc      Boolean;
+   parameter FreeOfChargeDb      Boolean;
+}
+
+action SetFreeOfChargeTaxBasis Structure(CustOrdLineValidation) {
+   initialcheck none;
+   parameter ValidateRec Structure(CustOrdLineValidation);
+   parameter FreeOfChargeDb Boolean;
+   parameter CustomerNoPay Text;
+   parameter CurrencyCode Text;
+   parameter CurrencyRateType Text;
+}
+
+action SetCalculatedPrices Structure(CustOrdLineValidation) {
+   initialcheck none;
+   parameter ValidateRec Structure(CustOrdLineValidation);
+   parameter FreeOfChargeDb Boolean;
+   parameter CustomerNoPay Text;
+   parameter CurrencyCode Text;
+   parameter CurrencyRateType Text;
+   parameter TaxFromDefaults Text;
+   parameter UsePriceInclTax Boolean;
+   parameter TaxCodeFlag Boolean;
+   parameter NewLine Boolean;
+   parameter DuplicateLine Boolean;
+   parameter TaxEdited Boolean;
+   parameter RecalcLineDisc Boolean;
+}
+
+action ValidateFreeOfCharge Structure(CustOrdLineValidation) {
+   initialcheck none;
+   parameter ValidateRec Structure(CustOrdLineValidation);
+   parameter FreeOfChargeDb Boolean;
+   parameter CustomerNoPay Text;
+   parameter CurrencyCode Text;
+   parameter CurrencyRateType Text;
+   parameter TaxFromDefaults Text;
+   parameter UsePriceInclTax Boolean;
+   parameter TaxCodeFlag Boolean;
+   parameter NewLine Boolean;
+   parameter DuplicateLine Boolean;
+   parameter TaxEdited Boolean;
+   parameter RecalcLineDisc Boolean;
+}
+
+action ConfigurationManualPark Text {
+   initialcheck none;
+   parameter PartNo Text;
+   parameter ConfigurationId Text;
+   parameter SpecRevForDate Number;
+   parameter SpecRevisionNo Number;
+}
+
+--------------------------------- FUNCTIONS ---------------------------------
+
+function GetNextRelNo Text {
+   parameter Identity1 Text;
+   parameter Identity2 Text;
+   parameter Identity4 Number;
+   parameter Contract  Text;
+   parameter Source    Text;
+}
+
+function ValidateClassificationDefaults Structure(ClassificationDefaultsStructure) {
+   parameter ClassificationUnitMeas    Text;
+   parameter CatalogNo                 Text;
+   parameter ClassificationPartNo      Text;
+   parameter ClassificationStandard    Text;
+   parameter Contract                  Text;
+   parameter ClassifcationPartEdited   Boolean;
+}
+
+function GetTaxLiabilityType Text {
+   parameter OrderNo Text;
+   parameter TaxLiability Text;
+}
+
+function IsExpctrConnected Text {
+   parameter OrderNo             Text;
+   parameter LineNo              Text;
+   parameter RelNo               Text;
+   parameter LineItemNo          Number;
+}
+
+function GetCustOrderPricingMethod Text {
+   parameter Contract Text;
+}
+
+function GetPriceEffectiveDateDb Text {
+   parameter Contract Text;
+
+}
+
+function GetExportControlledDb Boolean {
+   parameter OrderNo             Text;
+   parameter LineNo              Text;
+   parameter RelNo               Text;
+   parameter LineItemNo          Number;
+   parameter PartNo              Text;
+   parameter CatalogNo           Text;
+}
+
+function CheckReplication Structure(ReplicationStructure) {
+   parameter OrderNo                Text;
+   parameter LineNo                 Text;
+   parameter RelNo                  Text;
+   parameter LineItemNo             Number;
+   parameter BuyQtyDue              Number;
+   parameter PlannedDeliveryDate    Timestamp;
+   parameter PackingInstructionId   Text;
+   parameter DefaultAddrFlag        Enumeration(GenYesNo);
+   parameter AddrFlagDb             Enumeration(GenYesNo);
+   parameter ShipAddrno             Text;
+   parameter DockCode               Text;
+   parameter SubDockCode            Text;
+   parameter LocationNo             Text;
+   parameter PlannedRentalStartDate Date;
+   parameter PlannedRentalStartTime Time;
+   parameter PlannedRentalEndDate   Date;
+   parameter PlannedRentalEndTime   Time;
+}
+
+function GetConfigurationSpecInfo Structure(ConfigurationSpecInfoStructure) {
+   parameter PartNo Text;
+   parameter PlannedDeliveryDate Timestamp;
+   parameter ConfigurationId Text;
+}
+
+-------------------------------- STRUCTURES ---------------------------------
+
+structure CustOrdLineValidation {
+   attribute AdditionalDiscount  Number;
+   attribute AddrFlag            Enumeration(GenYesNo);
+   attribute BuyQtyDue           Number;
+   attribute InputQty            Number;
+   attribute CatalogNo           Text;
+   attribute CatalogDesc         Text;
+   attribute CatalogType         Enumeration(SalesPartType);
+   attribute ClassificationUnitMeas    Text;
+   attribute ClassificationPartNo      Text;
+   attribute Company             Text;
+   attribute ConditionCode       Text;
+   attribute ConfigurationId     Text;
+   attribute ConfigurationStatus Text;
+   attribute Contract            Text;
+   attribute ConvFactor          Number;
+   attribute CurrencyRate        Number;
+   attribute CurrRounding        Number;
+   attribute CustomerNo          Text;
+   attribute DefaultAddrFlag     Enumeration(GenYesNo);
+   attribute DeliverToCustomerNo Text;
+   attribute DeliveryCountryCode Text;
+   attribute DeliveryTerms       Text;
+   attribute DeliveryType        Text;
+   attribute DelTermsLocation    Text;
+   attribute Discount            Number;
+   attribute DistrictCode        Text;
+   attribute EndCustomerId       Text;
+   attribute EndCustomerName     Text;
+   attribute FreeOfChargeTaxBasis Number;
+   attribute GrossAmtCurr        Number;
+   attribute Identity1           Text;
+   attribute Identity2           Text;
+   attribute Identity3           Text;
+   attribute Identity4           Number;
+   attribute IntrastatExempt     Enumeration(IntrastatExempt);
+   attribute OrderNo             Text;
+   attribute LineNo              Text;
+   attribute RelNo               Text;
+   attribute LineItemNo          Number;
+   attribute OriginalOrderNo     Text;
+   attribute OriginalLineNo      Text;
+   attribute OriginalRelNo       Text;
+   attribute OriginalItemNo      Text;
+   attribute InvertedConvFactor  Number;
+   attribute MultipleTaxLines    Boolean;
+   attribute FetchTaxFromDefaults Text;
+   attribute NetAmountCurr       Number;
+   attribute OrderDiscount       Number;
+   attribute OwningCustomerNo    Text;
+   attribute PartNo              Text;
+   attribute PartOwnership       Enumeration(PartOwnership);
+   attribute PlannedDeliveryDate Timestamp;
+   attribute PriceConvFactor     Number;
+   attribute ProjectId           Text;
+   attribute QtyAssigned         Number;
+   attribute RentalDb            Text;
+   attribute RegionCode          Text;
+   attribute ShipAddrNo          Text;
+   attribute Source              Text;
+   attribute SupplyCode          Enumeration(OrderSupplyType);
+   attribute SupplySiteReserveType Enumeration(SupplySiteReserveType);
+   attribute SupplySite          Text;
+   attribute TaxAmountCurr       Number;
+   attribute TaxCalcStructureId  Text;
+   attribute TaxClassId          Text;
+   attribute TaxCode             Text;
+   attribute TaxLiability        Text;
+   attribute TaxLiabilityType    Enumeration(TaxLiabilityType);
+   attribute TotalDiscount       Number;
+   attribute SaleUnitPrice       Number;
+   attribute UnitPriceInclTax    Number;
+   attribute BaseSaleUnitPrice   Number;
+   attribute BaseUnitPriceInclTax Number;
+   attribute PriceEffectivityDate Date;
+   attribute PriceSourceId       Text;
+   attribute ProvisionalPriceDb  Boolean;
+   attribute PriceSourceNetPriceDb Boolean;
+   attribute RebateBuilderDb     Boolean;
+   attribute PartLevel           Enumeration(PriceDiscountPartLevel);
+   attribute PartLevelId         Text;
+   attribute CustomerLevel       Enumeration(PriceDiscountCustLevel);
+   attribute CustomerLevelId     Text;
+   attribute PriceListNo         Text;
+   attribute PartPrice           Number;
+   attribute CharPrice           Number;
+   attribute CalcCharPrice       Number;
+   attribute ConfiguredLinePriceId Number;
+   attribute PriceFreeze         Enumeration(FreezeFlag);
+   attribute BasicDataEdited     Boolean;
+   attribute PriceEdited         Boolean;
+   attribute Owner               Text;
+   attribute TaxAmountBase       Number;
+   attribute NetAmountBase       Number;
+   attribute GrossAmountBase     Number;
+   attribute GrossAmountCurr     Number;
+   attribute DiscountAmountCurr  Number;
+   attribute Cost                Number;
+   attribute ChargedItem         Enumeration(ChargedItem);
+   attribute CalcPriceCur        Number;
+   attribute PriceSource         Enumeration(PricingSource);
+   attribute PriceUnitMeas       Text;
+   attribute SuggestedExists     Number;
+   attribute SalesPriceGroupId   Text;
+   attribute InputUnitMeasGroupId Text;
+   attribute InputUomGroup       Boolean;
+   attribute CostLevelDb         Text;
+   attribute Gtin                Text;
+   attribute InputUnitMeas       Text;
+   attribute ShipmentConnectedDb Text;
+   attribute OriginalPartNo      Text;
+   attribute PackingInstructionId Text;
+   attribute PriceQtyDue         Number;
+   attribute RevisedQtyDue       Number;
+   attribute AvailableQty        Number;
+   attribute CustomerPartNo Text;
+   attribute CustomerPartConvFactor Number;
+   attribute CustomerPartUnitMeas Text;
+   attribute CustPartInvertConvFact Number;
+   attribute InputConvFactor Number;
+   attribute SalesUnitMeas Text;
+   attribute VendorNo Text;
+   attribute PurchasePartNo Text;
+   attribute ConsignmentStock Enumeration(ConsignmentStock);
+   attribute CloseTolerance Number;
+   attribute DopConnection Enumeration(DopConnection);
+   attribute CreateSmObjectOption Enumeration(CreateSmObjectOption);
+   attribute SelfBilling Enumeration(SelfBillingType);
+   attribute ReceivingAdviceType Enumeration(ReceivingAdviceType);
+   attribute ChargeableDays Number;
+   attribute PlannedRentalStartDate Timestamp;
+   attribute OwnerName Text;
+   attribute RefresshPriceSource Text;
+   attribute CompanyBearingTaxAmountBase Number;
+}
+
+-- this struture will hold only the attributes fetched from Customer_ORder_Line_API.Get_Line_Defaults
+structure CatalogNoDefaultsStruct {
+   attribute CatalogNo Text;
+   attribute CatalogDesc Text;
+
+   attribute OriginalPartNo Text;
+   attribute RentalDb Text;
+    --bool
+   attribute CatalogType Enumeration(SalesPartType);
+   attribute DeliveryType Text;
+    -- should be an enumeration missed in the .entity..?
+   attribute CustomerPartNo Text;
+   attribute CustomerPartConvFactor Number;
+   attribute CustomerPartUnitMeas Text;
+   attribute CustPartInvertConvFact Number;
+
+   attribute BuyQtyDue Number;
+   attribute RevisedQtyDue Number;
+   attribute CurrencyRate Number;
+   attribute ConvFactor Number;
+   attribute InvertedConvFactor Number;
+   attribute PriceConvFactor Number;
+   attribute SalesUnitMeas Text;
+   attribute PriceUnitMeas Text;
+   --iee code moved to server
+   attribute SaleUnitPrice Number;
+   attribute UnitPriceInclTax Number;
+   attribute BaseSaleUnitPrice Number;
+   attribute BaseUnitPriceInclTax Number;
+
+   attribute Discount Number;
+   attribute PartNo Text;
+   attribute Cost Number;
+   attribute ConditionCode Text;
+
+   attribute SupplyCode Enumeration(OrderSupplyType);
+   attribute SupplySite Text;
+   attribute VendorNo Text;
+   attribute PurchasePartNo Text;
+   attribute SupplySiteReserveType Enumeration(SupplySiteReserveType);
+
+   attribute ConsignmentStock Enumeration(ConsignmentStock);
+   attribute CloseTolerance Number;
+   attribute ChargedItem Enumeration(ChargedItem);
+   -- not in IEE
+   attribute DopConnection Enumeration(DopConnection);
+   attribute CreateSmObjectOption Enumeration(CreateSmObjectOption);
+   attribute SelfBilling Enumeration(SelfBillingType);
+   attribute ReceivingAdviceType Enumeration(ReceivingAdviceType);
+
+   attribute PartPrice Number;
+   attribute PriceSource Enumeration(PricingSource);
+   attribute PriceSourceId Text;
+   attribute PriceListNo Text;
+   attribute CustomerLevel Enumeration(PriceDiscountCustLevel);
+   attribute CustomerLevelId Text;
+   attribute PartLevel Enumeration(PriceDiscountPartLevel);
+   attribute PartLevelId Text;
+   attribute PriceSourceNetPriceDb Boolean;
+   attribute ProvisionalPriceDb Boolean;
+    --bool
+   attribute PartOwnership Enumeration(PartOwnership);
+   attribute FreeOfChargeDb Boolean;
+
+    -- not in .entity
+   attribute PackingInstructionId Text;
+
+   attribute TaxCode Text;
+   attribute TaxClassId         Text;
+   attribute TaxLiability       Text;
+   attribute TaxLiabilityType Enumeration(TaxLiabilityType);
+   attribute Taxable Boolean;
+
+   -- gelr: acquisition_origin, begin
+   attribute AcquisitionOrigin Number;
+   -- gelr: acquisition_origin, end
+   -- gelr:good_service_statistical_code, begin
+   attribute StatisticalCode Text;
+   -- gelr:good_service_statistical_code, end
+   -- gelr:brazilian_specific_attributes, begin
+   attribute AcquisitionReasonId Text;
+   -- gelr:brazilian_specific_attributes, end
+
+   attribute InputUnitMeasGroupId Text;
+   attribute InputUomGroup Boolean;
+   attribute InputUnitMeas Text;
+   attribute InputConvFactor Number;
+   attribute Success Boolean;
+
+}
+
+structure ClassificationDefaultsStructure {
+   attribute ClassificationUnitMeas    Text;
+   attribute ClassificationPartNo      Text;
+   attribute ClassificationStandard    Text;
+   attribute CatalogNo                 Text;
+}
+
+structure ReplicationStructure {
+   attribute SupplyCodeCheck       Text;
+   attribute ChangedAttribNotInPol Text;
+   attribute SendChangeRequest     Text;
+}
+
+structure ConfigurationSpecInfoStructure {
+   attribute SpecRevForDate Number;
+   attribute SpecRevisionNo Number;
+}
+
+

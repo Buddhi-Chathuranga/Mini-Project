@@ -1,0 +1,601 @@
+-----------------------------------------------------------------------------
+--
+--  Logical unit: CreateCompanyAssistantHandling
+--  Component:    ENTERP
+--
+--  IFS Developer Studio Template Version 3.0
+--
+--  Date    Sign    History
+--  ------  ------  ---------------------------------------------------------
+--  181207  thjilk  Created.
+-----------------------------------------------------------------------------
+
+layer Core;
+
+FUNCTION Use_Vou_Period___ (
+   source_company_ IN VARCHAR2 )  RETURN VARCHAR2
+IS  
+BEGIN
+   $IF Component_Accrul_SYS.INSTALLED $THEN
+      RETURN Company_Finance_API.Get_Use_Vou_No_Period(source_company_);
+   $ELSE
+      RETURN NULL;
+   $END
+END Use_Vou_Period___;
+
+
+FUNCTION Check_Company_Exist___ (
+   company_ IN VARCHAR2 )  RETURN VARCHAR2 
+IS
+   exist_ VARCHAR2(5);
+BEGIN
+   exist_ := Company_API.Check_Exist(company_);
+   IF (exist_ = 'TRUE') THEN
+      Error_SYS.Record_General(lu_name_, 'COMPANYEXIST: This Company is already created. Use Update Company instead.');
+   END IF;
+   RETURN 'TRUE';
+END Check_Company_Exist___;
+
+
+FUNCTION Default_Template___ RETURN VARCHAR2
+IS
+   template_id_  VARCHAR2(200);
+BEGIN
+   Create_Company_Tem_API.Get_Default_Template__(template_id_);
+   RETURN template_id_;
+END Default_Template___;
+
+
+FUNCTION Fetch_Code_Part_Info___ (
+   source_company_ IN VARCHAR2,
+   template_id_    IN VARCHAR2 )  RETURN Code_Part_Info_Structure_Rec
+IS
+   rec_              Code_Part_Info_Structure_Rec;
+   curr_bal_func_    VARCHAR2(100);
+BEGIN
+   curr_bal_func_ := 'CURR';
+   IF (template_id_ IS NOT NULL) THEN
+      rec_.code_part     := Create_Company_Tem_Detail_API.Get_Curr_Bal_Code_Part__(template_id_);
+      rec_.internal_name := Create_Company_Tem_Detail_API.Get_Internal_Name__(template_id_, rec_.code_part);
+   END IF;
+   IF (source_company_ IS NOT NULL) THEN
+      $IF Component_Accrul_SYS.INSTALLED $THEN
+         rec_.code_part     := Accounting_Code_Parts_API.Get_Codepart_Function_Db(source_company_, curr_bal_func_);
+         rec_.internal_name := Accounting_Code_Parts_API.Get_Code_Name(source_company_, rec_.code_part);  
+      $ELSE
+         rec_.code_part     := NULL;
+         rec_.internal_name := NULL;
+      $END 
+   END IF;
+   RETURN rec_;
+END Fetch_Code_Part_Info___;
+
+
+FUNCTION Validate_Create_From_Details___ (
+   source_company_ IN VARCHAR2,
+   template_id_    IN VARCHAR2 )  RETURN VARCHAR2
+IS
+   use_make_company_ VARCHAR2(5);
+   component_list_   VARCHAR2(1000);   
+BEGIN
+   IF (template_id_ IS NULL) THEN
+      IF (source_company_ IS NULL) THEN
+         Error_SYS.Record_General(lu_name_, 'VALIDMANDATORY: Not all mandatory fields are filled with values.');
+      ELSE
+         Company_API.Exist(source_company_);
+      END IF;
+   ELSE
+      Create_Company_Tem_API.Exist(template_id_);
+   END IF;
+   IF ((source_company_ IS NULL) AND (template_id_ IS NULL)) THEN
+      Error_SYS.Record_General(lu_name_, 'VALIDMANDATORY: Not all mandatory fields are filled with values.');
+   END IF;
+   Crecomp_Component_API.Check_If_All_Use_Make_Company(use_make_company_, component_list_);
+   IF (use_make_company_ = 'FALSE') THEN
+      RETURN component_list_;
+   END IF;
+   RETURN NULL;
+END Validate_Create_From_Details___;
+
+
+@DynamicComponentDependency ACCRUL
+PROCEDURE Validate_Accounting_Details___ (
+   source_company_        IN  VARCHAR2,
+   template_id_           IN  VARCHAR2,
+   creation_method_       IN  VARCHAR2,
+   acc_year_              IN  NUMBER,
+   start_year_            IN  NUMBER,
+   start_month_           IN  NUMBER,
+   number_of_years_       IN  NUMBER,
+   currency_code_         IN  VARCHAR2,
+   valid_from_            IN  DATE,
+   parallel_acc_currency_ IN  VARCHAR2,
+   parallel_cur_base_     IN  VARCHAR2,
+   info$_                 OUT VARCHAR2 ) 
+IS
+   rec_                 Code_Part_Info_Structure_Rec;
+   curr_bal_func_       VARCHAR2(100);
+   acc_curr_check_      VARCHAR2(5);
+   parallel_curr_check_ VARCHAR2(5);
+   acc_curr_factor_     NUMBER;
+   para_curr_factor_    NUMBER;
+   currency_rounding_   NUMBER;
+   decimals_in_rate_    NUMBER;
+BEGIN
+   curr_bal_func_ := 'CURR';
+   IF (creation_method_ = 'USER_DEFINED') THEN
+      IF (acc_year_ IS NULL) THEN
+         Error_SYS.Record_General(lu_name_, 'VALIDACCYEAR: The First Accounting Year in the user defined calendar may not be empty.');
+      ELSIF (acc_year_ < 1) THEN
+         Error_SYS.Record_General(lu_name_, 'VALIDACCYEAR2: The number given for the First Accounting Year is not valid.');
+      ELSIF (start_year_ IS NULL) THEN
+         Error_SYS.Record_General(lu_name_, 'VALIDSTRTYEAR: Start Year in the user defined calendar may not be empty.');
+      ELSIF (start_year_ < 1) THEN
+         Error_SYS.Record_General(lu_name_, 'VALIDSTRTYEAR2: The number given for the Start Year is not valid.');
+      ELSIF ((start_year_ < (acc_year_ - 1)) OR (start_year_ > acc_year_)) THEN
+         Error_SYS.Record_General(lu_name_, 'VALIDSTRTYEAR3: The Start from Year must be equal to First Accounting Year or one year less.');
+      ELSIF (start_month_ IS NULL) THEN
+         Error_SYS.Record_General(lu_name_, 'VALIDSTRTMNTH: The Start Month in the user defined calendar may not be empty.');
+      ELSIF ((start_month_ < 1) OR (start_month_ > 12)) THEN
+         Error_SYS.Record_General(lu_name_, 'VALIDSTRTMNTH2: The number given for the Start Month is not valid.');
+      ELSIF ((start_month_ = 1) AND (start_year_ < acc_year_)) THEN
+         Error_SYS.Record_General(lu_name_, 'VALIDSTRTMNTH3: The Start Month must be two or above when the Start Year is one less than the First Accounting Year.');
+      ELSIF (number_of_years_ IS NULL) THEN
+         Error_SYS.Record_General(lu_name_, 'VALIDNOOFYEARS: The Number of Years in the user defined calendar may not be empty.');
+      ELSIF (number_of_years_ < 1) THEN
+         Error_SYS.Record_General(lu_name_, 'VALIDNOOFYEARS2: The Number of Years for the user defined calendar must be positive.');
+      ELSIF (number_of_years_ > 99) THEN
+         Error_SYS.Record_General(lu_name_, 'VALIDNOOFYEARS3: The Number of Years for the user defined calendar must be less than a hundred years.');
+      ELSIF ((start_year_ IS NOT NULL) AND (start_month_ IS NOT NULL) AND (number_of_years_ IS NOT NULL)) THEN
+         IF (valid_from_ IS NOT NULL) THEN
+            User_Defined_Calender_Dates(valid_from_, start_year_, start_month_, number_of_years_);
+         END IF;
+      END IF;
+   END IF;
+   IF (parallel_acc_currency_ IS NOT NULL) THEN
+      Iso_Currency_API.Exist(parallel_acc_currency_);
+      Iso_Currency_API.Exist(currency_code_);
+      IF (parallel_cur_base_ IS NULL) THEN
+         Error_SYS.Record_General(lu_name_, 'REQPARCURRBASE: Parallel Currency Base is required when Parallel Currency is defined.');
+      END IF;
+   ELSE
+      Iso_Currency_API.Exist(currency_code_);
+   END IF;
+   IF ((parallel_acc_currency_ IS NOT NULL) AND (currency_code_ = parallel_acc_currency_)) THEN
+      Client_SYS.Add_Warning(lu_name_, 'PARAANDACCVALID: Parallel Currency is defined as same as the Accounting Currency.');
+   END IF;
+   IF (template_id_ IS NOT NULL) THEN
+      rec_.code_part       := Create_Company_Tem_Detail_API.Get_Curr_Bal_Code_Part__(template_id_);
+      rec_.internal_name   := Create_Company_Tem_Detail_API.Get_Internal_Name__(template_id_, rec_.code_part);
+      acc_curr_check_      := Create_Company_Tem_API.Exist_Curr_Code_In_Template__(template_id_, currency_code_);
+      parallel_curr_check_ := Create_Company_Tem_API.Exist_Curr_Code_In_Template__(template_id_, parallel_acc_currency_);
+      IF (acc_curr_check_ != 'TRUE') THEN
+         Error_SYS.Record_General(lu_name_, 'CHKACCCURR: Cannot create accounting currency :P1. Currency does not exist in template :P2.', currency_code_, template_id_);
+      END IF;
+      IF ((parallel_acc_currency_ IS NOT NULL ) AND (parallel_curr_check_ != 'TRUE')) THEN
+         Error_SYS.Record_General(lu_name_, 'CHKPARACURR: Cannot create parallel currency :P1. Currency does not exist in template :P2.', parallel_acc_currency_, template_id_);
+      END IF;
+   END IF;
+   IF (source_company_ IS NOT NULL) THEN
+      $IF Component_Accrul_SYS.INSTALLED $THEN
+         rec_.code_part     := Accounting_Code_Parts_API.Get_Codepart_Function_Db(source_company_, curr_bal_func_);
+         rec_.internal_name := Accounting_Code_Parts_API.Get_Code_Name(source_company_, rec_.code_part); 
+         Currency_Code_API.Get_Currency_Code_Attributes(acc_curr_factor_, currency_rounding_, decimals_in_rate_, source_company_, currency_code_);
+         IF (acc_curr_factor_ IS NULL) THEN
+            Error_SYS.Record_General(lu_name_, 'VALIDACCCURRINFO: Cannot create accounting currency :P1. Currency does not exist in source company :P2.', currency_code_, source_company_);
+         END IF;
+         Currency_Code_API.Get_Currency_Code_Attributes(para_curr_factor_, currency_rounding_, decimals_in_rate_, source_company_, parallel_acc_currency_);
+         IF ((parallel_acc_currency_ IS NOT NULL) AND (para_curr_factor_ IS NULL)) THEN
+            Error_SYS.Record_General(lu_name_, 'VALIDPARCURRINFO: Cannot create parallel currency :P1. Currency does not exist in source company :P2.', parallel_acc_currency_, source_company_);
+         END IF;
+      $ELSE
+         rec_.code_part     := NULL;
+         rec_.internal_name := NULL;
+      $END 
+   END IF; 
+   info$_ := Client_SYS.Get_All_Info;
+END Validate_Accounting_Details___;
+
+
+PROCEDURE User_Defined_Calender_Dates (
+   valid_from_          IN DATE,
+   start_year_          IN NUMBER,
+   start_month_         IN NUMBER,
+   no_of_years_         IN NUMBER )
+IS
+   user_def_start_date_ DATE;
+   user_def_end_date_   DATE;
+   start_date_          VARCHAR2(200);
+   end_date_            VARCHAR2(200);
+   minute_str_          VARCHAR2(200);
+BEGIN
+   minute_str_ := ' 1:00:00';
+   IF (start_month_ < 10) THEN
+      start_date_ := CONCAT(CONCAT(start_year_, CONCAT('/0', CONCAT(start_month_, '/01'))), minute_str_);
+      end_date_   := CONCAT(CONCAT((start_year_ + no_of_years_), CONCAT('/0', CONCAT(start_month_, '/01'))), minute_str_);
+   ELSE
+      start_date_ := CONCAT(CONCAT(start_year_, CONCAT('/', CONCAT(start_month_, '/01'))), minute_str_);
+      end_date_   := CONCAT(CONCAT((start_year_ + no_of_years_), CONCAT('/', CONCAT(start_month_, '/01'))), minute_str_);
+   END IF;
+   SELECT TO_DATE(start_date_, 'YYYY/MM/DD HH:MI:SS') INTO user_def_start_date_ FROM dual;
+   SELECT TO_DATE(end_date_, 'YYYY/MM/DD HH:MI:SS') INTO user_def_end_date_ FROM dual;
+   IF (valid_from_ != TRUNC(user_def_start_date_)) THEN
+      IF ((valid_from_ < user_def_start_date_) OR (valid_from_ > user_def_end_date_)) THEN
+         Error_SYS.Record_General(lu_name_, 'VALIDACCDATE: The Valid From of the Accounting Currency is not within the user defined calendar.');
+      END IF;     
+   END IF;
+END User_Defined_Calender_Dates;
+   
+
+FUNCTION Default_Valid_From___ (
+   start_year_      IN NUMBER,
+   start_month_     IN NUMBER ) RETURN DATE
+IS
+   valid_from_    DATE;
+   start_date_    VARCHAR2(200);
+   minute_str_     VARCHAR2(200);
+BEGIN
+   minute_str_ := ' 1:00:00';
+   IF (start_month_ < 10) THEN
+      start_date_ := CONCAT(CONCAT(start_year_, CONCAT('/0', CONCAT(start_month_, '/01'))), minute_str_);
+   ELSE
+      start_date_ := CONCAT(CONCAT(start_year_, CONCAT('/', CONCAT(start_month_, '/01'))), minute_str_);
+   END IF;
+   SELECT TO_DATE(start_date_, 'YYYY/MM/DD HH:MI:SS') INTO valid_from_ FROM dual;
+   RETURN valid_from_;
+END Default_Valid_From___;
+
+
+FUNCTION Language_List___ (
+   language_ref_ IN VARCHAR2 )  RETURN Language_Code_Structure_Rec
+IS
+   rec_                    Language_Code_Structure_Rec;
+   selected_recs_true_     VARCHAR2(4000);
+   i_                      NUMBER; 
+   is_attr_loop_           BOOLEAN;
+   dummy_attr_             VARCHAR2(4000);
+   language_list_          VARCHAR2(32000);
+   language_code_list_     VARCHAR2(32000);
+   language_code_          VARCHAR2(200);  
+BEGIN
+   selected_recs_true_ := language_ref_ || ',TRUE=1^';
+   i_                  := 1;
+   is_attr_loop_       := TRUE;  
+   WHILE is_attr_loop_ LOOP
+      dummy_attr_ := Regexp_Substr(selected_recs_true_,'[^,]+',1,i_);
+      dummy_attr_ := Regexp_Replace(dummy_attr_, '"','"^');
+      IF (Client_SYS.Get_Key_Reference_Value(dummy_attr_, 'TRUE') = '1') THEN
+         is_attr_loop_       := FALSE;
+         language_code_list_ := CONCAT(language_code_list_, '^');
+         EXIT;
+      END IF;      
+      language_code_ := Client_SYS.Get_Key_Reference_Value(dummy_attr_, 'LANGUAGE_CODE');
+      IF (i_ = 1) THEN
+         language_list_      := Iso_Language_API.Decode(language_code_);
+         language_code_list_ := language_code_;
+      ELSE
+         language_list_       := language_list_ || ';' || Iso_Language_API.Decode(language_code_);
+         language_code_list_  := language_code_list_ || '^' || language_code_;
+      END IF;     
+      i_ := i_ + 1;      
+   END LOOP;
+   rec_.language_code_list := language_code_list_;
+   rec_.language_list      := language_list_;
+   RETURN rec_;
+END Language_List___;
+
+
+FUNCTION Fetch_Calendar_Data___ (
+   source_company_ IN VARCHAR2,
+   template_id_    IN VARCHAR2 )  RETURN Calendar_Data_Structure_Rec
+IS
+   rec_  Calendar_Data_Structure_Rec;
+BEGIN
+   Company_API.Get_Cal_Data(rec_.acc_year, rec_.start_year, rec_.start_month, rec_.number_of_years, source_company_, template_id_);
+   RETURN rec_;
+END Fetch_Calendar_Data___;
+
+
+@DynamicComponentDependency ACCRUL
+FUNCTION Create_New_Company___ (
+   new_company_                IN  VARCHAR2,
+   new_company_name_           IN  VARCHAR2,
+   create_as_template_company_ IN  BOOLEAN,
+   create_as_master_company_   IN  BOOLEAN,
+   create_from_                IN  VARCHAR2,
+   source_company_             IN  VARCHAR2,
+   template_id_                IN  VARCHAR2,
+   calender_creation_method_   IN  VARCHAR2,
+   acc_year_                   IN  NUMBER,
+   start_year_                 IN  NUMBER,
+   start_month_                IN  NUMBER,
+   number_of_years_            IN  NUMBER,
+   use_vou_no_period_          IN  BOOLEAN,
+   currency_code_              IN  VARCHAR2,
+   valid_from_                 IN  DATE,
+   parallel_acc_currency_      IN  VARCHAR2,
+   parallel_cur_base_          IN  VARCHAR2,
+   default_language_           IN  VARCHAR2,
+   country_                    IN  VARCHAR2,
+   logical_acc_types_list_     IN  VARCHAR2,
+   code_part_                  IN  VARCHAR2,
+   internal_name_              IN  VARCHAR2,
+   language_codes_             IN  VARCHAR2,
+   info$_                      OUT VARCHAR2 ) RETURN Company_Creation_Structure_Rec
+IS
+   rec_                    Company_Creation_Structure_Rec;
+   attr_                   VARCHAR2(32000);
+   attr_ent_               VARCHAR2(32000);
+   attr_out_               VARCHAR2(2000);
+   valid_from_date_        VARCHAR2(200);
+   creation_parameters_    VARCHAR2(32000);
+   company_exist_          VARCHAR2(5);
+   error_created_          VARCHAR2(200);
+   languages_              VARCHAR2(32000);
+BEGIN
+   SELECT TO_CHAR(valid_from_, Client_SYS.date_format_) INTO valid_from_date_ FROM dual;
+   Client_SYS.Add_To_Attr('NEW_COMPANY', new_company_, attr_);
+   Client_SYS.Add_To_Attr('VALID_FROM', valid_from_date_, attr_);
+   IF (create_from_ = 'TEMPLATE') THEN
+      Client_SYS.Add_To_Attr('ACTION', 'NEW', attr_);
+   ELSIF (create_from_ = 'EXISTING') THEN
+      Client_SYS.Add_To_Attr('ACTION', 'DUPLICATE', attr_);
+   END IF;
+   Client_SYS.Add_To_Attr('TEMPLATE_ID', template_id_, attr_);
+   Client_SYS.Add_To_Attr('DUPL_COMPANY', source_company_, attr_);
+   Client_SYS.Add_To_Attr('MAKE_COMPANY', 'IMPORT', attr_);
+   Client_SYS.Add_To_Attr('CURRENCY_CODE', currency_code_, attr_);
+   Client_SYS.Add_To_Attr('PARALLEL_ACC_CURRENCY', parallel_acc_currency_, attr_);
+   Client_SYS.Add_To_Attr('PAR_ACC_CURR_VALID_FROM', valid_from_date_, attr_);
+   IF (use_vou_no_period_) THEN
+      Client_SYS.Add_To_Attr('USE_VOU_NO_PERIOD', 'TRUE', attr_);
+   ELSE
+      Client_SYS.Add_To_Attr('USE_VOU_NO_PERIOD', 'FALSE', attr_);
+   END IF;
+   Client_SYS.Add_To_Attr('NAME', new_company_name_, attr_);
+   IF (create_as_template_company_) THEN
+      Client_SYS.Add_To_Attr('TEMPLATE_COMPANY', 'TRUE', attr_);
+   ELSE
+      Client_SYS.Add_To_Attr('TEMPLATE_COMPANY', 'FALSE', attr_);
+   END IF;
+   Client_SYS.Add_To_Attr('START_YEAR', start_year_, attr_);
+   Client_SYS.Add_To_Attr('START_MONTH', start_month_, attr_);
+   Client_SYS.Add_To_Attr('NUMBER_OF_YEARS', number_of_years_, attr_);
+   Client_SYS.Add_To_Attr('ACC_YEAR', acc_year_, attr_);
+   Client_SYS.Add_To_Attr('LOGICAL_ACC_TYPES', logical_acc_types_list_, attr_);
+   Client_SYS.Add_To_Attr('CURR_BAL_CODE_PART', code_part_, attr_);
+   Client_SYS.Add_To_Attr('CODE_PART', code_part_, attr_);
+   IF (internal_name_ IS NOT NULL) THEN
+      Client_SYS.Add_To_Attr('CURR_BAL_CODE_PART_DESC', internal_name_, attr_);
+   END IF;
+   IF (calender_creation_method_ = 'USER_DEFINED') THEN
+      Client_SYS.Add_To_Attr('USER_DEFINED', 'TRUE', attr_);
+   ELSE
+      Client_SYS.Add_To_Attr('USER_DEFINED', 'FALSE', attr_);
+   END IF;
+   IF (create_as_master_company_) THEN
+      Client_SYS.Add_To_Attr('MASTER_COMPANY_DB', 'TRUE', attr_);
+   ELSE
+      Client_SYS.Add_To_Attr('MASTER_COMPANY_DB', 'FALSE', attr_);
+   END IF;
+   Client_SYS.Add_To_Attr('LANGUAGES', language_codes_, attr_);
+   Client_SYS.Add_To_Attr('DEFAULT_LANGUAGE_DB', default_language_, attr_);
+   Client_SYS.Add_To_Attr('COUNTRY_DB', country_, attr_);
+   Client_SYS.Add_To_Attr('MAIN_PROCESS', 'CREATE COMPANY', attr_);
+   Client_SYS.Add_To_Attr('COMPANY', new_company_, attr_ent_);
+   Client_SYS.Add_To_Attr('NAME', new_company_name_, attr_ent_);
+   Client_SYS.Add_To_Attr('DEFAULT_LANGUAGE', Iso_Language_API.Decode(default_language_), attr_ent_);
+   Client_SYS.Add_To_Attr('COUNTRY', Iso_Country_API.Decode(country_), attr_ent_);
+   IF (create_as_template_company_) THEN
+      Client_SYS.Add_To_Attr('TEMPLATE_COMPANY', 'TRUE', attr_ent_);
+   ELSE
+      Client_SYS.Add_To_Attr('TEMPLATE_COMPANY', 'FALSE', attr_ent_);
+   END IF;
+   Client_SYS.Add_To_Attr('FROM_COMPANY', source_company_, attr_ent_);
+   Client_SYS.Add_To_Attr('FROM_TEMPLATE_ID', template_id_, attr_ent_);
+   creation_parameters_ := Get_Creation_Parameters___(attr_);
+   Client_SYS.Add_To_Attr('CREATION_PARAMETERS', creation_parameters_, attr_ent_);
+   IF (create_as_master_company_) THEN
+      Client_SYS.Add_To_Attr('MASTER_COMPANY_DB', 'TRUE', attr_ent_);
+   ELSE
+      Client_SYS.Add_To_Attr('MASTER_COMPANY_DB', 'FALSE', attr_ent_);
+   END IF;
+   company_exist_ := Company_API.Check_Exist(new_company_);
+   IF (company_exist_ != 'TRUE') THEN
+      Company_API.New_Company(attr_ent_);
+   END IF;
+   Client_SYS.Add_To_Attr('NEW_COMPANY', new_company_, attr_out_);
+   Client_SYS.Add_To_Attr('PROCESS', 'ONLINE', attr_out_);
+   Create_Company_API.New_Company__(attr_out_);
+   Client_SYS.Add_To_Attr('FROM_WINDOW', 'CREATE_COMPANY', attr_);
+   Client_SYS.Add_To_Attr('PARALLEL_CURR_BASE', parallel_cur_base_, attr_);
+   languages_ := REPLACE(language_codes_, '^', Client_SYS.field_separator_);
+   Create_Company___(error_created_, attr_out_, attr_, new_company_, languages_);
+   IF (error_created_ = 'TRUE') THEN
+      rec_.success := 'OPEN_LOG';
+   ELSIF (error_created_ = 'FALSE') THEN
+      rec_.success := 'TRUE';
+   ELSIF (error_created_ = 'COMMENTS') THEN
+      rec_.success := 'TRUE';
+   END IF;
+   rec_.company := new_company_;
+   info$_ := Client_SYS.Get_All_Info;
+   RETURN rec_;
+END Create_New_Company___;
+
+
+FUNCTION Logical_Acc_Types_List___ (
+   assets_        IN BOOLEAN,
+   liabilities_   IN BOOLEAN,
+   revenues_      IN BOOLEAN,
+   cost_          IN BOOLEAN,
+   statistics_    IN BOOLEAN,
+   stat_open_bal_ IN BOOLEAN )  RETURN VARCHAR2
+IS
+   logical_acc_types_      VARCHAR2(200);
+BEGIN
+   IF (assets_) THEN
+      IF (logical_acc_types_ IS NOT NULL) THEN
+         logical_acc_types_ := CONCAT(logical_acc_types_, '^A');
+      ELSE
+         logical_acc_types_ := 'A';
+      END IF;
+   END IF;
+   IF (liabilities_) THEN
+      IF (logical_acc_types_ IS NOT NULL) THEN
+         logical_acc_types_ := CONCAT(logical_acc_types_, '^L');
+      ELSE
+         logical_acc_types_ := 'L';
+      END IF;
+   END IF;
+   IF (revenues_) THEN
+      IF (logical_acc_types_ IS NOT NULL) THEN
+         logical_acc_types_ := CONCAT(logical_acc_types_, '^R');
+      ELSE
+         logical_acc_types_ := 'R';
+      END IF;
+   END IF;
+   IF (cost_) THEN
+      IF (logical_acc_types_ IS NOT NULL) THEN
+         logical_acc_types_ := CONCAT(logical_acc_types_, '^C');
+      ELSE
+         logical_acc_types_ := 'C';
+      END IF;
+   END IF;
+   IF (statistics_) THEN
+      IF (logical_acc_types_ IS NOT NULL) THEN
+         logical_acc_types_ := CONCAT(logical_acc_types_, '^S');
+      ELSE
+         logical_acc_types_ := 'S';
+      END IF;
+   END IF;
+   IF (stat_open_bal_) THEN
+      IF (logical_acc_types_ IS NOT NULL) THEN
+         logical_acc_types_ := CONCAT(logical_acc_types_, '^O');
+      ELSE
+         logical_acc_types_ := 'O';
+      END IF;
+   END IF;
+   RETURN logical_acc_types_;
+END Logical_Acc_Types_List___;
+
+
+FUNCTION Convert_Attr_Unit___ (
+   column_  IN VARCHAR2,
+   value_   IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   unit_ VARCHAR2(200);
+BEGIN
+   unit_ := '$' || column_ || '=' || value_ || ' ';
+   RETURN unit_;
+END Convert_Attr_Unit___;
+
+
+FUNCTION Get_Creation_Parameters___ (
+   attr_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+   creation_parameters_ VARCHAR2(32000);
+   name_                VARCHAR2(200);
+   value_               VARCHAR2(2000);
+   ptr_                 NUMBER;
+   parameter_           VARCHAR2(3000);
+BEGIN
+   creation_parameters_ := '! ';   
+   WHILE (Client_SYS.Get_Next_From_Attr(attr_, ptr_, name_, value_)) LOOP
+      parameter_           := Convert_Attr_Unit___(name_, value_);
+      creation_parameters_ := creation_parameters_ || parameter_;
+   END LOOP;
+   RETURN creation_parameters_;
+END Get_Creation_Parameters___;
+
+
+PROCEDURE Create_Company___ (
+   error_created_       OUT VARCHAR2,
+   module_attr_         IN  VARCHAR2,
+   attr_                IN  VARCHAR2,
+   new_company_         IN  VARCHAR2,
+   languages_           IN  VARCHAR2 )
+IS
+   name_                VARCHAR2(200);
+   value_               VARCHAR2(2000);
+   ptr_                 NUMBER;
+   package_             VARCHAR2(200);
+   module_              VARCHAR2(200);
+BEGIN
+   WHILE (Client_SYS.Get_Next_From_Attr(module_attr_, ptr_, name_, value_)) LOOP
+      IF (name_ = 'MODULE') THEN
+         module_  := value_;
+         package_ := value_;--package have the same value as module
+      END IF;
+      IF (module_ IS NOT null) THEN 
+         Create_Company_API.Create_New_Company__(error_created_, new_company_, module_, package_,  attr_, languages_);
+         $IF Component_Accrul_SYS.INSTALLED $THEN
+            IF (module_ = 'ACCRUL') THEN 
+               Company_Finance_API.Set_Creation_Finished(new_company_);
+            END IF;
+         $END            
+      END IF;
+      module_  := NULL; 
+      package_ := NULL;
+   END LOOP; 
+   Create_Company_Log_API.Add_To_Imp_Table__(new_company_);
+   Create_Company_Log_API.Update_Log_Tab_To_Comments__(new_company_);
+END Create_Company___;
+
+   
+FUNCTION Validate_Code_Part___(
+   source_company_ IN VARCHAR2,
+   template_id_    IN VARCHAR2,
+   code_part_      IN VARCHAR2 )  RETURN VARCHAR2
+IS
+   code_part_available_    VARCHAR2(5);
+BEGIN
+   IF ((code_part_ IS NOT NULL) AND (template_id_ IS NOT NULL)) THEN
+      code_part_available_ := Create_Company_Tem_Detail_API.Is_Valid_Code_Part__(template_id_, code_part_);
+      IF (code_part_available_ != 'TRUE') THEN
+         Error_SYS.Record_General(lu_name_, 'VALIDTEMPCODEPART: Code part :P1 of template :P2 is not available or already occupied.', code_part_, template_id_);
+      END IF;
+   END IF;
+   IF ((code_part_ IS NOT NULL) AND (source_company_ IS NOT NULL)) THEN
+      $IF Component_Accrul_SYS.INSTALLED $THEN
+         code_part_available_ := Accounting_Code_Parts_API.Is_Codepart_Function(source_company_, code_part_, 'CURR');
+         IF (code_part_available_ = 'TRUE') THEN
+            Error_SYS.Record_General(lu_name_, 'VALIDSOURCECODEPART: Code part :P1 of company :P2 is not available or already occupied.', code_part_, source_company_);
+         END IF;
+      $ELSE
+         NULL;
+      $END
+   END IF;
+   RETURN 'TRUE';
+END Validate_Code_Part___;
+
+
+FUNCTION Fetch_Internal_Name___ (
+   source_company_ IN VARCHAR2,
+   template_id_    IN VARCHAR2,
+   code_part_      IN VARCHAR2 )  RETURN VARCHAR2
+IS
+  internal_name_  VARCHAR2(2000); 
+BEGIN
+   IF ((source_company_ IS NOT NULL) AND (code_part_ IS NOT NULL)) THEN
+      $IF Component_Accrul_SYS.INSTALLED $THEN
+         internal_name_ := Accounting_Code_Parts_API.Get_Code_Name(source_company_, code_part_);
+      $ELSE
+         internal_name_ := NULL;
+      $END
+   ELSIF ((template_id_ IS NOT NULL) AND (code_part_ IS NOT NULL)) THEN
+      internal_name_ := Create_Company_Tem_Detail_API.Get_Internal_Name__(template_id_, code_part_);
+   ELSE
+      internal_name_ := NULL;
+   END IF;
+   RETURN internal_name_;
+END Fetch_Internal_Name___;
+
+
+
+FUNCTION Use_Vou_Period_Template___ (
+   template_id_ IN VARCHAR2 ) RETURN VARCHAR2
+IS
+BEGIN
+   RETURN Create_Company_Tem_Detail_API.Get_Use_No_Period_Template__(template_id_);
+END Use_Vou_Period_Template___;
